@@ -269,5 +269,8 @@ pub use misc_integrators::{
     WhiteGaussianNoiseDomainLFIntegrator, NormalTraceJumpIntegrator,
     NonconservativeDGTraceIntegrator, MixedWeakGradDotIntegrator,
     MixedWeakCurlCrossIntegrator, DivDivIntegrator,
+    mfem_hex_order_w, mfem_vector_mass_quad_order_rt_hex,
+    mfem_vector_mass_quad_order_nd_hex, mfem_div_div_quad_order_rt_hex,
+    mfem_weak_grad_dot_quad_order_rt_hex, mfem_weak_curl_cross_quad_order_nd_hex,
 };
 pub use vector_convection_nlf::VectorConvectionNLFIntegrator;

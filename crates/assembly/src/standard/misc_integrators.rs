@@ -342,6 +342,111 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for DivDivIntegrator<C> {
     }
 }
 
+// ─── D667: MFEM default quadrature orders, hex RT/ND family ─────────────────
+//
+// MFEM does not give vector bilinear forms a caller-chosen rule: every
+// `BilinearFormIntegrator` computes its own per-element order from
+// `FiniteElement::GetOrder()` and `ElementTransformation::OrderW()`
+// (`bilininteg.hpp/.cpp`), and only an explicit `SetIntRule` overrides it.
+// The hex formulas, with the collection order `k` (= fem-rs space order) and
+// the geometry order `g` (`OrderW = 3g − 1` for the Qk hex map,
+// `eltrans.cpp:493`):
+//
+// | integrator (MFEM class)                  | formula                       | RT1 g=1 | RT1 g=2 |
+// |------------------------------------------|-------------------------------|---------|---------|
+// | `VectorFEMassIntegrator`                 | `OrderW + 2·GetOrder`         | 6       | 9       |
+// | `DivDivIntegrator`                       | `2·GetOrder − 2`              | 2       | 5       |
+// | `MixedWeakGradDotIntegrator`             | `GetOrder + GetOrder + OrderW`| 6       | 9       |
+//
+// with the crucial `fe/fe_rt.cpp:329` mapping `RT_HexahedronElement(p)` →
+// `GetOrder = p + 1` (probe: `fe.GetOrder()` prints 2 for RT1, D667 probe),
+// while `fe_nd.cpp:28` keeps `ND_HexahedronElement(p)` → `GetOrder = p`.
+// `MixedWeakCurlCrossIntegrator` derives the base
+// `MixedVectorIntegrator::GetIntegrationOrder = trial + test + OrderW`, so on
+// ND1 hexes it is `2k + 3g − 1` (4 affine / 7 curved).
+//
+// These helpers exist because the round-64 multidomain ports hard-coded the
+// affine trilinear values ("mass 2p+2, DivDiv 2p−2, MixedWeakGradDot 2p−1"),
+// which mis-derives `p` (RT `GetOrder = p+1`) *and* drops `OrderW`: on the
+// curved cylinder MFEM assembles mass/wgrad at order 9 and DivDiv at order 2
+// per element (RT1: `GetOrder = 2`, `OrderW = 5`), never 4/0/1 (D667 probe
+// `tmp/d667/d667_probe.cpp`, MASSDEF/WGDEF dumps).  Callers (the multidomain
+// miniapps) should pass these values per form; the integrators themselves
+// keep returning `None` from `integration_order` so an explicit caller rule
+// (MFEM `SetIntRule` semantics) always wins.
+
+/// MFEM `Trans.OrderW()` of the hexahedron's Qk geometry map of order `g`
+/// (`3g − 1`; affine hex `g = 1` → 2).
+#[must_use]
+pub fn mfem_hex_order_w(geom_order: u8) -> u8 {
+    3 * u16::from(geom_order) as u8 - 1
+}
+
+#[cfg(test)]
+mod mfem_quad_order_helper_tests {
+    use super::*;
+
+    /// D667 probe pins: on the curved P2 hex fixture (`OrderW = 5`,
+    /// `RT1 GetOrder = 2`) MFEM's mass/wgrad defaults report order 9
+    /// (`MASSDEF order=9`, `WGDEF order=9`) and DivDiv integrates with the
+    /// order-2 rule; the affine values are 6/2/6.
+    #[test]
+    fn mfem_hex_rt1_quad_orders_match_probe() {
+        assert_eq!(mfem_hex_order_w(1), 2);
+        assert_eq!(mfem_hex_order_w(2), 5);
+        // RT1 (space order 1): affine g=1 → 6/2/6, curved g=2 → 9/2/9.
+        assert_eq!(mfem_vector_mass_quad_order_rt_hex(1, 1), 6);
+        assert_eq!(mfem_vector_mass_quad_order_rt_hex(1, 2), 9);
+        assert_eq!(mfem_div_div_quad_order_rt_hex(1), 2);
+        assert_eq!(mfem_weak_grad_dot_quad_order_rt_hex(1, 1), 6);
+        assert_eq!(mfem_weak_grad_dot_quad_order_rt_hex(1, 2), 9);
+        // ND1: GetOrder = 1 → mass 4 affine / 7 curved, curl-cross likewise.
+        assert_eq!(mfem_vector_mass_quad_order_nd_hex(1, 1), 4);
+        assert_eq!(mfem_vector_mass_quad_order_nd_hex(1, 2), 7);
+        assert_eq!(mfem_weak_curl_cross_quad_order_nd_hex(1, 1), 4);
+        assert_eq!(mfem_weak_curl_cross_quad_order_nd_hex(1, 2), 7);
+    }
+}
+
+/// [`VectorMassIntegrator`](crate::standard::VectorMassIntegrator) on the hex
+/// RT space: `OrderW + 2·(k + 1)` (MFEM `VectorFEMassIntegrator`, RT
+/// `GetOrder = k + 1`).
+#[must_use]
+pub fn mfem_vector_mass_quad_order_rt_hex(space_order: u8, geom_order: u8) -> u8 {
+    mfem_hex_order_w(geom_order) + 2 * (space_order + 1)
+}
+
+/// [`VectorMassIntegrator`](crate::standard::VectorMassIntegrator) on the hex
+/// ND space: `OrderW + 2·k` (ND `GetOrder = k`).
+#[must_use]
+pub fn mfem_vector_mass_quad_order_nd_hex(space_order: u8, geom_order: u8) -> u8 {
+    mfem_hex_order_w(geom_order) + 2 * space_order
+}
+
+/// [`DivDivIntegrator`] on the hex RT space: `2·(k + 1) − 2 = 2k` (MFEM
+/// `DivDivIntegrator::AssembleElementMatrix`, geometry independent — the
+/// weight/det cancellation makes `OrderW` moot).  The round-64 reading
+/// "2p − 2 → 1-point rule at p = 1" used the collection order; MFEM's
+/// `el.GetOrder()` is `p + 1`, so the true affine/curved rule is order `2k`
+/// (RT1: an 8-point rule, never the 1-point rule).
+#[must_use]
+pub fn mfem_div_div_quad_order_rt_hex(space_order: u8) -> u8 {
+    2 * space_order
+}
+
+/// [`MixedWeakGradDotIntegrator`] on the hex RT space: `2·(k + 1) + OrderW`.
+#[must_use]
+pub fn mfem_weak_grad_dot_quad_order_rt_hex(space_order: u8, geom_order: u8) -> u8 {
+    2 * (space_order + 1) + mfem_hex_order_w(geom_order)
+}
+
+/// [`MixedWeakCurlCrossIntegrator`] on the hex ND space: `k + k + OrderW`
+/// (base `MixedVectorIntegrator::GetIntegrationOrder`).
+#[must_use]
+pub fn mfem_weak_curl_cross_quad_order_nd_hex(space_order: u8, geom_order: u8) -> u8 {
+    2 * space_order + mfem_hex_order_w(geom_order)
+}
+
 #[cfg(test)]
 mod white_gaussian_noise_tests {
     use super::*;

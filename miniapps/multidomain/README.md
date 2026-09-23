@@ -151,3 +151,59 @@ order 2, `-qp 20`, tf=0.5, dt=2e-4:
 Repro assets (temporary, `tmp/multidomain/`): C++ serial harness
 `serial_multidomain.cpp` (1:1 serial mirror + dumps), comparison scripts,
 run logs.
+
+## D667 (round 65): the RT/ND numeric residual family — root causes
+
+The round-64 registered residuals (RT cylinder diverging ~2.2x per step-1
+interface dof, ND trajectory 0.1–2.8% off) decompose into three independent
+findings, all pinned against MFEM 4.10 probes (`tmp/d667/d667_probe.cpp`,
+`d667_rt_ser.cpp`, `d667_twotet_probe.cpp`):
+
+1. **Signed integration weight in the vector assembler (FIXED, assembly
+   crate).** `VectorAssembler`'s volume loops multiplied the quadrature
+   weight by `det_j.abs()`; MFEM 4.10 carries the **signed** `det J` through
+   `Trans.Weight()` (`EvalWeight`, D652 precedent in the scalar assembler).
+   Mass-type forms are quadratic in the Piola shape (one `1/det` unpaired),
+   so a locally folded curved element contributes a *negated* block in MFEM
+   and a repaired positive one in fem-rs: on the folded single-hex fixture
+   `data/d667_curved_hex.mesh` the fem-rs mass matrix was off by up to 23%
+   per entry; after the one-line fix the element matrices (mass / DivDiv /
+   MixedWeakGradDot, incl. amplified-warp variants) match MFEM's raw
+   `AssembleElementMatrix` output to ≤1e-11 relative at identical rules
+   (`crates/assembly/tests/d667_rt1_curved_hex_mfem_parity.rs`).  Div-type
+   forms cancel `det²` and were never sensitive.  The fix is bitwise-inert
+   for `det > 0`, which is why the round-64 straight-hex runs matched.
+
+2. **The miniapp's quadrature-order table is wrong (registered, miniapps).**
+   The RT1 hex reports `FiniteElement::GetOrder() = 2` (fe_rt.cpp passes
+   `p + 1`), not the collection order `p = 1`, and on the curved P2 map
+   `Trans.OrderW() = 5` (Qk: `3g − 1`), so MFEM's true per-element defaults
+   are mass `OrderW + 2·GetOrder` (affine 6 / curved 9), DivDiv
+   `2·GetOrder − 2` = `2k` (RT1: an 8-point rule — never the round-64
+   assumed 1-point rule), WeakGradDot `2·GetOrder + OrderW` (6 / 9).  The
+   port's `2p+2 / 2p−2 / 2p−1` (4 / 0 / 1) under-integrate every hex.
+   Exact helpers now live in `fem_assembly::standard`
+   (`mfem_vector_mass_quad_order_rt_hex`, `mfem_div_div_quad_order_rt_hex`,
+   `mfem_weak_grad_dot_quad_order_rt_hex`, `mfem_weak_curl_cross_quad_order_nd_hex`,
+   `mfem_vector_mass_quad_order_nd_hex`, `mfem_hex_order_w`); the TDO should
+   pass those per form.  With `-qp 9` (mass stays at its own 2k+3, divdiv and
+   wgrad at 9) the block trajectory matches C++ to 3e-4 relative at t=0.005
+   and the cylinder ssq gap collapses from ~870x to ~16%.
+
+3. **`extract_submesh_3d` drops the curved geometry (registered, mesh
+   crate).** The submesh builder hard-codes `geometry: None`, so both
+   subdomains solve on straightened (trilinear) hexes while MFEM's
+   `SubMesh::CreateFromDomain` carries the parent's P2 field.  This is the
+   dominant remaining trajectory term (the cylinder, a fully curved
+   annulus, is far more sensitive than the mostly-straight block; fem-rs
+   also never probes the P2-only geometry detail at its under-integrated
+   rules).  Evidence:
+   `d667_refined_mesh_curvature_and_folds` (fem-rs's read of the refined
+   mesh matches MFEM's own Weight survey exactly — gmin 4.0277e-4, zero
+   folded hexes at order-9 points), so the reader and assembler are exact;
+   only the submesh hand-off loses the field.
+
+Validation numbers (tf=0.005, dt=1e-5, MFEM-refined mesh `-nr 1`, C++
+reference `d667_rt_ser`): block ssq 0.26366 (C++) vs 0.26359 (fem-rs,
+`-qp 9`); cyl ssq 1.431e-6 vs 1.196e-6.  After items 2+3 land, the RT/ND
+trajectories should close to the straight-mesh bit-level.

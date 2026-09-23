@@ -662,7 +662,23 @@ pub fn accumulate_vector_bilinear_element_blocks_with_basis<S: FESpace>(
             .try_inverse()
             .expect("degenerate element - zero-area/volume")
             .transpose();
-        let w = quad.weights[q] * det_j.abs();
+        // D667: the integration weight carries MFEM 4.10's **signed**
+        // determinant (`Trans.Weight() = det J` via `EvalWeight`) — the old
+        // `det_j.abs()` silently repaired locally inverted curved elements.
+        // MFEM does not: on a folded hex its mass-type integrand picks up the
+        // negated block (measured Weight min = -3.94e-4 on the folded
+        // fixture data/d667_curved_hex.mesh, probe tmp/d667/d667_probe.cpp;
+        // MFEM 4.10 likewise reports the inverted d37 tet as volume -1/6,
+        // tmp/d667/d667_twotet_probe.cpp).  fem-rs must reproduce that
+        // signed semantics (D652 precedent in the scalar assembler); the
+        // div-type forms are det-invariant either way (their two 1/det
+        // factors absorb the sign), so only mass / linear forms were exposed.
+        // For det > 0 the two are bitwise equal, which is why every
+        // straight / positively oriented mesh is untouched: the refined
+        // multidomain cylinder itself has no folded hexes (MFEM survey on
+        // data/d667_refined_curved.mesh: folded=0, gmin=+4.0277e-4 ==
+        // 8 · fem-rs det_min — pinned in d667_refined_mesh_curvature_and_folds).
+        let w = quad.weights[q] * det_j;
 
         ref_elem.eval_basis_vec(xi, &mut ref_phi);
         ref_elem.eval_curl(xi, &mut ref_curl);
@@ -933,7 +949,12 @@ pub fn accumulate_vector_linear_element_blocks_with_basis<S: FESpace>(
             .try_inverse()
             .expect("degenerate element - zero-area/volume")
             .transpose();
-        let w = quad.weights[q] * det_j.abs();
+        // D667: signed integration weight — MFEM 4.10 `Trans.Weight()` is
+        // `det J` (see the bilinear-loop note above); a linear form
+        // integrates `f·phi_phys` with `phi_phys = J·phi_ref/det`, so the
+        // |det| clamp flipped the sign of every contribution from a locally
+        // inverted curved element.
+        let w = quad.weights[q] * det_j;
 
         ref_elem.eval_basis_vec(xi, &mut ref_phi);
         ref_elem.eval_curl(xi, &mut ref_curl);

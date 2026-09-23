@@ -570,12 +570,25 @@ fn d37_mass_quadratic_form_matches_tet_volume() {
 }
 
 /// transform must keep the assembled mass form exact (e^T M e = |Omega|).
+///
+/// D667: the vector assembler's integration weight now carries MFEM 4.10's
+/// **signed** determinant (`Trans.Weight() = det J`, D652 precedent), so the
+/// pair must be positively oriented for `eᵀ M e` to equal the magnitude of
+/// the domain.  The original second tet `(0,1,3,4)` is *inverted* (det < 0 —
+/// MFEM: "Elements with wrong orientation: 1 / 2", `GetElementVolume` = −1/6,
+/// probe `tmp/d667/d667_twotet_probe.cpp`); under the old `det.abs()` clamp
+/// its block was silently repaired and the assertion passed for the wrong
+/// reason.  It is now positively oriented `(0,3,1,4)` (same vertex set, same
+/// face table), and a second scenario pins the signed semantics themselves:
+/// with the inverted tet the pair integrates to +1/6 + (−1/6) = 0, exactly
+/// MFEM's `GetElementVolume(0) + GetElementVolume(1)`.
 #[test]
 fn d37_two_tet_mass_form_is_exact() {
     let mass: [&dyn VectorBilinearIntegrator; 1] = [&VectorMassIntegrator { alpha: 1.0 }];
     let units = |_x: &[f64]| vec![1.0, 0.0, 0.0];
     for scale in [1.0, 0.5] {
-        // cube [0,s]^3 split into two tets sharing the face (v0,v1,v4)
+        // cube [0,s]^3 split into two positively oriented tets sharing the
+        // face (v0,v1,v4)
         let s = scale;
         let coords = vec![
             0.0, 0.0, 0.0, // 0
@@ -584,8 +597,8 @@ fn d37_two_tet_mass_form_is_exact() {
             0.0, 0.0, s, // 3
             s, s, s, // 4
         ];
-        let conn: Vec<u32> = vec![0, 1, 2, 4, 0, 1, 3, 4];
-        let face_conn: Vec<u32> = vec![1, 2, 4, 0, 2, 4, 0, 1, 4, 0, 1, 2, 1, 3, 4, 0, 3, 4, 0, 1, 3];
+        let conn: Vec<u32> = vec![0, 1, 2, 4, 0, 3, 1, 4];
+        let face_conn: Vec<u32> = vec![1, 2, 4, 0, 2, 4, 0, 1, 4, 0, 1, 3, 4, 0, 3, 4, 0, 1, 3];
         let nf = face_conn.len() / 3;
         let mesh = Mesh::<3>::uniform(
             coords,
@@ -609,6 +622,35 @@ fn d37_two_tet_mass_form_is_exact() {
             space.n_dofs()
         );
         assert!((q - vol).abs() <= 1e-12, "scale {scale}: {q} vs {vol}");
+    }
+
+    // Signed-semantics pin (MFEM 4.10): with the inverted tet `(0,1,3,4)`
+    // (det < 0) the mass quadratic form of the pair is s³/6 + (−s³/6) = 0 —
+    // the negated block, exactly MFEM's signed `GetElementVolume` sum.  The
+    // old `det.abs()` clamp returned s³/3 here instead.
+    {
+        let s = 1.0_f64;
+        let coords = vec![0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, s, s, s, s];
+        let conn: Vec<u32> = vec![0, 1, 2, 4, 0, 1, 3, 4];
+        let face_conn: Vec<u32> = vec![1, 2, 4, 0, 2, 4, 0, 1, 4, 0, 1, 3, 4, 0, 3, 4, 0, 1, 3];
+        let nf = face_conn.len() / 3;
+        let mesh = Mesh::<3>::uniform(
+            coords,
+            conn,
+            vec![1, 1],
+            ElementType::Tet4,
+            face_conn,
+            (1..=nf as i32).collect(),
+            ElementType::Tri3,
+        );
+        let space = HCurlSpace::new(mesh.clone(), 2);
+        let m = VectorAssembler::assemble_bilinear_nd_canonical(&space, &mass, 6);
+        let e = space.interpolate_vector(&units);
+        let mut me = vec![0.0_f64; e.len()];
+        m.spmv(&e.as_slice().to_vec(), &mut me);
+        let q: f64 = e.as_slice().iter().zip(me.iter()).map(|(a, b)| a * b).sum();
+        eprintln!("inverted pair: e^T M e = {q:.12e} (MFEM signed expectation 0)");
+        assert!(q.abs() <= 1e-12, "inverted pair must integrate to 0 (signed det), got {q}");
     }
 }
 
