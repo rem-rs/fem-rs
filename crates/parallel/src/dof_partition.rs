@@ -1246,9 +1246,14 @@ impl DofPartition {
                     let g_hi = if ga <= gb { nodes[b] } else { nodes[a] };
                     let q_lo = mesh.node_coords(g_lo);
                     let q_hi = mesh.node_coords(g_hi);
-                    let aligned = (p_hi[0] - p_lo[0]) * (q_hi[0] - q_lo[0])
-                        + (p_hi[1] - p_lo[1]) * (q_hi[1] - q_lo[1])
-                        + (p_hi[2] - p_lo[2]) * (q_hi[2] - q_lo[2])
+                    // `node_coords` returns exactly `dim` components (len 2 on
+                    // surface/2-D meshes), so sum the dot product over `dim`
+                    // only — an unconditional [0][1][2] here panicked with
+                    // "len is 2 but the index is 2" on every 2-D high-order
+                    // partition (D635a: pex5 RT1 / pex40 since 0e19c81).
+                    let aligned = (0..dim)
+                        .map(|k| (p_hi[k] - p_lo[k]) * (q_hi[k] - q_lo[k]))
+                        .sum::<f64>()
                         > 0.0;
                     for &d in block.iter() {
                         // Local-canonical index: the space numbers an edge's
