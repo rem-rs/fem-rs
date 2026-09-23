@@ -1924,9 +1924,22 @@ impl<M: MeshTopology> HDivSpace<M> {
             self.interpolate_vector_legacy(f, &mut result);
             return result;
         }
+        // D661: the sample rows, the reference element and the reference dual
+        // matrix depend only on (elem_type, order) — build them once and hoist
+        // them out of the per-element loop instead of reconstructing the
+        // moment-dual reference element and the n×n dual for every element.
+        // The values are unchanged bit-for-bit: `rows`/`w` are deterministic
+        // pure functions of (et, order), and the per-element solve consumes
+        // exactly the same `w` as before.
+        struct Hoisted {
+            et: ElementType,
+            rows: Vec<InterpRow>,
+            w: Vec<f64>,
+        }
+        let mut hoisted: Option<Hoisted> = None;
+        let order = self.order;
         for e in 0..self.mesh.n_elements() as u32 {
             let et = self.mesh.element_type(e);
-            let order = self.order;
             // D346: the support table lives in `hdiv_interpolant_available`
             // (shared with the assembly-side fallback switch) instead of a
             // private `matches!` here — same condition, one definition.
@@ -1935,15 +1948,48 @@ impl<M: MeshTopology> HDivSpace<M> {
                 "HDivSpace::interpolate_vector: RT order {order} on {et:?} is not supported \
                  (prism RTk with k>=1 and BDM are unsupported)"
             );
-
-            let rows = interp_rows(et, order);
+            if hoisted.as_ref().map_or(true, |h| h.et != et) {
+                let rows = interp_rows(et, order);
+                let n = rows.len();
+                let mut w = vec![0.0_f64; n * n];
+                let re: Box<dyn VectorReferenceElement> = match et {
+                    ElementType::Tri3 | ElementType::Tri6 => match order {
+                        0 => Box::new(TriRTk::new(0)),
+                        1 => Box::new(TriRT1),
+                        _ => Box::new(TriRT2),
+                    },
+                    ElementType::Quad4 => Box::new(QuadRTk::new(order as usize)),
+                    ElementType::Tet4 | ElementType::Tet10 => {
+                        // D540: the whole tet RT family is MFEM's nodal
+                        // `RT_TetrahedronElement` (point-dual, W = I), paired
+                        // with the SAME `mfem_nodal_dofs(k)` rows above.
+                        Box::new(TetRTk::new(order as usize))
+                    }
+                    // D289: the dual matrix must be built from the SAME basis
+                    // the assembly/get-values stack pairs these dofs with —
+                    // `vec_ref_elem`'s MFEM-default nodal GaussLegendre variant
+                    // (`RT_HexahedronElement(p, GaussLobatto, GaussLegendre)`),
+                    // not the LOR-pinned IntegratedGLL variant (see the long
+                    // note in the hex arm below).
+                    ElementType::Hex8 => {
+                        Box::new(HexRTk::new_gauss_legendre(order as usize))
+                    }
+                    ElementType::Prism6 => Box::new(PrismRT0::new(0)),
+                    ElementType::Pyramid5 => Box::new(PyraRTk::new(order as usize)),
+                    other => panic!("HDivSpace::interpolate_vector: unsupported {other:?}"),
+                };
+                fill_dual_matrix(&rows, re.as_ref(), &mut w);
+                hoisted = Some(Hoisted { et, rows, w });
+            }
+            let h = hoisted.as_ref().unwrap();
+            let rows = &h.rows;
+            let w = &h.w;
             let n = rows.len();
             let nodes = self.mesh.element_nodes(e);
             let dofs = self.element_dofs(e);
             debug_assert_eq!(dofs.len(), n);
             let signs = self.element_signs(e);
             let mut d = vec![0.0_f64; n];
-            let mut w = vec![0.0_f64; n * n];
 
             match et {
                 ElementType::Tri3 | ElementType::Tri6 => {
@@ -1965,12 +2011,6 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let ny = -j[0][1] * row.nk[0] + j[0][0] * row.nk[1];
                         *di = fv[0] * nx + fv[1] * ny;
                     }
-                    let re: Box<dyn VectorReferenceElement> = match order {
-                        0 => Box::new(TriRTk::new(0)),
-                        1 => Box::new(TriRT1),
-                        _ => Box::new(TriRT2),
-                    };
-                    fill_dual_matrix(&rows, re.as_ref(), &mut w);
                 }
                 ElementType::Quad4 => {
                     let c: Vec<[f64; 2]> = nodes
@@ -1987,7 +2027,6 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let ny = -jac[0][1] * row.nk[0] + jac[0][0] * row.nk[1];
                         *di = fv[0] * nx + fv[1] * ny;
                     }
-                    fill_dual_matrix(&rows, &QuadRTk::new(order as usize), &mut w);
                 }
                 ElementType::Tet4 | ElementType::Tet10 => {
                     let p0 = self.mesh.node_coords(nodes[0]);
@@ -2015,12 +2054,6 @@ impl<M: MeshTopology> HDivSpace<M> {
                         }
                         *di = val;
                     }
-                    let re: Box<dyn VectorReferenceElement> =
-                        // D540: the whole tet RT family is MFEM's nodal
-                        // `RT_TetrahedronElement` (point-dual, W = I), paired
-                        // with the SAME `mfem_nodal_dofs(k)` rows above.
-                        Box::new(TetRTk::new(order as usize));
-                    fill_dual_matrix(&rows, re.as_ref(), &mut w);
                 }
                 ElementType::Hex8 => {
                     let c: Vec<[f64; 3]> = nodes
@@ -2060,7 +2093,6 @@ impl<M: MeshTopology> HDivSpace<M> {
                     // constant-field *signs* (`lor.rs::pair_sign`), which are
                     // basis-independent; the LOR assemblers pin IntegratedGLL
                     // explicitly and never consume these values.
-                    fill_dual_matrix(&rows, &HexRTk::new_gauss_legendre(order as usize), &mut w);
                 }
                 ElementType::Prism6 => {
                     let p0 = self.mesh.node_coords(nodes[0]);
@@ -2088,7 +2120,6 @@ impl<M: MeshTopology> HDivSpace<M> {
                         }
                         *di = val;
                     }
-                    fill_dual_matrix(&rows, &PrismRT0::new(0), &mut w);
                 }
                 ElementType::Pyramid5 => {
                     // D534/D535: MFEM `RT_FuentesPyramidElement` dof values —
@@ -2120,12 +2151,11 @@ impl<M: MeshTopology> HDivSpace<M> {
                         }
                         *di = val;
                     }
-                    fill_dual_matrix(&rows, &PyraRTk::new(order as usize), &mut w);
                 }
                 other => panic!("HDivSpace::interpolate_vector: unsupported {other:?}"),
             }
 
-            let c = solve_dense(&w, &d);
+            let c = solve_dense(w, &d);
             let r = result.as_slice_mut();
             for i in 0..n {
                 r[dofs[i] as usize] = signs[i] * c[i];

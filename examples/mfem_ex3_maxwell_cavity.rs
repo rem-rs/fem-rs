@@ -55,6 +55,19 @@
 //!   pipeline stage matches the C++ `probe2d` harness to <=1e-9) and
 //!   `beam-tri` o1 solving to 8.01477893043346e-2 vs the C++
 //!   0.08014778969562512.
+//!
+//! # 2-D L² error parity — D653
+//!
+//! The hand-rolled [`l2_err_2d`] evaluator was replaced by the core
+//! geometry-generic [`fem_assembly::hdiv_error::compute_hdiv_l2_error`] (the
+//! D639 precedent): the old evaluator hardcoded `TriNDk` + a 3-node
+//! barycentric map, which on the quad mesh `data/star.mesh` evaluated a
+//! triangle basis against quad DOFs and printed 1.7087e0 where MFEM 4.10
+//! prints 0.0134918 (the PCG path — 386 iterations, average reduction factor
+//! 0.964819 — was already byte-identical).  With the core evaluator the
+//! star-mesh error reproduces the C++ `0.0134918` and quad meshes error-check
+//! correctly.  In 2-D the canonical (shared-face) DOF rotation is the
+//! identity, so both assembly modes share this path.
 
 use std::f64::consts::PI;
 
@@ -267,59 +280,23 @@ fn project_2d(space: &HCurlSpace<Mesh<2>>, k: f64) -> Vec<f64> {
     space.interpolate_vector(&|x| exact_2d(x, k).to_vec()).into_vec()
 }
 
-fn l2_err_2d<F>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: &F, canonical: bool) -> f64
+fn l2_err_2d<F>(sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: &F, _canonical: bool) -> f64
 where
     F: Fn(&[f64]) -> [f64; 2],
 {
-    use fem_element::nedelec::TriNDk;
-    let k = sp.order() as usize;
-    let mut e2 = 0.0;
-    for e in mesh.elem_iter() {
-        // Order-generic reference element: with `TriNDk::new(1)` the first
-        // three DOFs of an ND2 element were contracted with the ND1 basis,
-        // i.e. the reported error was meaningless for `-o 2` (D48).
-        let r = TriNDk::new(k);
-        let n = r.n_dofs();
-        // MFEM `GridFunction::ComputeL2Error` (fem/gridfunc.cpp:3410):
-        // intorder = 2*fe->GetOrder() + 3.
-        let q = r.quadrature((2 * k + 3) as u8);
-        let mut p = vec![0.0; n*2];
-        // Reconstruction on the element basis (`u_local = T·u_canon`).
-        let uloc = element_local_dofs(canonical, sp, e, u);
-        let nd = mesh.elem_nodes(e);
-        let x0 = mesh.node_coords(nd[0]);
-        let x1 = mesh.node_coords(nd[1]);
-        let x2 = mesh.node_coords(nd[2]);
-        // Jacobian: J = [x1-x0 | x2-x0] (columns are edge vectors)
-        let j00 = x1[0]-x0[0]; let j01 = x2[0]-x0[0];
-        let j10 = x1[1]-x0[1]; let j11 = x2[1]-x0[1];
-        let det_j = j00*j11 - j01*j10;
-        let inv_det = 1.0 / det_j;
-        // H(curl) covariant Piola: phi_phys = J^{-T} * phi_ref.
-        // J = [[j00, j01], [j10, j11]], so
-        // J^{-T} = (J^{-1})^T = [[j11, -j10], [-j01, j00]] / det — the
-        // off-diagonal entries of the adjugate must be *transposed*; this
-        // evaluator used to apply J^{-1} (D57: the 2-D L2 error was wrong on
-        // any non-right triangle, e.g. beam-tri 32.96 vs C++ 8.01e-2).
-        let jt00 =  j11*inv_det; let jt01 = -j10*inv_det;
-        let jt10 = -j01*inv_det; let jt11 =  j00*inv_det;
-        for (qi, xi) in q.points.iter().enumerate() {
-            r.eval_basis_vec(xi, &mut p);
-            let w = q.weights[qi] * det_j.abs();
-            let mut uh = [0.0; 2];
-            for a in 0..n {
-                uh[0] += uloc[a] * (jt00*p[a*2] + jt01*p[a*2+1]);
-                uh[1] += uloc[a] * (jt10*p[a*2] + jt11*p[a*2+1]);
-            }
-            let xp = [
-                (1.0-xi[0]-xi[1])*x0[0]+xi[0]*x1[0]+xi[1]*x2[0],
-                (1.0-xi[0]-xi[1])*x0[1]+xi[0]*x1[1]+xi[1]*x2[1]
-            ];
-            let e = ex(&xp);
-            e2 += w * ((uh[0]-e[0]).powi(2) + (uh[1]-e[1]).powi(2));
-        }
-    }
-    e2.sqrt()
+    // D653: the historical hand-rolled evaluator here hardcoded the triangle
+    // assumption — `TriNDk` basis + a 3-node barycentric map — while
+    // `data/star.mesh` is 20 QUADS: it evaluated a triangle basis on quad DOFs
+    // (pure garbage) over the lower-left half of each quad only, and printed
+    // 1.7087e0 where MFEM 4.10 prints 0.0134918 (the PCG iteration path was
+    // already byte-identical, so the solve was never in question).  Replaced
+    // by the core, geometry-generic evaluator (D639 precedent) that follows
+    // MFEM `GridFunction::ComputeL2Error`: per-geometry ND reference element
+    // (Quad4 -> `QuadNDk`), covariant Piola reconstruction, default rule
+    // `2*fe->GetOrder() + 3`, `|det J|` weights.  In 2-D the canonical
+    // (shared-face) rotation is the identity, so the DOF gather is the same
+    // for both assembly modes.
+    fem_assembly::hdiv_error::compute_hdiv_l2_error(sp, u, &|xi: &[f64]| ex(xi).to_vec())
 }
 
 fn solve_report_2d(
@@ -348,7 +325,7 @@ fn solve_report_2d(
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp.mesh(), sp, x, &|xi| exact_2d(xi, k), a.canonical));
+    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp, x, &|xi| exact_2d(xi, k), a.canonical));
 }
 
 // ─── 3D ─────────────────────────────────────────────────────────────────────

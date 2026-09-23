@@ -7,6 +7,18 @@
 //!
 //! `SinvBuilder` precomputes and stores the per-element dense inverse `S_e^{-1}`,
 //! then applies it globally as a block-diagonal operator.
+//!
+//! # Negative-det elements (D652)
+//!
+//! Element Jacobian determinants are used **signed**, exactly like MFEM 4.10
+//! (`ElementTransformation::Weight()` = det, `InverseJacobian()` = algebraic
+//! inverse; `DenseMatrixInverse`/`CalcInverse` never check the determinant
+//! sign — the only singularity guard is a debug-only `MFEM_ASSERT`).  An
+//! inverted (det < 0) element therefore contributes the exact negation of its
+//! mirrored positive-det block — physically meaningless but MFEM-faithful;
+//! mesh orientation is the caller's responsibility.  MFEM's own `star.mesh`
+//! (the ex8 mesh) is all-positive (det ≈ 0.2378), so this is a latent-only
+//! semantic on every stock example mesh.
 
 use std::marker::PhantomData;
 
@@ -98,10 +110,14 @@ fn transform_grads(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: 
 
 /// Bilinear quad Jacobian at (xi, eta): J = [J00 J01; J10 J11]
 ///
-/// Reference domain is [-1,1]² for QuadQ1: N0 .. N3 are the standard
-/// bilinear shape functions (1±ξ)(1±η)/4.
-/// Returns (J, det_J, J^{-T}).
-fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64; 2]; 2], f64, [[f64; 2]; 2]) {
+/// Reference domain is [0,1]² for QuadL2GL: N0 .. N3 are the standard
+/// bilinear shape functions.
+/// Returns (J, det_J) with the **signed** determinant — D652: MFEM 4.10
+/// `ElementTransformation::Weight()` is the signed determinant
+/// (`EvalWeight -> dFdx.Weight() -> DenseMatrix::Weight() -> Det()`) and its
+/// `InverseJacobian()` is the signed algebraic inverse, so inverted (det < 0)
+/// elements must not be silently repaired.
+fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64; 2]; 2], f64) {
     // QuadL2GL (Gauss-Legendre nodal) shape derivatives on [0,1]²:
     // N0=(1-ξ)(1-η), N1=ξ(1-η), N2=ξη, N3=(1-ξ)η
     let dN_dxi = [
@@ -122,9 +138,7 @@ fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64; 2]; 2
         j[1][0] += dN_deta[i] * x[i]; j[1][1] += dN_deta[i] * y[i];
     }
     let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
-    let id = 1.0 / det.max(1e-30);
-    let jit = [[j[1][1] * id, -j[0][1] * id], [-j[1][0] * id, j[0][0] * id]];
-    (j, det.abs(), jit)
+    (j, det)
 }
 
 // ─── SinvBuilder ─────────────────────────────────────────────────────────────
@@ -196,13 +210,21 @@ impl<M: MeshTopology> SinvBuilder<M> {
             let mut stiff = vec![0.0; nt * nt];
 
             for (xi, &wr) in qr.points.iter().zip(qr.weights.iter()) {
+                // D652: det_j is SIGNED throughout.  MFEM 4.10 assembles with
+                // the signed `Weight()` (= det, `eltrans.cpp:EvalWeight`) and
+                // the signed algebraic `InverseJacobian()`, so a negative-det
+                // element yields exactly the negation of its mirrored
+                // positive-det block (probe: tmp/d652/probe.cpp — Weight()
+                // prints -1, DenseMatrixInverse returns -S^{-1}).  The
+                // previous `.abs()` / `max(1e-30)` clamps silently repaired
+                // inverted elements instead.
                 let (det_j, j00, j01, j10, j11) = if is_tri {
                     let t = tr.as_ref().unwrap();
-                    (t.det_j().abs(), 0.0, 0.0, 0.0, 0.0)
+                    (t.det_j(), 0.0, 0.0, 0.0, 0.0)
                 } else {
                     let xi_f = xi[0];
                     let eta_f = xi[1];
-                    let (j, det, _) = quad_jacobian(&x4, &y4, xi_f, eta_f);
+                    let (j, det) = quad_jacobian(&x4, &y4, xi_f, eta_f);
                     (det, j[0][0], j[0][1], j[1][0], j[1][1])
                 };
                 let w = wr * det_j;
@@ -225,7 +247,10 @@ impl<M: MeshTopology> SinvBuilder<M> {
                     // J_std^{-T}); identical on axis-aligned quads (where the
                     // unit-square tests ran) and wrong on sheared ones — the
                     // star-mesh boundary quads of MFEM ex8.
-                    let id = 1.0 / det_j.max(1e-30);
+                    // D652: `id = 1/det_j` uses the signed determinant (MFEM
+                    // algebraic InverseJacobian()); for det > 0 this is
+                    // bitwise the old clamped value.
+                    let id = 1.0 / det_j;
                     let jit00 = j11 * id;  //  dy/dη / det
                     let jit01 = -j01 * id; // -dy/dξ / det
                     let jit10 = -j10 * id; // -dx/dη / det
@@ -428,5 +453,71 @@ mod tests {
         // Just check y is finite and non-zero
         let y_norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!(y_norm > 0.0 && y_norm < 1e10);
+    }
+
+    /// D652: the `SinvBuilder` block on a NEGATIVE-det quad must be the exact
+    /// negation of the mirrored positive-det block, matching MFEM 4.10.
+    ///
+    /// Adjudication (probe: `tmp/d652/probe.cpp`, MFEM 4.10 serial build):
+    /// * `ElementTransformation::Weight()` is the **signed** determinant
+    ///   (`eltrans.cpp: EvalWeight -> dFdx.Weight() -> DenseMatrix::Weight()
+    ///   -> Det()`; `Wght` is only cached while positive).  MassIntegrator and
+    ///   DiffusionIntegrator therefore assemble `S(neg-det elem) = -S(mirror)`,
+    ///   and `DenseMatrixInverse` / `CalcInverse` return the signed algebraic
+    ///   inverse `-S^{-1}` — no check, no abort anywhere on negative det.
+    ///   (`CalcInverse`'s singularity guard is an `MFEM_ASSERT`, i.e. debug
+    ///   builds only; for n >= 4 the release closed-form switch has no case
+    ///   and silently leaves the output untouched.)
+    /// * MFEM's `data/star.mesh` (the ex8 mesh) never triggers this: its 20
+    ///   quads have det in [0.237761, 0.237765] — the semantics are latent.
+    #[test]
+    fn sinv_negative_det_quad_matches_mfem() {
+        use fem_mesh::element_type::ElementType;
+
+        // 2x1 quad pair from the probe: element 0 is the unit square (det +1);
+        // element 1 is the same square rotated/reflected with a REVERSED
+        // vertex cycle, an affine map with det = -1 everywhere.
+        let coords: Vec<f64> = vec![0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0];
+        let conn: Vec<u32> = vec![0, 1, 4, 3, 1, 4, 5, 2];
+        let face_conn: Vec<u32> = vec![0, 1, 1, 2, 2, 5, 5, 4, 4, 3, 3, 0];
+        let mesh = Mesh::<2>::uniform(
+            coords, conn, vec![1, 2], ElementType::Quad4,
+            face_conn, vec![1; 6], ElementType::Line2,
+        );
+        let l2 = L2Space::new(mesh, 1);
+        let sinv = SinvBuilder::build(&l2, 0);
+        assert_eq!(sinv.n_elements(), 2);
+
+        // Positive-det element: MFEM assembles S = M + K =
+        // [[3.25,-1.5,-1.5,0],[-1.5,3.25,0,-1.5],[-1.5,0,3.25,-1.5],
+        //  [0,-1.5,-1.5,3.25]] (exact GL 2-pt rule both sides) and
+        // DenseMatrixInverse(S) = (pinned to the probe's printed digits;
+        // closed form 1 + 2/13 + 1/25 = 1.193846..., 24/25 = 0.96,
+        // 227/256 + ... = 0.886153846153...).
+        let pin = [
+            1.193846153846, 0.96, 0.96, 0.886153846154,
+            0.96, 1.193846153846, 0.886153846154, 0.96,
+            0.96, 0.886153846154, 1.193846153846, 0.96,
+            0.886153846154, 0.96, 0.96, 1.193846153846,
+        ];
+        let pos = sinv.elem_inverse(0);
+        for i in 0..16 {
+            assert!(
+                (pos[i] - pin[i]).abs() < 1e-9,
+                "positive-det block pin at [{i}]: {} vs MFEM {}",
+                pos[i], pin[i]
+            );
+        }
+
+        // Negative-det element: MFEM semantics = negated block (signed
+        // Weight() x signed InverseJacobian throughout).
+        let neg = sinv.elem_inverse(1);
+        for i in 0..16 {
+            assert!(
+                (neg[i] + pos[i]).abs() < 1e-10,
+                "negative-det block must equal -mirror at [{i}]: {} vs {}",
+                neg[i], -pos[i]
+            );
+        }
     }
 }
