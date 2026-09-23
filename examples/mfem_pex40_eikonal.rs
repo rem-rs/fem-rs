@@ -25,11 +25,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fem_assembly::mixed::HDivL2DivIntegrator;
+use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::DomainSourceIntegrator;
 use fem_assembly::vector_integrator::{
     VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData,
 };
-use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
@@ -41,7 +41,7 @@ use fem_parallel::{
     par_vector_assembler::ParVectorAssembler,
 };
 use fem_solver::SolverConfig;
-use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
+use fem_space::{HDivSpace, L2Space};
 
 // ─── Coefficients from ψ (RT grid function) — serial ex40 ───────────────────
 
@@ -353,69 +353,21 @@ fn block_dot(a: &ParBlockVector2, b: &ParBlockVector2) -> f64 {
 
 // ─── Owned-only L² norm of an L2 grid function ──────────────────────────────
 
+/// Owned-elements-only L² norm `‖u_h‖_L²` of the rank-local L2 grid function
+/// (D674).  Delegates to the library's `GridFunction::compute_l2_error_owned`
+/// with a zero exact solution — the pex36 pattern — which is MFEM
+/// `GridFunction::ComputeL2Error` with the zero coefficient (`2·order+3`
+/// quadrature, isoparametric QuadQk geometry, per-element-type dispatch)
+/// instead of this example's former Quad-only handwritten loop.
 fn l2_norm_owned(
     space: &L2Space<fem_mesh::Mesh<2>>,
     u_dm: &[f64],
     n_owned_elems: u32,
     order: u8,
 ) -> f64 {
-    let mesh = space.mesh();
-    let mut err2 = 0.0_f64;
-    let gorder = mesh.geom_order() as usize;
-    for e in 0..n_owned_elems {
-        let e = e as u32;
-        let edofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let geo = fem_element::lagrange::QuadQk::new(gorder);
-        let gn = geo.n_dofs();
-        let mut dphi = vec![0.0_f64; gn * 2];
-        let mut phi = vec![0.0_f64; gn];
-        let nodes = mesh.geometry_nodes(e);
-        let intorder = 2 * (order as usize) + 3;
-        let (quad, mut phi0) = if order == 0 {
-            let q = fem_element::lagrange::QuadQk::new(1).quadrature(intorder as u8);
-            (q, vec![1.0])
-        } else {
-            let re = fem_element::lagrange::QuadQk::new(order as usize);
-            let q = re.quadrature(intorder as u8);
-            (q, vec![0.0; edofs.len()])
-        };
-        let mut xp = vec![0.0_f64; 2];
-        for (qi, xi) in quad.points.iter().enumerate() {
-            geo.eval_basis(xi, &mut phi);
-            geo.eval_grad_basis(xi, &mut dphi);
-            // physical position (isoparametric geometry nodes)
-            xp[0] = 0.0;
-            xp[1] = 0.0;
-            let mut jac = [0.0_f64; 4];
-            for k in 0..gn {
-                let c = mesh.geom_coords_of(nodes[k]);
-                xp[0] += c[0] * phi[k];
-                xp[1] += c[1] * phi[k];
-                jac[0] += c[0] * dphi[k * 2];
-                jac[1] += c[0] * dphi[k * 2 + 1];
-                jac[2] += c[1] * dphi[k * 2];
-                jac[3] += c[1] * dphi[k * 2 + 1];
-            }
-            let det = (jac[0] * jac[3] - jac[1] * jac[2]).abs();
-            let w = quad.weights[qi] * det;
-            if order == 0 {
-                phi0[0] = 1.0;
-            } else {
-                // L2 P1 on [0,1]²: 4 bilinear vertex basis functions.
-                let (u, v) = (xi[0], xi[1]);
-                phi0[0] = (1.0 - u) * (1.0 - v);
-                phi0[1] = u * (1.0 - v);
-                phi0[2] = u * v;
-                phi0[3] = (1.0 - u) * v;
-            }
-            let mut uh = 0.0;
-            for i in 0..edofs.len() {
-                uh += u_dm[edofs[i]] * phi0[i];
-            }
-            err2 += w * uh * uh;
-        }
-    }
-    err2.sqrt()
+    let quad_order = 2 * order + 3;
+    GridFunction::new(space, u_dm.to_vec())
+        .compute_l2_error_owned(&|_| 0.0, quad_order, n_owned_elems)
 }
 
 // ─── Mesh ───────────────────────────────────────────────────────────────────

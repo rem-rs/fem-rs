@@ -26,20 +26,16 @@
 //! cargo run --example mfem_ex22_complex_helmholtz -- -p 0 -m data/star.mesh -r 1 -o 2 -sigma 10.0
 //! ```
 
-#![allow(non_snake_case, dead_code, unused_imports)]
-
-use fem_assembly::complex::{ComplexAssembler, ComplexGridFunction, ComplexSystem};
+use fem_assembly::complex::{ComplexAssembler, ComplexGridFunction};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator,
                               CurlCurlIntegrator, GradDivIntegrator, VectorMassIntegrator};
 use fem_assembly::VectorAssembler;
-use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
-use fem_linalg::{CsrMatrix, fem_to_linlvo_csr};
-use fem_element::ReferenceElement;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
+use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::{element_jacobian_at, refine_uniform, topology::MeshTopology, Mesh};
 use fem_space::{FESpace, H1Space, HCurlSpace, HDivSpace};
 use fem_space::constraints::{boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
-use fem_solver::{linlvoPreconditioner, DenseVec, GSSmoother, right_preconditioned_gmres,
-                 solve_gmres};
+use fem_solver::{linlvoPreconditioner, DenseVec, GSSmoother, right_preconditioned_gmres};
 use fem_solver::SolverConfig as SolverCfg;
 use linlvo::JacobiPrecond;
 
@@ -258,10 +254,7 @@ fn main() {
 fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool, dim: usize) {
-    use fem_element::lagrange::{TriP1, TriP2, TriP3,
-                                 quad::{QuadQ1, QuadQ2, QuadQ3, QuadQ4}};
-
+               quad_order: u8, exact_sol_known: bool, _dim: usize) {
     let space = H1Space::new(mesh.clone(), cfg.order as u8);
     let n = space.n_dofs();
     println!("Number of finite element unknowns: {}", n);
@@ -381,10 +374,7 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool, dim: usize) {
-    use fem_element::VectorReferenceElement;
-    use fem_element::nedelec::{TriNDk};
-
+               quad_order: u8, exact_sol_known: bool, _dim: usize) {
     let space = HCurlSpace::new(mesh.clone(), cfg.order as u8);
     let n = space.n_dofs();
     println!("Number of finite element unknowns: {}", n);
@@ -490,7 +480,7 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool, dim: usize) {
+               quad_order: u8, exact_sol_known: bool, _dim: usize) {
     let rt_order = if cfg.order >= 1 { cfg.order as u8 - 1 } else { 0 };
     let space = HDivSpace::new(mesh.clone(), rt_order);
     let n = space.n_dofs();
@@ -579,47 +569,14 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
 // ─── L² error helpers ─────────────────────────────────────────────────────
 
-/// L² error for H(Curl) vector fields on Tri3 mesh.
-fn l2_error_hcurl(mesh: &Mesh<2>, space: &HCurlSpace<Mesh<2>>,
-                   u_re: &[f64], u_im: &[f64],
-                   mu: f64, epsilon: f64, sigma: f64, omega: f64,
-                   quad_order: u8) -> (f64, f64) {
-    use fem_element::VectorReferenceElement;
-    use fem_element::nedelec::{TriNDk};
-
-    let mut er2 = 0.0; let mut ei2 = 0.0;
-    for e in 0..mesh.n_elements() as u32 {
-        let re = TriNDk::new(1);
-        let nld = re.n_dofs();
-        let q = re.quadrature(quad_order);
-        let mut phi = vec![0.0; nld * 2];
-        let _en = mesh.element_nodes(e);
-        let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        for (qi, xi) in q.points.iter().enumerate() {
-            re.eval_basis_vec(xi, &mut phi);
-            let (J, xp) = element_jacobian(mesh, e, xi);
-            let det_j = J.determinant();
-            let w = q.weights[qi] * det_j.abs();
-
-            // Numerical solution
-            let mut uh_re = [0.0; 2];
-            let mut uh_im = [0.0; 2];
-            for a in 0..nld {
-                uh_re[0] += u_re[ed[a]] * phi[a * 2];
-                uh_re[1] += u_re[ed[a]] * phi[a * 2 + 1];
-                uh_im[0] += u_im[ed[a]] * phi[a * 2];
-                uh_im[1] += u_im[ed[a]] * phi[a * 2 + 1];
-            }
-            // Exact: [u0_exact, 0]
-            let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
-            er2 += w * ((uh_re[0] - er).powi(2) + (uh_re[1] - 0.0).powi(2));
-            ei2 += w * ((uh_im[0] - ei).powi(2) + (uh_im[1] - 0.0).powi(2));
-        }
-    }
-    (er2.sqrt(), ei2.sqrt())
-}
-
-/// L² error for H(Div) vector fields on Tri3 mesh.
+/// L² error for H(Div) vector fields in 2-D (Tri3/Quad4, RT0 basis only).
+///
+/// D674-family limitation (documented, not parameterized this round): the
+/// reference element is hard-wired to `TriRTk::new(0)` / `QuadRTk::new(0)`, so
+/// an HDiv space of order ≥ 1 (`-p 2 -o 2` → RT1) is silently evaluated with
+/// the RT0 basis (only the first slot per element is consumed) and any
+/// non-Tri3/Quad4 element type panics.  The quadrature order argument is the
+/// MFEM `ComputeL2Error` convention (`2*order + 3`).
 fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                   u_re: &[f64], u_im: &[f64],
                   mu: f64, epsilon: f64, sigma: f64, omega: f64,
@@ -866,7 +823,7 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool, dim: usize) {
+               quad_order: u8, exact_sol_known: bool, _dim: usize) {
     let space = HCurlSpace::new(mesh.clone(), cfg.order as u8);
     let n = space.n_dofs();
     println!("Number of finite element unknowns: {}", n);
@@ -940,7 +897,7 @@ fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
                mu: f64, epsilon: f64, sigma: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
-               quad_order: u8, exact_sol_known: bool, dim: usize) {
+               quad_order: u8, exact_sol_known: bool, _dim: usize) {
     let rt_order = if cfg.order >= 1 { cfg.order as u8 - 1 } else { 0 };
     let space = HDivSpace::new(mesh.clone(), rt_order);
     let n = space.n_dofs();
@@ -1006,6 +963,16 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 
 // ─── 3D L² error helpers ──────────────────────────────────────────────────
 
+/// L² error for H(Curl) vector fields in 3-D (Hex8/Tet4, ND1 basis only).
+///
+/// D674-family limitation (documented, not parameterized this round): the
+/// reference element is hard-wired to `HexNDk::new(1)` for Hex8 and — via the
+/// `_` catch-all — `TetNDk::new(1)` for EVERYTHING else, so non-Hex8/Tet4
+/// cells (prisms, pyramids) are silently evaluated with the wrong tet basis
+/// and an order ≥ 2 space (`-o 2`) is silently evaluated with the ND1 basis
+/// (only the first 4/6 slots per element are consumed).  There is no panic on
+/// either path today; only the printed error row is wrong.  The quadrature
+/// order argument is the MFEM `ComputeL2Error` convention (`2*order + 3`).
 fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
                       u_re: &[f64], u_im: &[f64],
                       mu: f64, epsilon: f64, sigma: f64, omega: f64,
@@ -1054,6 +1021,14 @@ fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
     (er2.sqrt(), ei2.sqrt())
 }
 
+/// L² error for H(Div) vector fields in 3-D (Hex8/Tet4, RT0 basis only).
+///
+/// D674-family limitation (documented, not parameterized this round): the
+/// reference element is hard-wired to `HexRTk::new_gauss_legendre(0)` for Hex8
+/// (D330's Gauss-Legendre nodal pair) and — via the `_` catch-all —
+/// `TetRTk::new(0)` for EVERYTHING else, so non-Hex8/Tet4 cells are silently
+/// evaluated with the wrong tet basis and an order ≥ 1 HDiv space is silently
+/// evaluated with the RT0 basis.  There is no panic on either path today.
 fn l2_error_hdiv_3d(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>,
                      u_re: &[f64], u_im: &[f64],
                      mu: f64, epsilon: f64, sigma: f64, omega: f64,

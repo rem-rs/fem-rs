@@ -36,7 +36,20 @@ use fem_solver::ode::traits::TimeStepper;
 // [0,1]² — NOT the equally spaced QuadQk.  Mismatched DOF nodes make the
 // initial projection and error evaluation land on the wrong physical points.
 fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElement> {
-    if mesh.element_type(0) == ElementType::Quad4 {
+    // D674: dispatch by element type, not by element 0's node count.  The
+    // DG operator (`DgHyperbolicConservationLaws`) and the flat
+    // `e * dp * n_eq` solution layout are single-element-type, so a MIXED
+    // mesh fails loudly here instead of silently trusting element 0.
+    let first = mesh.element_type(0);
+    for e in 1..mesh.n_elements() as u32 {
+        let et = mesh.element_type(e);
+        assert!(
+            et == first,
+            "ex18: mixed mesh (element 0 is {first:?}, element {e} is {et:?}) \
+             is not supported — the DG hyperbolic operator is single-element-type"
+        );
+    }
+    if first == ElementType::Quad4 {
         Box::new(QuadL2GL::new(order as usize))
     } else {
         match order {
@@ -228,13 +241,14 @@ fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
     // evaluate u0 at each DOF node (Gauss-Legendre nodes for L2 spaces) —
     // NOT an L² projection.
     let ref_elem = make_ref_elem(mesh, order);
-    let is_quad = mesh.element_nodes(0).len() == 4;
     let dp = ref_elem.n_dofs();
     let n_elems = mesh.n_elements();
     let mut u = vec![0.0; n_elems * dp * n_eq];
     let dof_ref = ref_elem.dof_coords(); // [dof][dim], [0,1]² domain
 
     for e in 0..n_elems {
+        // D674: per-element mapping dispatch (was: element 0's node count).
+        let is_quad = matches!(mesh.element_type(e as u32), ElementType::Quad4);
         let pg: Vec<[f64; 2]> = mesh.geometry_nodes(e as u32)
             .iter()
             .map(|n| {
@@ -276,7 +290,6 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     n_eq: usize,
 ) -> f64 {
     let ref_elem = make_ref_elem(mesh, order);
-    let is_quad = mesh.element_nodes(0).len() == 4;
     let dp = ref_elem.n_dofs();
     // MFEM GridFunction::ComputeLpError uses intorder = 2*fe->GetOrder() + 3
     // (gridfunc.cpp); for the DG L2 space GetOrder() = order.
@@ -286,6 +299,8 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     let mut err_sq = 0.0;
 
     for e in 0..mesh.n_elements() {
+        // D674: per-element mapping dispatch (was: element 0's node count).
+        let is_quad = matches!(mesh.element_type(e as u32), ElementType::Quad4);
         let base = e * dp * n_eq;
         let pg: Vec<[f64; 2]> = mesh.geometry_nodes(e as u32)
             .iter()

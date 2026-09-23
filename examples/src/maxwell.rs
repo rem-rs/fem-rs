@@ -1689,6 +1689,13 @@ where
 }
 
 /// L² norm of the error using the existing quadrature-based H(Curl) integration.
+///
+/// Order-aware (D672): the reference basis is selected from
+/// `space.order()` — ND1 (Whitney) for order 1, the MFEM-faithful
+/// `TriND2`/`QuadND2` for order 2, the generic `TriNDk`/`QuadNDk` family for
+/// order ≥ 3 — exactly mirroring the assembler's
+/// `vec_ref_elem_with_basis` dispatch, so the evaluated basis always matches
+/// the slot tables the solution was assembled with.
 pub fn l2_error_hcurl_exact<F>(
     space: &HCurlSpace<Mesh<2>>,
     uh: &[f64],
@@ -1712,10 +1719,21 @@ where
     F: Fn(&[f64]) -> [f64; 2],
     P: Fn(u32) -> bool,
 {
-    use fem_element::nedelec::QuadNDk;
+    use fem_element::nedelec::{QuadND2, QuadNDk, TriND2, TriNDk};
     use fem_element::VectorReferenceElement;
 
     let mesh = space.mesh();
+    // D672: the reference basis MUST be the one the assembler paired with
+    // this space's dof/slot tables (`VectorAssembler::vec_ref_elem_with_basis`).
+    // The former hard-wired ND1 silently evaluated order-2 solutions with the
+    // wrong basis (ex22 -p 1 -o 2 -r 1: Re error 2.010e-1 vs C++ 5.623e-3,
+    // 36x too large, and non-converging under refinement).
+    let order = space.order() as usize;
+    // MFEM `GridFunction::ComputeL2Error` (gridfunc.cpp) integrates the error
+    // with `IntRules.Get(geom, 2*fe->GetOrder() + 3)`; the order-1 path keeps
+    // its historical quadrature(6) so existing order-1 outputs stay
+    // byte-identical (quad_rule_01(6) and (7) are the same 4x4 Gauss rule).
+    let quad_order: u8 = if order == 1 { 6 } else { 2 * order as u8 + 3 };
     let mut err2 = 0.0_f64;
 
     for e in mesh.elem_iter() {
@@ -1729,10 +1747,20 @@ where
 
         match elem_type {
             ElementType::Tri3 => {
-                let ref_elem = TriNDk::new(1);
-                let quad = ref_elem.quadrature(6);
+                let ref_elem: Box<dyn VectorReferenceElement> = match order {
+                    1 => Box::new(TriNDk::new(1)),
+                    2 => Box::new(TriND2),
+                    o => Box::new(TriNDk::new(o)),
+                };
+                let quad = ref_elem.quadrature(quad_order);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
+                assert_eq!(
+                    dofs.len(),
+                    n_ldofs,
+                    "l2_error_hcurl_exact: Tri slot table has {} dofs, ND{order} needs {n_ldofs}",
+                    dofs.len(),
+                );
 
                 let x0 = mesh.node_coords(nodes[0]);
                 let x1 = mesh.node_coords(nodes[1]);
@@ -1766,10 +1794,20 @@ where
                 }
             }
             ElementType::Quad4 => {
-                let ref_elem = QuadNDk::new(1);
-                let quad = ref_elem.quadrature(6);
+                let ref_elem: Box<dyn VectorReferenceElement> = match order {
+                    1 => Box::new(QuadNDk::new(1)),
+                    2 => Box::new(QuadND2),
+                    o => Box::new(QuadNDk::new(o)),
+                };
+                let quad = ref_elem.quadrature(quad_order);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
+                assert_eq!(
+                    dofs.len(),
+                    n_ldofs,
+                    "l2_error_hcurl_exact: Quad slot table has {} dofs, ND{order} needs {n_ldofs}",
+                    dofs.len(),
+                );
 
                 // Quad4 bilinear mapping on the [0,1]^2 reference domain
                 // (matches QuadND1::quadrature = quad_rule_01 and MFEM's
@@ -8479,5 +8517,42 @@ mod tests_maxwell_mf {
         let err: f64 = x_mf.iter().zip(x_asm.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
         let ref_n: f64 = x_asm.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-15);
         assert!(err / ref_n < 1e-7, "mf vs asm diff {:.3e}", err / ref_n);
+    }
+}
+
+#[cfg(test)]
+mod tests_l2_error_hcurl_order_aware {
+    use super::*;
+    use fem_mesh::Mesh;
+    use std::f64::consts::PI;
+
+    /// D672 pin: `l2_error_hcurl_exact` must evaluate an ND2 solution with
+    /// the assembler-matched ND2 reference basis (`TriND2`/`QuadND2`, the
+    /// same dispatch as `VectorAssembler::vec_ref_elem_with_basis`), not the
+    /// leading ND1 slots.  Interpolating the exact field into the space and
+    /// evaluating the error yields the small interpolation error, which is
+    /// well below the ND1 error on the same mesh; the former ND1-hardwired
+    /// evaluator consumed only the first 4 slots of every quad element and
+    /// returned a large wrong number.
+    #[test]
+    fn l2_error_hcurl_exact_is_order_aware() {
+        let exact = |x: &[f64]| -> Vec<f64> {
+            vec![(PI * x[1]).sin(), (PI * x[0]).sin()]
+        };
+        let err = |order: u8| {
+            let mesh = Mesh::<2>::unit_square_quad(4);
+            let space = HCurlSpace::new(mesh, order);
+            let uh = space.interpolate_vector(&exact);
+            l2_error_hcurl_exact(&space, uh.as_slice(), |x| {
+                [(PI * x[1]).sin(), (PI * x[0]).sin()]
+            })
+        };
+        let e1 = err(1);
+        let e2 = err(2);
+        assert!(
+            e2 < 0.2 * e1,
+            "ND2 interpolation error {e2:.6e} should be well below ND1 {e1:.6e}",
+        );
+        assert!(e2 < 5e-2, "ND2 interpolation error should be small, got {e2:.6e}");
     }
 }

@@ -26,10 +26,10 @@
 
 use fem_assembly::assembler::Assembler;
 use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
+use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_assembly::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
 use fem_io::mfem::read_mfem_file;
-use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_minres_precond, SolverConfig};
 use fem_space::fe_space::FESpace;
@@ -411,63 +411,21 @@ fn main() {
     println!(" Total dofs:       {}", nr + nl);
 }
 
-/// L² norm of a grid function: sqrt(∫ u² dx) via 2·order+3 quadrature
-/// (MFEM GridFunction::ComputeL2Error with the zero coefficient).
-/// The Jacobian is isoparametric (QuadQk geometry, matching the mesh's
-/// curvature), NOT the affine P1 approximation — the star mesh is curved
-/// (Quad9 after `set_curvature`), so the affine detJ would bias the norm.
+/// L² norm of an L2 grid function: `‖u_h‖_L²` (D674).  Delegates to the
+/// library's `GridFunction::compute_l2_error_owned` with a zero exact
+/// solution — the pex36 pattern — which is MFEM
+/// `GridFunction::ComputeL2Error` with the zero coefficient: `2·order+3`
+/// quadrature and isoparametric QuadQk geometry (the star mesh is curved,
+/// Quad9 after `set_curvature`), with per-element-type dispatch instead of
+/// this example's former Quad-only handwritten loop.
 fn l2_norm(
     mesh: &impl MeshTopology,
     space: &L2Space<impl MeshTopology>,
     u: &[f64],
     _qo: u8,
 ) -> f64 {
-    let mut error2 = 0.0_f64;
-    let gorder = mesh.geom_order() as usize;
-    for e in mesh.elem_iter() {
-        let edofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let geo = fem_element::lagrange::QuadQk::new(gorder);
-        let gn = geo.n_dofs();
-        let mut dphi = vec![0.0_f64; gn * 2];
-        let mut phi = vec![0.0_f64; gn];
-        let nodes = mesh.geometry_nodes(e);
-        let order = space.order() as usize;
-        let intorder = 2 * order + 3;
-        // L² P0: constant basis (1 dof/elem).  P1+: QuadQk barycentric basis.
-        let (quad, phi0) = if order == 0 {
-            let q = fem_element::lagrange::QuadQk::new(1).quadrature(intorder as u8);
-            (q, vec![1.0])
-        } else {
-            let re = fem_element::lagrange::QuadQk::new(order);
-            let q = re.quadrature(intorder as u8);
-            (q, vec![0.0; edofs.len()])
-        };
-        let mut phi_l2 = phi0;
-        for (qi, xi) in quad.points.iter().enumerate() {
-            // isoparametric detJ from the mesh's geometry nodes
-            geo.eval_grad_basis(xi, &mut dphi);
-            geo.eval_basis(xi, &mut phi);
-            let mut j = [[0.0_f64; 2]; 2];
-            for k in 0..gn {
-                let xk = mesh.geom_coords_of(nodes[k]);
-                for i in 0..2 {
-                    for d in 0..2 {
-                        j[i][d] += xk[i] * dphi[k * 2 + d];
-                    }
-                }
-            }
-            let det_j = (j[0][0] * j[1][1] - j[0][1] * j[1][0]).abs();
-            let w = quad.weights[qi] * det_j;
-            if order > 0 {
-                let re = fem_element::lagrange::QuadQk::new(order);
-                re.eval_basis(xi, &mut phi_l2);
-            }
-            let mut uh = 0.0;
-            for (jj, &d) in edofs.iter().enumerate() {
-                uh += u[d] * phi_l2[jj];
-            }
-            error2 += w * uh * uh;
-        }
-    }
-    error2.abs().sqrt()
+    let n_elems = mesh.n_elements() as u32;
+    let quad_order = 2 * space.order() + 3;
+    GridFunction::new(space, u.to_vec())
+        .compute_l2_error_owned(&|_| 0.0, quad_order, n_elems)
 }
