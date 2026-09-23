@@ -5,32 +5,31 @@
 //! Creates a new mesh consisting of all elements NOT possessing a given set
 //! of attribute numbers. New boundary elements are created at the cut faces.
 //!
-//! # Round 64 (D659) — unblock status
+//! # Round 65 (D675/D685) — the VTK default input is native now
 //!
-//! * MFEM's default input `data/beam-tet.vtk` is a **VTK** file.  fem-rs has
-//!   no VTK reader yet (fem-io only parses the MFEM mesh format), so the
-//!   `.vtk` path is an honest, declared `exit(3)` with a gap note instead of
-//!   a crash — the VTK reader itself is registered as debt **D675**.  The
-//!   MFEM-format twin of the same mesh is byte-verified against the C++
-//!   trimmer: `-m data/beam-tet.mesh -a 1` reproduces
-//!   `48 -> 24` elements / `68 -> 36` boundary elements and the C++
-//!   `trimmer.mesh` to 82/83 content lines; the single residual line is one
-//!   cut triangle written as the same *oriented* triangle under a cyclic
-//!   rotation of its vertex cycle (identical geometry and normal): fem-rs's
-//!   write path MarkEdge-canonicalizes boundary cycles for AMR readiness
-//!   (`mark_tet_mesh_for_refinement`), MFEM's trimmer preserves the
-//!   post-`Finalize` cycle start.  Registered as debt **D676** (writer-level
-//!   byte parity, not a trimmer-logic issue).
-//! * The previous port only iterated the mesh's *boundary* faces, so the new
-//!   boundary elements at the cut faces were never created (C++ prints
-//!   `68 -> 36`, the old port counted 34 and wrote a mesh without the two cut
-//!   triangles).  This port replicates MFEM `Mesh::GenerateFaces`: elements
-//!   are scanned in order, local faces in `Geometry::Constants<T>::FaceVert`
-//!   order (fem/geom.cpp:987 tet / 1032 hex / 1061 prism — outward-oriented
-//!   cycles), first encounter owns the global face index and orientation.
-//! * C++'s default `-m` value `../../data/beam-tet.vtk` assumes
-//!   `cwd = miniapps/meshing`; here the default is repo-root relative
-//!   (`data/beam-tet.vtk`) like every other example.
+//! * `data/beam-tet.vtk` is read by the new 1:1 `Mesh::LoadVtk` port
+//!   (`fem_io::vtk_legacy_reader`), byte-verified against MFEM 4.10
+//!   `Mesh(file,1,1) + Print()` for all three repo `.vtk` assets and 15
+//!   cell-type probes (`crates/io/tests/vtk_mfem_parity.rs`).
+//! * Boundary orientation is passthrough + parity repair (D685): C++
+//!   duplicates both the original boundary elements and the cut faces
+//!   (`GetBdrElement(be)` / `GetFace(f)->Duplicate`) from the *source* mesh's
+//!   in-memory tables — cut faces keep the *owner* (= first encountering
+//!   element, possibly the removed one) cycle start — and then
+//!   `trimmed_mesh.Finalize()` runs `CheckBdrElementOrientation()` with its
+//!   default `fix_it = true` unconditionally (`mesh.cpp:3571`): every boundary
+//!   element is parity-compared against the *trimmed* mesh's own face table
+//!   (generated from the survivors) and odd permutations are repaired by
+//!   `Swap(bv[0], bv[1])` — never by rotating the cycle.  Original boundary
+//!   elements were already parity-aligned to the same (surviving) element by
+//!   the source load, so only cut faces whose owner was removed can flip.
+//! * `-m data/beam-tet.mesh -a 1` / `-a 2` are byte-identical to the MFEM
+//!   4.10 trimmer (the `.mesh` twin is stored mark-oriented, so the reader's
+//!   `Load(refine=1)` mirror is a no-op there).  The VTK default tier keeps a
+//!   read-side residual: the port implements `Mesh(file,1,1)` (marked), while
+//!   the C++ trimmer loads with `Mesh(file,0,0)` (unmarked) — every differing
+//!   record is a geometry-preserving vertex-cycle rotation of the same
+//!   element/face (tracked as D688, the `Load(refine=false)` reader knob).
 
 use std::collections::HashMap;
 
@@ -79,39 +78,6 @@ struct GlobFace {
     e2: Option<u32>,
 }
 
-/// MFEM `Mesh::Finalize(fix_orientation)` parity: reverse `cycle` iff it runs
-/// opposite to the FaceVert cycle that element `adj` contributes for the same
-/// face (the cycle start is preserved — a rotation never flips normals).
-fn fixup_orientation(
-    cycle: Vec<u32>,
-    adj: u32,
-    mesh: &Mesh<3>,
-    face_table: &[Vec<usize>],
-) -> Vec<u32> {
-    let enodes = mesh.elem_nodes(adj);
-    // The reference cycle of `adj`'s local face with the same vertex set.
-    let mut reference: Option<Vec<u32>> = None;
-    for fv in face_table {
-        let cyc: Vec<u32> = fv.iter().map(|&i| enodes[i]).collect();
-        let mut a = cyc.clone();
-        let mut b = cycle.clone();
-        a.sort_unstable();
-        b.sort_unstable();
-        if a == b {
-            reference = Some(cyc);
-            break;
-        }
-    }
-    let Some(reference) = reference else { return cycle };
-    // Rotate the reference so it starts at cycle[0], then compare the second
-    // vertices: equal → same orientation, otherwise → reversed.
-    let start = reference.iter().position(|&v| v == cycle[0]);
-    let Some(start) = start else { return cycle };
-    let n = reference.len();
-    let same = reference[(start + 1) % n] == cycle[1 % n];
-    if same { cycle } else { cycle.into_iter().rev().collect() }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -140,30 +106,44 @@ fn main() {
         }
     }
 
-    // D659: honest exit(3) on the VTK default — fem-rs has no VTK reader yet
-    // (debt D675); MFEM's Mesh() constructor reads VTK natively.
-    if mesh_file.to_ascii_lowercase().ends_with(".vtk") {
-        eprintln!(
-            "trimmer (D659 honest exit 3): '{}' is a VTK file but fem-rs has \
-             no VTK reader yet (fem-io parses the MFEM mesh format only; \
-             MFEM's Mesh() reads VTK natively).  Registered debt: D675.  \
-             Run the MFEM-format twin of the same mesh instead: \
-             -m data/beam-tet.mesh (byte-verified against the C++ trimmer).",
-            mesh_file
-        );
-        std::process::exit(3);
-    }
-
-    // Read mesh
-    let mesh = match read_mfem_file(&mesh_file) {
-        Ok(m) => {
-            if let Some(m3) = m.mesh3d { m3 }
-            else if let Some(_m2) = m.mesh2d {
-                eprintln!("Expected 3D mesh"); std::process::exit(1);
+    // D675 (round 65): VTK meshes are read natively now — the default input
+    // `data/beam-tet.vtk` goes through the 1:1 `Mesh::LoadVtk` port, so the
+    // default run matches the C++ trimmer exactly.
+    let mesh = if mesh_file.to_ascii_lowercase().ends_with(".vtk") {
+        let vtk = fem_io::vtk_legacy_reader::read_vtk_mesh_file(&mesh_file).unwrap_or_else(|e| {
+            eprintln!("Error reading mesh: {e}");
+            std::process::exit(1);
+        });
+        match vtk.mesh3d {
+            Some(m3) => m3,
+            None => {
+                if vtk.mesh2d.is_some() {
+                    eprintln!("Expected 3D mesh");
+                    std::process::exit(1);
+                } else {
+                    eprintln!("No mesh found");
+                    std::process::exit(1);
+                }
             }
-            else { eprintln!("No mesh found"); std::process::exit(1); }
         }
-        Err(e) => { eprintln!("Error reading mesh: {e}"); std::process::exit(1); }
+    } else {
+        match read_mfem_file(&mesh_file) {
+            Ok(m) => {
+                if let Some(m3) = m.mesh3d {
+                    m3
+                } else if let Some(_m2) = m.mesh2d {
+                    eprintln!("Expected 3D mesh");
+                    std::process::exit(1);
+                } else {
+                    eprintln!("No mesh found");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading mesh: {e}");
+                std::process::exit(1);
+            }
+        }
     };
 
     let face_table = mfem_face_verts(mesh.elem_type);
@@ -269,23 +249,39 @@ fn main() {
     // boundary elements first (in file order, original attributes), then the
     // new cut faces (in global-face order, attributes `bdr_attr[attr_inv]`).
     //
-    // C++'s `trimmed_mesh.Finalize()` (fix_orientation) aligns every boundary
-    // triangle with the FaceVert cycle of its surviving adjacent element
-    // (reversal only — the cycle start is preserved).  The duplicated cut
-    // faces inherit the *owner* (= first-encounter) orientation, which for
-    // beam-tet is the REMOVED side, so without this alignment the two files
-    // differ by exactly the two cut triangles' orientation (round-64 diff:
-    // `4 2 10 15 0` vs `4 2 0 15 10`).  `fixup_orientation` replicates it.
+    // D685 (probe-refuted round-64 premise, `tmp/d663/verdict.md`): C++ copies
+    // both kinds verbatim — `GetBdrElement(be)->Duplicate()` keeps the source
+    // mesh's in-memory boundary cycle and the cut faces
+    // `GetFace(f)->Duplicate()` keep the *owner* first-encounter cycle start,
+    // even when the owner is on the removed side.  The orientation work is
+    // done afterwards by `trimmed_mesh.Finalize()` →
+    // `CheckBdrElementOrientation()` (default `fix_it = true`, mesh.cpp:3571):
+    // each boundary element is compared against the *trimmed* mesh's own face
+    // table entry — for a cut face that entry is the surviving element's
+    // FaceVert cycle — and odd permutations are repaired by
+    // `Swap(bv[0], bv[1])`, the cycle start never moves.  Original boundary
+    // elements were already parity-aligned to that same surviving element by
+    // the source load's own `fix_orientation = true` pass, so the repair only
+    // ever fires on cut faces whose owner was trimmed away.
     let mut trimmed_face_conn = Vec::new();
     let mut trimmed_face_tags = Vec::new();
+    // MFEM `GetTriOrientation`/`GetQuadOrientation` parity: `cycle` covers the
+    // same vertices as `reference` but runs in the reversed cyclic direction.
+    fn odd_vs_reference(cycle: &[u32], reference: &[u32]) -> bool {
+        let n = reference.len();
+        let Some(start) = reference.iter().position(|&v| v == cycle[0]) else {
+            return false; // well-formed face tables always contain cycle[0]
+        };
+        let backward = (0..n).all(|i| reference[(start + n - i) % n] == cycle[i]);
+        backward
+    }
     for f in 0..nf {
         let fnodes = &mesh.face_conn[f * npf..f * npf + npf];
         let mut key = fnodes.to_vec();
         key.sort_unstable();
         if let Some(&g) = face_lookup.get(&key) {
             if faces[g].e2.is_none() && !marker[elem_attr(faces[g].e1) as usize] {
-                let cyc = fixup_orientation(fnodes.to_vec(), faces[g].e1, &mesh, &face_table);
-                trimmed_face_conn.extend_from_slice(&cyc);
+                trimmed_face_conn.extend_from_slice(fnodes);
                 trimmed_face_tags.push(mesh.face_tags[f]);
             }
         }
@@ -299,7 +295,21 @@ fn main() {
                 let a = if m1 { a1 } else { a2 };
                 let new_attr = bdr_attr[attr_inv[a]];
                 let survivor = if m1 { e2 } else { f.e1 };
-                let cyc = fixup_orientation(f.verts.clone(), survivor, &mesh, &face_table);
+                let mut cyc = f.verts.clone();
+                let enodes = mesh.elem_nodes(survivor);
+                for fv in &face_table {
+                    let reference: Vec<u32> = fv.iter().map(|&i| enodes[i]).collect();
+                    let mut sorted_ref = reference.clone();
+                    sorted_ref.sort_unstable();
+                    let mut sorted_cyc = cyc.clone();
+                    sorted_cyc.sort_unstable();
+                    if sorted_ref == sorted_cyc {
+                        if odd_vs_reference(&cyc, &reference) {
+                            cyc.swap(0, 1);
+                        }
+                        break;
+                    }
+                }
                 trimmed_face_conn.extend_from_slice(&cyc);
                 trimmed_face_tags.push(new_attr);
             }
@@ -331,10 +341,4 @@ fn main() {
 
     write_mfem_file_3d("trimmer.mesh", &trimmed).expect("write mesh");
     println!("Wrote trimmer.mesh ({} elements, {} nodes).", trimmed.n_elems(), trimmed.n_nodes());
-}
-
-// TEMP-DEBUG D659: removed before final report
-#[allow(dead_code)]
-fn temp_debug() {
-    let _ = std::collections::HashMap::<u32, u32>::new();
 }

@@ -17,7 +17,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_mesh::{refine_uniform, Mesh};
+use fem_mesh::refine_uniform;
 use fem_solver::{solve_pcg_gssmoother, SolverConfig};
 use fem_space::{
     H1Space,

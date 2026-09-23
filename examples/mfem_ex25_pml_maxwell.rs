@@ -303,7 +303,7 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
     let ess_tdofs = boundary_dofs_hcurl(space.mesh(), &space, &ess_bdr_tags);
 
     // ── Assemble complex system via SesquilinearForm (1:1 with C++) ──────
-    use fem_assembly::complex::{SesquilinearForm, Convention};
+    use fem_assembly::complex::Convention;
         let conv = if herm_conv { Convention::Hermitian } else { Convention::BlockSymmetric };
 
     let attr     = vec![1];  // computational domain (element tag 1)
@@ -429,7 +429,6 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
             let e = maxwell_solution(x, dim, prob, k);
             e.iter().map(|c| c.im).collect()
         };
-        let q_bdr = std::cmp::max(2, 2*args.order + 1) as u8;
         let bc_re_full = space.interpolate_vector(&bc_fn_re);
         let bc_im_full = space.interpolate_vector(&bc_fn_im);
         bc_re.copy_from_slice(bc_re_full.as_slice());

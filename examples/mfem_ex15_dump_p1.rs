@@ -4,8 +4,8 @@
 //!   (with feature flag DUMP_IT3 env: cargo run ... 2> /dev/null)
 
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, MeshTopology};
-use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_mesh::Mesh;
+use fem_mesh::amr::NCStateQuad;
 use fem_space::H1Space;
 use fem_space::FESpace;
 use fem_space::dof_manager::EdgeKey;
@@ -48,8 +48,6 @@ fn main() {
     }
     println!("phys_to_vertex_dof non-identity: {ndiff}");
     if ndiff > 0 && ndiff <= 60 {
-        let mut v: Vec<_> = dm0.phys_to_vertex_dof.iter().filter(|(_, &v)| false).collect();
-        let _ = v;
         for (&p, &v) in dm0.phys_to_vertex_dof.iter() {
             if p as usize != v as usize {
                 println!("  phys {p} -> view dof {v}");

@@ -31,7 +31,7 @@ use fem_mesh::amr::{
 use fem_space::{
     H1Space,
     constraints::{
-        apply_hanging_constraints, boundary_dofs, recover_hanging_values,
+        boundary_dofs, recover_hanging_values,
     },
     fe_space::FESpace,
 };
@@ -248,12 +248,12 @@ fn main() {
 
             // Assemble stiffness matrix
             let diffusion = DiffusionIntegrator { kappa: 1.0 };
-            let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], quad_rule);
+            let mat = Assembler::assemble_bilinear(&space, &[&diffusion], quad_rule);
 
             // Assemble RHS (time-dependent)
             let rhs_fn = |pt: &[f64]| rhs_func(pt, time);
             let source = DomainSourceIntegrator::new(rhs_fn);
-            let mut rhs_vec = Assembler::assemble_linear(&space, &[&source], quad_rule);
+            let rhs_vec = Assembler::assemble_linear(&space, &[&source], quad_rule);
 
             // Apply hanging-node constraints.
             // P2: upgrade the mesh-level P1 constraints (0.5 average) to the

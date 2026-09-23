@@ -47,29 +47,27 @@
 
 use std::sync::{Arc, Mutex};
 
-use fem_assembly::assembler::{Assembler, face_dofs_p1};
+use fem_assembly::assembler::face_dofs_p1;
 use fem_assembly::dg::dg_base::{
     build_face_elem_map, phys_to_ref, phys_to_ref_quad_01, quad_jac_at_01, ref_elem_vol,
     simplex_jac, xform_grads,
 };
 use fem_assembly::integrator::BoundaryMassIntegrator;
 use fem_assembly::standard::{DiffusionIntegrator, NeumannIntegrator};
-use fem_assembly::{DgAssembler, InteriorFaceList};
 use fem_core::types::DofId;
 use fem_element::ReferenceElement;
 use fem_mesh::{ElementType, Mesh, refine_uniform, topology::MeshTopology};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
-use fem_parallel::par_solver::par_solve_gmres;
 use fem_parallel::{
-    DofPartition, ParAmgConfig, ParAssembler, ParCsrMatrix, ParVector, ParallelFESpace,
+    ParAmgConfig, ParAssembler, ParCsrMatrix, ParVector, ParallelFESpace,
     SmootherType, WorkerConfig, par_solve_pcg_amg,
 };
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
 use fem_space::dof_manager::DofManager;
 use fem_space::fe_space::FESpace;
-use fem_space::{H1Space, L2Space};
+use fem_space::H1Space;
 
 /// Hole radius (C++ global `a_`); set from `-a` after clamping to [0.01, 0.49].
 static mut HOLE_RADIUS: f64 = 0.2;

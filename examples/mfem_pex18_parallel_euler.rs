@@ -212,14 +212,12 @@ fn main() {
             };
 
             let mut t = 0.0;
-            let mut ti = 0usize;
             let rk4 = Rk4;
             loop {
                 let dta = dt.min(args.t_final - t);
                 let rhs = |_: f64, u: &[f64], dudt: &mut [f64]| euler_op.mult(u, dudt);
                 rk4.step(t, dta, &mut sol, &rhs);
                 t += dta;
-                ti += 1;
                 if args.dt <= 0.0 {
                     let max_cs = euler_op.max_char_speed();
                     dt = args.cfl * h_min / max_cs / (2.0 * order as f64 + 1.0);

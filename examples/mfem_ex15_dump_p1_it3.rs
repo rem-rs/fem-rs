@@ -4,8 +4,8 @@
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, MeshTopology};
-use fem_mesh::amr::{NCStateQuad, NcState2D, HangingNodeConstraint};
+use fem_mesh::Mesh;
+use fem_mesh::amr::{NCStateQuad, HangingNodeConstraint};
 use fem_space::constraints::{apply_dirichlet, boundary_dofs, conforming_assemble};
 use fem_space::fe_space::FESpace;
 use fem_space::H1Space;

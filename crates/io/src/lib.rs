@@ -32,6 +32,7 @@ pub mod vtk_legacy;
 pub mod exodus;
 pub mod vtk;
 pub mod vtk_reader;
+pub mod vtk_legacy_reader;
 pub mod mfem;
 pub mod data_collection;
 pub mod nurbs_mesh;

@@ -24,7 +24,7 @@ use fem_assembly::{
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::Mesh;
 use fem_parallel::ParAssembler;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
@@ -356,7 +356,6 @@ fn global_sum_by_dof(
     comm: &fem_parallel::Comm,
 ) -> Vec<f64> {
     let n_total = coarse_dp.n_total_dofs();
-    let n_owned = coarse_dp.n_owned_dofs;
     debug_assert!(local.len() >= n_total);
     let n_ranks = comm.size() as i32;
     let rank = comm.rank();
