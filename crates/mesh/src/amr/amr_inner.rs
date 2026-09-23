@@ -2980,13 +2980,15 @@ fn refine_nonconforming_3d_internal(
     // SetVerticesFromNodes), not straight averages (see amr::curved_tet).
     let geo = super::curved_tet::TetPkGeometry::new(mesh);
     // MFEM's canonical new-vertex numbering (`oedge + e2v[E]`, see
-    // `MfemTetRefineIds`).  Reproduced where a written file pins it down — a
-    // *curved* mesh under *uniform* refinement keeps its `nodes` table, so the
-    // refined file carries these ids in every section.  Straight-sided meshes
-    // keep the historical first-touch numbering (the straight-refinement
-    // regression outputs pin it), and partial refinement would leave holes in
-    // the dense id space, so neither switches.
-    let mfem_ids = if geo.is_some() && marked_set.len() == n_elems {
+    // `MfemTetRefineIds`).  D651: applied to *every* fully-refined (uniform)
+    // tet mesh — straight-sided ones included.  The historical straight-side
+    // exception kept "first-touch" midpoint ids, which permutes every
+    // post-refinement global numbering derived from a first-encounter element
+    // walk (H(curl)/H(div) edge-dof ids, EnumEdges-style edge indices) and
+    // made ex3's beam-tet PCG history diverge from MFEM from iteration 0.
+    // Partial refinement keeps first-touch ids: the dense `NV + NE` id space
+    // would be left with holes only marked edges fill.
+    let mfem_ids = if marked_set.len() == n_elems {
         Some(MfemTetRefineIds::build(mesh))
     } else {
         None
@@ -3080,17 +3082,21 @@ fn refine_nonconforming_3d_internal(
 
             // 4 corner tets (MFEM embedding matrices 0..4).
             fine_parent.extend((0..4u8).map(|k| (e, k)));
-            if geo.is_some() {
+            if geo.is_some() || mfem_ids.is_some() {
                 // MFEM `UniformRefinement3D_base`: the coarse vertex sits at
                 // the child's *own* reference vertex (slot 0 of child 1..3
                 // holds the child's first edge midpoint), which makes every
                 // child positively oriented.  The historical fem-rs order
                 // below is a mirrored copy of the same children (vertex first
-                // — a 0↔1 transposition), kept for straight-sided meshes
-                // whose regression outputs pin it; a curved mesh must emit
-                // MFEM's order because the refined geometry's per-child
-                // evaluation (`build_refined_tet_geometry`'s `child_map`)
-                // reads the children in MFEM's slot semantics.
+                // — a 0↔1 transposition), kept for straight-sided *partial*
+                // refinements whose regression outputs pin it; a mirrored
+                // child flips det(J), and a *subsequent* uniform refinement
+                // of that mirrored element then evaluates the
+                // best-aspect-ratio refinement-type selection on a transposed
+                // Jacobian — D651's second deviation, visible as a different
+                // interior-octahedron split one level down.  Uniform
+                // refinement must therefore emit MFEM's order even for
+                // straight-sided meshes.
                 new_conn.extend_from_slice(&[n0, m01, m02, m03]); new_tags.push(tag);
                 new_conn.extend_from_slice(&[m01, n1, m12, m13]); new_tags.push(tag);
                 new_conn.extend_from_slice(&[m02, m12, n2, m23]); new_tags.push(tag);
