@@ -12,7 +12,7 @@
 
 use fem_element::ReferenceElement;
 use fem_mesh::{MeshTopology, element_type::ElementType};
-use fem_space::fe_space::FESpace;
+use fem_space::fe_space::{FESpace, SpaceType};
 
 use crate::postproc::error_estimate::ElementIndicators;
 use crate::postproc::grid_function::GridFunction;
@@ -334,6 +334,52 @@ fn pyramid_flux_element(order: u8, n_flux_dofs: usize) -> Box<dyn ReferenceEleme
     bergot
 }
 
+/// D637: the flux recovery implements MFEM's `ZZErrorEstimator` with an H¹
+/// flux space (the solution's own `FECollection`): every element's flux
+/// vector has exactly one slot per **that element's** H¹ flux DOF, and
+/// `H1_FECollection` makes the dof transformations no-ops (D455), so the
+/// recovery samples basis values directly against the first `n_ldofs` slots
+/// of `element_dofs`.  On the D613 wildcard-numbered quadratic-connectivity
+/// labels (Hex20/Hex27/…) the H¹ table legitimately carries *extra*
+/// connectivity dofs beyond the flux family (20 ≥ 8) — the leading slots are
+/// the vertex slots the family reads (pinned by
+/// `d614_flux_recovery_affine_exact_on_high_order_cells`).
+///
+/// Everything else decouples the flux rows from the dof table and was
+/// silently mis-indexed (or silently produced zero η): RT/HDiv (RT0 hex
+/// carries 6 face dofs against the 8-slot H¹ hex family — and hex RT p ≥ 1
+/// additionally needs the shared-quad-face canonical rotation
+/// (`element_face_blocks`), which is unwired; d448 covered 2-D quad faces
+/// only), HCurl/ND, L², vector spaces, variable-order tables shorter than
+/// the family.  Those are refused loudly here; the hex-RT canonical
+/// rotation itself remains future work.
+fn check_h1_flux_layout<S: FESpace>(
+    space: &S,
+    element: u32,
+    elem_type: ElementType,
+    n_ldofs: usize,
+) {
+    let n_table = space.element_dofs(element).len();
+    assert!(
+        space.space_type() == SpaceType::H1 && n_table >= n_ldofs,
+        "D637 flux recovery: element {element} ({elem_type:?}) has {n_table} \
+         flux-space dofs but the H¹ flux family at order {} has {n_ldofs} \
+         slots — this recovery only implements the H¹ flux space (MFEM \
+         ZZErrorEstimator with the solution's H1_FECollection).  A non-H¹ \
+         ({:?}) table here was silently mis-indexed; for hex RT p ≥ 1 the \
+         shared-quad-face canonical rotation table is not wired yet (d448: \
+         2-D only).",
+        space.order(),
+        space.space_type()
+    );
+    assert!(
+        space.element_face_blocks(element).is_empty(),
+        "D637 flux recovery: element {element} reports canonical face-block \
+         rotations (element_face_blocks non-empty) that this recovery does \
+         not apply — averaging would silently drop them"
+    );
+}
+
 impl FluxRecovery for DiffusionIntegrator<f64> {
     fn compute_element_flux<M: MeshTopology, S: FESpace<Mesh = M>>(
         &self,
@@ -359,6 +405,7 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let n_ldofs = ref_elem.n_dofs();
         let nodes = mesh.element_nodes(element);
         let elem_dofs = space.element_dofs(element);
+        check_h1_flux_layout(space, element, elem_type, n_ldofs);
 
         // MFEM DiffusionIntegrator::ComputeElementFlux evaluates κ·∇u_h at the
         // flux-space DOF nodes (fluxelem.GetNodes()) directly — no L²
@@ -569,24 +616,26 @@ where
     let nd = gf.space().n_dofs();
     let dim = mesh.dim() as usize;
     let order = gf.space().order();
-    let elem_type = mesh.element_type(0);
-
-    // D462: sample the solution space in its own pyramid slot order — the
-    // Fuentes default misreads a Bergot pyramid space (`pyr_type = 0`).
-    let ref_elem = ref_elem_vol_with_pyramid_basis(
-        elem_type,
-        order,
-        gf.space().pyramid_basis(),
-    );
-    let n_ldofs = ref_elem.n_dofs();
-    let dof_coords = ref_elem.dof_coords();
+    let dofs_vec = gf.dofs();
 
     // ── Step 1-2: SumFluxAndCount ────────────────────────────────────────────
     let mut flux_sum = vec![vec![0.0; dim]; nd];
     let mut flux_count = vec![0usize; nd];
-    let dofs_vec = gf.dofs();
 
+    // D637: each element is sampled in its OWN family, at its OWN H¹ dof
+    // coordinates — element 0's slot count used to size every element's flux
+    // vector, which silently mis-sampled (or indexed out of bounds) every
+    // cell of a different family on a mixed mesh.
     for e in 0..ne as u32 {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol_with_pyramid_basis(
+            elem_type,
+            order,
+            gf.space().pyramid_basis(),
+        );
+        let n_ldofs = ref_elem.n_dofs();
+        check_h1_flux_layout(gf.space(), e, elem_type, n_ldofs);
+        let dof_coords = ref_elem.dof_coords();
         let raw = integrator.compute_element_flux(mesh, gf.space(), e, &dofs_vec, &dof_coords);
         let elem_dofs = gf.space().element_dofs(e);
         for (i, &gdof) in elem_dofs.iter().enumerate() {
@@ -622,6 +671,15 @@ where
     // ── Step 3: per-element error ────────────────────────────────────────────
     let mut eta = vec![0.0; ne];
     for e in 0..ne as u32 {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol_with_pyramid_basis(
+            elem_type,
+            order,
+            gf.space().pyramid_basis(),
+        );
+        let n_ldofs = ref_elem.n_dofs();
+        check_h1_flux_layout(gf.space(), e, elem_type, n_ldofs);
+        let dof_coords = ref_elem.dof_coords();
         let raw = integrator.compute_element_flux(mesh, gf.space(), e, &dofs_vec, &dof_coords);
         let elem_dofs = gf.space().element_dofs(e);
 

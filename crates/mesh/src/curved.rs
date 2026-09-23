@@ -295,10 +295,10 @@ impl<const D: usize> CurvedMesh<D> {
         let mut grad_ref = vec![0.0_f64; n * dim];
         self.eval_geom_grad_basis(xi, &mut grad_ref);
 
-        // Get factory DOF reference coordinates (always in factory order)
-        use fem_element::lagrange::factory::ref_elem;
-        let et = mesh_elem_type_to_factory_type(self.elem_type);
-        let factory = ref_elem(et, self.geom_order);
+        // Get factory DOF reference coordinates (always in factory order).
+        // D632: pyramids take their Fuentes table family, not the equispaced
+        // `PyramidPk` the factory hands back.
+        let factory = self.geom_ref_elem();
         let ref_coords = factory.dof_coords();
 
         // Vertex coordinates (first n_vert entries of geom_conn are vertices)
@@ -350,21 +350,35 @@ impl<const D: usize> CurvedMesh<D> {
 
     /// Evaluate geometric basis functions at `xi` using the factory.
     pub(crate) fn eval_geom_basis(&self, xi: &[f64], phi: &mut [f64]) {
-        use fem_element::lagrange::factory::ref_elem;
-        let et = mesh_elem_type_to_factory_type(self.elem_type);
-        let elem = ref_elem(et, self.geom_order);
+        let elem = self.geom_ref_elem();
         elem.eval_basis(xi, phi);
     }
 
     /// Evaluate geometric basis function gradients at `xi` using the factory.
     pub(crate) fn eval_geom_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        use fem_element::lagrange::factory::ref_elem;
-        let et = mesh_elem_type_to_factory_type(self.elem_type);
-        let elem = ref_elem(et, self.geom_order);
+        let elem = self.geom_ref_elem();
         // Check capacity
         assert!(grads.len() >= self.nodes_per_elem * D,
             "grads len {} < nodes_per_elem {} * D {}", grads.len(), self.nodes_per_elem, D);
         elem.eval_grad_basis(xi, grads);
+    }
+
+    /// The reference element whose dof table `geom_conn`/`nodes_per_elem`
+    /// stores: the factory family for every simplex/tensor cell, the Fuentes
+    /// H¹ pyramid for the pyramid labels (D632).  `factory::ref_elem(Pyramid, p)`
+    /// returns the **equispaced** `PyramidPk` — 14 dofs at order 2 against the
+    /// 15-slot Fuentes table `set_curvature_pyramid5` (D347, MFEM
+    /// `SetCurvature`) writes — so routing pyramids through it silently
+    /// corrupted every curved-pyramid geometry read.
+    fn geom_ref_elem(&self) -> Box<dyn fem_element::ReferenceElement> {
+        if D == 3 && matches!(self.elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
+            curved_geometry_ref_elem_3d(self.elem_type, self.geom_order)
+        } else {
+            fem_element::lagrange::factory::ref_elem(
+                mesh_elem_type_to_factory_type(self.elem_type),
+                self.geom_order,
+            )
+        }
     }
 }
 
@@ -824,8 +838,13 @@ pub fn refine_curved_3d_general(curved: &CurvedMesh<3>) -> CurvedMesh<3> {
 
 /// Non-conforming uniform refinement for curved 3-D meshes of any element type.
 pub fn refine_curved_3d_nc_general(curved: &CurvedMesh<3>, marked: &[usize]) -> CurvedMesh<3> {
-    let factory_type = mesh_elem_type_to_factory_type(curved.elem_type);
-    let geo = fem_element::lagrange::factory::ref_elem(factory_type, curved.geom_order);
+    // D632: read the geometry table with the mesh's own family.  The pyramid
+    // branch used to go through `factory::ref_elem(Pyramid, g)` = the
+    // equispaced `PyramidPk` (14 dofs at order 2) against the 15-slot Fuentes
+    // table `set_curvature` writes — silently corrupting the re-interpolated
+    // child geometry (`refine_curved_3d_general` already routed through this
+    // helper; the hex/prism arms are factory families, so they are unchanged).
+    let geo = curved_geometry_ref_elem_3d(curved.elem_type, curved.geom_order);
     let npe = geo.n_dofs();
     let nc = n_corners_3d(curved.elem_type);
     let le = linear_elem_type_3d(curved.elem_type);

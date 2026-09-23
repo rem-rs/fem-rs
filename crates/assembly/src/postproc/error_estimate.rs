@@ -459,7 +459,16 @@ pub fn derefine_mark(eta: &[f64], threshold: f64) -> Vec<u32> {
 }
 
 /// Element volume/area for a mesh element (used internally).
-fn elem_vol(m: &dyn MeshTopology, e: u32) -> f64 {
+///
+/// D636: 3-D non-simplex cells integrate `∫|det J|` through the family-true
+/// isoparametric [`geom_jacobian`] — the "first 4 vertices" tetrahedron
+/// formula returned `det ≡ 0` on every hex (the four base corners are
+/// coplanar; wedges/pyramids degenerated the same way), squashing the whole
+/// ZZ family's `η² ∝ V_K` weights to zero.  Quadrature order tracks the
+/// geometry order (`2·geom_order`, ≥ 2): exact for straight cells, where
+/// `|det J|` is a low-degree polynomial.  Simplices keep the exact corner
+/// formula and 2-D stays as it was.
+fn elem_vol<M: MeshTopology>(m: &M, e: u32) -> f64 {
     let n = m.element_nodes(e);
     let npe = n.len();
     if m.dim() == 2 {
@@ -473,15 +482,30 @@ fn elem_vol(m: &dyn MeshTopology, e: u32) -> f64 {
             let (x0, x1, x2) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]));
             0.5 * ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x1[1]-x0[1])*(x2[0]-x0[0])).abs()
         } else { 1.0 }
-    } else if npe >= 4 {
-        // 3D: tetrahedron volume
-        let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
-        let a = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
-        let b = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
-        let c = [x3[0]-x0[0], x3[1]-x0[1], x3[2]-x0[2]];
-        let cr = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-        (cr[0]*c[0] + cr[1]*c[1] + cr[2]*c[2]).abs() / 6.0
-    } else { 1.0 }
+    } else {
+        let elem_type = m.element_type(e);
+        if is_simplex(elem_type) && npe >= 4 {
+            // Tetrahedron volume (exact for the P1 geometry)
+            let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
+            let a = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
+            let b = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
+            let c = [x3[0]-x0[0], x3[1]-x0[1], x3[2]-x0[2]];
+            let cr = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+            (cr[0]*c[0] + cr[1]*c[1] + cr[2]*c[2]).abs() / 6.0
+        } else if npe >= 4 {
+            // D636: ∫|det J| with the element family's own quadrature (the
+            // frames of `ref_elem_vol` and `geom_jacobian` agree — D235/D614).
+            let ord: u8 = (2 * m.geom_order() as usize).max(2) as u8;
+            let ref_elem = ref_elem_vol(elem_type, ord);
+            let quad = ref_elem.quadrature(ord);
+            let mut vol = 0.0;
+            for (q, xi) in quad.points.iter().enumerate() {
+                let (_, det_j) = geom_jacobian(m, e, n, xi, 3, elem_type);
+                vol += quad.weights[q] * det_j.abs();
+            }
+            vol
+        } else { 1.0 }
+    }
 }
 
 /// ZZ gradient-recovery error estimator using GridFunction.
