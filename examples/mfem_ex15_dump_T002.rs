@@ -487,7 +487,7 @@ fn main() {
                             println!("E{e}EDOF {i} gd={gd} u={:.17e}{cs}", u[gd as usize]);
                         }
                         println!("E{e}FLD {n_ldofs} {dim2}");
-                        for (i, &gd) in ed.iter().enumerate() {
+                        for (i, _) in ed.iter().enumerate() {
                             for d in 0..dim2 {
                                 println!("E{e}FL {i} {d} {:.17e}", raw[i * dim2 + d]);
                             }

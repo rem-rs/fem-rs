@@ -17,7 +17,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::SolverConfig;
-use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_mesh::refine_uniform;
 use fem_solver::solve_pcg_gssmoother;
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, VectorH1Space};
 use fem_parallel::launcher::native::ThreadLauncher;

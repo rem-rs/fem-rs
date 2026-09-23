@@ -11,7 +11,6 @@
 //!   mesh-quality -m data/blade.mesh -o 2 -size -aspr -skew
 
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::topology::MeshTopology;
 use fem_mesh::{Mesh, element_type::ElementType};
 
 /// Compute geometric parameters from the Jacobian matrix at a point.
@@ -65,7 +64,6 @@ fn geometric_params(j: &nalgebra::DMatrix<f64>, dim: usize) -> (f64, Vec<f64>, V
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut mesh_file = "../../data/inline-quad.mesh".to_string();
-    let mut order: usize = 1;
     let mut ref_levels: usize = 0;
     let mut vis_size = true;
     let mut vis_aspr = true;
@@ -75,7 +73,7 @@ fn main() {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-m" | "--mesh" => { if let Some(v) = it.next() { mesh_file = v.clone(); } }
-            "-o" | "--order" => { if let Some(v) = it.next() { order = v.parse().unwrap_or(1); } }
+            "-o" | "--order" => { it.next(); } // value consumed; order unused by this port
             "-r" | "--ref-levels" => { if let Some(v) = it.next() { ref_levels = v.parse().unwrap_or(0); } }
             "-size" => vis_size = true,
             "-no-size" => vis_size = false,

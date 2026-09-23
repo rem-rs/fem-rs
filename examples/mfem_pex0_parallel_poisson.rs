@@ -7,7 +7,6 @@
 //!   cargo run --release --example mfem_pex0_parallel_poisson -- --ranks 2
 //!   cargo run --release --example mfem_pex0_parallel_poisson -- --ranks 4 -o 2
 
-use std::sync::Arc;
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_io::mfem::read_mfem_file;
@@ -54,7 +53,6 @@ fn main() {
     let mut mesh: Mesh<2> = reader.mesh2d.expect("Mesh must be 2D");
     mesh = refine_uniform(&mesh);
 
-    let global_n = mesh.n_nodes();
     let launcher = ThreadLauncher::new(WorkerConfig::new(args.ranks));
 
     launcher.launch(move |comm| {

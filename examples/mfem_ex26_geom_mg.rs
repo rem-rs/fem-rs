@@ -10,7 +10,6 @@
 //! cargo run --example mfem_ex26_geom_mg -- -m data/fichera.mesh
 //! ```
 
-use std::io::Write;
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::mfem::{
@@ -87,7 +86,7 @@ where
     Mesh<D>: Ex26Mesh,
 {
     let dim = D;
-    let mut mesh_data = mesh.glvis_bytes();
+    let mesh_data = mesh.glvis_bytes();
 
     println!("Options used:");
     println!("   --mesh {}", args.mesh.as_deref().unwrap_or("data/star.mesh"));

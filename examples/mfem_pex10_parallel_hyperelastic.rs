@@ -16,7 +16,6 @@ use fem_assembly::{
     HyperelasticModel, HyperelasticityForm,
 };
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::WorkerConfig;

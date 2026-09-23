@@ -65,7 +65,6 @@ fn main() {
 
     // For P2 (Tri6): elevate before refinement so refinements preserve mid-edge nodes
     let use_tri6 = !is_quad && args.order >= 2;
-    let use_quad9 = is_quad && args.order >= 2;
     if use_tri6 {
         mesh = elevate_to_tri6(&mesh);
     }
@@ -97,8 +96,8 @@ fn main() {
     // Quad9: H1Space order=2 on Quad4 mesh → 9 DOFs per element via
     // DofManager::build_q2_quad.  The assembler reads 4 corner nodes and
     // computes the 9 Q2 coordinates internally.
-    let use_quad9 = is_quad && args.order >= 2;
 
+    let use_quad9 = is_quad && args.order >= 2;
     let n_elems = mesh.n_elems();
     let n_nodes = mesh.n_nodes();
     let elem_name = if is_quad { "quads" } else { "triangles" };

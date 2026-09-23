@@ -59,7 +59,7 @@ use fem_mesh::topology::MeshTopology;
 use fem_mesh::{ElementType, Mesh};
 use fem_parallel::par_block_csr::{ParBlockCsrMatrix2, ParBlockVector2};
 use fem_parallel::{
-    ParAmgConfig, ParAmgHierarchy, ParAssembler, ParCsrMatrix, ParIlu0Precond, ParVector,
+    ParAmgConfig, ParAmgHierarchy, ParCsrMatrix, ParIlu0Precond, ParVector,
     ParallelFESpace, SmootherType, WorkerConfig, launcher::native::ThreadLauncher,
     par_partition::partition_mesh, par_solve_gmres_block_diag,
 };
@@ -597,7 +597,7 @@ fn main() {
                 // L² mass block.  A single GS sweep is too weak for this
                 // nearly-singular (−1e-6 shift) system, and long GMRES
                 // trajectories drift in the ill-conditioned block system.
-                let ilu11 = ParIlu0Precond::new(&block.a11);
+                let _ilu11 = ParIlu0Precond::new(&block.a11);
                 let precond = |r: &ParBlockVector2, z: &mut ParBlockVector2| {
                     // Strong A00 preconditioner (AMG V-cycle) keeps the
                     // preconditioned-residual scale ‖B b‖ small, so the
@@ -629,7 +629,7 @@ fn main() {
                     max_iter: 20000,
                     ..SolverConfig::default()
                 };
-                let res = par_solve_gmres_block_diag(
+                let _res = par_solve_gmres_block_diag(
                     &block,
                     &precond,
                     &rhs_block,

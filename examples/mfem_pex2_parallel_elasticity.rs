@@ -35,7 +35,7 @@ use fem_parallel::{
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
 use fem_space::fe_space::FESpace;
-use fem_space::{H1Space, VectorH1Space};
+use fem_space::VectorH1Space;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -24,7 +24,6 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
-use fem_assembly::assembler::Assembler;
 use fem_assembly::postproc::coefficient::FnMatrixCoeff;
 use fem_assembly::standard::{DomainSourceIntegrator, TensorDiffusionIntegrator};
 use fem_element::ReferenceElement;
@@ -363,7 +362,6 @@ fn flux_error_par(
     let mesh = space.mesh();
     let order = space.order();
     let n_dm = dp.n_total_dofs();
-    let n_owned = dp.n_owned_dofs;
     let re = ref_elem_for(order);
     let n_ldofs = re.n_dofs();
     let flux_dof_coords = re.dof_coords();

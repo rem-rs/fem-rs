@@ -23,7 +23,7 @@ use fem_assembly::{
 use fem_core::types::DofId;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{Mesh, amr::refine_uniform, topology::MeshTopology};
+use fem_mesh::{amr::refine_uniform, topology::MeshTopology};
 use fem_solver::{
     ImexDirkRk3, ImexExpImplEuler, ImexOperator, ImexRk2_222, ImexRk2_232, SolverConfig,
     solve_pcg_blockilu, solve_pcg_dsmoother,
@@ -394,7 +394,6 @@ fn main() {
     let m: CsrMatrix<f64>;
     let k: CsrMatrix<f64>;
     let s: CsrMatrix<f64>;
-    let dof_coords: Vec<f64>;
 
     if args.cg {
         // Continuous Galerkin (-cg): H1 space, no face integrators.
@@ -435,11 +434,10 @@ fn main() {
             let x = dm.dof_coord(i as DofId);
             u[i] = u0_function(args.problem, &bb_min, &bb_max, x);
         }
-        dof_coords = vec![];
     } else {
         let space = L2Space::new_with_basis(mesh.clone(), args.order as u8, L2Basis::GaussLobatto);
         n_dofs = space.n_dofs();
-        dof_coords = space.dof_coords().to_vec();
+        let dof_coords = space.dof_coords().to_vec();
 
         // 6. Assemble M, K, S.
         let qo = 2 * args.order as u8;

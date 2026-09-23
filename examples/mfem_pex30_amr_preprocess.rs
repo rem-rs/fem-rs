@@ -20,7 +20,6 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use fem_assembly::postproc::grid_function::{GridFunction, compute_coeff_l2_norm_first_n};
 use fem_core::ElemId;

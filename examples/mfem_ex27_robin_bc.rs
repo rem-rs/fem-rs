@@ -425,7 +425,7 @@ fn integrate_bc<S: FESpace>(
     alpha: f64,
     beta: f64,
     gamma: f64,
-    qo: u8,
+    _qo: u8,
 ) -> (f64, f64) {
     let dim = 2usize;
     let order = space.order();

@@ -8,7 +8,7 @@
 
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology};
-use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_mesh::amr::NCStateQuad;
 use fem_space::{H1Space, fe_space::FESpace};
 
 fn main() {

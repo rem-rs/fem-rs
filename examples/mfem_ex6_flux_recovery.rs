@@ -45,7 +45,6 @@ fn main() {
             .mesh2d
             .expect("MFEM mesh must be 2D")
     };
-    let dim = mesh.dim() as usize;
     let elem_type = mesh.element_type(0);
     let is_quad = matches!(elem_type, ElementType::Quad4);
 

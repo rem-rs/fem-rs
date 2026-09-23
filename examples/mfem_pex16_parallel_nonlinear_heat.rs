@@ -28,8 +28,7 @@ use fem_parallel::{
     launcher::native::ThreadLauncher, par_partition::partition_mesh,
     par_refine::par_uniform_refine,
 };
-use fem_solver::SolverConfig;
-use fem_space::{H1Space, fe_space::FESpace};
+use fem_space::H1Space;
 
 // ─── Initial temperature (C++ ex16.cpp:364-374) ────────────────────────────
 
@@ -79,7 +78,6 @@ fn par_solve_cg_jacobi_mfem(
     }
     let mut d = z.clone_vec();
     let mut nom = r.global_dot(&z);
-    let nom0 = nom;
     let target = (nom * rtol * rtol).max(0.0);
 
     let mut ap = ParVector::zeros_like(b);

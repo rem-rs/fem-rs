@@ -21,15 +21,13 @@ use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::{ElasticityIntegrator, NeumannIntegrator};
 use fem_assembly::Assembler;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_file_with_coords, write_mfem_gf_file};
-use fem_linalg::{CsrMatrix, SolverConfig};
+use fem_linalg::SolverConfig;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::solve_pcg_gssmoother;
 use fem_solver::solve_sparse_lu;
 use fem_space::constraints::boundary_dofs;
 use fem_space::H1Space;
-use fem_space::constraints::prolong::prolongate_pk_hanging;
-use fem_space::dof_manager::DofManager;
 use fem_space::{FESpace, VectorH1Space};
 
 fn mark_elements(eta: &[f64], fraction: f64) -> Vec<u32> {
@@ -64,8 +62,6 @@ macro_rules! amr_loop {
         let visualize = $vis_path;
 
         let mut x_prev: Option<Vec<f64>> = None;
-        let mut prev_mesh = None;
-        let mut prev_dm: Option<DofManager> = None;
 
         for it in 0..=max_amr_itr {
             let space = VectorH1Space::new(mesh.clone(), order, dim as u8);
@@ -91,17 +87,10 @@ macro_rules! amr_loop {
             let mut mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order_u8);
             for &d in &ess { mat.apply_dirichlet_row_zeroing(d, 0.0, &mut rhs); }
 
-            let mut x = if let (Some(prev_u), Some(ref pmesh), Some(ref pdm)) = (&x_prev, &prev_mesh, &prev_dm) {
-                if pdm.n_dofs > 0 {
-                    let mut u_new = vec![0.0_f64; n_dofs];
-                    for c in 0..dim {
-                        let cp = &prev_u[c * pdm.n_dofs..(c + 1) * pdm.n_dofs];
-                        let cn = prolongate_pk_hanging(pmesh, pdm, &dm, cp);
-                        for (j, &v) in cn.iter().enumerate() { u_new[c * n_scalar + j] = v; }
-                    }
-                    u_new
-                } else { vec![0.0_f64; n_dofs] }
-            } else { vec![0.0_f64; n_dofs] };
+            // Previous-solution prolongation was removed: the compiler proved
+            // the computed initial guess was overwritten at the solve step
+            // below before ever being read (dead store).
+            let x;
 
             // Static condensation
             let (solve_mat, solve_rhs, backsub) = if static_cond {
@@ -151,8 +140,6 @@ macro_rules! amr_loop {
                 x_prev = Some(x); break;
             }
 
-            prev_mesh = Some(mesh.clone());
-            prev_dm = Some(space.scalar_dof_manager().clone());
 
             // Refine
             mesh = $refine_fn(mesh, &marked);

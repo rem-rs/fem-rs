@@ -17,7 +17,6 @@
 //! ```
 
 use std::fs::File;
-use std::io::Write;
 
 use fem_assembly::{
     Assembler, GridFunction, VectorAssembler,

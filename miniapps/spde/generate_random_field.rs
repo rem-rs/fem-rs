@@ -235,7 +235,7 @@ where
     // ========================================================================
     // III. Generate random imperfections via fractional PDE
     // ========================================================================
-    let mut bc = Boundary::new();
+    let bc = Boundary::new();
     bc.print_info();
     bc.verify_defined_boundaries(&mesh);
 

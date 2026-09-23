@@ -410,7 +410,6 @@ fn rhs_stress_flux(lam: f64, mu: f64, grad: &[f64], normal: &[f64], l: usize, di
 
 use std::collections::HashMap;
 use nalgebra::DMatrix;
-use fem_element::lagrange::{SegP1, SegP2, SegP3, TriP1, TriP2, TriP3, TetP1, TetP2, TetP3};
 use fem_element::ReferenceElement;
 
 fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> { et.ref_elem(order) }

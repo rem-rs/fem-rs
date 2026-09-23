@@ -4,9 +4,7 @@
 
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::csr_spmm;
-use fem_mesh::{Mesh, MeshTopology};
-use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_mesh::{Mesh, amr::NCStateQuad};
 use fem_space::constraints::{apply_dirichlet, boundary_dofs, conforming_assemble};
 use fem_space::fe_space::FESpace;
 use fem_space::H1Space;
@@ -163,7 +161,6 @@ fn p2_constraints(
     use fem_space::dof_manager::EdgeKey;
     let mut out: Vec<fem_mesh::amr::HangingNodeConstraint> = Vec::new();
     for c in p1 {
-        let (mid, a, b) = (c.constrained, c.parent_a, c.parent_b);
         let (mid, a, b) = (c.constrained, c.parent_a, c.parent_b);
         let e = dm.edge_dof_map.get(&EdgeKey::new(a as u32, b as u32)).copied();
         let Some(e) = e else { continue };

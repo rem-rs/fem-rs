@@ -11,7 +11,6 @@
 use std::sync::{Arc, Mutex};
 use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator};
 use fem_linalg::{CooMatrix, SolverConfig};
-use fem_mesh::Mesh;
 use fem_parallel::{
     ParAssembler, ParVector, ParallelFESpace,
     par_partition::partition_mesh,
@@ -22,7 +21,6 @@ use fem_io::mfem::read_mfem_file;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let n = a.iter().position(|x| x == "--n").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(16);
     let r = a.iter().position(|x| x == "--ranks").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(2);
     let freq = a.iter().position(|x| x == "--freq").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let omega = 2.0 * std::f64::consts::PI * freq;

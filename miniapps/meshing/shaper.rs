@@ -104,7 +104,6 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut mesh_file = "../../data/inline-quad.mesh".to_string();
     let mut sd: usize = 2;
-    let mut nclimit: i32 = 1;
     let mut aniso: bool = false;
 
     let mut it = args.iter().skip(1);
@@ -115,7 +114,7 @@ fn main() {
                 if let Some(v) = it.next() { if let Ok(val) = v.parse() { sd = val; } }
             }
             "-ncl" | "--nc-limit" => {
-                if let Some(v) = it.next() { if let Ok(val) = v.parse() { nclimit = val; } }
+                it.next(); // -ncl value consumed; not used by this port
             }
             "-a" | "--aniso" => aniso = true,
             "-i" | "--iso" => aniso = false,

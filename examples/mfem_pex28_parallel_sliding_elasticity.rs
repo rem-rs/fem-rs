@@ -88,11 +88,10 @@ fn run_case(n_workers: usize, offset: f64, order: u8) -> RunResult {
         let par_space = ParallelFESpace::new_vector(local_space, &par_mesh, dim, comm.clone());
         let dof_part = par_space.dof_partition();
         let n_owned = dof_part.n_owned_dofs;
-        let n_scalar = par_space.local_space().n_scalar_dofs();
         let n_global = par_space.n_global_dofs();
 
         // Normal constraints on tags 1+4.
-        let (c_mat, _) = build_normal_constraints(
+        let _ = build_normal_constraints(
             par_mesh.local_mesh(),
             par_space.local_space().scalar_dof_manager(),
             &[1, 4],

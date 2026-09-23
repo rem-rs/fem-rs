@@ -189,10 +189,6 @@ fn main() {
     let result = Arc::new(Mutex::new(None::<RunResult>));
     let result_slot = Arc::clone(&result);
     let mesh_arc = Arc::clone(&mesh);
-    let sm = Arc::clone(&source_marker);
-    let bm = Arc::clone(&base_marker);
-    let rm = Arc::clone(&rose_marker);
-    let et = Arc::clone(&ess_tags);
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {
@@ -210,7 +206,7 @@ fn main() {
         let ps = ParallelFESpace::new(space, &par_mesh, comm.clone());
         let dof_part = ps.dof_partition();
         let n_owned = dof_part.n_owned_dofs;
-        let ghost = ps.dof_ghost_exchange_arc();
+        let _ghost = ps.dof_ghost_exchange_arc();
 
         // ── 8. RHS: ∫ 1_s v with the source marker ───────────────────────────
         let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);

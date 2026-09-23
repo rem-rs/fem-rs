@@ -314,7 +314,7 @@ fn main() {
     }
 }
 
-fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
+fn run_wave_2d(mesh: Mesh<2>, args: &Args) {
     let dim = 2;
 
     // 3. Define the ODE solver used for time integration.
@@ -506,7 +506,7 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
 
 // ─── 3D wave equation ─────────────────────────────────────────────────────
 
-fn run_wave_3d(mut mesh: Mesh<3>, args: &Args) {
+fn run_wave_3d(mesh: Mesh<3>, args: &Args) {
     let dim = 3;
 
     // 4. Refine the mesh uniformly.

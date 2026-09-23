@@ -40,7 +40,6 @@ use fem_io::mfem::read_mfem_file;
 use fem_linalg::SolverConfig;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::{refine_uniform, refine_uniform_3d, Mesh};
-use fem_space::constraints::apply_dirichlet_diag_one;
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, VectorH1Space};
 
@@ -79,7 +78,7 @@ fn parse_args() -> Args {
     while i < argv.len() {
         let arg = argv[i].clone();
         i += 1;
-        let mut next = |i: &mut usize| -> String {
+        let next = |i: &mut usize| -> String {
             let v = argv.get(*i).cloned().unwrap_or_default();
             *i += 1;
             v

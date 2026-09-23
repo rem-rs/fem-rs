@@ -13,7 +13,7 @@
 use fem_assembly::{DgElasticityAssembler, InteriorFaceList};
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, MeshTopology};
-use fem_space::{fe_space::FESpace, L2Space};
+use fem_space::L2Space;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::WorkerConfig;
 
@@ -26,18 +26,16 @@ fn assemble_rhs(
     space: &L2Space<fem_mesh::Mesh<2>>,
     mesh: &fem_mesh::Mesh<2>,
     dim: usize,
-    kappa: f64,
-    alpha: f64,
-    lambda_elem: &[f64],
-    mu_elem: &[f64],
-    quad_order: u8,
-    init_disp: &dyn Fn(&[f64], usize) -> f64,
+    _kappa: f64,
+    _alpha: f64,
+    _lambda_elem: &[f64],
+    _mu_elem: &[f64],
+    _quad_order: u8,
+    _init_disp: &dyn Fn(&[f64], usize) -> f64,
 ) -> Vec<f64> {
-    let n_elem = mesh.n_elements() as usize;
     let n_scalar = space.n_dofs();
     let n_total = dim * n_scalar;
-    let mut rhs = vec![0.0_f64; n_total];
-    let ifl = InteriorFaceList::build(mesh);
+    let rhs = vec![0.0_f64; n_total];
     
     // Volume integral: ∫ f·v (f=0 for this problem, so only boundary terms)
     // Boundary integral: DG SIP Dirichlet BC

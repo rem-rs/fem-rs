@@ -43,7 +43,6 @@ use fem_parallel::{ParAssembler, ParVector, ParallelFESpace, WorkerConfig};
 use fem_solver::SolverConfig;
 use fem_space::H1Space;
 use fem_space::constraints::{boundary_dofs, p2_hanging_constraints, recover_hanging_values};
-use fem_space::fe_space::FESpace;
 
 const ALPHA: f64 = 0.02;
 
@@ -203,7 +202,7 @@ fn main() {
             }
 
             let mut ref_it = 1usize;
-            let mut last_global_eta: Vec<f64> = Vec::new();
+            let mut last_global_eta: Vec<f64>;
             loop {
                 // ── Solve on the current mesh (P2, PCG + AMG) ─────────────
                 let (global_dofs, u_dm, hang_global) =
@@ -836,7 +835,6 @@ fn parallel_derefine(
     threshold: f64,
 ) -> bool {
     let partition = par_mesh.partition();
-    let n_elems = par_mesh.global_n_elems();
     let mesh = par_mesh.local_mesh();
 
     // Candidate parents: recorded groups (children relocated by centre
@@ -1090,7 +1088,6 @@ fn parallel_derefine(
             elems.insert(pg_new, vec![tag, corner_gids[0], corner_gids[1], corner_gids[2], corner_gids[3]]);
             executed.push(p);
         }
-        let chosen = executed;
         // Node compaction: collect referenced nodes in ascending gid.
         let mut ref_nodes: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for rec in elems.values() {
@@ -1267,8 +1264,8 @@ fn gather_global_eta(
     par_mesh: &ParallelMesh<Mesh<2>>,
     eta_owned: &[f64],
 ) -> (Vec<f64>, f64) {
-    let partition = par_mesh.partition();
     let n_elems = par_mesh.global_n_elems();
+    let partition = par_mesh.partition();
     let mut global = vec![0.0f64; n_elems];
     let mut local_sum = 0.0;
     let mut payload = Vec::with_capacity(eta_owned.len() * 12);

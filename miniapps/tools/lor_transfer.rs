@@ -28,7 +28,6 @@ use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::DomainSourceIntegrator;
 use fem_assembly::Assembler;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::topology::MeshTopology;
 use fem_mesh::transformation::find_points;
 use fem_mesh::{element_type::ElementType, Mesh};
 use fem_space::{FESpace, H1Space};
@@ -236,9 +235,9 @@ fn main() {
     let mut rho_pr_dofs = vec![0.0f64; fespace.n_dofs()];
     let mut dof_count = vec![0u32; fespace.n_dofs()];
     let mut u_fine = vec![0.0f64; n_fine];
-    let mut mu = vec![0.0f64; n_fine];
+    let mu = vec![0.0f64; n_fine];
     let mut rhs = vec![0.0f64; n_coarse];
-    let mut phi_c = vec![0.0f64; n_coarse];
+    let phi_c = vec![0.0f64; n_coarse];
     for e in 0..mesh.n_elems() as u32 {
         let ns = mesh.elem_nodes(e);
         let v0 = mesh.coords_of(ns[0]);

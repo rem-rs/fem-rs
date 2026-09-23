@@ -24,7 +24,7 @@ use fem_assembly::{
         MfemHeadInsert, assemble_ex41_bdr_faces, assemble_ex41_interior_faces,
         build_bdr_face_locs, build_face_locs,
     },
-    postproc::coefficient::{FnVectorCoeff, VectorCoeff},
+    postproc::coefficient::FnVectorCoeff,
     standard::MassIntegrator,
 };
 use fem_linalg::CooMatrix;

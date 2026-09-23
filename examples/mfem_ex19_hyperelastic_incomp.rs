@@ -16,7 +16,7 @@
 
 use fem_assembly::physics::mixed_hyperelasticity::MixedHyperelasticityForm;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
-use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
+use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::right_preconditioned_gmres;
 use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother};
 use fem_mesh::{geometry_jacobian, refine_uniform, MeshTopology};
@@ -74,7 +74,7 @@ fn main() {
     let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
     let dim: usize;
     let mesh3d: bool;
-    let mut mesh: Box<dyn fem_mesh::MeshTopology + Send + Sync> = if let Some(m2) = mfem.mesh2d {
+    let mesh: Box<dyn fem_mesh::MeshTopology + Send + Sync> = if let Some(m2) = mfem.mesh2d {
         mesh3d = false;
         dim = 2;
         let mut m = m2;

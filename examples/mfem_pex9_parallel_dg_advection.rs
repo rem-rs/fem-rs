@@ -51,7 +51,7 @@ use fem_assembly::dg::dg_imex::{
     build_face_locs, MfemHeadInsert,
 };
 use fem_assembly::dg::DGAdvectionIntegrator;
-use fem_assembly::postproc::coefficient::{FnVectorCoeff, VectorCoeff};
+use fem_assembly::postproc::coefficient::FnVectorCoeff;
 use fem_assembly::standard::MassIntegrator;
 use fem_assembly::Assembler;
 use fem_linalg::CooMatrix;
@@ -265,7 +265,7 @@ fn main() {
         };
         let mut t = 0.0_f64;
         let mut step = 0usize;
-        let mut mass_u = 0.0_f64; // 最终质量
+        let mass_u; // 最终质量
         while t < t_final - 1e-14 {
             let dta = dt.min(t_final - t);
             let mut k1 = ParVector::zeros_like(&u);

@@ -34,7 +34,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, ElementType, topology::MeshTopology, Mesh};
-use fem_solver::{fmt_g, solve_pcg_jacobi, SolverConfig};
+use fem_solver::{fmt_g, solve_pcg_dsmoother, SolverConfig};
 use fem_space::{fe_space::FESpace, H1Space, HCurlSpace, HDivSpace, L2Space};
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -43,11 +43,18 @@ struct Args {
     mesh_file: String,
     order: u8,
     prob: u8,
+    device: String,
     visualization: bool,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh_file: String::new(), order: 1, prob: 0, visualization: false };
+    let mut a = Args {
+        mesh_file: String::new(),
+        order: 1,
+        prob: 0,
+        device: String::from("cpu"),
+        visualization: false,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -58,6 +65,7 @@ fn parse_args() -> Args {
             "-m" | "--mesh" => a.mesh_file = it.next().unwrap_or_default(),
             "-o" | "--order" => a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             "-p" | "--problem-type" => a.prob = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "-d" | "--device" => a.device = it.next().unwrap_or_else(|| "cpu".into()),
             "-vis" | "--visualization" => a.visualization = true,
             "-no-vis" | "--no-visualization" => a.visualization = false,
             _ => {}
@@ -148,29 +156,40 @@ fn main() {
         }
     };
 
+    // MFEM ex24 prints the parsed options (`args.PrintOptions(cout)`) and the
+    // device configuration (`device.Print()`) before touching the mesh.
     println!("Options used:");
     println!("   --mesh {}", if args.mesh_file.is_empty() { "built-in" } else { &args.mesh_file });
     println!("   --order {}", args.order);
     println!("   --problem-type {}", args.prob);
-    if args.visualization { println!("   --visualization"); }
+    println!("   --no-static-condensation");
+    println!("   --no-partial-assembly");
+    println!("   --device {}", args.device);
+    if args.visualization {
+        println!("   --visualization");
+    } else {
+        println!("   --no-visualization");
+    }
+    println!("Device configuration: {}", args.device);
+    println!("Memory configuration: host-std");
 
     match args.prob {
         0 => {
             if let Some(mut m) = mesh2d {
                 let l = ref_levels(m.n_elements(), 2);
                 for _ in 0..l { m = refine_uniform(&m); }
-                solve_grad_2d(&m, args.order, args.visualization);
+                solve_grad_2d(&m, args.order);
             } else if let Some(mut m) = mesh3d {
                 let l = ref_levels(m.n_elements(), 3);
                 for _ in 0..l { m = fem_mesh::refine_uniform_3d(&m); }
-                solve_grad_3d(&m, args.order, args.visualization);
+                solve_grad_3d(&m, args.order);
             }
         }
         1 => {
             if let Some(mut m) = mesh3d {
                 let l = ref_levels(m.n_elements(), 3);
                 for _ in 0..l { m = fem_mesh::refine_uniform_3d(&m); }
-                solve_curl_3d(&m, args.order, args.visualization);
+                solve_curl_3d(&m, args.order);
             } else {
                 eprintln!("Problem 1 (curl) requires a 3D mesh");
             }
@@ -179,11 +198,11 @@ fn main() {
             if let Some(mut m) = mesh2d {
                 let l = ref_levels(m.n_elements(), 2);
                 for _ in 0..l { m = refine_uniform(&m); }
-                solve_div_2d(&m, args.order, args.visualization);
+                solve_div_2d(&m, args.order);
             } else if let Some(mut m) = mesh3d {
                 let l = ref_levels(m.n_elements(), 3);
                 for _ in 0..l { m = fem_mesh::refine_uniform_3d(&m); }
-                solve_div_3d(&m, args.order, args.visualization);
+                solve_div_3d(&m, args.order);
             }
         }
         _ => eprintln!("Unrecognized problem type: {}", args.prob),
@@ -192,7 +211,7 @@ fn main() {
 
 // ─── Problem 0: Grad — ∇p: H¹→H(curl) (2D) ──────────────────────────────────
 
-fn solve_grad_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
+fn solve_grad_2d(mesh: &Mesh<2>, order: u8) {
     let dim = 2;
     let qo = (2 * order + 1).max(3) as u8;
     let h1 = H1Space::new(mesh.clone(), order);
@@ -209,15 +228,21 @@ fn solve_grad_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     b.spmv(&p, &mut rhs);
     let mass = VectorAssembler::assemble_bilinear(&nd, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
     let mut e_sol = vec![0.0; nd.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_jacobi(&mass, &rhs, &mut e_sol, &cfg).expect("PCG solve failed");
+    // C++ ex24 step 9: `CGSolver cg; cg.SetRelTol(1e-12); cg.SetMaxIter(1000);
+    // cg.SetPrintLevel(1);` with a `DSmoother Jacobi(Amat)` preconditioner.
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 1000,
+        verbose: true,
+        ..SolverConfig::default()
+    };
+    solve_pcg_dsmoother(&mass, &rhs, &mut e_sol, &cfg).expect("PCG solve failed");
 
     // (b) DLO gradient interpolant
     let g = DiscreteLinearOperator::gradient(&h1, &nd).expect("grad DLO");
     let mut e_interp = vec![0.0; nd.n_dofs()];
     g.spmv(&p, &mut e_interp);
-    let interp_norm: f64 = e_interp.iter().map(|v| v * v).sum::<f64>().sqrt();
-    println!("  DLO interpolant norm = {:.6e}", interp_norm);
 
     // (c) Exact projection of grad p onto H(curl) — C++ `ex24.cpp:290`
     //     `exact_proj.ProjectCoefficient(gradp_coef)`, which for ND spaces is
@@ -236,18 +261,15 @@ fn solve_grad_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     println!(" Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e2));
     println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e3));
 
-    // Output with precision(8) matching C++
+    // Output with precision(8) matching C++ — C++ ex24 step 13 writes
+    // `refined.mesh` and `sol.gf` silently (no console message).
     write_mfem_file("refined.mesh", mesh).expect("write mesh");
     write_mfem_gf_file("sol.gf", dim, &e_sol, "H1", 1, 1, 8).expect("write sol.gf");
-    println!("\nWrote refined.mesh and sol.gf");
-    if vis {
-        println!("  glvis -m refined.mesh -g sol.gf");
-    }
 }
 
 // ─── Problem 0: Grad (3D) — ∇p: H¹→H(curl) ──────────────────────────────────
 
-fn solve_grad_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
+fn solve_grad_3d(mesh: &Mesh<3>, order: u8) {
     let dim = 3;
     let qo = (2 * order + 1).max(3) as u8;
     let h1 = H1Space::new(mesh.clone(), order);
@@ -325,17 +347,21 @@ fn solve_grad_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     b_3d.spmv(&p, &mut rhs);
     let mass = VectorAssembler::assemble_bilinear(&nd, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
     let mut e_sol = vec![0.0; nd.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_jacobi(&mass, &rhs, &mut e_sol, &cfg).expect("PCG solve failed");
+    // C++ ex24 step 9: PCG, relTol 1e-12, maxIter 1000, printLevel 1, DSmoother.
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 1000,
+        verbose: true,
+        ..SolverConfig::default()
+    };
+    solve_pcg_dsmoother(&mass, &rhs, &mut e_sol, &cfg).expect("PCG solve failed");
 
-    // (b) DLO gradient interpolant
-    let g = DiscreteLinearOperator::gradient(&h1, &nd);
+    // (b) DLO gradient interpolant (MFEM step 10, `GradientInterpolator` —
+    //     for ND1 this is the edge-vertex incidence, identical in 2D and 3D).
+    let g = DiscreteLinearOperator::gradient(&h1, &nd).expect("grad DLO");
     let mut e_interp = vec![0.0; nd.n_dofs()];
-    if let Ok(ref g) = g {
-        g.spmv(&p, &mut e_interp);
-        let interp_norm: f64 = e_interp.iter().map(|v| v * v).sum::<f64>().sqrt();
-        println!("  DLO interpolant norm = {:.6e}", interp_norm);
-    }
+    g.spmv(&p, &mut e_interp);
 
     // (c) Exact projection of grad p onto H(curl) in 3D — C++ `ex24.cpp:290`
     //     `ProjectCoefficient` == `Project_ND` (the nodal interpolant).
@@ -346,22 +372,20 @@ fn solve_grad_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     let err_qo = 2 * order + 3;
     let gradp = |x: &[f64]| gradp_exact(x);
     let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo, None);
+    let e2 = compute_l2_error_hcurl(&e_interp, &nd, &gradp, err_qo, None);
     let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo, None);
     println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e1));
+    println!(" Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e2));
     println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e3));
 
-    // Output
+    // Output — C++ ex24 step 13 writes `refined.mesh` and `sol.gf` silently.
     write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
     write_mfem_gf_file("sol.gf", dim, &e_sol, "H1", 1, 1, 8).expect("write sol.gf");
-    println!("\nWrote refined.mesh and sol.gf");
-    if vis {
-        println!("  glvis -m refined.mesh -g sol.gf");
-    }
 }
 
 // ─── Problem 1: Curl (3D) — curl v: H(curl)→H(div) ──────────────────────────
 
-fn solve_curl_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
+fn solve_curl_3d(mesh: &Mesh<3>, order: u8) {
     let dim = 3;
     let qo = (2 * order + 1).max(3) as u8;
     let nd_order = order;
@@ -381,8 +405,15 @@ fn solve_curl_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     c.spmv(&v, &mut rhs);
     let mass = VectorAssembler::assemble_bilinear(&rt, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
     let mut w_sol = vec![0.0; rt.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_jacobi(&mass, &rhs, &mut w_sol, &cfg).expect("PCG");
+    // C++ ex24 step 9: PCG, relTol 1e-12, maxIter 1000, printLevel 1, DSmoother.
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 1000,
+        verbose: true,
+        ..SolverConfig::default()
+    };
+    solve_pcg_dsmoother(&mass, &rhs, &mut w_sol, &cfg).expect("PCG");
 
     // (b) DLO curl interpolant
     let curl_dlo = DiscreteLinearOperator::curl_3d(&nd, &rt).expect("curl_3d DLO");
@@ -405,18 +436,14 @@ fn solve_curl_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     println!(" Curl interpolant E_h = curl v_h in H(div): || E_h - curl v ||_{{L_2}} = {}\n", fmt_g(e2));
     println!(" Projection E_h of exact curl v in H(div): || E_h - curl v ||_{{L_2}} = {}\n", fmt_g(e3));
 
-    // Output
+    // Output — C++ ex24 step 13 writes `refined.mesh` and `sol.gf` silently.
     write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
     write_mfem_gf_file("sol.gf", dim, &w_sol, "H1", 1, 1, 8).expect("write sol.gf");
-    println!("\nWrote refined.mesh and sol.gf");
-    if vis {
-        println!("  glvis -m refined.mesh -g sol.gf");
-    }
 }
 
 // ─── Problem 2: Div — div v: H(div)→L² (2D) ─────────────────────────────────
 
-fn solve_div_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
+fn solve_div_2d(mesh: &Mesh<2>, order: u8) {
     let dim = 2;
     let qo = (2 * order + 1).max(3) as u8;
     let rt_order = if order > 0 { order - 1 } else { 0 };
@@ -442,14 +469,24 @@ fn solve_div_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     d.spmv(&v, &mut rhs);
     let mass = Assembler::assemble_bilinear(&l2, &[&MassIntegrator { rho: 1.0 }], qo);
     let mut f_sol = vec![0.0; l2.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_jacobi(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
+    // C++ ex24 step 9: PCG, relTol 1e-12, maxIter 1000, printLevel 1, DSmoother
+    // (this is the only printed solve — the interpolant below is not solved
+    // for in C++).
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 1000,
+        verbose: true,
+        ..SolverConfig::default()
+    };
+    solve_pcg_dsmoother(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
 
     // (b) DLO divergence interpolant
     let mut f_interp = vec![0.0; l2.n_dofs()];
     let mut interp_rhs = vec![0.0; l2.n_dofs()];
     d.spmv(&v, &mut interp_rhs);
-    solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
+    let silent = SolverConfig { verbose: false, ..cfg };
+    solve_pcg_dsmoother(&mass, &interp_rhs, &mut f_interp, &silent).expect("interp mass solve");
 
     // (c) Exact projection of div(grad p) into L² — C++ `ex24.cpp:298`
     //     `exact_proj.ProjectCoefficient(divgradp_coef)`, which on a nodal L²
@@ -465,18 +502,14 @@ fn solve_div_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e2));
     println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e3));
 
-    // Output
+    // Output — C++ ex24 step 13 writes `refined.mesh` and `sol.gf` silently.
     write_mfem_file("refined.mesh", mesh).expect("write mesh");
     write_mfem_gf_file("sol.gf", dim, &f_sol, "H1", 1, 1, 8).expect("write sol.gf");
-    println!("\nWrote refined.mesh and sol.gf");
-    if vis {
-        println!("  glvis -m refined.mesh -g sol.gf");
-    }
 }
 
 // ─── Problem 2: Div (3D) — div v: H(div)→L² ─────────────────────────────────
 
-fn solve_div_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
+fn solve_div_3d(mesh: &Mesh<3>, order: u8) {
     let dim = 3;
     let qo = (2 * order + 1).max(3) as u8;
     let rt_order = if order > 0 { order - 1 } else { 0 };
@@ -502,14 +535,24 @@ fn solve_div_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     d.spmv(&v, &mut rhs);
     let mass = Assembler::assemble_bilinear(&l2, &[&MassIntegrator { rho: 1.0 }], qo);
     let mut f_sol = vec![0.0; l2.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..SolverConfig::default() };
-    solve_pcg_jacobi(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
+    // C++ ex24 step 9: PCG, relTol 1e-12, maxIter 1000, printLevel 1, DSmoother
+    // (this is the only printed solve — the interpolant below is not solved
+    // for in C++).
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 1000,
+        verbose: true,
+        ..SolverConfig::default()
+    };
+    solve_pcg_dsmoother(&mass, &rhs, &mut f_sol, &cfg).expect("PCG");
 
     // (b) DLO divergence interpolant
     let mut f_interp = vec![0.0; l2.n_dofs()];
     let mut interp_rhs = vec![0.0; l2.n_dofs()];
     d.spmv(&v, &mut interp_rhs);
-    solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
+    let silent = SolverConfig { verbose: false, ..cfg };
+    solve_pcg_dsmoother(&mass, &interp_rhs, &mut f_interp, &silent).expect("interp mass solve");
 
     // (c) Exact projection of div(grad p) into L² — C++ `ex24.cpp:298`
     //     `exact_proj.ProjectCoefficient(divgradp_coef)`, which on a nodal L²
@@ -525,11 +568,7 @@ fn solve_div_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e2));
     println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e3));
 
-    // Output
+    // Output — C++ ex24 step 13 writes `refined.mesh` and `sol.gf` silently.
     write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
     write_mfem_gf_file("sol.gf", dim, &f_sol, "H1", 1, 1, 8).expect("write sol.gf");
-    println!("\nWrote refined.mesh and sol.gf");
-    if vis {
-        println!("  glvis -m refined.mesh -g sol.gf");
-    }
 }

@@ -1,8 +1,8 @@
 //! Debug: run the full ex15 flow to Time 0.02 it1 (with both derefs) and dump
 //! P1/P2 constraint counts + cP size, to compare against the working Time 0.01.
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, MeshTopology};
-use fem_mesh::amr::{NCStateQuad, NcState2D, HangingNodeConstraint};
+use fem_mesh::Mesh;
+use fem_mesh::amr::{NCStateQuad, HangingNodeConstraint};
 use fem_space::H1Space;
 use fem_space::FESpace;
 use fem_space::dof_manager::DofManager;
@@ -36,7 +36,7 @@ fn dump(label: &str, mesh: &Mesh<2>, nc: &NCStateQuad) {
     let p1 = nc.constraints();
     let p2 = fem_space::constraints::p2_hanging_constraints(p1, dm, nc.active_midpoints());
     let p = fem_space::constraints::build_conforming_prolongation(space.n_dofs(), &p2);
-    let ndiff = dm.phys_to_vertex_dof.iter().filter(|(_, &v)| false).count();
+    let ndiff = dm.phys_to_vertex_dof.iter().filter(|_| false).count();
     let _ = ndiff;
     let nonid = dm.phys_to_vertex_dof.values().enumerate().filter(|(i, v)| *i as u32 != **v).count();
     println!(

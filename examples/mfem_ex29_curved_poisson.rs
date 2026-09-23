@@ -314,7 +314,6 @@ fn compute_flux_projected(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, uh: &[f64],
     for e in mesh.elem_iter() {
         let et = mesh.element_type(e);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let g = mesh.geometry_nodes(e);
         for k in 0..n_ldofs {
             // Evaluate −σ(x)·∇u_h at flux dof k (physical position of geometry node k)
             let xi = &flux_dof_coords[k];

@@ -14,14 +14,12 @@
 //!   mesh-explorer -m data/star-q2.mesh -r 1 -s 2.0
 //!   mesh-explorer -m data/escher-p3.mesh -c 2
 
-use fem_io::mfem::{read_mfem_file, write_mfem_file_3d, write_mfem_file};
-use fem_mesh::topology::MeshTopology;
+use fem_io::mfem::{read_mfem_file, write_mfem_file_3d};
 use fem_mesh::{Mesh, element_type::ElementType};
 
 fn print_characteristics(mesh: &Mesh<3>) {
     let ne = mesh.n_elems();
     let nv = mesh.n_nodes();
-    let nf = mesh.n_faces();
     let nbe = mesh.n_faces();
     println!("Mesh Characteristics:");
     println!("  Number of vertices:          {nv}");
@@ -69,7 +67,7 @@ fn main() {
     let mesh = match read_mfem_file(&mesh_file) {
         Ok(m) => {
             if let Some(m3) = m.mesh3d { m3 }
-            else if let Some(m2) = m.mesh2d {
+            else if m.mesh2d.is_some() {
                 eprintln!("Expected 3D mesh, got 2D. Use a 3D mesh file.");
                 std::process::exit(1);
             }

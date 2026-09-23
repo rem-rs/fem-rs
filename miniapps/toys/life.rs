@@ -17,7 +17,6 @@
 
 use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
 use fem_mesh::Mesh;
-use fem_space::L2Space;
 
 /// Periodic index into an `nx × ny` grid.
 fn index(i: i32, j: i32, nx: i32, ny: i32) -> usize {
@@ -200,7 +199,6 @@ fn main() {
     let mut sketch_pad_params: Vec<i32> = Vec::new();
     let mut blinker_params: Vec<i32> = Vec::new();
     let mut glider_params: Vec<i32> = Vec::new();
-    let mut visualization = false;
 
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
@@ -226,8 +224,9 @@ fn main() {
             "-g" | "--glider" => {
                 glider_params = it.next().map(|v| parse_i32_list(v)).unwrap_or_default();
             }
-            "-vis" | "--visualization" => visualization = true,
-            "-no-vis" | "--no-visualization" => visualization = false,
+            // -vis/-no-vis accepted for CLI parity; this port has no GLVis link.
+            "-vis" | "--visualization" => {}
+            "-no-vis" | "--no-visualization" => {}
             _ => {}
         }
     }
@@ -236,7 +235,6 @@ fn main() {
     let mesh: Mesh<2> = Mesh::make_cartesian_2d(nx as usize, ny as usize, nx as f64, ny as f64);
 
     // 3. P0 L2 space.
-    let fespace = L2Space::new(mesh.clone(), 0);
     let len = (nx as usize) * (ny as usize);
 
     // 4. Two bit arrays for double-buffering.

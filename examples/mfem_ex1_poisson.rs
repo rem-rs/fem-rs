@@ -34,8 +34,23 @@ use fem_space::{
 use fem_solver::GSSmoother;
 
 fn main() {
-    // 1. Parse command-line options.
+    // 1. Parse command-line options.  MFEM ex1 prints the parsed options
+    //    (`args.PrintOptions(cout)`) and the device/memory configuration
+    //    (`device.Print()`) as the first 10 lines of stdout.
     let args = parse_args();
+    println!("Options used:");
+    match args.mesh {
+        Some(ref m) => println!("   --mesh {m}"),
+        None => println!("   --mesh data/star.mesh"),
+    }
+    println!("   --order {}", args.order);
+    println!("   {}", if args.static_cond { "--static-condensation" } else { "--no-static-condensation" });
+    println!("   --no-partial-assembly");
+    println!("   --no-full-assembly");
+    println!("   --device cpu");
+    println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
 
     // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class).
 
@@ -76,7 +91,7 @@ fn main() {
     let n_full = space.n_dofs();
 
     // Print BEFORE assembly (matching C++ output order).
-    println!("\nNumber of finite element unknowns: {n_full}");
+    println!("Number of finite element unknowns: {n_full}");
 
     // 6. Essential (Dirichlet) boundary DOFs.
     let dm = space.dof_manager();
@@ -138,7 +153,7 @@ struct Args {
     n:             usize,
     order:         u8,
     /// Static condensation (not yet implemented).
-    _static_cond:  bool,
+    static_cond:  bool,
     visualization: bool,
 }
 
@@ -147,7 +162,7 @@ fn parse_args() -> Args {
         mesh:          None,
         n:             0, // 0 → default to data/star.mesh (MFEM ex1 default)
         order:         1,
-        _static_cond:  false,
+        static_cond:   false,
         visualization: true,
     };
     let mut it = std::env::args().skip(1);
@@ -163,7 +178,7 @@ fn parse_args() -> Args {
                     .unwrap_or(1);
             }
             "-sc" | "--static-condensation" => {
-                a._static_cond = true;
+                a.static_cond = true;
             }
             "-n" | "--n" => {
                 a.n = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
