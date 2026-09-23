@@ -106,7 +106,12 @@ fn main() {
     println!("Size of linear system: {}", a_mat.nrows);
 
     // 11. PCG + GS smoother
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200, verbose: true, ..Default::default() };
+    // MFEM ex29: PCG(*A, M, B, X, 1, 200, 1e-12, 0.0) — the legacy helper
+    // applies `SetRelTol(sqrt(1e-12))` = 1e-6; `solve_pcg_gssmoother` takes
+    // that rel_tol directly (criterion `(B r, r) <= rtol²·nom0` =
+    // `1e-12·nom0`).  The raw 1e-12 meant `1e-24·nom0`: C++ stopped at
+    // iteration 7, this kept going to 11 (D634).
+    let cfg = SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 200, verbose: true, ..Default::default() };
     let mut x = vec![0.0; n_dofs];
     solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg).expect("PCG");
 

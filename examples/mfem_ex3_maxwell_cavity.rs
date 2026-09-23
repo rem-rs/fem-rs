@@ -234,7 +234,14 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
 
     let mut mat =
         assemble_mat_mfem_rule(args.canonical, &space, 1.0, 1.0, args.order.max(1) as u8);
-    let mut x = u_proj.clone();
+    // MFEM `FormLinearSystem(..., copy_interior = 0)` leaves the *interior* of
+    // the initial X zeroed — only the essential dofs carry the boundary data
+    // (`form_linear_system` writes those itself).  Starting the solver from
+    // the full projection instead forked the PCG history from iteration 0
+    // (D634: iter-0 (B r, r) 0.12456 vs C++ 146.402, 119 vs 137 iterations;
+    // after this fix 145.78 / 138 — the residual gap is MFEM's
+    // `EliminateVDofsInRHS` rhs convention, see ledger debt D641).
+    let mut x = vec![0.0; n_dofs];
     form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
     solve_report_2d(&space, &mut x, &rhs, args, kappa, &mat);
@@ -365,7 +372,14 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
 
     let mut mat =
         assemble_mat_mfem_rule(args.canonical, &space, 1.0, 1.0, args.order.max(1) as u8);
-    let mut x = u_proj.clone();
+    // MFEM `FormLinearSystem(..., copy_interior = 0)` leaves the *interior* of
+    // the initial X zeroed — only the essential dofs carry the boundary data
+    // (`form_linear_system` writes those itself).  Starting the solver from
+    // the full projection instead forked the PCG history from iteration 0
+    // (D634: iter-0 (B r, r) 0.12456 vs C++ 146.402, 119 vs 137 iterations;
+    // after this fix 145.78 / 138 — the residual gap is MFEM's
+    // `EliminateVDofsInRHS` rhs convention, see ledger debt D641).
+    let mut x = vec![0.0; n_dofs];
     form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
     solve_report(&space, &mut x, &rhs, args, &mat);

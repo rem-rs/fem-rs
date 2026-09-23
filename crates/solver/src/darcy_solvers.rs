@@ -144,7 +144,7 @@ pub fn mfem_minres(
         return (0, true, eta.abs());
     }
     if param.print_level >= 1 {
-        println!("MINRES: iteration {:3}: ||r||_B = {}", 0, eta);
+        println!("MINRES: iteration {:3}: ||r||_B = {}", 0, crate::iterative::fmt_g(eta));
     }
 
     let mut it = 1_usize;
@@ -225,7 +225,7 @@ pub fn mfem_minres(
         }
 
         if param.print_level >= 1 {
-            println!("MINRES: iteration {:3}: ||r||_B = {}", it, eta.abs());
+            println!("MINRES: iteration {:3}: ||r||_B = {}", it, crate::iterative::fmt_g(eta.abs()));
         }
 
         if has_prec {
@@ -240,9 +240,20 @@ pub fn mfem_minres(
         it -= 1; // MFEM: `it--` after the exhausted loop
     }
 
+    // MFEM `MINRESSolver::Mult` loop_end (linalg/solvers.cpp:1927-1959): the
+    // final `||r||_B` line is gated on `iterations`/`first_and_last` (legacy
+    // levels 1/3); the `Number of iterations` count only prints for `summary`
+    // (level 2) or a non-converged run with warnings (level >= 0); the
+    // `No convergence!` warning likewise.  A *converged* level-1 run must
+    // therefore print neither the count nor the warning (D634: ex5 parity).
     if param.print_level >= 1 {
-        println!("MINRES: iteration {:3}: ||r||_B = {}", it, eta.abs());
+        println!("MINRES: iteration {:3}: ||r||_B = {}", it, crate::iterative::fmt_g(eta.abs()));
+    }
+    if param.print_level >= 2 || (!converged && param.print_level >= 0) {
         println!("MINRES: Number of iterations: {:3}", it);
+    }
+    if !converged && param.print_level >= 0 {
+        println!("MINRES: No convergence!");
     }
     (it, converged, eta.abs())
 }

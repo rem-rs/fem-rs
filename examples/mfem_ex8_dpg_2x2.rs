@@ -194,25 +194,37 @@ fn main() {
     let shat = build_shat(&bhat, &sinv, s1);
 
     // ── 11. Block-diagonal preconditioner ──────────────────────────────────────
-    // MFEM uses UMFPack direct solves for each block.  We approximate with
-    // inner CG solves (zero initial guess, matching MFEM iterative_mode=false).
-    let inner_cfg = SolverConfig {
-        rtol: 1e-3,
+    // MFEM ex8.cpp (no SuiteSparse build): each block inverse is a fresh
+    // `CGSolver` with `SetPrintLevel(-1)`, `SetRelTol(1e-3)`, `SetMaxIter(200)`
+    // and `iterative_mode = false` — i.e. an unpreconditioned CG started from
+    // zero with the (r,r) <= rel²·(r₀,r₀) stopping test.  `solve_cg_mfem` is
+    // that exact solver; the former `solve_cg_operator` call tested
+    // ‖r‖₂ <= rtol·‖b‖₂ instead, so every preconditioner application from
+    // mid-solve on differed from C++ and forked the outer PCG (D634: 74
+    // outer iterations, DPG norm 1% off, vs C++ 28 / 0.0183277).
+    let inner_opts = fem_solver::SliOptions {
+        rel_tol: 1e-3,
+        abs_tol: 0.0,
         max_iter: 200,
-        verbose: false,
-        ..Default::default()
+        print_level: -1,
     };
     let s0_ref = &s0_mat;
     let shat_ref = &shat;
     let ess_pc = ess_usize.clone();
     let precond = move |r: &[f64], z: &mut [f64]| {
         // Block 0: S0^{-1} via CG with zero initial guess
-        z[..s0].fill(0.0);
-        fem_solver::solve_cg_operator(s0, s0, |x, y| s0_ref.spmv(x, y), &r[..s0], &mut z[..s0], &inner_cfg).ok();
+        fem_solver::solve_cg_mfem(
+            s0, |x: &[f64], y: &mut [f64]| s0_ref.spmv(x, y), &r[..s0], &mut z[..s0],
+            None::<fn(&[f64], &mut [f64])>, &inner_opts, false,
+            None::<&mut dyn FnMut(i32, f64, bool)>,
+        );
         // Block 1: Shat^{-1} via CG with zero initial guess
         if s1 > 0 {
-            z[s0..].fill(0.0);
-            fem_solver::solve_cg_operator(s1, s1, |x, y| shat_ref.spmv(x, y), &r[s0..], &mut z[s0..], &inner_cfg).ok();
+            fem_solver::solve_cg_mfem(
+                s1, |x: &[f64], y: &mut [f64]| shat_ref.spmv(x, y), &r[s0..], &mut z[s0..],
+                None::<fn(&[f64], &mut [f64])>, &inner_opts, false,
+                None::<&mut dyn FnMut(i32, f64, bool)>,
+            );
         }
         for &d in &ess_pc { if d < s0 { z[d] = 0.0; } }
     };

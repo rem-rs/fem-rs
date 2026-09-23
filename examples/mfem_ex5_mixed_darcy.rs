@@ -9,26 +9,18 @@
 //!   MINRES + BlockDiagonalPreconditioner(DSmoother(M), GSSmoother(S))
 //! where S = B diag(M)^{-1} B^T.
 
-use std::fs::File;
-use std::io::Write;
 use std::time::Instant;
 
 use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
 use fem_assembly::standard::VectorMassIntegrator;
-use fem_assembly::{
-    VectorAssembler,
-    vector_integrator::{VectorLinearIntegrator, VectorQpData},
-};
+use fem_assembly::VectorAssembler;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_linalg::{CooMatrix, fem_to_linlvo_csr};
-use fem_solver::block::BlockSystem;
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
 use fem_assembly::postproc::grid_function::GridFunction;
-use linlvo::{
-    precond::{BlockDiagonalPreconditioner, GaussSeidelSmoother, JacobiPrecond, SplitMode},
-    DenseVec, KrylovSolver, Minres, SolverParams, VerboseLevel,
-};
+use fem_solver::darcy_solvers::{IterSolveParameters, mfem_minres, schur_complement_bmb_diag};
+use fem_solver::smoother::{GsSmoother, GsType};
+use fem_solver::fmt_g;
 
 fn main() {
     let args = parse_args();
@@ -75,88 +67,62 @@ fn main() {
     };
     let gp = vec![0.0; n_p]; // g = 0 in 2D
 
-    // ── Build flat block system ─────────────────────────────────────────
-    let mm_clone = mm.clone();
-    let mb_clone = mb.clone();
+    // ── Flat saddle operator [[M, Bᵀ], [B, 0]] and RHS ───────────────────
     let bt = mb.transpose(); // B^T
-    let flat = BlockSystem { a: mm, bt, b: mb, c: None }.to_flat_csr();
     let n = n_u + n_p;
     let mut rhs = Vec::with_capacity(n);
     rhs.extend(fu); rhs.extend(gp);
     let mut x = vec![0.0; n];
 
-    // ── Build preconditioner ────────────────────────────────────────────
-    // C++:  BlockDiagonalPreconditioner darcyPrec(block_offsets);
-    //       darcyPrec.SetDiagonalBlock(0, new DSmoother(M));     // diag(M)⁻¹
-    //       darcyPrec.SetDiagonalBlock(1, new GSSmoother(*S));   // GS on S
+    // ── Preconditioner: BlockDiagonalPreconditioner(DSmoother(M), GSSmoother(S))
+    //   C++ ex5.cpp: MinvBt = Transpose(B) scaled by 1/diag(M), S = B·MinvBt,
+    //   invM = new DSmoother(M) (= diag(M)⁻¹), invS = new GSSmoother(*S)
+    //   (symmetric, 1 sweep, zero start), both iterative_mode = false.
+    let m_diag: Vec<f64> = (0..n_u).map(|i| mm.get(i, i)).collect();
+    let s = schur_complement_bmb_diag(&mb, &m_diag);
+    let gs = GsSmoother::new(&s, GsType::Symmetric, 1);
 
-    let mm = mm_clone;
-    let mb = mb_clone;
-    let diag_m: Vec<f64> = (0..n_u).map(|i| mm.get(i, i).max(1e-30)).collect();
-
-    // S = B diag(M)^{-1} B^T (exact, no regularization — matches C++)
-    let bt_t = mb.transpose();
-    let mut minvbt_coo = CooMatrix::<f64>::new(n_u, n_p);
-    for i in 0..n_u {
-        let inv_d = 1.0 / diag_m[i];
-        for ptr in bt_t.row_ptr[i]..bt_t.row_ptr[i+1] {
-            let j = bt_t.col_idx[ptr] as usize;
-            minvbt_coo.add(i, j, bt_t.values[ptr] * inv_d);
-        }
-    }
-    let minvbt = minvbt_coo.into_csr();
-    let s = mb.multiply(&minvbt);
-
-    let m_linlvo = fem_to_linlvo_csr(&mm);
-    let jacobi = JacobiPrecond::from_csr(&m_linlvo)
-        .expect("JacobiPrecond on mass matrix failed");
-
-    // C++: GSSmoother(*S) — Gauss-Seidel on exact Schur complement
-    let s_linlvo = fem_to_linlvo_csr(&s);
-    let gs = GaussSeidelSmoother::from_csr(&s_linlvo)
-        .expect("GaussSeidelSmoother on Schur complement failed");
-
-    let prec: BlockDiagonalPreconditioner<f64> = BlockDiagonalPreconditioner::new(
-        n, n_u, SplitMode::BlockJacobi, Box::new(jacobi), Box::new(gs),
-    );
-
-    // ── Solve with preconditioned MINRES ────────────────────────────────
-    let flat_linlvo = fem_to_linlvo_csr(&flat);
-    let lb = DenseVec::from_vec(rhs);
-    let mut lx = DenseVec::zeros(n);
-
-    let params = SolverParams {
-        rtol:  1e-6,
-        atol:  1e-10,
+    // ── Solve with MINRESSolver ──────────────────────────────────────────
+    //   C++ ex5.cpp: MINRESSolver, SetAbsTol(1e-10), SetRelTol(1e-6),
+    //   SetMaxIter(1000), SetPrintLevel(1) — the exact `mfem_minres` port
+    //   (linalg/solvers.cpp MINRESSolver::Mult, incl. the ‖r‖_B print format).
+    let param = IterSolveParameters {
+        print_level: 1,
         max_iter: 1000,  // MFEM ex5: maxIter = 1000
-        verbose: VerboseLevel::Iterations,
-        check_interval: 1,
+        abs_tol: 1e-10,
+        rel_tol: 1e-6,
+    };
+    let apply_op = |v: &[f64], w: &mut [f64]| {
+        // [[M, Bᵀ], [B, 0]] · v
+        mm.spmv(&v[..n_u], &mut w[..n_u]);
+        let mut bt_vp = vec![0.0; n_u];
+        bt.spmv(&v[n_u..], &mut bt_vp);
+        for (wi, bi) in w[..n_u].iter_mut().zip(&bt_vp) {
+            *wi += bi;
+        }
+        mb.spmv(&v[..n_u], &mut w[n_u..]);
+    };
+    let apply_prec = |v: &[f64], w: &mut [f64]| {
+        // diag(DSmoother(M), GSSmoother(S)) · v
+        for (wi, (&vi, &di)) in w[..n_u].iter_mut().zip(v[..n_u].iter().zip(&m_diag)) {
+            *wi = vi / di;
+        }
+        gs.mult(&v[n_u..], &mut w[n_u..]);
     };
 
-    let solver = Minres::<f64>::default();
     let start = Instant::now();
-    let result = solver.solve(&flat_linlvo, Some(&prec), &lb, &mut lx, &params);
+    let (iters, converged, final_norm) =
+        mfem_minres(n, &apply_op, Some(&apply_prec), &rhs, &mut x, &param);
     let elapsed = start.elapsed();
 
-    if let Ok(ref res) = result {
-        if res.final_residual.is_finite() {
-            x.copy_from_slice(lx.as_slice());
-        }
+    // C++: solver.GetConverged() / GetNumIterations() / GetFinalNorm() print
+    // (default ostream precision — `fmt_g`).
+    if converged {
+        println!("MINRES converged in {iters} iterations with a residual norm of {}.", fmt_g(final_norm));
+    } else {
+        println!("MINRES did not converge in {iters} iterations. Residual norm is {}.", fmt_g(final_norm));
     }
-
-    match result {
-        Ok(res) => {
-            println!();
-            if res.converged {
-                // MFEM format: "MINRES converged in N iterations with a residual norm of X.XXXe-XX."
-                println!("MINRES converged in {} iterations with a residual norm of {:.3e}.", res.iterations, res.final_residual);
-            } else {
-                println!("MINRES did not converge in {} iterations. Residual norm is {:.3e}.", res.iterations, res.final_residual);
-            }
-            println!("MINRES solver took {:.4}s.", elapsed.as_secs_f64());
-        }
-        Err(e) => println!("\nMINRES error: {e}"),
-    }
+    println!("MINRES solver took {}s.", fmt_g(elapsed.as_secs_f64()));
 
     // ── L² errors (matching C++ MFEM ex5 exactly) ────────────────────
     // MFEM: order_quad = max(2, 2*order+1);

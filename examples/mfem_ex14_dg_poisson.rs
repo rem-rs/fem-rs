@@ -68,8 +68,14 @@ fn main() {
     let a_mat = DgAssembler::assemble_dg(&space, &ifl, 1.0, args.sigma, kappa, quad_order, None);
 
     let mut x = vec![0.0_f64; space.n_dofs()];
+    // MFEM ex14: PCG(A, M, b, x, 1, 500, 1e-12, 0.0) / CG(a, b, x, 1, 500, 1e-12, 0.0)
+    // — the legacy helpers apply `SetRelTol(sqrt(1e-12))` = 1e-6;
+    // `solve_pcg_gssmoother` takes that rel_tol directly (criterion
+    // `(B r, r) <= rtol²·nom0` = `1e-12·nom0`).  Passing the raw 1e-12 here
+    // meant `1e-24·nom0`: C++ stopped at iteration 308 while this hit the
+    // 500-iteration cap "without converging" (D634).
     let cfg = SolverConfig {
-        rtol: 1e-12,
+        rtol: 1e-6,
         atol: 0.0,
         max_iter: 500,
         verbose: true,

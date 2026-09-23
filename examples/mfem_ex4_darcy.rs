@@ -17,7 +17,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::{solve_pcg, GSSmoother, SolverConfig};
+use fem_solver::{solve_pcg, GSSmoother};
 use fem_space::{
     HDivSpace,
     fe_space::FESpace,
@@ -124,16 +124,14 @@ fn main() {
 
     // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner.
     // MFEM ex4: PCG(*A, M, B, X, 1, 10000, 1e-20, 0.0)
-    // print_level=1, max_iter=10000, rtol=sqrt(1e-20)=1e-10, atol=0.0
+    // `solve_pcg` mirrors MFEM's legacy `PCG()` helper, which takes the RAW
+    // RTOLERANCE literal (1e-20) and itself applies `SetRelTol(sqrt(1e-20))`;
+    // its criterion is `(B r, r) <= 1e-20 · (B r0, r0)`.  Passing the
+    // pre-sqrt'ed 1e-10 here loosened the stop by 10 orders of magnitude
+    // (D634: 287-iteration premature "convergence", ‖F−F_h‖ 27× C++).
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
     let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
-    let cfg = SolverConfig {
-        rtol: 1e-10,
-        max_iter: 10000,
-        verbose: true,
-        ..SolverConfig::default()
-    };
-    let _result = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-10, 10000, true)
+    let _result = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-20, 10000, true)
         .expect("solver failed");
 
     // 13. Compute and print the L² norm of the error.

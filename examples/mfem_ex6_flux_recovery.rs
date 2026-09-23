@@ -114,12 +114,17 @@ fn main() {
         }
 
         // Solve: PCG + GSSmoother (MFEM: PCG(*A, M, B, X, 3, 200, 1e-12, 0.0)).
-        // C++ print_iter=3 → PrintLevel::Iterations in linlvo.
+        // The MFEM legacy helper applies `SetRelTol(sqrt(1e-12))` = 1e-6;
+        // `solve_pcg_gssmoother` takes that rel_tol directly (its criterion is
+        // `(B r, r) <= rtol²·nom0`, i.e. `1e-12·nom0` — the raw 1e-12 here
+        // meant `1e-24·nom0` and over-converged 12 orders past C++, D634).
+        // print_iter = 3 → legacy `FirstAndLast` (`(B r, r) = … ...` first line
+        // + final line + ARF, no per-iteration history).
         let cfg = SolverConfig {
-            rtol: 1e-12,
+            rtol: 1e-6,
             atol: 0.0,
             max_iter: 200,
-            print_level: PrintLevel::Iterations,
+            print_level: PrintLevel::FirstAndLast,
             ..SolverConfig::default()
         };
         let res = solve_pcg_gssmoother(&red_mat, &red_rhs, &mut u_red, &cfg);
