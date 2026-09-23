@@ -82,6 +82,19 @@ pub(crate) fn vec_ref_elem_with_basis(
             (SpaceType::HDiv, ElementType::Hex8) => {
                 return Box::new(fem_element::raviart_thomas::HexRTk::new(order as usize));
             }
+            // D638: the HCurl hex `(GaussLobatto, IntegratedGLL)` assembly leg —
+            // MFEM `ND_FECollection(p, 3, GaussLobatto, IntegratedGLL)`, i.e.
+            // `ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)` (the LOR
+            // basis pair of `fem/lor/lor.hpp`).  `HexNDk::new_integrated_gll`
+            // shares the default element's dof/slot/sign tables
+            // (`nd_slot_table`) — only the open modes differ — so the space's
+            // tables pair 1:1 and only the basis shape changes.  Without this
+            // arm the quad_igll request silently fell through to the
+            // GaussLegendre element (the D638 defect the d638 mass-parity test
+            // pins).
+            (SpaceType::HCurl, ElementType::Hex8) if order >= 1 => {
+                return Box::new(HexNDk::new_integrated_gll(order as usize));
+            }
             _ => {}
         }
     }

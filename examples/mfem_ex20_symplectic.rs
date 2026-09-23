@@ -22,35 +22,50 @@
 
 use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{element_type::ElementType, Mesh};
-use fem_solver::ode::traits::HamiltonianSystem;
+use fem_solver::ode::{SiavSolver, TimeDependentOperator};
 use std::fs::File;
 use std::io::Write;
 
-// ─── Hamiltonian ───────────────────────────────────────────────────────
+// ─── SIAV operator pair (MFEM `GradT` / `NegGradV`) ───────────────────
 
-/// Parameters for the 1D Hamiltonian system.
-struct Hamiltonian {
-    prob: i32,   // problem type 0-4
-    m: f64,      // mass
-    k: f64,      // spring constant / potential strength
+/// MFEM `NegGradV : TimeDependentOperator` — F(q) = -dV/dq, the explicit
+/// right-hand side of the SIAV pair (`dq/dt = P p`, `dp/dt = F q`).
+/// The Hamiltonians below are autonomous, so the stage times delivered by
+/// `SiavSolver::step` via `set_time` need no storage.
+struct NegGradV {
+    prob: i32, // problem type 0-4
+    k: f64,    // spring constant / potential strength
 }
 
-impl HamiltonianSystem for Hamiltonian {
-    /// Compute dH/dq  (the force / gradient of potential).
-    fn grad_q(&self, q: &[f64], _p: &[f64], out: &mut [f64]) {
-        let q0 = q[0];
-        out[0] = match self.prob {
-            1 => self.k * q0.sin(),                             // pendulum
-            2 => -self.k * q0 * (-0.5 * q0 * q0).exp(),         // Gaussian
-            3 => self.k * (1.0 + 2.0 * q0 * q0) * q0,           // quartic
-            4 => self.k * (1.0 - 0.25 * q0 * q0) * q0,          // negative quartic
-            _ => self.k * q0,                                    // harmonic
+impl TimeDependentOperator for NegGradV {
+    fn size(&self) -> usize {
+        1
+    }
+
+    fn set_time(&mut self, _t: f64) {
+        // autonomous system: F does not depend on t (MFEM stores t_ but
+        // `NegGradV::Mult` never reads it)
+    }
+
+    fn is_explicit(&self) -> bool {
+        true
+    }
+
+    fn mult(&self, x: &[f64], y: &mut [f64]) {
+        let q0 = x[0];
+        y[0] = match self.prob {
+            1 => -self.k * q0.sin(),                             // pendulum
+            2 => -self.k * q0 * (-0.5 * q0 * q0).exp(),          // Gaussian
+            3 => -self.k * (1.0 + 2.0 * q0 * q0) * q0,           // quartic
+            4 => -self.k * (1.0 - 0.25 * q0 * q0) * q0,          // negative quartic
+            _ => -self.k * q0,                                    // harmonic
         };
     }
 
-    /// Compute dH/dp  (the velocity / derivative of kinetic energy).
-    fn grad_p(&self, _q: &[f64], p: &[f64], out: &mut [f64]) {
-        out[0] = p[0] / self.m;
+    fn implicit_solve(&mut self, _dt: f64, _x: &[f64], _k: &mut [f64]) {
+        // MFEM's default `TimeDependentOperator::ImplicitSolve` aborts; this
+        // operator is explicitly typed, so the solver never takes this branch.
+        panic!("NegGradV: ImplicitSolve called on an explicit operator");
     }
 }
 
@@ -108,9 +123,14 @@ fn main() {
     println!("   --time-step {dt}");
     println!("   --mass {m}");
     println!("   --spring-const {k}");
-    // 2. Create the symplectic integrator
-    let sys = Hamiltonian { prob, m, k };
-    // let solver = SIAVSolver::new(order); // TODO: SIAVSolver not available
+    // 2. Create and Initialize the Symplectic Integration Solver
+    //    (MFEM: SIAVSolver siaSolver(order); GradT P; NegGradV F; siaSolver.Init(P,F);)
+    let sia_solver = SiavSolver::new(order as usize);
+    let mut neg_grad_v = NegGradV { prob, k };
+    // MFEM `GradT : Operator` — P(p) = dT/dp = (1/m)·p (`y.Set(1.0/m_, x)`).
+    let grad_t = |p: &[f64], dq: &mut [f64]| {
+        dq[0] = (1.0 / m) * p[0];
+    };
 
     // 3. Set the initial conditions
     let mut t = 0.0f64;
@@ -163,9 +183,9 @@ fn main() {
             }
         }
 
-        // 6b. Advance the state (MFEM: siaSolver.Step(q,p,t,dt))
-        // solver.step(solver.step(&sys, &mut q, &mut p, dt);sys, &mut q, &mut p, dt); // TODO: SIAVSolver not available
-        t += dt;
+        // 6b. Advance the state of the system (MFEM: siaSolver.Step(q,p,t,dt);
+        //     t is advanced inside the step, by Σ aᵢ·dt per stage)
+        sia_solver.step_vecs(&mut neg_grad_v, grad_t, &mut q, &mut p, &mut t, dt);
 
         // 6c. Record energy
         e[i + 1] = hamiltonian(prob, m, k, q[0], p[0]);
@@ -227,5 +247,62 @@ fn main() {
 
     println!();
     println!("Mean and standard deviation of the energy");
-    println!("{e_mean}\t{e_sd}");
+    // C++ `cout << e_mean << "\t" << e_sd` under the default `precision(6)`.
+    println!("{}\t{}", fmt_g6(e_mean), fmt_g6(e_sd));
+}
+
+/// Mimic C++ `std::cout << v` under the default `cout.precision(6)`
+/// (defaultfloat, i.e. printf-style `%g` with 6 significant digits) —
+/// same convention as `mfem_ex15_dynamic_amr.rs::fmt_g6`.
+fn fmt_g6(v: f64) -> String {
+    let p = 6usize; // significant digits
+    let sci = format!("{:.5e}", v); // 5 decimals = 6 significant digits
+    let (mant, exp) = sci.split_once('e').expect("sci format");
+    let exp: i32 = exp.parse().expect("exp");
+    let neg = mant.starts_with('-');
+    let mant = mant.trim_start_matches('-');
+    let mut digits: Vec<char> = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+    while digits.len() > 1 && digits[digits.len() - 1] == '0' {
+        digits.pop();
+    }
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    if exp >= -4 && exp < p as i32 {
+        if exp >= 0 {
+            let int_len = (exp + 1) as usize;
+            if int_len >= digits.len() {
+                out.push_str(&digits.iter().collect::<String>());
+                out.push_str(&"0".repeat(int_len - digits.len()));
+            } else {
+                out.push_str(&digits[..int_len].iter().collect::<String>());
+                out.push('.');
+                out.push_str(&digits[int_len..].iter().collect::<String>());
+            }
+        } else {
+            out.push('0');
+            out.push('.');
+            out.push_str(&"0".repeat((-exp - 1) as usize));
+            out.push_str(&digits.iter().collect::<String>());
+        }
+    } else {
+        out.push(digits[0]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..].iter().collect::<String>());
+        }
+        out.push('e');
+        if exp < 0 {
+            out.push('-');
+        } else {
+            out.push('+');
+        }
+        let e = exp.abs();
+        if e < 10 {
+            out.push('0');
+        }
+        out.push_str(&e.to_string());
+    }
+    out
 }
