@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use fem_assembly::postproc::coefficient::{CoeffCtx, VectorCoeff};
 use fem_assembly::standard::{
     CurlCurlIntegrator, MixedWeakCurlCrossIntegrator, VectorMassIntegrator,
+    mfem_vector_mass_quad_order_nd_hex, mfem_weak_curl_cross_quad_order_nd_hex,
 };
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
@@ -182,11 +183,18 @@ impl ConvectionDiffusionTDO {
     ) -> Self {
         let n = space.n_dofs();
 
-        // Mass form: VectorMassIntegrator. MFEM's rule order is
-        // `Trans.OrderW() + 2·p` with `OrderW() = p·dim − 1 = 2` for the Qk
-        // trilinear hex map → quadrature order 2·order + 2.
+        // Mass form: VectorMassIntegrator. D678: MFEM's true default rule is
+        // `Trans.OrderW() + 2·GetOrder()` with `GetOrder() = k` for
+        // ND_HexahedronElement (fe_nd.cpp:28) and `OrderW() = 3g − 1` for the
+        // Qk hex map (affine 2k + 2 / P2-curved 2k + 5) — the round-64
+        // hardcode `2p + 2` dropped OrderW (D667 probe).
         let mass = VectorMassIntegrator { alpha: 1.0 };
-        let mass_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order + 2 };
+        let geom_order = space.mesh().geom_order();
+        let mass_qp = if qp_override > 0 {
+            qp_override as u8
+        } else {
+            mfem_vector_mass_quad_order_nd_hex(order, geom_order)
+        };
         let mut m_mat = VectorAssembler::assemble_bilinear(space, &[&mass], mass_qp);
 
         // Eliminate essential DOFs.
@@ -195,13 +203,21 @@ impl ConvectionDiffusionTDO {
         fem_space::apply_dirichlet(&mut m_mat, &mut zero_rhs, &ess_tdofs, &zero_vals);
 
         // Stiffness: CurlCurlIntegrator(-sigma) + MixedWeakCurlCrossIntegrator(alpha * velocity)
-        // (C++ multidomain_nd.cpp:107-109). MFEM rules: CurlCurl on a Qk ND
-        // element uses order `2·p` (the integrator selects it itself);
-        // MixedVectorIntegrator uses `trial + test + OrderW() = 2·order + 2`.
+        // (C++ multidomain_nd.cpp:107-109). D678: MFEM rules — CurlCurl on a
+        // Qk ND element selects its own `2·GetOrder = 2k` order internally
+        // (the integrator's `integration_order_for`, never the fallback
+        // below); MixedWeakCurlCross derives the base
+        // `MixedVectorIntegrator::GetIntegrationOrder = trial + test + OrderW
+        // = 2k + 3g − 1` (ND2: affine 6 / curved 9) — replacing the
+        // `2·order + 2` hardcode that mis-served both on curved maps.
         let curl_curl = CurlCurlIntegrator { mu: -sigma };
         let vel = ScaledVelocity { alpha };
         let conv = MixedWeakCurlCrossIntegrator { velocity: vel };
-        let k_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order + 2 };
+        let k_qp = if qp_override > 0 {
+            qp_override as u8
+        } else {
+            mfem_weak_curl_cross_quad_order_nd_hex(order, geom_order)
+        };
         let k_mat = VectorAssembler::assemble_bilinear(space, &[&curl_curl, &conv], k_qp);
 
         let b = vec![0.0_f64; n];

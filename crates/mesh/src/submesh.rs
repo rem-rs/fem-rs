@@ -334,6 +334,15 @@ pub fn extract_boundary_submesh(mesh: &Mesh<3>, bdr_tags: &[i32]) -> BoundarySub
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
+        // D677 adjudication: `geometry: None` is DELIBERATE here (unlike
+        // `extract_submesh_3d`, which carries the parent table).  Carrying
+        // would need a face-geometry-slot remapper — distilling the parent
+        // volume element's row into the boundary face's own (order-p
+        // tri/quad) row — while this builder pins surface elements to
+        // Tri3/Quad4, which cannot represent an order-2 face map anyway.
+        // Every current consumer (pex34/pex35) runs straight-sided parents,
+        // where the parent table is `None` and the point is moot.  See the
+        // round-66 debt registration for the curved-boundary carry.
         geometry: None, nc_vertex_view: None,
     };
 
@@ -452,6 +461,9 @@ fn local_face_vertices_3d(elem_type: ElementType) -> Vec<Vec<usize>> {
 /// Extract a 3-D submesh containing elements whose tag belongs to `element_tags`.
 ///
 /// Supports mixed element types (Tet4, Hex8, Prism6, etc.).
+///
+/// D677: the submesh inherits the parent's high-order geometry table (MFEM
+/// `SubMesh` semantics); straight parents extract unchanged.
 pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
     let tag_set: HashSet<i32> = element_tags.iter().copied().collect();
 
@@ -587,6 +599,52 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
     let use_mixed_face = sub_face_types.len() > 1
         && !sub_face_types.iter().all(|&t| t == sub_face_types[0]);
 
+    // D677: carry the parent's high-order geometry into the submesh.  MFEM's
+    // SubMesh constructors inherit the parent `nodes` field wholesale
+    // (`SubMesh::CreateFromDomain` → `AddElementsToMesh` + `UpdateNodes`), so a
+    // curved parent's subdomain must keep solving on the curved map — dropping
+    // the table straightened every submesh hex and was the dominant driver of
+    // the multidomain RT/ND trajectory divergence (round-65 D667 finding).
+    // For a straight parent (`geometry: None`) this is inert, which keeps the
+    // straight-grid paths bit-identical.  Each submesh element copies its
+    // parent element's geometry row verbatim (same element types ⇒ same row
+    // layout, uniform and ragged tables alike); vertex slots remap to the
+    // submesh vertex ids and higher-order nodes are appended to a fresh
+    // coordinate table on first use, preserving the parent's node sharing so a
+    // curved edge keeps a single geometry node across the elements meeting
+    // there.
+    let sub_geometry = mesh.geometry.as_ref().map(|g| {
+        let mut map: HashMap<NodeId, NodeId> = HashMap::with_capacity(parent_nodes.len() * 2);
+        for (&pn, &sn) in &sub_of_parent {
+            map.insert(pn, sn);
+        }
+        // coords[0..n_vertices] coincide with the mesh vertices — the same
+        // invariant `set_curvature_*` establishes (`geom_coords =
+        // self.coords.clone()` there).
+        let mut coords = sub_coords.clone();
+        let mut next = parent_nodes.len() as NodeId;
+        let mut conn: Vec<NodeId> = Vec::with_capacity(parent_elem_ids.len() * 8);
+        for &pe in &parent_elem_ids {
+            for &gn in mesh.geometry_row(pe) {
+                let sn = *map.entry(gn).or_insert_with(|| {
+                    let s = next;
+                    next += 1;
+                    let c = &g.coords[gn as usize * 3..gn as usize * 3 + 3];
+                    coords.extend_from_slice(c);
+                    s
+                });
+                conn.push(sn);
+            }
+        }
+        crate::simplex::GeometryData {
+            order: g.order,
+            conn,
+            nodes_per_elem: g.nodes_per_elem,
+            n_nodes: next as usize,
+            coords,
+        }
+    });
+
     let sub_mesh = Mesh {
         coords: sub_coords,
         conn: sub_conn,
@@ -604,7 +662,7 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
-        geometry: None, nc_vertex_view: None,
+        geometry: sub_geometry, nc_vertex_view: None,
     };
 
     SubMesh3D {

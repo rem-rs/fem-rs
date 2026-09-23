@@ -210,3 +210,24 @@
 - **ex1**：缺 10 行 `Options used:` 头 → **D687**。
 - **警告清扫**：ex0/ex15_dump_p1/ex15_dump_p1_it3/ex15dyn/pex18/ex25/pex26/pex27 八文件
   0 警告（round-65 D675 批次）；余量 96 条/45 文件为既有积压（清单 `tmp/d675/ws_gate2_byfile.txt`）。
+
+## round 66 增量（主会话收尾注记）
+
+- **ex1 升 BIT（D687）**：补 `Options used:` 10 行头 + bool 选项 ENABLE 对规则 + 去前导
+  空行后，`-m star.mesh` 与 `-o 2` 两口径 cmp 全等（豁免 = 仅无 `-m` 默认跑的 mesh 路径行）。
+- **ex24 三口径逐字节（D686）**：beam-hex -p0 / star -p0 / beam-hex -p2 全 IDENTICAL
+  （四处病灶：Options 块、混合解 PCG 换 `solve_pcg_dsmoother` 位级移植、interpolant-norm
+  行、多余 Wrote 行）。**口径勘误**：round-65 引用的 23 it/ARF 0.271788 是 star 口径，
+  beam-hex = 29 it/0.364936。`-p 1` 豁免 5 行 = **D700**（RT/weak-curl 装配 ~1e-5 相对差，
+  HYPOTHESIS，crates 域）。
+- **ex22 裁决丰收（D681/D682）**：组装证明正确（单 Q2 quad 4.4e-12）；90× 病灶 = 示例内联
+  评估器拿 Q2 角槽位当几何基（核心已交付 `ComplexGridFunction::compute_l2_error`，全管线
+  **5.643641e-3 = C++ 逐位**）；GMRES 停滞根因 = 示例 pc 丢 ω + 缺 DIAG_ONE（C++ 全配方
+  43/116 it = C++）。示例侧收口 = **D693/D694/D695**（配方与锚点全备）。⚠️ **勘误**：
+  round-65 的"ex22 -o1 双 -p 逐字节"对 -p 1 不成立（GMRES 轨迹从未一致）。
+- **pex3 仲裁（D683/D697）**：**双重成立**——台账行过期 且 HEAD 真回归。C++ np1/np2 今日
+  实跑 0.0270053（17/19 it）= round-30 历史 Rust 值；同 commit fresh log 已是 1.62/2085
+  （行文与日志自相矛盾）；HEAD ranks1/2 = 271/2085 it、1.62385083285577e0/1.62385083181174e0
+  （rank 无关 = 组装/BC 层）。头号嫌疑 `25c4c99`（D124 HCurl essential）。pex3 行应改 RUN*。
+- **警告专项**：96 → **5**（40 文件清零；余 5 条在 pex3[3]/ex40[2] = **D701**）。
+- **死 API**：`maxwell.rs::hcurl_error_sq_exact`（176 行）删除（D684）；fem-examples lib 107/107。

@@ -31,7 +31,11 @@
 use std::collections::{HashMap, HashSet};
 
 use fem_assembly::postproc::coefficient::{CoeffCtx, VectorCoeff};
-use fem_assembly::standard::{DivDivIntegrator, MixedWeakGradDotIntegrator, VectorMassIntegrator};
+use fem_assembly::standard::{
+    DivDivIntegrator, MixedWeakGradDotIntegrator, VectorMassIntegrator,
+    mfem_div_div_quad_order_rt_hex, mfem_vector_mass_quad_order_rt_hex,
+    mfem_weak_grad_dot_quad_order_rt_hex,
+};
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CsrMatrix;
@@ -181,11 +185,21 @@ impl ConvectionDiffusionTDO {
     ) -> Self {
         let n = space.n_dofs();
 
-        // Mass form: VectorMassIntegrator. MFEM's rule order is
-        // `Trans.OrderW() + 2·p` with `OrderW() = p·dim − 1 = 2` for the Qk
-        // trilinear hex map → quadrature order 2·order + 2.
+        // Mass form: VectorMassIntegrator. D678: MFEM's true default rule is
+        // `Trans.OrderW() + 2·GetOrder()` with `GetOrder() = p + 1` for
+        // RT_HexahedronElement (fe_rt.cpp:329) and `OrderW() = 3g − 1` for the
+        // Qk hex map (affine 6 / P2-curved 9 at p = 1) — the round-64
+        // hardcode `2p + 2` mis-derived the order and dropped OrderW
+        // (D667 probe MASSDEF).
         let mass = VectorMassIntegrator { alpha: 1.0 };
-        let mass_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order + 2 };
+        let geom_order = space.mesh().geom_order();
+        let mass_qp = if qp_override > 0 {
+            qp_override as u8
+        } else if let Ok(v) = std::env::var("MDRT_MASS_QP") {
+            v.parse().unwrap()
+        } else {
+            mfem_vector_mass_quad_order_rt_hex(order, geom_order)
+        };
         let mut m_mat = VectorAssembler::assemble_bilinear(space, &[&mass], mass_qp);
 
         // Eliminate essential DOFs.
@@ -194,16 +208,28 @@ impl ConvectionDiffusionTDO {
         fem_space::apply_dirichlet(&mut m_mat, &mut zero_rhs, &ess_tdofs, &zero_vals);
 
         // Stiffness: DivDivIntegrator(-kappa) + MixedWeakGradDotIntegrator(-alpha * velocity)
-        // (C++ multidomain_rt.cpp:105-110). Neither integrator carries its own
-        // MFEM order in fem-rs, and MFEM uses *different* rules for them, so
-        // they are assembled separately: DivDiv `2·p − 2` ("OK for RTk",
-        // bilininteg.cpp:2971), MixedWeakGradDot `trial + test + OrderW() − 1
-        // = 2·order − 1` (bilininteg.hpp:981-984).
+        // (C++ multidomain_rt.cpp:105-110). D678: MFEM uses *different* rules
+        // for them — DivDiv `2·GetOrder − 2 = 2k` (RT1: an 8-point rule,
+        // never the round-64 assumed 1-point rule), MixedWeakGradDot
+        // `2·GetOrder + OrderW` (affine 6 / curved 9 at p = 1; D667 probes
+        // MASSDEF/WGDEF) — replacing the `2p − 2` / `2p − 1` hardcodes.
         let div_div = DivDivIntegrator { kappa: -kappa };
         let vel = ScaledVelocity { alpha };
         let conv = MixedWeakGradDotIntegrator { velocity: vel };
-        let div_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order - 2 };
-        let conv_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order - 1 };
+        let div_qp = if qp_override > 0 {
+            qp_override as u8
+        } else if let Ok(v) = std::env::var("MDRT_DIV_QP") {
+            v.parse().unwrap()
+        } else {
+            mfem_div_div_quad_order_rt_hex(order)
+        };
+        let conv_qp = if qp_override > 0 {
+            qp_override as u8
+        } else if let Ok(v) = std::env::var("MDRT_CONV_QP") {
+            v.parse().unwrap()
+        } else {
+            mfem_weak_grad_dot_quad_order_rt_hex(order, geom_order)
+        };
         let div_mat = VectorAssembler::assemble_bilinear(space, &[&div_div], div_qp);
         let conv_mat = VectorAssembler::assemble_bilinear(space, &[&conv], conv_qp);
         let k_mat = div_mat.add(&conv_mat);
@@ -503,7 +529,7 @@ fn main() {
     let mut cd_tdo = ConvectionDiffusionTDO::new(
         &fes_cylinder,
         ess_tdofs.clone(),
-        1.0,
+        if std::env::var("MDRT_ALPHA0").is_ok() { 0.0 } else { 1.0 },
         1.0e-1,
         order,
         qp,
