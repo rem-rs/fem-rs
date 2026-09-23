@@ -8,20 +8,38 @@
 //! Deviations from the C++ miniapp:
 //! * GLVis / ParaView output is not available (silent runs).
 //! * Serial port: ParSubMesh → extract_submesh_3d, ParFESpace → HDivSpace.
-//! * Essential DOFs are face DOFs on boundary faces (normal components).
+//!
+//! Serial mechanism mapping (additions w.r.t. `multidomain.rs`):
+//!
+//! | MFEM (parallel)                             | this port                                     |
+//! |---------------------------------------------|-----------------------------------------------|
+//! | `GetEssentialTrueDofs(bdr_attrs)` (RT)      | full face blocks — `(order+1)²` dofs per quad face (`hdiv_boundary_dofs`; D377) |
+//! | `ProjectBdrCoefficientNormal(square_xy)`    | `HDivSpace::interpolate_vector(square_xy)` restricted to the wall dofs (exact for this linear field: the normal trace lies in the trace space, so interpolation == L2 projection) |
+//! | `ParSubMesh::CreateTransferMap` (RT)        | face-matched, orientation-corrected dof pairing (`BlockToCylinderMap`) |
+//!
+//! The RT transfer map cannot match dofs by coordinates alone (the H1 trick):
+//! an RT quad face carries `(order+1)²` dofs laid out over the face's
+//! *canonical* vertex frame, and the two submeshes pick different canonical
+//! frames for the same physical face (node ids are unrelated), so the anchor
+//! lattice points are permuted between the two spaces. Instead, dofs are
+//! paired *per physical face* (keyed by sorted corner coordinates) with the
+//! index-free "geometric factor" calibration `g(d)` of each dof (see
+//! `BlockToCylinderMap::new`): two dofs on the same physical face carry the
+//! same flux functional up to orientation, i.e. `g_cyl = ±g_blk`, and the
+//! value map is `dst[c] = sign(g_c·g_b)·src[b]`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use fem_assembly::postproc::coefficient::{CoeffCtx, VectorCoeff};
-use fem_assembly::standard::{
-    DivDivIntegrator, MixedWeakGradDotIntegrator, VectorMassIntegrator,
-};
+use fem_assembly::standard::{DivDivIntegrator, MixedWeakGradDotIntegrator, VectorMassIntegrator};
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CsrMatrix;
 use fem_mesh::submesh::extract_submesh_3d;
+use fem_mesh::topology::MeshTopology;
 use fem_mesh::{refine_hex8_uniform, Mesh};
 use fem_solver::{solve_pcg_dsmoother, SolverConfig};
+use fem_space::dof_manager::FaceKey;
 use fem_space::fe_space::FESpace;
 use fem_space::hdiv::HDivSpace;
 
@@ -41,7 +59,14 @@ fn velocity_profile(x: &[f64], out: &mut [f64]) {
     };
 }
 
-/// Scaled velocity coefficient: `-alpha * velocity`.
+/// Scaled velocity coefficient: `+alpha * velocity`.
+///
+/// C++ folds `aq = ScalarVectorProductCoefficient(-alpha, *q)` (rt.cpp:106)
+/// *and* MFEM's `MixedWeakGradDotIntegrator::CalcTestShape` negates the test
+/// shape (`shape *= -1.0`, bilininteg.hpp:990), so the net coefficient is
+/// `+alpha·q`. fem-rs' `MixedWeakGradDotIntegrator` does not negate, so the
+/// miniapp passes `+alpha` directly. (The DivDivIntegrator `d = -kappa` fold
+/// of rt.cpp:105 is reproduced as `DivDivIntegrator { kappa: -kappa }`.)
 struct ScaledVelocity {
     alpha: f64,
 }
@@ -50,18 +75,26 @@ impl VectorCoeff for ScaledVelocity {
     fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
         velocity_profile(ctx.x, out);
         for v in out.iter_mut() {
-            *v *= -self.alpha;
+            *v *= self.alpha;
         }
     }
 }
 
-/// Face DOFs on boundary faces whose tag is listed in `tags` (for H(div)).
-fn hdiv_boundary_dofs(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>, tags: &[i32]) -> Vec<u32> {
-    use fem_mesh::topology::MeshTopology;
-    use fem_space::dof_manager::FaceKey;
+/// C++ `square_xy` (multidomain_rt.cpp:74-82): a vector field parallel to the
+/// xy plane wrapping counter-clockwise, used for the initial condition.
+fn square_xy(x: &[f64]) -> Vec<f64> {
+    vec![-2.0 * x[1], 2.0 * x[0], 0.0]
+}
 
-    let mut face_tag_by_set: std::collections::HashMap<[u32; 4], i32> =
-        std::collections::HashMap::new();
+/// Cyclic-corner-ordered hex faces of `mesh` whose boundary tag is listed in
+/// `tags`, deduplicated by sorted vertex set.
+///
+/// The element face table (not the stored boundary-face vertex order) provides
+/// the proper cyclic corner order — submeshes store quad boundary faces in
+/// sorted-vertex order, which derives wrong face keys (see the note on
+/// `hex_boundary_dofs` in `multidomain.rs`).
+fn boundary_hex_faces(mesh: &Mesh<3>, tags: &[i32]) -> Vec<[u32; 4]> {
+    let mut face_tag_by_set: HashMap<[u32; 4], i32> = HashMap::new();
     for f in 0..mesh.n_boundary_faces() as u32 {
         let ns = mesh.face_nodes(f);
         let mut s = [ns[0], ns[1], ns[2], ns[3]];
@@ -78,25 +111,44 @@ fn hdiv_boundary_dofs(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>, tags: &[i32]) 
         [1, 2, 6, 5],
     ];
 
-    let mut out: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<[u32; 4]> = HashSet::new();
+    let mut out: Vec<[u32; 4]> = Vec::new();
     for e in 0..mesh.n_elems() as u32 {
         let ns = mesh.elem_nodes(e);
         for lf in &HEX_FACES {
             let fns = [ns[lf[0]], ns[lf[1]], ns[lf[2]], ns[lf[3]]];
             let mut key = fns;
             key.sort_unstable();
+            if seen.contains(&key) {
+                continue;
+            }
             let Some(&tag) = face_tag_by_set.get(&key) else {
                 continue;
             };
             if !tags.contains(&tag) {
                 continue;
             }
-            // Face DOFs: for RT, each face has DOFs associated with it.
-            // For hex faces, FaceKey uses the first 3 vertices.
-            let fk = FaceKey::new(fns[0], fns[1], fns[2]);
-            if let Some(dof) = space.tri_face_dof(fk) {
-                out.insert(dof);
-            }
+            seen.insert(key);
+            out.push(fns);
+        }
+    }
+    out
+}
+
+/// All H(div) dofs lying on `faces`: the full face blocks — `(order+1)²` dofs
+/// per quad face (MFEM's `GetEssentialTrueDofs` constrains the whole block;
+/// `tri_face_dof` alone returns only its first dof — D377).
+///
+/// The space registers each hex face under `FaceKey` of the three smallest
+/// (sorted) vertex ids of the face, so the lookup key is built the same way.
+fn hdiv_boundary_dofs(space: &HDivSpace<Mesh<3>>, faces: &[[u32; 4]]) -> Vec<u32> {
+    let mut out: HashSet<u32> = HashSet::new();
+    for f in faces {
+        let mut s4 = *f;
+        s4.sort_unstable();
+        let fk = FaceKey::new(s4[0], s4[1], s4[2]);
+        if let Some(ds) = space.face_dofs(fk) {
+            out.extend(ds);
         }
     }
     let mut v: Vec<u32> = out.into_iter().collect();
@@ -129,9 +181,11 @@ impl ConvectionDiffusionTDO {
     ) -> Self {
         let n = space.n_dofs();
 
-        // Mass form: VectorMassIntegrator.
+        // Mass form: VectorMassIntegrator. MFEM's rule order is
+        // `Trans.OrderW() + 2·p` with `OrderW() = p·dim − 1 = 2` for the Qk
+        // trilinear hex map → quadrature order 2·order + 2.
         let mass = VectorMassIntegrator { alpha: 1.0 };
-        let mass_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order };
+        let mass_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order + 2 };
         let mut m_mat = VectorAssembler::assemble_bilinear(space, &[&mass], mass_qp);
 
         // Eliminate essential DOFs.
@@ -139,12 +193,20 @@ impl ConvectionDiffusionTDO {
         let zero_vals = vec![0.0_f64; ess_tdofs.len()];
         fem_space::apply_dirichlet(&mut m_mat, &mut zero_rhs, &ess_tdofs, &zero_vals);
 
-        // Stiffness: DivDivIntegrator(kappa) + MixedWeakGradDotIntegrator(-alpha * velocity).
+        // Stiffness: DivDivIntegrator(-kappa) + MixedWeakGradDotIntegrator(-alpha * velocity)
+        // (C++ multidomain_rt.cpp:105-110). Neither integrator carries its own
+        // MFEM order in fem-rs, and MFEM uses *different* rules for them, so
+        // they are assembled separately: DivDiv `2·p − 2` ("OK for RTk",
+        // bilininteg.cpp:2971), MixedWeakGradDot `trial + test + OrderW() − 1
+        // = 2·order − 1` (bilininteg.hpp:981-984).
         let div_div = DivDivIntegrator { kappa: -kappa };
         let vel = ScaledVelocity { alpha };
         let conv = MixedWeakGradDotIntegrator { velocity: vel };
-        let k_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order };
-        let k_mat = VectorAssembler::assemble_bilinear(space, &[&div_div, &conv], k_qp);
+        let div_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order - 2 };
+        let conv_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order - 1 };
+        let div_mat = VectorAssembler::assemble_bilinear(space, &[&div_div], div_qp);
+        let conv_mat = VectorAssembler::assemble_bilinear(space, &[&conv], conv_qp);
+        let k_mat = div_mat.add(&conv_mat);
 
         let b = vec![0.0_f64; n];
 
@@ -212,46 +274,150 @@ fn rk3ssp_step(f: &mut ConvectionDiffusionTDO, x: &mut [f64], t: &mut f64, dt: f
     *t += dt;
 }
 
-/// Block-to-cylinder transfer map for H(div).
+/// Block-to-cylinder transfer map for H(div): the serial equivalent of
+/// `ParSubMesh::CreateTransferMap(pressure_block_gf, pressure_cylinder_gf)`
+/// restricted to the interface dofs (the cylinder keeps its own values on
+/// non-interface dofs, as in C++).
+///
+/// RT face dofs are canonical functionals tied to an oriented face frame, and
+/// the two submeshes pick different frames for the same physical face (node
+/// ids are unrelated). The map therefore pairs dofs per *physical face*
+/// (keyed by sorted corner coordinates) and corrects the orientation through
+/// each dof's geometric factor `g(d)` — the vector-valued density of its
+/// functional, recovered from three constant-field interpolations:
+/// `interpolate_vector(e_i)[d] = e_i · g(d)`. Two dofs on the same physical
+/// face carry the same flux functional up to orientation, so
+/// `g_cyl = ±g_blk` (equal magnitude, parallel) and
+/// `value_cyl = sign(g_c·g_b) · value_blk`.
+///
+/// `new` verifies this relation per pair with an interpolated linear field
+/// before accepting the map.
 struct BlockToCylinderMap {
-    pairs: Vec<(u32, u32)>,
+    /// (cylinder dof, block dof, orientation sign) triples on the interface.
+    pairs: Vec<(u32, u32, f64)>,
 }
+
+fn coord_key(c: &[f64]) -> [i64; 3] {
+    [
+        (c[0] * 1e9).round() as i64,
+        (c[1] * 1e9).round() as i64,
+        (c[2] * 1e9).round() as i64,
+    ]
+}
+
+/// (dof position key) → dof, plus each dof's geometric factor, per face.
+/// Face keys are sorted quantized corner coordinates (physical identity).
+type FaceDofs = HashMap<([i64; 3], [i64; 3], [i64; 3], [i64; 3]), HashMap<[i64; 3], (u32, [f64; 3])>>;
 
 impl BlockToCylinderMap {
     fn new(
         cyl_space: &HDivSpace<Mesh<3>>,
+        cyl_faces: &[[u32; 4]],
         blk_space: &HDivSpace<Mesh<3>>,
-        interface_dofs_cyl: &[u32],
-        interface_dofs_blk: &[u32],
+        blk_faces: &[[u32; 4]],
     ) -> Self {
-        fn coord_key(c: &[f64]) -> [i64; 3] {
-            [
-                (c[0] * 1e9).round() as i64,
-                (c[1] * 1e9).round() as i64,
-                (c[2] * 1e9).round() as i64,
-            ]
+        /// Geometric factor `g(d)` of every dof (see struct docs).
+        fn factors(space: &HDivSpace<Mesh<3>>) -> Vec<[f64; 3]> {
+            let mut g = vec![[0.0_f64; 3]; space.n_dofs()];
+            for i in 0..3 {
+                let v = space
+                    .interpolate_vector(&|_| {
+                        let mut e = vec![0.0_f64; 3];
+                        e[i] = 1.0;
+                        e
+                    })
+                    .as_slice()
+                    .to_vec();
+                for (d, gd) in g.iter_mut().enumerate() {
+                    gd[i] = v[d];
+                }
+            }
+            g
         }
-        let blk_coords = blk_space.dof_coords();
-        let mut by_coord: std::collections::HashMap<[i64; 3], u32> =
-            std::collections::HashMap::new();
-        for &d in interface_dofs_blk {
-            by_coord.insert(coord_key(&blk_coords[d as usize]), d);
+
+        /// Face → (dof position → (dof, geometric factor)) inventory of the
+        /// interface. Face keys use the *node* coordinates of the corners;
+        /// dof positions use the dof-coordinate table.
+        fn inventory(space: &HDivSpace<Mesh<3>>, faces: &[[u32; 4]], g: &[[f64; 3]]) -> FaceDofs {
+            let mesh = space.mesh();
+            let coords = space.dof_coords();
+            let mut inv: FaceDofs = HashMap::new();
+            for f in faces {
+                let mut s4 = *f;
+                s4.sort_unstable();
+                let fk = FaceKey::new(s4[0], s4[1], s4[2]);
+                let Some(ds) = space.face_dofs(fk) else {
+                    continue;
+                };
+                let mut cs: Vec<[i64; 3]> =
+                    f.iter().map(|n| coord_key(&mesh.node_coords(*n))).collect();
+                cs.sort_unstable();
+                let key = (cs[0], cs[1], cs[2], cs[3]);
+                let entry = inv.entry(key).or_default();
+                for d in ds {
+                    entry.insert(coord_key(&coords[d as usize]), (d, g[d as usize]));
+                }
+            }
+            inv
         }
-        let cyl_coords = cyl_space.dof_coords();
-        let mut pairs = Vec::with_capacity(interface_dofs_cyl.len());
-        for &c in interface_dofs_cyl {
-            let key = coord_key(&cyl_coords[c as usize]);
-            let &b = by_coord
-                .get(&key)
-                .unwrap_or_else(|| panic!("BlockToCylinderMap: no block dof at cyl interface dof {c}"));
-            pairs.push((c, b));
+
+        let cyl_g = factors(cyl_space);
+        let blk_g = factors(blk_space);
+        let blk_inv = inventory(blk_space, blk_faces, &blk_g);
+        let cyl_inv = inventory(cyl_space, cyl_faces, &cyl_g);
+
+        // Self-verification field: interpolation of `square_xy` in both spaces
+        // yields the exact trace coefficients (linear field), so a correct
+        // pairing must satisfy `proj_c[c] == sign · proj_b[b]` per pair.
+        let proj_c = cyl_space.interpolate_vector(&square_xy).as_slice().to_vec();
+        let proj_b = blk_space.interpolate_vector(&square_xy).as_slice().to_vec();
+
+        let mut pairs: Vec<(u32, u32, f64)> = Vec::new();
+        for (key, cyl_map) in &cyl_inv {
+            let Some(blk_map) = blk_inv.get(key) else {
+                panic!("BlockToCylinderMap: block side missing interface face {key:?}");
+            };
+            if cyl_map.len() != blk_map.len() {
+                panic!(
+                    "BlockToCylinderMap: face {key:?} dof count mismatch: cyl {} vs blk {}",
+                    cyl_map.len(),
+                    blk_map.len()
+                );
+            }
+            for (&pos, &(c, gc)) in cyl_map {
+                let Some(&(b, gb)) = blk_map.get(&pos) else {
+                    panic!(
+                        "BlockToCylinderMap: no block dof on face {key:?} at cyl dof {c} pos {pos:?}"
+                    );
+                };
+                let dot = gc[0] * gb[0] + gc[1] * gb[1] + gc[2] * gb[2];
+                let nc = (gc[0] * gc[0] + gc[1] * gc[1] + gc[2] * gc[2]).sqrt();
+                let nb = (gb[0] * gb[0] + gb[1] * gb[1] + gb[2] * gb[2]).sqrt();
+                assert!(
+                    dot.abs() > 0.999_999 * nc * nb && nc > 0.0 && nb > 0.0,
+                    "BlockToCylinderMap: geometric factors not parallel at cyl dof {c} / blk dof {b}: g_c={gc:?} g_b={gb:?}"
+                );
+                let sign = if dot > 0.0 { 1.0 } else { -1.0 };
+                let want = sign * proj_b[b as usize];
+                let got = proj_c[c as usize];
+                assert!(
+                    (got - want).abs() <= 1e-9 * (1.0 + got.abs() + want.abs()),
+                    "BlockToCylinderMap: transfer verification failed at cyl dof {c} / blk dof {b}: {got} vs {want}"
+                );
+                pairs.push((c, b, sign));
+            }
         }
+        pairs.sort_by_key(|&(c, b, _)| (c, b));
         BlockToCylinderMap { pairs }
     }
 
+    /// C++ `map.Transfer(block_gf, cyl_gf)` followed by
+    /// `cyl_gf.GetTrueDofs` (multidomain_rt.cpp:394-401): copies the block
+    /// values onto the cylinder interface dofs (orientation-corrected),
+    /// leaving the cylinder-interior dofs untouched.
     fn transfer(&self, src: &[f64], dst: &mut [f64]) {
-        for &(c, b) in &self.pairs {
-            dst[c as usize] = src[b as usize];
+        for &(c, b, s) in &self.pairs {
+            dst[c as usize] = s * src[b as usize];
         }
     }
 }
@@ -275,12 +441,6 @@ fn parse_i32(args: &[String], flag: &str, default: i32) -> i32 {
         .position(|a| a == flag)
         .map(|i| args[i + 1].parse().expect("bad int arg"))
         .unwrap_or(default)
-}
-
-fn marker_to_tags(marker: &[i32]) -> Vec<i32> {
-    (1..=marker.len() as i32)
-        .filter(|&a| marker[(a - 1) as usize] != 0)
-        .collect()
 }
 
 fn main() {
@@ -331,22 +491,23 @@ fn main() {
 
     // Essential DOFs: inflow (bdr attr 8) and interface (bdr attr 9).
     let mesh_cyl = fes_cylinder.mesh();
-    let mut inflow_attributes = vec![0_i32; 9];
-    inflow_attributes[7] = 1;
-    let mut inner_cylinder_wall_attributes = vec![0_i32; 9];
-    inner_cylinder_wall_attributes[8] = 1;
-    let mut ess_tdofs =
-        hdiv_boundary_dofs(mesh_cyl, &fes_cylinder, &marker_to_tags(&inflow_attributes));
-    ess_tdofs.extend(hdiv_boundary_dofs(
-        mesh_cyl,
-        &fes_cylinder,
-        &marker_to_tags(&inner_cylinder_wall_attributes),
-    ));
+    let inflow_tags = vec![8_i32];
+    let inner_cylinder_wall_tags = vec![9_i32];
+    let cyl_inflow_faces = boundary_hex_faces(mesh_cyl, &inflow_tags);
+    let cyl_interface_faces = boundary_hex_faces(mesh_cyl, &inner_cylinder_wall_tags);
+    let mut ess_tdofs = hdiv_boundary_dofs(&fes_cylinder, &cyl_inflow_faces);
+    ess_tdofs.extend(hdiv_boundary_dofs(&fes_cylinder, &cyl_interface_faces));
     ess_tdofs.sort_unstable();
     ess_tdofs.dedup();
     println!("Cylinder ess vdofs: {}", ess_tdofs.len());
-    let mut cd_tdo =
-        ConvectionDiffusionTDO::new(&fes_cylinder, ess_tdofs, 1.0, 1.0e-1, order, qp);
+    let mut cd_tdo = ConvectionDiffusionTDO::new(
+        &fes_cylinder,
+        ess_tdofs.clone(),
+        1.0,
+        1.0e-1,
+        order,
+        qp,
+    );
 
     let mut field_cylinder = vec![0.0_f64; fes_cylinder.n_dofs()];
 
@@ -364,34 +525,40 @@ fn main() {
     }
 
     let mesh_blk = fes_block.mesh();
-    let mut block_wall_attributes = vec![0_i32; 9];
-    block_wall_attributes[0] = 1;
-    block_wall_attributes[1] = 1;
-    block_wall_attributes[2] = 1;
-    block_wall_attributes[3] = 1;
-    block_wall_attributes[4] = 1;
-    block_wall_attributes[5] = 1;
-    block_wall_attributes[6] = 1;
-    block_wall_attributes[7] = 1;
-    let block_ess_tdofs =
-        hdiv_boundary_dofs(mesh_blk, &fes_block, &marker_to_tags(&block_wall_attributes));
-    println!("Block ess vdofs (walls 0-7): {}", block_ess_tdofs.len());
+    // All boundary attributes except the interface (attr 9) — C++
+    // `block_wall_attributes = 1; block_wall_attributes[8] = 0;`
+    // (multidomain_rt.cpp:298-300).
+    let block_wall_tags: Vec<i32> = (1..=8).collect();
+    let block_wall_faces = boundary_hex_faces(mesh_blk, &block_wall_tags);
+    let block_ess_tdofs = hdiv_boundary_dofs(&fes_block, &block_wall_faces);
+    println!("Block ess vdofs (walls 1-8): {}", block_ess_tdofs.len());
 
     let mut d_tdo =
-        ConvectionDiffusionTDO::new(&fes_block, block_ess_tdofs, 0.0, 1.0, order, qp);
+        ConvectionDiffusionTDO::new(&fes_block, block_ess_tdofs.clone(), 0.0, 1.0, order, qp);
 
+    // Initial condition: p = square_xy on the outer walls, normal projection
+    // (C++ `ProjectBdrCoefficientNormal(one, block_wall_attributes)`,
+    // multidomain_rt.cpp:310-312). The interpolation of `square_xy` equals the
+    // L2 projection because the normal trace of this linear field lies in the
+    // trace space; the interior stays zero as in C++.
     let mut field_block = vec![0.0_f64; fes_block.n_dofs()];
+    {
+        let proj = fes_block.interpolate_vector(&square_xy).as_slice().to_vec();
+        for &d in &block_ess_tdofs {
+            field_block[d as usize] = proj[d as usize];
+        }
+    }
+    let nonzero = field_block.iter().filter(|&&v| v != 0.0).count();
+    let ic_sum: f64 = field_block.iter().sum();
+    println!("Block initial BC dofs (nonzero): {nonzero}  IC sum: {ic_sum:.6e}");
 
-    // Block → cylinder transfer map.
-    let interface_dofs_cyl =
-        hdiv_boundary_dofs(mesh_cyl, &fes_cylinder, &marker_to_tags(&inner_cylinder_wall_attributes));
-    let interface_dofs_blk =
-        hdiv_boundary_dofs(mesh_blk, &fes_block, &marker_to_tags(&inner_cylinder_wall_attributes));
+    // Block → cylinder transfer map (C++ multidomain_rt.cpp:383-386).
+    let blk_interface_faces = boundary_hex_faces(mesh_blk, &inner_cylinder_wall_tags);
     let field_block_to_cylinder_map = BlockToCylinderMap::new(
         &fes_cylinder,
+        &cyl_interface_faces,
         &fes_block,
-        &interface_dofs_cyl,
-        &interface_dofs_blk,
+        &blk_interface_faces,
     );
 
     // Time loop.
@@ -415,8 +582,10 @@ fn main() {
         if last_step || ti % vis_steps == 0 {
             let bsum: f64 = field_block.iter().sum();
             let csum: f64 = field_cylinder.iter().sum();
+            let bsq: f64 = field_block.iter().map(|v| v * v).sum();
+            let csq: f64 = field_cylinder.iter().map(|v| v * v).sum();
             println!(
-                "step {ti}, t = {t}  block: sum={bsum:.6e}  cyl: sum={csum:.6e}"
+                "step {ti}, t = {t}  block: sum={bsum:.6e} ssq={bsq:.6e}  cyl: sum={csum:.6e} ssq={csq:.6e}"
             );
         }
 

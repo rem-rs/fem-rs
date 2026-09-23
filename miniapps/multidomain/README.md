@@ -13,12 +13,14 @@ one-way through a shared interface.
 
 ## Files
 
-| file          | purpose                                        |
-|---------------|------------------------------------------------|
-| `multidomain.rs` | the miniapp (this port)                     |
+| file | purpose |
+|------|---------|
+| `multidomain.rs` | the H1 miniapp (this port) |
+| `multidomain_nd.rs` | H(curl) variant (`multidomain_nd.cpp`): magnetic diffusion (outer box) + convection-diffusion (cylinder), ND2. Ported round 64 (D657) |
+| `multidomain_rt.rs` | H(div) variant (`multidomain_rt.cpp`): same split scheme with RT1 fluxes. Ported round 64 (D657) |
 
-Upstream `multidomain_nd.cpp` / `multidomain_rt.cpp` (ND/RT interface
-variants) are **not** ported — see "kernel gaps" below.
+Upstream `multidomain_nd.cpp` / `multidomain_rt.cpp` are PAR-only; the ND/RT
+ports mirror them serially (see each file's header for the mechanism table).
 
 ## Running
 
@@ -84,6 +86,50 @@ this mesh.
    suspect: `build_h1_geometry` node→reference-position assignment for hexes.
 7. (design, not a bug) fem-space `boundary_dofs` takes an explicit tag list
    while MFEM uses `bdr_attr_is_ess` marker arrays — the port expands markers.
+
+## ND / RT variants (round 64, D657)
+
+Both variants were ported 1:1 and verified against serial C++ harnesses
+(MFEM 4.10 serial tree, same `ParX → X` mirroring as the H1 harness; sources
+`tmp/d657/multidomain_{nd,rt}_serial.cpp`, binaries `$HOME/work/d657/`):
+
+- dof / essential-dof counts match MFEM exactly on the default gear:
+  ND 7708/5664 ndofs, 1168/800 essential; RT 7296/5120 ndofs, 576/640
+  essential (= `(k+1)²` per quad face — the full face blocks).
+- initial condition = `interpolate_vector(square_xy)` restricted to the wall
+  dofs, equal to MFEM's `ProjectBdrCoefficient{Tangent,Normal}` for this
+  linear field: ND IC sum −4.000000 vs C++ −4 (exact); RT ≈ 1e-17 both.
+- ND trajectory (dt=1e-5): block dof-sum agrees to ~1e-5 relative per step,
+  block/dof-energy (Σdof²) to 0.1–0.3% through t=0.005; cylinder energy to
+  a few %.
+- RT trajectory: block dof-energy agrees to ~3e-6 (t=4e-5) … ~2% (t=0.005).
+  The RT cylinder diverges (fills faster than C++): traced (round 64) to the
+  *free* block-interface dof values after one step differing ~2.2x in
+  Σv² from MFEM (absolute level ~1e-8 on a 5e-2 field — the transfer itself
+  is verified to copy values exactly, `cyl_if == blk_if` in both codes).
+  Prime suspect: the RT1-hex interior-basis divergence / `MixedWeakGradDot`
+  evaluation on the non-parallelepiped facet hexes — core territory
+  (crates/space hdiv, crates/assembly), reported as debt, not worked around
+  in the miniapp.
+
+The ND/RT transfer map cannot reuse the H1 coordinate trick: ND edge dofs
+sit at Gauss-Legendre points along the *canonical* (min node id → max) edge
+direction and ND face dofs take the face-creating element's anchors, so the
+same physical dof carries different coordinates/indices in the two
+differently-numbered submeshes. Both ports pair dofs per *physical entity*
+(sorted corner coordinates) and fix the orientation with each dof's
+"geometric factor" `g(d)` recovered from three constant-field interpolations
+(`interpolate_vector(e_i)[d] = e_i·g(d)`): `g_cyl = ±g_blk`, and
+`dst[c] = sign(g_c·g_b)·src[b]`. The pairing is verified at construction
+against an interpolated linear field.
+
+Quadrature orders mirror MFEM (bilininteg.cpp/hpp): mass
+`Trans.OrderW() + 2p` (= 2p+2 on the trilinear hex map), CurlCurl on Qk `2p`
+(integrator-selected), MixedWeakCurlCross `2p+2`, DivDiv `2p−2`,
+MixedWeakGradDot `2p−1`. Note MFEM's `MixedWeakGradDotIntegrator` negates
+the test shape internally (`shape *= -1.0`), so the C++ `-alpha` coefficient
+fold is a *net* `+alpha` — the RT port passes `+alpha` to fem-rs'
+non-negating integrator.
 
 ## Validation status (vs serial C++ harness, MFEM 4.9 serial, same mesh)
 

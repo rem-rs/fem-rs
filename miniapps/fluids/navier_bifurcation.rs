@@ -69,9 +69,20 @@
 //!   build tree).
 //! * The Rust CG prints MFEM's `PCG: No convergence!` (its rule is
 //!   `print_level >= 0 && !converged`) in front of the iteration table
-//!   whenever the 200-iteration cap is hit — at `rs = 3` that is the pressure
-//!   solve at every step.  The 4.9 serial mirror prints nothing there, so
-//!   those two lines are the only extra lines of the port's output.
+//!   whenever the 200-iteration cap is hit — at the default gear that is the
+//!   pressure solve at every step.  The 4.9 serial mirror prints nothing
+//!   there, so those two lines are the only extra lines of the port's output.
+//! * **D658 adjudication (round 64)**: the PRES 200-iteration stagnation is
+//!   *not* a port defect — MFEM 4.10's own serial mirror stagnates
+//!   identically (`$HOME/work/navier_ser/cpp_bifurcation.txt`: step 1
+//!   `PRES 200 4.64e+01`, bitwise the port's number): it is the no-hypre
+//!   `OrthoSolver(GSSmoother)` fallback being too weak for the 26k-dof
+//!   pure-Neumann pressure.  MFEM's hypre builds converge the pressure with
+//!   `HypreBoomerAMG` (navier_solver.cpp:267-296).  `-pc amg` selects the
+//!   fem-rs analogue (`fem_amg::AmgSolver`, V-cycle, `boomeramg_config()`,
+//!   inside the same `OrthoSolver` wrapper): PRES then converges (28
+//!   iterations at the recorded gear) — the C++ converging behaviour.
+//!   The default remains the no-hypre mirror gear.
 //!
 //! # Verification (serial C++ mirror, MFEM 4.9 + GSLIB)
 //!
@@ -161,6 +172,13 @@ struct Context {
     print_csv_freq: i32,
     visualization: bool,
     traj_len_update_freq: i32,
+    /// D658 extension (no C++ equivalent): `-pc amg` switches the pressure
+    /// preconditioner to the `HypreBoomerAMG` analogue (fem-amg), the
+    /// preconditioner the hypre builds of MFEM 4.10 use by default.  The
+    /// default `false` keeps the no-hypre serial fallback
+    /// `OrthoSolver(GSSmoother)` — the gear the recorded serial-mirror
+    /// verification ran (and in which PRES hits the 200-iteration cap).
+    pressure_amg: bool,
 }
 
 impl Context {
@@ -181,6 +199,7 @@ impl Context {
             print_csv_freq: 500,
             visualization: true,
             traj_len_update_freq: 0,
+            pressure_amg: false,
         }
     }
 }
@@ -218,6 +237,16 @@ fn parse_args(ctx: &mut Context) {
             }
             "-vis" | "--visualization" => ctx.visualization = true,
             "-no-vis" | "--no-visualization" => ctx.visualization = false,
+            "-pc" | "--pressure-precond" => {
+                match take(&mut i).as_str() {
+                    "gs" => ctx.pressure_amg = false,
+                    "amg" => ctx.pressure_amg = true,
+                    other => {
+                        eprintln!("Unknown -pc value: {other} (use gs|amg)");
+                        std::process::exit(1);
+                    }
+                }
+            }
             other => {
                 eprintln!("Unknown option: {other}");
                 std::process::exit(1);
@@ -981,6 +1010,7 @@ fn main() {
     // `NavierSolver flow_solver(&pmesh, ctx.order, 1.0/ctx.Re)`.
     let cfg = NavierConfig {
         verbose: true,
+        pressure_amg: ctx.pressure_amg,
         ..Default::default()
     };
     let mut flow_solver = NavierSolver::new(disc, kinvis, cfg);

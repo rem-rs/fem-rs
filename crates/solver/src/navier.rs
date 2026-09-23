@@ -118,6 +118,17 @@ pub struct NavierConfig {
     /// `verbose` (the `Setup` banner, the per-step iteration table and
     /// [`NavierSolver::print_info`]).
     pub verbose: bool,
+    /// Use the AMG pressure preconditioner — the analogue of MFEM's
+    /// `SpInvPC = HypreBoomerAMG` (navier_solver.cpp:267-282) for builds with
+    /// `MFEM_USE_HYPRE`, wrapped in `OrthoSolver` exactly like the C++
+    /// `SpInvOrthoPC` when `pres_dbcs` is empty.
+    ///
+    /// `false` (the default) keeps the no-hypre serial fallback
+    /// `OrthoSolver(GSSmoother)`, which is the gear the recorded serial-mirror
+    /// verifications of the navier miniapps were produced with (the smoother
+    /// cannot converge the 26k-dof pure-Neumann pressure within the 200
+    /// iteration cap — MFEM 4.10's own serial mirror stagnates identically).
+    pub pressure_amg: bool,
 }
 
 impl Default for NavierConfig {
@@ -131,6 +142,7 @@ impl Default for NavierConfig {
             pl_spsolve: 0,
             pl_hsolve: 0,
             verbose: true,
+            pressure_amg: false,
         }
     }
 }
@@ -415,6 +427,10 @@ pub struct NavierSolver<D: NavierDiscretization> {
     /// snapshotted in `Setup` exactly like the C++ full-assembly path.
     mv_diag: Vec<f64>,
     h_diag: Vec<f64>,
+    /// `SpInvPC` — the [`crate::amg::AmgSolver`] analogue of MFEM's
+    /// `HypreBoomerAMG` pressure preconditioner (navier_solver.cpp:270/278),
+    /// built in `Setup` when [`NavierConfig::pressure_amg`] is set.
+    sp_amg: Option<crate::amg::AmgSolver<f64>>,
 
     vel: VelState,
     pn: Vec<f64>,
@@ -469,6 +485,7 @@ impl<D: NavierDiscretization> NavierSolver<D> {
             g: CsrMatrix::new_empty(0, 0),
             mv_diag: Vec::new(),
             h_diag: Vec::new(),
+            sp_amg: None,
             vel: VelState::new(nv),
             pn: vec![0.0; np],
             curlu: Vec::new(),
@@ -520,6 +537,15 @@ impl<D: NavierDiscretization> NavierSolver<D> {
         self.sp = self.disc.assemble_pressure_laplace();
         self.d = self.disc.assemble_divergence();
         self.g = self.disc.assemble_gradient();
+
+        // `SpInvPC`: the BoomerAMG analogue, built once for the constant `Sp`
+        // (MFEM builds `HypreBoomerAMG` on the LOR/assembled matrix in Setup).
+        if self.cfg.pressure_amg {
+            self.sp_amg = Some(crate::amg::AmgSolver::setup(
+                &self.sp,
+                crate::amg::boomeramg_config(),
+            ));
+        }
 
         // `MvInvPC = DSmoother(Mv)` and `HInvPC = DSmoother(H)` with the
         // initial `H_bdfcoeff = 1/dt`; both are built once, in Setup.
@@ -796,6 +822,7 @@ impl<D: NavierDiscretization> NavierSolver<D> {
         // otherwise the bare smoother.
         {
             let sp = &self.sp;
+            let amg = self.sp_amg.as_ref();
             let apply = |x: &[f64], y: &mut [f64]| sp.spmv(x, y);
             let ortho = pres_ess.is_empty();
             let mut r_ortho = vec![0.0_f64; npl];
@@ -808,12 +835,17 @@ impl<D: NavierDiscretization> NavierSolver<D> {
                 } else {
                     r
                 };
-                // `GSSmoother::Mult` zeroes its output (`iterative_mode` is
-                // false, as propagated by `OrthoSolver`), then runs one
-                // forward and one backward sweep.
-                out.fill(0.0);
-                gs_forward(sp, rin, out);
-                gs_backward(sp, rin, out);
+                if let Some(amg) = amg {
+                    // `SpInvPC->Mult`: the BoomerAMG analogue V-cycle.
+                    out.copy_from_slice(&amg.precond_apply(rin));
+                } else {
+                    // `GSSmoother::Mult` zeroes its output (`iterative_mode`
+                    // is false, as propagated by `OrthoSolver`), then runs one
+                    // forward and one backward sweep.
+                    out.fill(0.0);
+                    gs_forward(sp, rin, out);
+                    gs_backward(sp, rin, out);
+                }
                 if ortho {
                     z_ortho.copy_from_slice(out);
                     orthogonalize(&mut z_ortho);
