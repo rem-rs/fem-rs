@@ -4470,6 +4470,24 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十三轮（round 63）：D640+D641（D634 收口，头号）+ D639/D644 + miniapps 台账续作 + prism 可写轮
+
+开局 HEAD = round 62 末笔 `a39d228`（已推送，ls-remote 实证）；磁盘 52G；树净。
+
+### 派单（四路并行，号段 D651–D662）
+
+| 路 | 债务 | 号段 | 独占文件 | 禁区 |
+|----|------|------|----------|------|
+| A | **D640+D641（头号，D634 收口）**：ex8 块装配对齐（S0/Shat/Sinv/RAPOperator，73-vs-28 迭代根因）+ `EliminateVDofsInRHS` 口径（bilinearform.cpp:1239；补齐后 ex3 有望 137 it 全对齐） | D651-653 | `assembly/src/**` 块算子/bilinearform 路径、`space/src/constraints/**`、solver（若涉）、ex8/ex3 | parallel（B）、io、mesh、element |
+| B | **D639 ex4/ex5 误差评估器换核心**（手写版对解不敏感；`hdiv_error::compute_hdiv_l2_error*` 已有 C++ 验证实现）+ **D644 pex5/pex40 C++ 同档参考**（MPI 参考现编对拍，官方无 pex40 源则如实登记） | D654-656 | `examples/mfem_ex{4,5}_*.rs`、`tmp/d639/**` | 一切 crates/** 源码 |
+| C | **miniapps 台账续作**（~80 文件三态化；README 37 exit(3)+67 parity 为底账；BIT 候选抽 8-10 复跑；长跑记 RUN-LONG）——只读 | D657-659 | `tmp/ledger/**`、矩阵 §3 | 一切代码 |
+| D | **prism.rs 可写轮**：D597 行表下沉单一来源（hdiv/transfer 消费）+ D605 清警告 + D598 coord_twins 2-hex wedge 夹具 + D646 SIAV 双实现收敛 + D647 ex2 stderr→stdout（可升全逐字节） | D660-662 | `prism.rs`、`hdiv.rs`、transfer（space/assembly 两处以实际为准）、`ode/**`+`symplectic.rs`、ex2、`tmp/d597/**` | assembly 其他文件、parallel、mesh、io |
+
+### 未派单（留后续）
+
+D609/D610/D611/D616/D626/D627/D628/D629/D630/D631/D648/D649/D650/D593、D586 upstream 投递
+（**待用户 GitHub 操作**——成稿在 `tmp/d586/`）。
+
 ## 第六十二轮（round 62）：D634 停机规则族（头号）+ 并行回归二分 + ex20 根因 + 小件三清
 
 开局 HEAD = round 61 末笔 `eef75ec`（已推送，ls-remote 实证）；磁盘 65G；树净。
@@ -4487,6 +4505,71 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 
 D597/D605/D598（prism.rs 可写轮）、D609/D610/D611/D616/D626/D627/D628/D629/D630/D631（io/space 余量族）、
 miniapps 台账续作（~80 文件）、D586 upstream 投递（**待用户 GitHub 操作**，成稿在 `tmp/d586/`）。
+
+### 四路交付与关门（round 63 主会话收尾）
+
+#### A —— D640 + D641 **关闭**（头号，D634 收口）
+- **D640 挖出真核心 bug**：`crates/assembly/src/dpg/sinv.rs` 四边形分支把 **J⁻¹ 当 J⁻ᵀ**（非对角
+  系数写反）——轴对齐单元上两者相同故历史 unit-square 验证全盲，star.mesh 外圈剪切四边形暴露。
+  16 行修复；**ex8 29 it（C++ 28，终步容差边缘多一步）、DPG 0.0183277 逐字节**；square-disc
+  交叉验证 ✓。定位方法论范例：F/B0/Bhat/S0 逐位一致 → Sinv 块多重集一致但 uᵀS⁻¹u 差 →
+  S⁻¹ 在自身基底非正确逆 → 块内变换错。
+- **D641 落地 + 两处 round-62 诊断修正**：`form_linear_system_vdofs`（全量投影 x + DIAG_KEEP +
+  `PartMult` 赋值语义 + copy_interior；既有入口零改动，4 单测）。修正①：PartMult 是**赋值**
+  ⇒ 消元口径与既有逐 dof 入口等价（等价性测试）；修正②：MFEM 4.10 `IterativeSolver` 默认
+  `iterative_mode=true`（solvers.cpp:29）——round 62 "MFEM 置 x=0" 记录有误。
+- **ex3 剩余残差铁证**：消元系统 ‖B‖/‖X₀‖/‖r₀‖ 与 C++ 一致到 1e-15~16，**A 对角线序列前 12 项
+  逐位、第 13 项起分叉** ⇒ **tet-ND 边编号置换 vs MFEM EnumEdges**（只有置换能解释）→
+  **D651（round 64 头号候选，space 域）**。ex3 数值按预期不变（消元等价）。
+- 新债：D651/D652（sinv 负 det 垃圾块）/D653（ex3 2-D l2_err 三角专用）。纪律偏差一次：
+  `cat >>` 追加文件（应用 Edit）——已自查，并入纪律强调。
+
+#### B —— D639 + D644 **关闭**
+- **D639 根因**：手写评估器硬编码**纯三角 RT0 假设**（TriRTk(0) 3-dof + 三角求积 + 仿射三角
+  变换），而 star.mesh 是 **20 个四边形**——三角求积只盖每 quad 左下半（范数比 0.495≈1/2 面积）
+  ⇒ 重构场是垃圾 ⇒ "对解不敏感"。删手写换核心 `hdiv_error`；**ex4 0.0161443 / ex5 0.000143587
+  与 C++ 逐字节**（ex4 敏感性 -f 2 → 0.0326 随解变化 ✓）；求解轨迹零漂移（646/397 it 保持）。
+- **D644**：官方源实为 `ex5p.cpp`/`ex40p.cpp`（MFEM 命名 exNp，无 pex40 文件名）；MPI 参考现编
+  实跑：ex5p **RUN**（dim 逐位同；Schur 预条件子 AMG 参数族差异 44vs95 it、误差同量级）、
+  ex40p **RUN⁺**（Newton 全轨迹同形 ≤2e-3）。
+- 新债：D654（BoomerAMG 参数族对齐或豁免）、D655（Total dofs 本地 vs 全局口径）、D656（examples
+  手写误差残留审计）。
+
+#### C —— miniapps 台账全量三态化（零代码改动）
+- **100 文件全定档**：BIT/BIT* 21（本轮新真对拍 14：printfunc 逐字节、field-interp SHA256=
+  round-32 记录、get_values 全新真值链等）、RUN 43（6 项与 C++ 记录逐位复现）、RUN* 2、CRASH 2、
+  **DEV 21（README 的 21 处 exit(3) 承诺全部验证兑现、零回潮）**、NOREF 6。128 日志 + 18 件
+  C++ 参考快照。
+- **意外升级**：twist 从 README 记载的 exit(3) 变 rc=0 真写出曲面 nodes（nodes writer 落地红利，
+  README 过期）。
+- **完成定义第 3 条达成**：examples（round 61）+ miniapps（本轮）全部三态化。
+- 新债：D657（multidomain_nd/_rt 首跑即挂）、D658（navier_bifurcation 不收敛+README 回潮嫌疑）、
+  D659（trimmer 双重阻塞）。
+
+#### D —— prism 可写轮五件 **关闭**
+- **D597**：`prism.rs::mfem_nodal_rows()` 单一来源（D541 先例；RT0Wdg nk 约定文档随迁），hdiv/
+  transfer 两消费方改调、手拷贝删；**26/26 红线逐位同基线**（d468/d493/d572/d584）。
+- **D605** 警告清。**D598**：coord_twins 合法触发夹具从无到有（2-hex AddHexAsWedges pinched；
+  **中和实验**证明压在目标路径上；112/112 exact path）；**连带更正 d584 docstring**（two-wedge
+  夹具 twin_groups 实为空——初版遗留错误，仅注释零行为）。
+- **D646**：SIAV 双实现收敛——symplectic 版**零消费方**删除（lib 270→264 账目吻合），Yoshida4
+  保留（不同算法）+ 补周期测试。**D647**：ex2 升**全流逐字节**——**简报前提再修正**：MFEM 4.10
+  ex2.cpp 根本无 "Wrote" 打印 ⇒ 1:1 修法是删行；278 行/11783 字节 cmp 全同、stderr 双侧 0。
+- 新债：D660（prism order-0 节点双源互钉）、D661（interpolate_vector 每单元重建参考元性能债）、
+  D662（夹具文档 vs 实测行为漂移审计——d584 即实例）。
+
+### 全量回归（五道门）
+
+门 1 lib **2624/0**（symplectic 删测 −6、新增 +5 净效应）；门 2 `--tests` **256 targets / 3991 / 0**
+（零 flake）；门 3 examples **0 错误**（目标全 current）；门 4 pro **rc=0**；门 5 fem-py **rc=0**。
+磁盘 53G。头条逐名 grep：d640/d641/d639/d644/d597/d598/d646/d647 全 ok。
+
+### round 64 待办（建议）
+
+**① D651（tet-ND 边编号置换 vs EnumEdges——ex3 唯一剩余障碍，space 域 dof_manager/hcurl）**；
+② **D657/D658**（multidomain 崩溃 + navier_bifurcation 回潮嫌疑）；③ **D654/D655/D656**（D639
+余量：BoomerAMG 参数族/口径/残留审计）；④ D652/D653/D659/D660-D662 小件族；⑤ D593/D616/D626/
+D627-D629 余量；⑥ D586 upstream 投递（**待用户 GitHub 操作**）。
 
 ## 第六十一轮（round 61）：D624 混合几何落存储（头号）+ slot 序同族三件 + 三态台账 + 小件打包
 
