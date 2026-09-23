@@ -134,10 +134,14 @@
 | P2 | ~~D117/D118 io 混合高阶几何~~ + ~~D624 落存储~~ | **round 60+61 两段关闭**：编号引擎（60）→ 落存储 attach（61，ragged CSR 零新字段、uniform 逐位不变、llnl-p3 1.3e-13 + wrong orientation 15/26→0 + fichera-mixed-16 翻绿 + AMR mindet=粗/4）；残 D627/D628/D629（写出/细化传播/曲面） |
 | P1 | ~~D612/D619/D613 slot 序同族~~ | **round 61 关闭（B 路）**：Hex27 官方序=MFEM FaceVert 序裁决 + p_refine 旧序换掉[**连带修体心坐标真 bug：20 结点求和/8 → 角点均值**]；D619 误诊关闭（D31 已顺带修复，零改动 pin 直接绿）；D613 曲线标签契约+DofManager 高阶编号补齐（红 5/6→绿 6/6） |
 | P1 | ~~D614 postproc 接线~~ + ~~D615 hex IGLL 装配腿~~（51984 条目 2.26e-13，此前**静默跌落 GaussLegendre**）+ ~~D617 tet GM fixture~~（红证据：旧矩解 tet 段偏差 1e18..2.5e32） | **round 61 关闭（D 路）** |
-| **P1（新，round 61 台账扫出）** | **D634 迭代求解器停机规则/残差口径族**（ex4 提前收敛误差 27×、ex5 MINRES 假收敛 u_err O(1)、ex3/6/8/14/29 同族——修一处收益一片）**← round 62 头号候选**；**D633** data 默认网格资产缺失（e1f16f8 误删，恢复即修 10 例）；**D635a** pex5/pex40 并行分区越界回归（round 30 还绿）；**D635b** ex20 辛积分器未演化（输出 1/0） | **待派** |
+| **P1（round 62 关闭，台账新债清)）** | ~~D634 停机规则族~~（**根因=七例求解器配置漂移，核心 API 两套语义全对**[round 32 对齐守住]：ex4 字面量预开方松 10 量级→646 it=C++ 且 0-588 行逐字节、ex5 改用 1:1 mfem_minres→397 行逐字节、ex6/ex14/ex29 同族、ex3 初值口径、ex8 内层判据；核心唯一真缺陷=mfem_minres 打印门；**回归红线 ex1/ex2/ex24/ex31/d367/d370/mg 全绿**）；~~D635a pex5/pex40 并行越界~~（二分闭环：`0e19c81` Step 0b 三分量硬编码 dot on dim-len 切片；修复后与回归前父构建**逐位一致**）；~~D635b ex20 辛积分器未演化~~（根因=**步进调用被过期 TODO 注释**，SIAVSolver 早已建成；六配置逐字节=C++）；~~D633 data 资产缺失~~（23 件回填 MD5 校验、ex15dyn 513s 全程 rc=0） |
+| **P1（新，round 62 登记）** | **D639** ex4/ex5 示例局部 H(div) 误差评估器对解不敏感（应改调核心 hdiv_error）；**D640** ex8 块/算子装配对齐（S0/Shat/Sinv/RAPOperator）；**D641** `EliminateVDofsInRHS` 口径缺失（bilinearform.cpp:1239；补齐后 ex3 有望全对齐）；**D644** pex5/pex40 缺 C++ 同档参考 | 待派（与 miniapps 台账续作同族） |
+| P1 | ~~D612/D619/D613 slot 序同族~~ + ~~D614 postproc 接线~~ + ~~D615 hex IGLL 装配腿~~ + ~~D617 tet GM fixture~~ | **round 61 关闭（D 路）** |
+| P1 | ~~D632 pyramid 细化家族错配~~（真根因=CurvedMesh 三求值器走 factory；∫|detJ| 0.1434→1/3）+ ~~D636 elem_vol hex 恒 0~~（η 0→√3、ZZ 全 0→全>1e-10）+ ~~D637 flux_recovery 推断~~（显式 D637 拒绝替代静默 0.0） | **round 62 关闭（D 路）** |
+| P1 | ~~D638 HCurl hex IGLL 装配腿~~（曾静默跌落 GL，95184 项 1.88e-14、框架因子=1） | **round 62 关闭（C 路）** |
 | P2 | D113 剩余细化几何搬运（Hex27/Prism6/Tet4/Pyramid5） | 队列 |
 | P2 | D122 并行 ND2/RT1 ghost 分区缺陷 | 队列 |
-| P3 | D597/D598/D605（prism.rs 可写轮）、D590（GLL 生成器）、D616/D627/D628/D629/D630/D636/D637/D638、D570、D579、D593 | 挂起明确化 |
+| P3 | D597/D598/D605（prism.rs 可写轮）、D590、D616/D627/D628/D629/D630/D648（金字塔标记细化越界实录）/D649（hex RT 面旋转）/D650（CurvedMesh JacobianCache 直边化风险）、D570、D579、D593、D644 | 挂起明确化 |
 
 ## 6. 维护规程
 
