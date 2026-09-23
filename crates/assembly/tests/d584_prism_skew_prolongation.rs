@@ -43,9 +43,10 @@ use std::collections::{HashMap, HashSet};
 /// geometry as the MFEM probe's skew wedge.  The element stays affine (the
 /// ENGINE frame absorbs the shear), so the exact-path prolongation builder
 /// must serve the refinement.  A single element also keeps this fixture free
-/// of the coincident-vertex pinch of the two-wedge cube (its crossing z = 0
-/// diagonals refine to two distinct fine nodes at the same point — a
-/// `HdivVertexMaps` ambiguity, exercised by the two-wedge test below).
+/// of the coincident-vertex ambiguity of the two-wedge cube (a `HdivVertexMaps`
+/// twin hazard; the fixture that actually materialises fine twins is the
+/// pinched `AddHexAsWedges` mesh in `tests/d598_wedge_pinch_coord_twins.rs` —
+/// the two-wedge test below is twin-free per the D598 probe).
 fn skewed_prism_mesh() -> Mesh<3> {
     Mesh::<3> {
         coords: vec![
@@ -318,15 +319,14 @@ fn d584_skew_fixture_is_genuinely_skewed() {
     assert_eq!(stats.located_count, fine_space.n_dofs());
 }
 
-/// Two-wedge cube, sheared: the interior diagonal quad makes the z = 0
-/// diagonals of the two wedges cross at (0.5, 0.5, 0), and their midpoints
-/// refine to TWO distinct fine nodes at the same coordinates.  The
-/// prolongation builder's coarse→fine vertex correlation must not confuse the
-/// twins (a plain nearest-node lookup resolves the tie by scan order and hands
-/// the wrong twin to the second wedge's extended vertex set, which used to
-/// make the exact path decline to the approximate legacy builder).  With the
-/// coordinate-twin correction the exact path serves the whole refinement and
-/// the constant field stays dof-exact.
+/// Two-wedge cube, sheared: constant-field dof-exactness of the exact
+/// prolongation path across the sheared shared-face geometry.  (An earlier
+/// revision of this comment claimed the refinement materialises coincident
+/// fine twins at (0.5, 0.5, 0); the D598 twin-count probe shows the legal
+/// main-diagonal split of this fixture produces NO coordinate twins — the
+/// genuine twin trigger is the pinched two-hex `AddHexAsWedges` mesh in
+/// `tests/d598_wedge_pinch_coord_twins.rs`, which is what exercises the
+/// builder's `coord_twins` defence.)
 #[test]
 fn d584_skew_two_wedge_rt0_constant_field_prolongs_exactly() {
     let c3 = [0.9_f64, 0.4, -1.1];

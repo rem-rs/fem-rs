@@ -2812,23 +2812,22 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
             }
         }
         // PRISM_FACES slot order: xi=0 tri, xi=1 tri, zeta=0 quad, diagonal
-        // quad (eta+zeta=1), eta=0 quad.  D584: the normals are the
-        // `RT0WdgFiniteElement` nk table (`fe_fixed_order.cpp:6439`) — the
-        // triangular-face rows carry n̂|F| = ±½ (the quad-face rows coincide
-        // with the generic `RT_WedgeElement` table) — the same convention as
-        // the `PrismRT0` k = 0 basis (D572: slots 0,1 doubled) and the stored
-        // dofs (dof = f·adj(J)·n̂|F|), so the reference dual is the identity
-        // and the interpolation solve returns the nodal flux samples
-        // verbatim.  (With the historical generic rows — ±1 = 2·n̂|F| on the
-        // triangular faces — the dual was diag(2,2,1,1,1) and the solve undid
-        // the 2× — same stored values, but the table then stated a convention
-        // no MFEM collection pairs with its basis.)
+        // quad (eta+zeta=1), eta=0 quad.  The rows are MFEM's
+        // `RT0WdgFiniteElement` node/normal table — the D584 RT0Wdg nk
+        // convention (triangular-face rows `n̂|F| = ±½`) — consumed from the
+        // single element-crate definition `prism::mfem_nodal_rows()` (D597,
+        // the D541 pyramid precedent; the same rows the prolongation builder
+        // reads via `hdiv_rt_slot_rows(Prism, 0)`).  The D572 `PrismRT0`
+        // basis is point-dual to these rows (W = I), so the interpolation
+        // solve returns the nodal flux samples verbatim.  (With the
+        // historical generic rows — ±1 = 2·n̂|F| on the triangular faces —
+        // the dual was diag(2,2,1,1,1) and the solve undid the 2× — same
+        // stored values, but the table then stated a convention no MFEM
+        // collection pairs with its basis.)
         ElementType::Prism6 => {
-            rows.push(InterpRow { xi: [0.0, 1.0 / 3.0, 1.0 / 3.0], nk: [-0.5, 0.0, 0.0] });
-            rows.push(InterpRow { xi: [1.0, 1.0 / 3.0, 1.0 / 3.0], nk: [0.5, 0.0, 0.0] });
-            rows.push(InterpRow { xi: [0.5, 0.5, 0.0], nk: [0.0, 0.0, -1.0] });
-            rows.push(InterpRow { xi: [0.5, 0.5, 0.5], nk: [0.0, 1.0, 1.0] });
-            rows.push(InterpRow { xi: [0.5, 0.0, 0.5], nk: [0.0, -1.0, 0.0] });
+            for (pt, nk) in fem_element::raviart_thomas::prism::mfem_nodal_rows() {
+                rows.push(InterpRow { xi: pt, nk });
+            }
         }
         // PYRAMID_FACES slot order: base quad (3,2,1,0) centre, then the
         // triangular faces (0,1,4), (1,2,4), (2,3,4), (3,0,4), then the

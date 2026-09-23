@@ -21,7 +21,6 @@
 //! Prints DOF count, solver iterations, and final residual.
 //! Writes `displaced.mesh` and `sol.gf` (matching MFEM ex2 output files).
 
-use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
@@ -30,7 +29,7 @@ use fem_assembly::{
     standard::{ElasticityIntegrator, NeumannIntegrator},
     postproc::coefficient::PWConstCoeff,
 };
-use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::solve_pcg;
 use fem_linalg::fem_to_linlvo_csr;
@@ -185,7 +184,9 @@ fn main() {
         // Write the inverted solution (x → −x, matching MFEM ex2).
         let neg_x: Vec<f64> = x.iter().map(|&v| -v).collect();
         write_mfem_gf_file("sol.gf", dim, &neg_x, "H1", args.order, dim, 14).expect("sol write failed");
-        eprintln!("  Wrote displaced.mesh and sol.gf");
+        // D647: no "Wrote displaced.mesh and sol.gf" print — MFEM 4.10 ex2
+        // (`examples/ex2.cpp` step 14) writes the files silently; the former
+        // eprintln was the one line blocking full-stream byte parity.
     }
 
     // 15. Send the solution to GLVis.

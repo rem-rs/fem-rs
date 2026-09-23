@@ -1294,7 +1294,8 @@ fn hdiv_rt0_family<M: MeshTopology>(mesh: &M) -> Option<HdivRt0Family> {
 /// `hex_rt1::mfem_hex_nodal_dofs` (D494 — same enumeration
 /// `HDivSpace::interp_rows` performs: face Gauss grids, then the interior
 /// closed×open blocks with the HexRTk orientation flips in the normal);
-/// prism enumerates its order-0 Gauss–Legendre samples per face (higher
+/// prism (order 0) consumes the single element-crate table
+/// `prism::mfem_nodal_rows()` (D597 — the D541 pyramid precedent; higher
 /// prism orders stay on the legacy builder).
 fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], [f64; 3])>> {
     let z2 = |p: [f64; 2]| [p[0], p[1], 0.0];
@@ -1317,31 +1318,19 @@ fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], 
             let (pts, nks) = hex_rt1::mfem_hex_nodal_dofs(o as usize);
             Some(pts.iter().zip(nks.iter()).map(|(p, n)| (*p, *n)).collect())
         }
-        (HdivRt0Family::Prism, 0) => Some(vec![
-            // Prism RT0 rows in the ENGINE frame (axes = vertical, eta,
-            // zeta — columns pt(3)−pt(0), pt(1)−pt(0), pt(2)−pt(0)),
-            // mirroring `HDivSpace`'s prism `interp_rows`.  Faces: bottom
-            // tri, top tri, front quad (zeta = 0), right quad
-            // (eta + zeta = 1), left quad (eta = 0) in MFEM slot order.
-            // D584: the triangular-face rows carry the `RT0WdgFiniteElement`
-            // nk (n̂|F| = ±½, `fe_fixed_order.cpp:6439` — the quad rows
-            // coincide with the generic table), matching the D572 `PrismRT0`
-            // basis (tri slots doubled) and the stored dofs (physical face
-            // fluxes); the reference dual is the identity, so the
-            // prolongation rows P = B are MFEM's RT0Wdg
-            // `GetLocalInterpolation` (`fe_fixed_order.cpp:6442`) directly.
-            // (The historical generic ±1 rows made W = diag(2,2,1,1,1) and
-            // P = B·W⁻¹ landed on the generic collection's rows — entrywise
-            // equal to RT0Wdg's on prism refinements, whose children are
-            // ENGINE-frame-aligned, but stated in a convention no MFEM
-            // collection pairs with its basis; see
-            // `tests/d584_prism_skew_prolongation.rs`.)
-            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-0.5, 0.0, 0.0]),
-            ([1.0, 1.0 / 3.0, 1.0 / 3.0], [0.5, 0.0, 0.0]),
-            ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
-            ([0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
-            ([0.5, 0.0, 0.5], [0.0, -1.0, 0.0]),
-        ]),
+        // D597 (the D541 pyramid precedent): the prism RT0 rows are the
+        // MFEM `RT0WdgFiniteElement` node/normal table in the ENGINE frame
+        // (axes = vertical, eta, zeta; D584 RT0Wdg nk convention,
+        // `fe_fixed_order.cpp:6439`), consumed from the single element-crate
+        // definition `prism::mfem_nodal_rows()` — the same rows
+        // `HDivSpace`'s prism `interp_rows` reads.  The reference dual is
+        // the identity, so the prolongation rows P = B are MFEM's RT0Wdg
+        // `GetLocalInterpolation` (`fe_fixed_order.cpp:6442`) directly; see
+        // `tests/d584_prism_skew_prolongation.rs`.  Higher prism orders stay
+        // on the legacy builder.
+        (HdivRt0Family::Prism, 0) => {
+            Some(fem_element::raviart_thomas::prism::mfem_nodal_rows())
+        }
         // D493: `RT_FuentesPyramidElement` dof nodes and normals — the
         // element's own slot order (base quad first, then the four triangular
         // faces (0,1,4), (1,2,4), (2,3,4), (3,0,4), then the Fuentes

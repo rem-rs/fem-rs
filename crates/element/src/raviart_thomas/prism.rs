@@ -386,6 +386,33 @@ pub struct PrismRTk {
 /// Order-0 element (alias for `PrismRTk::new(0)`, kept for backward compat).
 pub type PrismRT0 = PrismRTk;
 
+/// MFEM `RT0WdgFiniteElement` dof node/normal rows — `(point, nk)` per dof in
+/// the element's slot order (D597 single source, the D541 pyramid precedent):
+/// the space engine's dual rows (`HDivSpace::interp_rows(Prism6)`) and the
+/// prolongation builder's slot table (`hdiv_rt_slot_rows(Prism, 0)`) both
+/// consume this one definition instead of keeping hand-copied 5-row tables.
+///
+/// Frame: axes = (xi, eta, zeta) with xi = layer, (eta, zeta) = triangle
+/// plane; slot order = bottom tri, top tri, q0 (zeta = 0), q1 (diagonal
+/// eta+zeta = 1), q2 (eta = 0).  The triangular-face normals carry the
+/// `RT0WdgFiniteElement` nk `n̂|F| = ±½` (`fe_fixed_order.cpp:6439`) — the
+/// quad rows coincide with the generic `RT_WedgeElement` table — matching the
+/// D572 basis (tri slots doubled) and the stored dofs (dof = f·adj(J)·n̂|F|);
+/// the reference dual is the identity, so the prolongation rows P = B are
+/// MFEM's RT0Wdg `GetLocalInterpolation` (`fe_fixed_order.cpp:6442`) directly
+/// (D584).  Only order 0 has a nodal table (the collection
+/// `RT0_3DFECollection` serves); orders ≥ 1 are moment-based in this crate
+/// and stay off the nodal path.
+pub fn mfem_nodal_rows() -> Vec<([f64; 3], [f64; 3])> {
+    vec![
+        ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-0.5, 0.0, 0.0]),
+        ([1.0, 1.0 / 3.0, 1.0 / 3.0], [0.5, 0.0, 0.0]),
+        ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
+        ([0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
+        ([0.5, 0.0, 0.5], [0.0, -1.0, 0.0]),
+    ]
+}
+
 impl PrismRTk {
     pub fn new(order: usize) -> Self {
         assert!(
@@ -701,10 +728,10 @@ mod tests {
             |u, v| u * v,
             |_, v| v * v,
         ];
-        let (rule, n_pts): (QuadratureRule, ()) = if h < 2 {
-            (tri_rule(12), ())
+        let rule = if h < 2 {
+            tri_rule(12)
         } else {
-            (quad_rule_01(12), ())
+            quad_rule_01(12)
         };
         for (pt, &w) in rule.points.iter().zip(rule.weights.iter()) {
             let (x, n, ds) = face_point(h, pt[0], pt[1]);
@@ -829,6 +856,34 @@ mod tests {
                     "coord {i} comp {c}: got {} want {} (got {g:?} want {w:?})",
                     g[c],
                     w[c]
+                );
+            }
+        }
+    }
+
+    /// D597: the single-source RT0Wdg row table — consumed by the space
+    /// engine (`HDivSpace::interp_rows(Prism6)`) and the prolongation builder
+    /// (`hdiv_rt_slot_rows(Prism, 0)`) in place of their former hand copies —
+    /// equals the MFEM probe values (face centroids/centres, tri nk halved to
+    /// `n̂|F| = ±½`, quad nk the unnormalised generic table;
+    /// `fe_fixed_order.cpp:6439`, probes `tmp/d572` / `tmp/d584`).
+    #[test]
+    fn mfem_nodal_rows_rt0_single_source() {
+        let rows = mfem_nodal_rows();
+        assert_eq!(rows.len(), PrismRTk::new(0).n_dofs());
+        let want: Vec<([f64; 3], [f64; 3])> = vec![
+            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-0.5, 0.0, 0.0]),
+            ([1.0, 1.0 / 3.0, 1.0 / 3.0], [0.5, 0.0, 0.0]),
+            ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
+            ([0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
+            ([0.5, 0.0, 0.5], [0.0, -1.0, 0.0]),
+        ];
+        assert_eq!(rows.len(), want.len());
+        for (i, ((xi, nk), (wxi, wnk))) in rows.iter().zip(want.iter()).enumerate() {
+            for d in 0..3 {
+                assert!(
+                    (xi[d] - wxi[d]).abs() < 1e-15 && (nk[d] - wnk[d]).abs() < 1e-15,
+                    "row {i} comp {d}: ({xi:?}, {nk:?}) vs ({wxi:?}, {wnk:?})"
                 );
             }
         }

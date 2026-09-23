@@ -1,116 +1,24 @@
 //! Symplectic integrators for Hamiltonian systems.
 //!
-//! The [`HamiltonianSiavSolver`] (`(q, p)`-tuple form of MFEM's `SIAVSolver`)
-//! implements a variable-order symplectic integrator (orders 1–4) using the
-//! coefficients from MFEM's `SIAV` (Symplectic Integration Algorithm V) scheme.
+//! The MFEM `SIAVSolver` tableau itself (orders 1–4, `ode.cpp:1109-1149`) has
+//! a single implementation in this crate: [`super::mfem_ode::SiavSolver`],
+//! the `TimeDependentOperator`/`P_`-operator form MFEM's electromagnetics
+//! miniapps drive (ex20 pattern).  Its `(q, p)`-tuple `HamiltonianSystem`
+//! twin used to live here as a second hand copy of the same tables and stage
+//! loop; it had no consumers outside its own tests and was removed at D646
+//! (死代码零容忍) — drive [`super::mfem_ode::SiavSolver`] directly instead.
 //!
-//! The Euler-vector form of the same tableau (MFEM `TimeDependentOperator`
-//! `F_`/`P_`, including the implicit branch) lives in
-//! [`super::mfem_ode::SiavSolver`]; the two are the explicit-`F_` special case
-//! of each other.  The distinct names avoid the one-letter case-only
-//! near-collision of the crate-root re-exports.
+//! [`Yoshida4`] is *not* part of that duplication: it is a distinct 4th-order
+//! composition (Yoshida 1990), kept for long-term energy conservation
+//! experiments.
 //!
 //! These schemes preserve the phase-space volume of Hamiltonian systems,
 //! giving excellent long-term energy conservation.
 
 use super::traits::HamiltonianSystem;
 
-/// Variable-order symplectic integration algorithm (SIAV).
-///
-/// Supports orders 1–4 via a set of Yoshida-type composition coefficients.
-/// The scheme advances `(q, p)` under Hamilton's equations:
-/// ```text
-///   dq/dt =  ∂H/∂p
-///   dp/dt = -∂H/∂q
-/// ```
-///
-/// Each stage updates `p` (using `-∂H/∂q`) then `q` (using `∂H/∂p`):
-/// ```text
-///   for i in 0..order:
-///     if b[i] ≠ 0:  p += b[i] · dt · (-∂H/∂q)
-///     q += a[i] · dt · (∂H/∂p)
-/// ```
-pub struct HamiltonianSiavSolver {
-    order: usize,
-    a: Vec<f64>,
-    b: Vec<f64>,
-}
-
-impl HamiltonianSiavSolver {
-    /// Create a new `HamiltonianSiavSolver` of the given order (1–4).
-    pub fn new(order: usize) -> Self {
-        let (a, b) = match order {
-            1 => (vec![1.0], vec![1.0]),
-            2 => (vec![0.5, 0.5], vec![0.0, 1.0]),
-            3 => (
-                vec![2.0 / 3.0, -2.0 / 3.0, 1.0],
-                vec![7.0 / 24.0, 0.75, -1.0 / 24.0],
-            ),
-            4 => {
-                let cbrt2 = 2.0_f64.powf(1.0 / 3.0);
-                let a0 = (2.0 + cbrt2 + cbrt2.recip()) / 6.0;
-                let a1 = (1.0 - cbrt2 - cbrt2.recip()) / 6.0;
-                (
-                    vec![a0, a1, a1, a0],
-                    vec![
-                        0.0,
-                        1.0 / (2.0 - cbrt2),
-                        1.0 / (1.0 - cbrt2 * cbrt2),
-                        1.0 / (2.0 - cbrt2),
-                    ],
-                )
-            }
-            o => panic!("HamiltonianSiavSolver::new: unsupported order {o} (must be 1–4)"),
-        };
-        Self { order, a, b }
-    }
-
-    /// Order of the integrator.
-    pub fn order(&self) -> usize {
-        self.order
-    }
-
-    /// Advance the Hamiltonian system by one time step `dt`.
-    ///
-    /// * `sys` — the Hamiltonian system (provides `grad_q` = ∂H/∂q and `grad_p` = ∂H/∂p).
-    /// * `q` — generalized coordinates (updated in place).
-    /// * `p` — generalized momenta (updated in place).
-    /// * `dt` — time step.
-    /// * `t` — current time (unused in autonomous systems but preserved for API parity).
-    pub fn step(
-        &self,
-        sys: &dyn HamiltonianSystem,
-        q: &mut [f64],
-        p: &mut [f64],
-        _t: f64,
-        dt: f64,
-    ) {
-        let n = q.len();
-        let mut neg_grad_q = vec![0.0_f64; n];
-        let mut grad_p = vec![0.0_f64; n];
-
-        for i in 0..self.order {
-            if self.b[i] != 0.0 {
-                sys.grad_q(q, p, &mut neg_grad_q);
-                let bi = self.b[i] * dt;
-                for k in 0..n {
-                    p[k] -= bi * neg_grad_q[k];  // dp/dt = -∂H/∂q
-                }
-            }
-            sys.grad_p(q, p, &mut grad_p);
-            let ai = self.a[i] * dt;
-            for k in 0..n {
-                q[k] += ai * grad_p[k];  // dq/dt = ∂H/∂p
-            }
-        }
-    }
-}
-
 /// 4th-order Yoshida symplectic integrator (a special composition of three
 /// leapfrog steps).  Coefficients from Yoshida (1990).
-///
-/// This is a fixed-order alternative to [`HamiltonianSiavSolver`] when 4th-order
-/// accuracy is desired without the overhead of the variable-order dispatch.
 pub struct Yoshida4;
 
 impl Yoshida4 {
@@ -173,30 +81,6 @@ impl Yoshida4 {
             q[k] += (w1 / 2.0) * dt * buf[k];
         }
     }
-
-    fn yoshida_stage(
-        &self,
-        sys: &dyn HamiltonianSystem,
-        q: &mut [f64],
-        p: &mut [f64],
-        dt: f64,
-        w: f64,
-    ) {
-        let n = q.len();
-        let mut buf = vec![0.0_f64; n];
-        let c = w * dt;
-
-        // Drift (position update)
-        sys.grad_p(q, p, &mut buf);
-        for k in 0..n {
-            q[k] += c * buf[k];
-        }
-        // Kick (momentum update)
-        sys.grad_q(q, p, &mut buf);
-        for k in 0..n {
-            p[k] -= c * buf[k];
-        }
-    }
 }
 
 impl Default for Yoshida4 {
@@ -229,71 +113,17 @@ mod tests {
         0.5 * p * p / m + 0.5 * k * q * q
     }
 
-    #[test]
-    fn siav_order1_energy_conservation() {
-        let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = HamiltonianSiavSolver::new(1);
-        let mut q = vec![0.0_f64];
-        let mut p = vec![1.0_f64];
-        let e0 = harmonic_energy(q[0], p[0], 1.0, 1.0);
-        let dt = 0.01;
-        let nsteps = 1000;
-        for _ in 0..nsteps {
-            solver.step(&sys, &mut q, &mut p, 0.0, dt);
-        }
-        let e1 = harmonic_energy(q[0], p[0], 1.0, 1.0);
-        let rel_err = (e1 - e0).abs() / e0;
-        assert!(
-            rel_err < 0.1,
-            "order-1 energy drift too large: {rel_err:.3e}"
-        );
-    }
+    // D646: the former `HamiltonianSiavSolver` tests (orders 1–4 energy
+    // conservation, oscillator period, coefficient tables, invalid-order
+    // panic) went with the deleted duplicate; the SIAV tableau is covered by
+    // `mfem_ode::SiavSolver`'s tests (`d89_ode_solvers.rs`) and ex20.  Only
+    // the distinct `Yoshida4` composition keeps local coverage here.
 
     #[test]
-    fn siav_order2_energy_conservation() {
-        let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = HamiltonianSiavSolver::new(2);
-        let mut q = vec![0.0_f64];
-        let mut p = vec![1.0_f64];
-        let e0 = harmonic_energy(q[0], p[0], 1.0, 1.0);
-        let dt = 0.05;
-        let nsteps = 1000;
-        for _ in 0..nsteps {
-            solver.step(&sys, &mut q, &mut p, 0.0, dt);
-        }
-        let e1 = harmonic_energy(q[0], p[0], 1.0, 1.0);
-        let rel_err = (e1 - e0).abs() / e0;
-        assert!(
-            rel_err < 1e-3,
-            "order-2 energy drift too large: {rel_err:.3e}"
-        );
-    }
-
-    #[test]
-    fn siav_order4_energy_conservation() {
-        let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = HamiltonianSiavSolver::new(4);
-        let mut q = vec![0.0_f64];
-        let mut p = vec![1.0_f64];
-        let e0 = harmonic_energy(q[0], p[0], 1.0, 1.0);
-        let dt = 0.1;
-        let nsteps = 1000;
-        for _ in 0..nsteps {
-            solver.step(&sys, &mut q, &mut p, 0.0, dt);
-        }
-        let e1 = harmonic_energy(q[0], p[0], 1.0, 1.0);
-        let rel_err = (e1 - e0).abs() / e0;
-        assert!(
-            rel_err < 1e-5,
-            "order-4 energy drift too large: {rel_err:.3e}"
-        );
-    }
-
-    #[test]
-    fn siav_oscillator_period() {
+    fn yoshida4_oscillator_period() {
         // Harmonic oscillator with m=1, k=1 has period 2π.
         let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = HamiltonianSiavSolver::new(4);
+        let solver = Yoshida4::new();
         let mut q = vec![1.0_f64];
         let mut p = vec![0.0_f64];
         let dt = 0.01;
@@ -311,26 +141,6 @@ mod tests {
             "oscillator period error too large: p={}",
             p[0]
         );
-    }
-
-    #[test]
-    fn siav_coefficients_order1() {
-        let solver = HamiltonianSiavSolver::new(1);
-        assert_eq!(solver.a, vec![1.0]);
-        assert_eq!(solver.b, vec![1.0]);
-    }
-
-    #[test]
-    fn siav_coefficients_order2() {
-        let solver = HamiltonianSiavSolver::new(2);
-        assert_eq!(solver.a, vec![0.5, 0.5]);
-        assert_eq!(solver.b, vec![0.0, 1.0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "unsupported order")]
-    fn siav_invalid_order_panics() {
-        HamiltonianSiavSolver::new(5);
     }
 
     #[test]
