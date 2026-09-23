@@ -4470,6 +4470,24 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十二轮（round 62）：D634 停机规则族（头号）+ 并行回归二分 + ex20 根因 + 小件三清
+
+开局 HEAD = round 61 末笔 `eef75ec`（已推送，ls-remote 实证）；磁盘 65G；树净。
+
+### 派单（四路并行，号段 D639–D650）
+
+| 路 | 债务 | 号段 | 独占文件 | 禁区 |
+|----|------|------|----------|------|
+| A | **D634（头号）停机规则/残差口径族**（ex4 提前收敛 27×、ex5 MINRES 假收敛 u_err O(1)、ex14 反向、ex6/ex29 过收敛、ex3/ex8 口径——逐例根因；round 32 两套 PCG API 教训直用；修核心不修示例；**回归红线 = ex1/ex2/ex24/ex31 逐字节档 + d367/d370/mg 锚点**） | D639-641 | `crates/solver/src/**`、`crates/amg/src/**`（若涉）、`tmp/d634/**` | parallel（B）、io、mesh、assembly、vendor linger |
+| B | **D635a 并行越界回归二分**（pex5 native.rs:154 / pex40 dof_partition.rs:1251；round 30 还绿——worktree 单点验证引入提交；嫌疑 = D624 ragged/D31 槽表的索引语义）+ **D633 data 回填**（官方树 cp + 逐件 add -f + 受益例复跑） | D642-644 | `crates/parallel/src/**`、`data/`、`tmp/d635/**` | solver（A）、io、mesh、assembly |
+| C | **D635b ex20 辛积分器未演化**（根因：dt/Step/场插值路径——先红 `1/0` 复现）+ **D638 HCurl hex IGLL 装配腿**（契约 = D615 的 HDiv 先例 + hex ND IGLL 泛函） | D645-647 | ex20 缺陷所在核心模块、`vector_assembler.rs`、`hcurl.rs`（若需）、`tmp/d635b/**` | parallel（B）、mesh（D）、io、A 路停机文件（撞即报） |
+| D | **D632 pyramid 细化家族错配**（一行修法在案）+ **D636 elem_vol 四顶点公式**（hex det≡0、ZZ 压扁 → 改 geom_jacobian ∫\|detJ\|）+ **D637 flux_recovery 推断修正**（本轮范围：n_flux_dofs + 空表显式拒绝） | D648-650 | `mesh/src/amr/**`、`assembly/src/postproc/{error_estimate,flux_recovery}.rs`、`tmp/d632/**` | solver（A）、parallel（B）、io、space hcurl/hdiv/dof_manager、vector_assembler（C） |
+
+### 未派单（留后续）
+
+D597/D605/D598（prism.rs 可写轮）、D609/D610/D611/D616/D626/D627/D628/D629/D630/D631（io/space 余量族）、
+miniapps 台账续作（~80 文件）、D586 upstream 投递（**待用户 GitHub 操作**，成稿在 `tmp/d586/`）。
+
 ## 第六十一轮（round 61）：D624 混合几何落存储（头号）+ slot 序同族三件 + 三态台账 + 小件打包
 
 开局 HEAD = round 60 末笔 `4edcbd4`（已推送，ls-remote 实证）；磁盘 63G；树净。
@@ -4550,11 +4568,67 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 （10 例受益，恢复即修）；④ **D635b ex20 辛积分器**；⑤ D627/D628/D629/D630/D632 小件族；
 ⑥ D586 upstream 投递（待用户）；⑦ miniapps 未抽样 ~80 文件的台账续作。
 
+### 四路交付与关门（round 62 主会话收尾）
+
+#### A —— D634 **关闭**（头号；结论出乎意料又合乎纪律）
+- **根因结论：核心层两套 PCG/MINRES API 语义全对（round 32 对齐守住），错的是七个示例的求解器
+  配置漂移**。核心唯一真缺陷 = `mfem_minres` 尾部打印门 + 3 处 `‖r‖_B` 未走 fmt_g。
+- **逐例**：ex4 字面量预开方（helper 收原始字面量，阈值松 10 量级）→ 287 假收敛；修后 **646 it
+  =C++、it0–588 逐字节**。ex5 用 linger Minres 弃用已有 1:1 `mfem_minres` → 修后 **396 it、397
+  行迭代史逐字节**（p_err 3.493678e-5=C++）。ex6/ex14/ex29 同族字面量未换算（过收敛/欠收敛）
+  → **ex14 308 it 全迭代行逐字节、ex29 7 it**。ex3 初值口径（copy_interior=0）。ex8 内层 CG
+  判据对齐（余差=装配侧 D640）。
+- **回归红线全绿**：ex1/ex2/ex24/ex31 逐字节档 + d367/d370/mg 锚点 + fem-solver 全 target 0 失败。
+- 新债：D639（ex4/ex5 局部误差评估器对解不敏感）、D640（ex8 块装配对齐）、D641
+  （EliminateVDofsInRHS 口径，补齐后 ex3 有望全对齐）。
+
+#### B —— D635a + D633 **关闭**
+- **D635a 二分闭环**：引入提交 `0e19c81`（round 36 D412 批次）在 Step 0b 对 `node_coords` 硬编码
+  三分量点积（切片实长 dim）⇒ 2-D 高阶边空间分区必崩；worktree 父子构建单点验证（父 rc=0/
+  子 rc=101）。修 = dim 感知点积（8+/3-，3-D 语义逐位不变）；**pex5 修复后 95 迭代与回归前
+  父构建逐位一致**；pex40 同根因同点位。fem-parallel 308/0。
+- **D633**：23 件 MFEM 标准网格回填（MD5 逐件校验 + add -f 入库）；ex9/pex9/ex15_dump/
+  **ex15dyn 513s 全程** rc=0。
+- 新债：D642（e1f16f8 删除且 MFEM 无源的 12 件处置——已核无引用）、D643（parallel 坐标分量
+  硬编码审计）、D644（pex5/pex40 缺 C++ 同档参考）。
+
+#### C —— D635b + D638 **关闭**
+- **D635b 根因出乎意料地简单**：ex20 的步进调用被**过期 TODO 注释掉**（"SIAVSolver not
+  available"——实际早已建成带测试），循环只剩 `t += dt`。重接 MFEM 忠实协议后**六配置与 C++
+  逐字节同**（含 5 个新升档）。修在 example 侧（缺陷本体在 example，核心无恙——按"先读再定"
+  重定向并披露）。
+- **D638**：HCurl hex IGLL 装配腿曾**静默跌落 GL**（p=1 两开基重合故侥幸通过）；+13 行修复后
+  **95,184 项 1.88e-14**（框架因子=1，与 RT 的 /16 不同，逐项断言）。
+- 新债：D645（ex20 -vis 保真）、D646（SIAV 表双实现择一）、D647（ex2 stderr 行破坏逐字节口径）。
+
+#### D —— D632 + D636 + D637 **关闭**
+- **D632 真根因深于登记**：CurvedMesh 自身三个几何求值器也走 factory（母网格 map 即错）；
+  修 = `geom_ref_elem()`（金字塔→Fuentes、其余 factory 恒等回落位级不变）；∫|detJ| **0.1434→1/3**、
+  槽 14→15。
+- **D636**：elem_vol 泛型化（3-D 非单纯形走 geom_jacobian ∫|detJ|）；hex η **0→√3**、ZZ 全 0→
+  全>1e-10；d235 九项位级不变。
+- **D637**：flux_recovery 逐单元家族/坐标 + `check_h1_flux_layout` 显式拒绝（静默 0.0 eta 消灭）；
+  首版 `==` 守卫打破 D613 通配表被自家回归抓住改 `≥`——测试防自骗实例。
+- 新债：D648（金字塔标记细化越界实录）、D649（hex RT 面旋转接线）、D650（CurvedMesh
+  JacobianCache 直边化风险）。
+
+### 全量回归（五道门）
+
+门 1 lib **2626/0**；门 2 `--tests` **255 targets / 3991 / 0**（本轮零 flake）；门 3 examples
+**0 错误**（19m51s）；门 4 pro **rc=0**；门 5 fem-py **rc=0**。磁盘 53G。头条逐名 grep：d634 七例
+红绿日志、d635 二分链、d638/d632/d636/d637 全 ok。
+
+### round 63 待办（建议）
+
+**① D640+D641（ex8 块装配对齐 + EliminateVDofsInRHS——D634 余量的收口，补齐后 ex3/ex8 有望
+全对齐）**；② **D639**（ex4/ex5 误差评估器换核心 hdiv_error）；③ miniapps 台账续作（~80 文件）+
+D644（pex5/pex40 C++ 参考）；④ D597/D605/D598（prism.rs 可写轮）；⑤ D627-D630/D632 余量
+（写出/细化传播/曲面/二次连通）；⑥ D586 upstream 投递（待用户）；⑦ D645/D646/D647 小件。
+
 ### 未派单（留后续）
 
-D597/D605/D598（prism.rs 可写轮三件）、D609/D610/D611（D602 余量）、D616（命名）、D618/D620、
-D593（-pa last-ulp）、D631（D624 落地后 D41 安全网复核）、D586 upstream 投递（**需用户 GitHub
-操作**——三篇成稿在 `tmp/d586/`，checklist 已备）。
+D597/D605/D598（prism.rs 可写轮三件）、D609/D610/D611（D602 余量）、D616/D618/D620/D631/D648/
+D649/D650、D593（-pa last-ulp）、D586 upstream 投递（**待用户 GitHub 操作**——成稿在 `tmp/d586/`）。
 
 ## 第六十轮（round 60）：覆盖矩阵建立（主会话）+ 真实功能缺口补全四路（用户优先级裁定）
 
