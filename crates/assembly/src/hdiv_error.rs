@@ -156,7 +156,13 @@ fn scalar_l2_error_impl<S: FESpace>(
 
         for (qi, xi) in quad.points.iter().enumerate() {
             let (_jac, det_j, xp) = jacobian_and_point(mesh, e, xi, dim);
-            let w = quad.weights[qi] * det_j.abs();
+            // D679 verdict (site 159): **signed** — MFEM
+            // `GridFunction::ComputeL2Error` accumulates
+            // `ip.weight * Trans.Weight()` with the *signed* determinant
+            // (D667 probe: inverted-tet volume −1/6, "NOT FIXED").  The
+            // scalar integrand here carries det exactly once, so `abs()`
+            // would differ from MFEM on inverted elements.
+            let w = quad.weights[qi] * det_j;
             re.eval_basis(xi, &mut phi);
             let mut uh = 0.0_f64;
             for i in 0..n_ldofs {
@@ -273,7 +279,12 @@ fn piola_l2_error_impl<S: FESpace>(
 
         for (qi, xi) in quad.points.iter().enumerate() {
             let (jac, det_j, xp) = jacobian_and_point(mesh, e, xi, dim);
-            let w = quad.weights[qi] * det_j.abs();
+            // D679 verdict (site 276): **signed** — the Piola maps below
+            // already carry the signed 1/det (HDiv) / J⁻ᵀ (HCurl), and MFEM
+            // pairs them with the signed `Trans.Weight()`.  Keeping `abs()`
+            // here would flip the weight without flipping the field on an
+            // inverted element, i.e. differ from MFEM.
+            let w = quad.weights[qi] * det_j;
 
             vre.eval_basis_vec(xi, &mut ref_bv);
             match space_type {
@@ -281,6 +292,10 @@ fn piola_l2_error_impl<S: FESpace>(
                     // φ_phys = J φ̂ / det J  (contravariant Piola).  A
                     // degenerate (zero-measure) element would give inf/NaN;
                     // contribute zero there.
+                    // D679 verdict (site 284): **keep abs** — this is a
+                    // magnitude-only degeneracy guard (|det| > 1e-80), a
+                    // genuine |·| use; the signed det is passed to the Piola
+                    // below.
                     if det_j.abs() > 1e-80 {
                         crate::vector_assembler::piola_hdiv_basis(
                             &jac, det_j, &ref_bv, &mut phys_bv, n_ldofs, dim,
@@ -438,12 +453,19 @@ fn div_error_impl<S: FESpace>(
         let mut elem_error = 0.0_f64;
         for (qi, xi) in quad.points.iter().enumerate() {
             let (_jac, det_j, xp) = jacobian_and_point(mesh, e, xi, dim);
-            let w = quad.weights[qi] * det_j.abs();
+            // D679 verdict (site 441): **signed** — MFEM
+            // `ElementTransformation::Weight()` is the *signed* det J
+            // (D667 probe), and `GridFunction::GetDivergence` divides the
+            // reference div by that same signed weight, so the
+            // weight × div² integrand matches MFEM only with the signed det
+            // here too (`abs()` would flip the div block on inverted
+            // elements without flipping the weight).
+            let w = quad.weights[qi] * det_j;
 
             // div u_h(x) = Σ_i s_i·u_i · div φ̂_i(ξ) / det J — MFEM
             // `GridFunction::GetDivergence`'s RT branch, `(dofs·divshape) /
-            // Weight` (fem/gridfunc.cpp:1441-1444; Weight = |det J| = det J
-            // for the oriented elements the assembler builds).
+            // Weight` (fem/gridfunc.cpp:1441-1444; Weight = signed det J —
+            // equal to |det J| on the oriented elements the assembler builds).
             vre.eval_div(xi, &mut ref_div);
             crate::vector_assembler::piola_hdiv_div(det_j, &ref_div, &mut phys_div, n_ldofs);
             let mut duh = 0.0_f64;

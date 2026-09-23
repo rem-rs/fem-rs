@@ -782,7 +782,14 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                         &qpts[q],
                         dim,
                     );
-                    let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                    // D679 verdict (sites 785/809/835): **signed** — MFEM
+                    // weights every DPG-domain integrand with the signed
+                    // `Trans.Weight()` (D667 probe: inverted-tet volume
+                    // −1/6, "NOT FIXED"); the qp_* basis values come from
+                    // `dpg_basis::eval_vol_space`, whose Piola/div transforms
+                    // already use the signed det, so signed is the only
+                    // self-consistent (and MFEM-faithful) choice here.
+                    let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                     let n = test_sizes[*tb];
                     let mut fv = vec![0.0_f64; n];
                     integ.assemble_linear(&ctx, &qp_test[*tb][q], &mut fv);
@@ -806,7 +813,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                         &qpts[q],
                         dim,
                     );
-                    let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                    let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                     integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
                 }
                 let (r0, c0) = (test_offsets[*row], test_offsets[*col]);
@@ -832,7 +839,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                             &qpts[q],
                             dim,
                         );
-                        let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                        let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                         let tv = qp_trial[*tbb].as_ref().unwrap()[q].clone();
                         integ.assemble2(&ctx, &tv, &qp_test[tb][q], &mut be);
                     }
@@ -2201,7 +2208,12 @@ mod tests {
                 let jit = inv_transpose(&jac, 2);
                 eval_vol_space(VolKind::HDiv, tau_order, et, 2, &jac, det, &jit, xi, None, &mut tv);
                 for i in 0..n_tau {
-                    r_tau[i] -= qwts[q] * det.abs() * tv.div[i];
+                    // D679 verdict (site 2204): **signed** — tv.div already
+                    // carries the signed 1/det (dpg_basis), and MFEM pairs
+                    // div-block integrands with the signed Weight(); signed ×
+                    // signed 1/det is det-independent, whereas `abs()` would
+                    // flip this residual on inverted elements.
+                    r_tau[i] -= qwts[q] * det * tv.div[i];
                 }
             }
             // face terms

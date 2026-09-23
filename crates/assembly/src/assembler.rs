@@ -1117,14 +1117,22 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             // `dshapedxt = Mult(dshape, AdjugateJacobian)`, `w = ip.weight/Weight()`;
             // ConvectionIntegrator: same dshapedxt with the bare `ip.weight`).
             // This branch therefore keeps the *same* convention as the
-            // isoparametric branch below — grad_phys = adjJᵀ∇φ (|detJ|-scaled)
-            // and weight = ip.weight/|detJ| — so that both `weight × grad_phys`
+            // isoparametric branch below — grad_phys = adjJᵀ∇φ (detJ-scaled)
+            // and weight = ip.weight/detJ — so that both `weight × grad_phys`
             // and `ip.weight × grad_phys` integrator families are correct.
             // (Previously this branch stored the true J⁻ᵀ∇φ with weight
             // ip.weight·|detJ|, which is equivalent only for the `weight × grad`
             // family and silently dropped |detJ| for the `ip.weight × grad`
             // family, e.g. ConvectionIntegrator.)
-            let w = quad.weights[q] / tr.det_j().abs();
+            //
+            // D679 verdict (site 1127): **signed** det.  MFEM's
+            // `ElementTransformation::Weight()` carries the *signed* Jacobian
+            // determinant (D667 probe: `GetElementVolume` of an inverted tet =
+            // −1/6, "NOT FIXED"), so DiffusionIntegrator's
+            // `ip.weight/Weight()` × adjugate-scaled grads cancels det with
+            // the *same* sign on inverted elements too; an `abs()` here
+            // negates the gradient block versus MFEM there.
+            let w = quad.weights[q] / tr.det_j();
 
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
@@ -1141,8 +1149,9 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 dim,
                 weight:    w,
                 // True physical measure (mass-type integrands), identical to the
-                // isoparametric branch below.
-                phys_weight: quad.weights[q] * tr.det_j().abs(),
+                // isoparametric branch below.  D679 (site 1145): signed — MFEM
+                // `MassIntegrator` uses `ip.weight * Weight()` (signed).
+                phys_weight: quad.weights[q] * tr.det_j(),
                 ref_weight: quad.weights[q],
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
@@ -1165,8 +1174,15 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 mesh.geom_order() > 1, // curved → L2_T1 lexicographic order
             );
             // MFEM DiffusionIntegrator: w = ip.weight / Trans.Weight() where
-            // Trans.Weight() = |det J| for square elements (not ×|det|).
-            let w = quad.weights[q] / det_qp.abs();
+            // Trans.Weight() is the *signed* det J (D667 probe: inverted tet
+            // volume −1/6, "NOT FIXED").
+            // D679 verdict (site 1169): **signed** — with the adjugate-scaled
+            // grads the signed 1/det cancels det exactly, matching MFEM on
+            // inverted elements; `abs()` would negate the gradient block.
+            let w = quad.weights[q] / det_qp;
+            // D679 verdict (site 1170): **keep abs** — degeneracy guard on the
+            // magnitude |det J| (skip near-zero-measure points); MFEM has no
+            // such guard (it produces inf/NaN).
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
                     eprintln!("warning: degenerate element {} at quad point {}, det={:.3e}", e, q, det_qp);
@@ -1178,7 +1194,9 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
             transform_grads_adj(&adj, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
-            let w_phys = quad.weights[q] * det_qp.abs();
+            // D679 verdict (site 1181): **signed** — MFEM mass-family weight is
+            // `ip.weight * Weight()` (signed).
+            let w_phys = quad.weights[q] * det_qp;
 
             let qp = QpData {
                 n_dofs:    n_elem_dofs,
@@ -1276,7 +1294,10 @@ fn accumulate_volume_linear_element<S: FESpace>(
             xp = xp_surf;
         } else if affine {
             let tr = affine_tr.as_ref().unwrap();
-            w = quad.weights[q] * tr.det_j().abs();
+            // D679 verdict: **signed** — the linear-form integrand pairs this
+            // weight with true J⁻ᵀ∇φ gradients (single det power, odd parity);
+            // MFEM `DomainLFIntegrator` uses `ip.weight * Weight()` (signed).
+            w = quad.weights[q] * tr.det_j();
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
             transform_grads(tr.jacobian_inv_t(), &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
@@ -1289,7 +1310,10 @@ fn accumulate_volume_linear_element<S: FESpace>(
                 mesh, geo_nds, geo.as_ref(), &xi_g, dim,
                 mesh.geom_order() > 1, // curved → L2_T1 lexicographic order
             );
-            w = quad.weights[q] * det_qp.abs();
+            // D679 verdict: **signed** — same MFEM `ip.weight * Weight()`
+            // semantics as the affine branch above (signed, not |det|).
+            w = quad.weights[q] * det_qp;
+            // D679 verdict: **keep abs** — magnitude-only degeneracy guard.
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
                     eprintln!("warning: degenerate element {} at quad point {}, det={:.3e}", e, q, det_qp);
@@ -1940,9 +1964,9 @@ impl Assembler {
 
     /// Element mass matrix in MFEM `DenseMatrix` column-major layout, as
     /// consumed by `WhiteGaussianNoiseDomainLFIntegrator`. Weights follow
-    /// MFEM `MassIntegrator` (`Trans.Weight()` = |det J|); the element matrix
-    /// is produced by the standard [`MassIntegrator`] so it is bit-identical
-    /// to the global mass assembly.
+    /// MFEM `MassIntegrator` (`Trans.Weight()` = signed det J, D679); the
+    /// element matrix is produced by the standard [`MassIntegrator`] so it is
+    /// bit-identical to the global mass assembly.
     pub(crate) fn mass_element_matrix<S: FESpace>(space: &S, e: u32) -> Vec<f64> {
         use crate::standard::MassIntegrator;
 
@@ -1981,7 +2005,9 @@ impl Assembler {
             let (w_phys, xp);
             if affine {
                 let tr = affine_tr.as_ref().unwrap();
-                w_phys = quad.weights[q] * tr.det_j().abs();
+                // D679 verdict: **signed** — MFEM `MassIntegrator` weight is
+                // `ip.weight * Weight()` with the signed determinant.
+                w_phys = quad.weights[q] * tr.det_j();
                 ref_elem.eval_basis(xi, &mut phi);
                 xp = tr.map_to_physical(xi);
             } else {
@@ -1992,7 +2018,8 @@ impl Assembler {
                     mesh, geo_nds, geo.as_ref(), &xi_g, dim,
                     mesh.geom_order() > 1, // curved → L2_T1 lexicographic order
                 );
-                w_phys = quad.weights[q] * det.abs();
+                // D679 verdict: **signed** (same MassIntegrator semantics).
+                w_phys = quad.weights[q] * det;
                 ref_elem.eval_basis(xi, &mut phi);
                 xp = xp_qp;
             }

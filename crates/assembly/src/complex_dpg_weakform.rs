@@ -922,12 +922,20 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             let mut fi = vec![0.0_f64; n_te];
 
             // Linear forms (real + imag)
+            // D679 verdict (sites 930/944/967/976/998/1007/1040/1050/2102):
+            // **signed** — MFEM weights every domain integrand with the signed
+            // `Trans.Weight()` (D667 probe: inverted-tet volume −1/6, "NOT
+            // FIXED"); the qp_* basis values come from
+            // `dpg_basis::eval_vol_space`, whose Piola/div transforms already
+            // use the signed det.  All `det.abs()` clamps in this file were
+            // converted in one batch; identical values on every positive-det
+            // (oriented) element, MFEM-faithful on inverted ones.
             for (tb, integ) in &self.lf_integs_r {
                 for q in 0..n_qp {
                     let (_jac, det, xp) = element_geo_at(
                         &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
                     );
-                    let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                    let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                     let n = test_sizes[*tb];
                     let mut fv = vec![0.0_f64; n];
                     integ.assemble_linear(&ctx, &qp_test[*tb][q], &mut fv);
@@ -941,7 +949,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                     let (_jac, det, xp) = element_geo_at(
                         &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
                     );
-                    let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                    let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                     let n = test_sizes[*tb];
                     let mut fv = vec![0.0_f64; n];
                     integ.assemble_linear(&ctx, &qp_test[*tb][q], &mut fv);
@@ -964,7 +972,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                             let (_jac, det, xp) = element_geo_at(
                                 &mesh, simplex.as_ref(), geo, &geo_nodes, &bpts[q], dim,
                             );
-                            let ctx = VolCtx { w: bwts[q] * det.abs(), x: xp, dim, elem: e };
+                            let ctx = VolCtx { w: bwts[q] * det, x: xp, dim, elem: e };
                             integ.assemble2(&ctx, &tables[col][q], &tables[row][q], &mut ge);
                         }
                     }
@@ -973,7 +981,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                             let (_jac, det, xp) = element_geo_at(
                                 &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
                             );
-                            let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                            let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                             integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
                         }
                     }
@@ -995,7 +1003,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                             let (_jac, det, xp) = element_geo_at(
                                 &mesh, simplex.as_ref(), geo, &geo_nodes, &bpts[q], dim,
                             );
-                            let ctx = VolCtx { w: bwts[q] * det.abs(), x: xp, dim, elem: e };
+                            let ctx = VolCtx { w: bwts[q] * det, x: xp, dim, elem: e };
                             integ.assemble2(&ctx, &tables[col][q], &tables[row][q], &mut ge);
                         }
                     }
@@ -1004,7 +1012,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                             let (_jac, det, xp) = element_geo_at(
                                 &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
                             );
-                            let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                            let ctx = VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                             integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
                         }
                     }
@@ -1037,7 +1045,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                                         &mesh, simplex.as_ref(), geo, &geo_nodes, &bpts[q], dim,
                                     );
                                     let ctx =
-                                        VolCtx { w: bwts[q] * det.abs(), x: xp, dim, elem: e };
+                                        VolCtx { w: bwts[q] * det, x: xp, dim, elem: e };
                                     integ.assemble2(&ctx, &tvs[q], &tsts[tb][q], &mut be);
                                 }
                             }
@@ -1047,7 +1055,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                                         &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
                                     );
                                     let ctx =
-                                        VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                                        VolCtx { w: qwts[q] * det, x: xp, dim, elem: e };
                                     let tv = qp_trial[*tbb].as_ref().unwrap()[q].clone();
                                     integ.assemble2(&ctx, &tv, &qp_test[tb][q], &mut be);
                                 }
@@ -2099,7 +2107,7 @@ mod tests {
                 let (_jac, det, xp) = crate::vector_assembler::isoparametric_jacobian(
                     &mesh, &gnodes, georef.as_ref(), xi, 2,
                 );
-                let ctx = VolCtx { w: qwts[qi] * det.abs(), x: xp.clone(), dim: 2, elem: 0 };
+                let ctx = VolCtx { w: qwts[qi] * det, x: xp.clone(), dim: 2, elem: 0 };
                 // the four imaginary cross blocks, in (row, col) placement
                 let integs: Vec<(usize, usize, &dyn DpgBilinear2)> = vec![
                     (1usize, 0usize, &grad_q),

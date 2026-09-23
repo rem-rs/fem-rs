@@ -35,9 +35,11 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr, solve_gmres_complex};
 use fem_mesh::ElementTransformation;
+use fem_mesh::element_jacobian_at;
 use fem_mesh::topology::MeshTopology;
 use crate::postproc::grid_function::{ref_elem_vol, simplex_jacobian, phys_coords};
 use fem_space::fe_space::FESpace;
+use fem_space::ref_elem::field_element_for_space;
 
 use crate::assembler::Assembler;
 use crate::vector_assembler::VectorAssembler;
@@ -666,7 +668,10 @@ impl ComplexGridFunction {
             let mut phi = vec![0.0; n_ldofs];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                // D679 verdict: **signed** — MFEM `ComputeLpError` weights are
+                // `ip.weight * Trans.Weight()` (signed det; D667 probe).  The
+                // scalar integrand carries det exactly once.
+                let w = quad.weights[q] * det_j;
                 ref_elem.eval_basis(xi, &mut phi);
                 let mut uh_re = 0.0;
                 let mut uh_im = 0.0;
@@ -710,6 +715,66 @@ impl ComplexGridFunction {
         space: &dyn ComplexGridFunctionSpace,
     ) -> f64 {
         self.compute_lp_error(f64::INFINITY, exact_re, exact_im, quad_order, space)
+    }
+
+    /// L² errors of the real and imaginary parts of a scalar H¹ field,
+    /// `(‖Re u_h − Re u‖_{L²}, ‖Im u_h − Im u‖_{L²})`.
+    ///
+    /// Matches MFEM 4.10 `ComplexGridFunction` usage in ex22.cpp:445
+    /// (`u.real().ComputeL2Error(u0_r)` / `u.imag().ComputeL2Error(u0_i)`),
+    /// with the `ComputeL2Error` quadrature convention `2·order + 3`.
+    ///
+    /// # D681 geometry rule
+    /// The mapped point and integration weight come from the **mesh's element
+    /// transformation** ([`fem_mesh::element_jacobian_at`], geometry basis
+    /// `ref_elem(1)`), never from the solution basis' first vertex slots.  On
+    /// a Q2 GLL quad the four corner shapes all vanish at the element centre,
+    /// so a corner-slot-only "Jacobian" degenerates (det → 0 mid-cell, mapped
+    /// point collapses toward a global vertex regardless of h) — the ex22
+    /// `-p 0 -o 2` 90× error (5.06e-1 vs C++ 5.64364e-3) that *grows* under
+    /// refinement.  Basis and geometry share a reference frame for every
+    /// geometry (`h1_field_element` and `ref_elem(1)` are both `QuadQk` on
+    /// `[0,1]²`, `HexQk` on `[-1,1]³`, unit simplices), so the pairing below
+    /// is exact.
+    pub fn compute_l2_error<S: FESpace + Send + Sync>(
+        &self,
+        exact_re: &dyn Fn(&[f64]) -> f64,
+        exact_im: &dyn Fn(&[f64]) -> f64,
+        quad_order: u8,
+        space: &S,
+    ) -> (f64, f64) {
+        let mesh = space.mesh();
+        let dim = mesh.dim() as usize;
+        let order = space.order();
+        let mut er2 = 0.0_f64;
+        let mut ei2 = 0.0_f64;
+        for e in 0..mesh.n_elements() as u32 {
+            let et = mesh.element_type(e);
+            let re = field_element_for_space(space, et, order);
+            let nld = re.n_dofs();
+            let quad = re.quadrature(quad_order);
+            let edofs = space.element_dofs(e);
+            debug_assert_eq!(edofs.len(), nld, "dof/space slot count mismatch");
+            let mut phi = vec![0.0_f64; nld];
+            for (qi, xi) in quad.points.iter().enumerate() {
+                re.eval_basis(xi, &mut phi);
+                let (jac, xp) = element_jacobian_at(mesh, e, xi, dim);
+                let w = quad.weights[qi] * jac.determinant().abs();
+                let mut uh_re = 0.0_f64;
+                let mut uh_im = 0.0_f64;
+                for (i, &d) in edofs.iter().enumerate() {
+                    uh_re += self.u_re[d as usize] * phi[i];
+                    uh_im += self.u_im[d as usize] * phi[i];
+                }
+                let er = exact_re(&xp);
+                let ei = exact_im(&xp);
+                let dr = uh_re - er;
+                let di = uh_im - ei;
+                er2 += w * dr * dr;
+                ei2 += w * di * di;
+            }
+        }
+        (er2.sqrt(), ei2.sqrt())
     }
 }
 

@@ -585,7 +585,10 @@ impl PADiffusionOp {
                     .try_inverse()
                     .expect("degenerate element in PADiffusionOp")
                     .transpose();
-                let w = quad.weights[qi] * det_j.abs();
+                // D679 verdict: **signed** — the diffusion-type integrand
+                // pairs this weight with true J⁻ᵀ∇φ gradients (single det
+                // power); MFEM `ip.weight * Trans.Weight()` is signed.
+                let w = quad.weights[qi] * det_j;
 
                 ref_elem.eval_grad_basis(xi, &mut grad_ref);
                 for i in 0..ldofs {
