@@ -12,10 +12,11 @@
 use std::time::Instant;
 
 use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
+use fem_assembly::hdiv_error::compute_hdiv_l2_error_order;
 use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::VectorAssembler;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
-use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_solver::darcy_solvers::{IterSolveParameters, mfem_minres, schur_complement_bmb_diag};
@@ -130,9 +131,6 @@ fn main() {
     //        norm_u = ComputeLpNorm(2., ucoeff, *mesh, irs);
     let order_quad = std::cmp::max(2, 2 * args.order + 1);
 
-    let u_ex_fn = |x: &[f64]| -> [f64; 2] {
-        [-(x[0].exp() * x[1].sin()), -(x[0].exp() * x[1].cos())]
-    };
     let p_ex_fn = |x: &[f64]| -> f64 { x[0].exp() * x[1].sin() };
 
     // Pressure L² error (scalar L2 space — MFEM ComputeL2Error)
@@ -142,66 +140,33 @@ fn main() {
     let p_zero = GridFunction::new(&p_sp, vec![0.0; n_p]);
     let np = p_zero.compute_l2_error(&p_ex_fn, order_quad);
 
-    // Velocity L² error (H(div) vector field — contravariant Piola)
-    let eu = compute_hdiv_l2_error_2d_simple(&u_sp, &x[..n_u], &u_ex_fn);
-    let nu = compute_hdiv_l2_error_2d_simple(&u_sp, &vec![0.0; n_u], &u_ex_fn);
+    // Velocity L² error (H(div) vector field — contravariant Piola).
+    // MFEM: u.ComputeL2Error(ucoeff, irs) with irs = IntRules.Get(geom,
+    // order_quad); `nu` plays the role of MFEM's ComputeLpNorm(2., ucoeff,
+    // *mesh, irs) via the zero-field error (same integral).
+    // D639: this used to be an example-local reconstruction hardcoded to
+    // `TriRTk::new(0)` + triangle quadrature + the first 3 element DOFs.
+    // star.mesh is a *quad* mesh (RT1-quad = 12 DOFs/element, bilinear
+    // geometry), so the reconstructed field was garbage and the printed
+    // ratio was solution-insensitive (1.211582e0 vs 1.211583e0 for two
+    // different solutions; C++: 1.43587e-4).  The core routine picks the
+    // per-element reference element/geometry exactly like the assembler.
+    let u_ex_vec = |x: &[f64]| -> Vec<f64> {
+        vec![-(x[0].exp() * x[1].sin()), -(x[0].exp() * x[1].cos())]
+    };
+    let eu = compute_hdiv_l2_error_order(&u_sp, &x[..n_u], &u_ex_vec, order_quad);
+    let nu = compute_hdiv_l2_error_order(&u_sp, &vec![0.0; n_u], &u_ex_vec, order_quad);
 
-    // MFEM output format: "|| u_h - u_ex || / || u_ex || = %.6e"
-    println!("|| u_h - u_ex || / || u_ex || = {:.6e}", eu / nu.max(1e-32));
-    println!("|| p_h - p_ex || / || p_ex || = {:.6e}", ep / np.max(1e-32));
+    // MFEM output format (default ostream precision — `fmt_g`):
+    //   "|| u_h - u_ex || / || u_ex || = " << err_u / norm_u
+    println!("|| u_h - u_ex || / || u_ex || = {}", fmt_g(eu / nu.max(1e-32)));
+    println!("|| p_h - p_ex || / || p_ex || = {}", fmt_g(ep / np.max(1e-32)));
 
     // ── Output ──────────────────────────────────────────────────────────
     write_mfem_file("ex5.mesh", u_sp.mesh()).expect("mesh write failed");
     write_mfem_gf_file("sol_u.gf", dim, &x[..n_u], "H1", args.order, dim, 14).expect("write sol_u");
     write_mfem_gf_file("sol_p.gf", dim, &x[n_u..], "H1", args.order, 1, 14).expect("write sol_p");
     eprintln!("  Wrote ex5.mesh, sol_u.gf, sol_p.gf");
-}
-
-fn compute_hdiv_l2_error_2d_simple<F>(space: &HDivSpace<Mesh<2>>, u: &[f64], ex: &F) -> f64
-where
-    F: Fn(&[f64]) -> [f64; 2],
-{
-    use fem_element::raviart_thomas::TriRTk;
-    use fem_element::reference::VectorReferenceElement;
-    use fem_mesh::ElementTransformation;
-
-    let mut e2 = 0.0;
-    let ref_elem = TriRTk::new(0);
-    let n_ldofs = ref_elem.n_dofs();
-    let q = ref_elem.quadrature(6);
-    let mut ref_phi = vec![0.0_f64; n_ldofs * 2];
-
-    for e in space.mesh().elem_iter() {
-        let nodes = space.mesh().elem_nodes(e);
-        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let signs = space.element_signs(e);
-        let tr = ElementTransformation::from_simplex_nodes(space.mesh(), nodes);
-        let jac = tr.jacobian();
-        let det_j = tr.det_j();
-        let inv_det = 1.0 / det_j;
-
-        for (qi, xi) in q.points.iter().enumerate() {
-            ref_elem.eval_basis_vec(xi, &mut ref_phi);
-            let w = q.weights[qi] * det_j.abs();
-
-            // Contravariant Piola: φ_phys = (1/det(J)) · J · φ_ref
-            let mut fh = [0.0_f64; 2];
-            for i in 0..n_ldofs {
-                let s = signs[i];
-                let r0 = ref_phi[i * 2];
-                let r1 = ref_phi[i * 2 + 1];
-                let px = s * (jac[(0, 0)] * r0 + jac[(0, 1)] * r1) * inv_det;
-                let py = s * (jac[(1, 0)] * r0 + jac[(1, 1)] * r1) * inv_det;
-                fh[0] += u[dofs[i]] * px;
-                fh[1] += u[dofs[i]] * py;
-            }
-
-            let xp = [tr.map_to_physical(xi)[0], tr.map_to_physical(xi)[1]];
-            let exact = ex(&xp);
-            e2 += w * ((fh[0] - exact[0]).powi(2) + (fh[1] - exact[1]).powi(2));
-        }
-    }
-    e2.sqrt()
 }
 
 fn assemble_ex5_bdr_rhs(

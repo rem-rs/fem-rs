@@ -16,7 +16,7 @@ use fem_assembly::{
     standard::{GradDivIntegrator, VectorMassIntegrator},
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
-use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{solve_pcg, GSSmoother};
 use fem_space::{
     HDivSpace,
@@ -135,11 +135,23 @@ fn main() {
         .expect("solver failed");
 
     // 13. Compute and print the L² norm of the error.
-    // MFEM: x.ComputeL2Error(F) — uses contravariant Piola for H(div).
-    let l2_err = compute_hdiv_l2_error(&space, &x, &|xi| {
+    // MFEM: x.ComputeL2Error(F) — the vector overload that evaluates the field
+    // through `GetVectorValues` → `CalcVShape_RT`, i.e. the contravariant
+    // Piola map, with the default rule `IntRules.Get(geom, 2·GetOrder()+3)`
+    // (GetOrder() = p+1 for RT).  D639: this used to be an example-local
+    // reconstruction hardcoded to `TriRTk::new(0)` + triangle quadrature +
+    // the first 3 element DOFs — garbage on star.mesh, which is a *quad*
+    // mesh (20 squares; RT0-quad = 4 edge DOFs/element, bilinear geometry);
+    // the printed value was therefore solution-insensitive (0.432497 vs
+    // 0.432509 for two different solutions) and 27× the C++ truth.  The
+    // core routine picks the per-element reference element/geometry exactly
+    // like the assembler, and its default quadrature order implements
+    // MFEM's 2·(p+1)+3 convention.
+    use fem_assembly::hdiv_error::compute_hdiv_l2_error;
+    let l2_err = compute_hdiv_l2_error(&space, &x, &|p: &[f64]| {
         let k = kappa;
-        [(k * xi[0]).cos() * (k * xi[1]).sin(),
-         (k * xi[1]).cos() * (k * xi[0]).sin()]
+        vec![(k * p[0]).cos() * (k * p[1]).sin(),
+             (k * p[1]).cos() * (k * p[0]).sin()]
     });
     println!("\n|| F_h - F ||_{{L^2}} = {}", fem_solver::fmt_g(l2_err));
 
@@ -172,68 +184,6 @@ impl VectorLinearIntegrator for MaxwellHSource {
             f[i] += qp.weight * (qp.phi_vec[i * 2] * fx + qp.phi_vec[i * 2 + 1] * fy);
         }
     }
-}
-
-// ─── Exact solution ──────────────────────────────────────────────────────────
-//
-//   F = (cos(κx)sin(κy), cos(κy)sin(κx))
-
-fn exact_f(x: &[f64], kappa: f64) -> [f64; 2] {
-    let k = kappa;
-    [(k * x[0]).cos() * (k * x[1]).sin(),
-     (k * x[1]).cos() * (k * x[0]).sin()]
-}
-
-// ─── H(div) L² error (contravariant Piola) ──────────────────────────────────
-
-fn compute_hdiv_l2_error<F>(space: &HDivSpace<Mesh<2>>, u: &[f64], ex: &F) -> f64
-where
-    F: Fn(&[f64]) -> [f64; 2],
-{
-    use fem_element::raviart_thomas::TriRTk;
-    use fem_element::reference::VectorReferenceElement;
-    use fem_mesh::ElementTransformation;
-
-    let mut e2 = 0.0;
-    let ref_elem = TriRTk::new(0);
-    let n_ldofs = ref_elem.n_dofs();
-    let q = ref_elem.quadrature(6);
-    let mut ref_phi = vec![0.0_f64; n_ldofs * 2];
-
-    for e in space.mesh().elem_iter() {
-        let nodes = space.mesh().elem_nodes(e);
-        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let signs = space.element_signs(e);
-        let tr = ElementTransformation::from_simplex_nodes(space.mesh(), nodes);
-        let jac = tr.jacobian();
-        let det_j = tr.det_j();
-        let inv_det = 1.0 / det_j;
-
-        for (qi, xi) in q.points.iter().enumerate() {
-            ref_elem.eval_basis_vec(xi, &mut ref_phi);
-            let w = q.weights[qi] * det_j.abs();
-
-            // Contravariant Piola: φ_phys = (1/det(J)) · J · φ_ref
-            let mut fh = [0.0_f64; 2];
-            for i in 0..n_ldofs {
-                let s = signs[i];
-                let r0 = ref_phi[i * 2];
-                let r1 = ref_phi[i * 2 + 1];
-                let px = s * (jac[(0, 0)] * r0 + jac[(0, 1)] * r1) * inv_det;
-                let py = s * (jac[(1, 0)] * r0 + jac[(1, 1)] * r1) * inv_det;
-                fh[0] += u[dofs[i]] * px;
-                fh[1] += u[dofs[i]] * py;
-            }
-
-            let xp = [
-                tr.map_to_physical(xi)[0],
-                tr.map_to_physical(xi)[1],
-            ];
-            let exact = ex(&xp);
-            e2 += w * ((fh[0] - exact[0]).powi(2) + (fh[1] - exact[1]).powi(2));
-        }
-    }
-    e2.sqrt()
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
