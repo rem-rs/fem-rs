@@ -4470,6 +4470,59 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十四轮（round 64）：D651（头号，根因反转到 mesh 细化层）+ D657/D658（multidomain/navier）+ D654-656 收口 + 小件族六件
+
+开局 HEAD = round 63 末笔 `d4417d2`（已推送，ls-remote 实证）；磁盘 63G；树净（`.mimosa/` 与 d615 夹具未跟踪属主会话）。
+
+### 派单（四路并行，号段 D663 起；D666/D669-D671 未用）
+
+| 路 | 债务 | 号段 | 独占文件 | 禁区 |
+|----|------|------|----------|------|
+| A | **D651（头号）tet-ND 边编号置换 vs EnumEdges**（ex3 唯一剩余障碍；round-63 铁证 = A 对角线前 12 项逐位第 13 分叉） | D663-666 | space dof_manager/hcurl、space tests、mesh（若根因在边编号层）、`tmp/d651/**` | assembly/solver/parallel/io/element/amg、examples（ex3 只读） |
+| B | **D657 multidomain_nd/_rt 崩溃 + D658 navier_bifurcation 不收敛（回潮嫌疑）** | D667-671 | `miniapps/multidomain/**`、`miniapps/fluids/**`、`tmp/d657|658/**`（升级路径 solver/parallel） | space（A）、assembly、io、mesh、amg（C） |
+| C | **D654 ex5p BoomerAMG 参数族（44vs95）+ D655 Total dofs 口径 + D656 examples 手写误差残留审计（只读）** | D672-674 | pex5/pex40、crates/amg（若需）、`tmp/d654/**` | miniapps、space、assembly、solver、examples 其余（D656 只读） |
+| D | **小件族 D652 sinv 负 det → D653 ex3 2-D l2_err → D659 trimmer → D660 → D661 → D662** | D675-680 | assembly/dpg/sinv.rs、ex3（仅 2-D 误差路径）、trimmer、`data/beam-tet.vtk`、element/prism.rs、space/hdiv.rs、transfer、`tmp/**` | dof_manager/hcurl（A）、examples 其余、solver/parallel/amg/io/mesh |
+
+### 四路交付与关门（round 64 主会话收尾）
+
+#### A —— D651 **关闭**（头号；根因反转）
+- 根因**不在 space**（dof_manager/hcurl 无辜——首遇遍历编号与规范化方向号[MFEM `GetElementEdges` 的 `v[e0]>v[e1]` 翻转约定]本就与 MFEM 一致），**在 mesh 细化层两处**：①直面 tet 均匀细化新顶点编号用 first-touch，MFEM `UniformRefinement3D_base` 用**字典序**（`oedge+e2v[E]`；`MfemTetRefineIds` 早已实现但被门在 curved）；②角子单元发射序 = 镜像（顶点在首位 = 0↔1 转置）⇒ det(J)<0 传导到**下一层** BAR 优选时雅可比转置分叉。修复 `amr_inner.rs`：`mfem_ids` 门去掉 curved 条件（uniform 即 MFEM 字典序；partial 保 first-touch 防留洞）；发射序 `geo.is_some() || mfem_ids.is_some()` 走 MFEM 序。
+- 验收：新测试 `d651_tet_nd_enum_edges` 16/16 有符号 GetElementDofs 表逐位 + 前 64 边 dof 顶点对 64/64 + ess count=6528 前 64 项逐位（MFEM 4.10 探针真值，`tmp/d651/probe.cpp`）；**ex3 3-D beam-tet 137 行 (B r, r) 逐字节全同 + ARF 0.903118 两侧同 + E 0.391631**——ex3 3-D 从"迭代数都不同"一步到 BIT 边缘。
+- 新债：**D663**（io 写出直面 Tet4 重跑 mark 规范化 vs MFEM 存储序——refined.mesh 文件级 pin 偏离；内存/求解不受影响）、**D664**（ex3 3-D 距 BIT 仅 3 项打印格式差：缺 Size 行/多 GSSmoother 摘要行/E_h `{:.14e}` vs cout 6 位）、**D665**（HYPOTHESIS：23 个 refine_uniform_3d miniapp 消费方数值将随本修变化——更对而非更错，门仅编译无风险）。
+- 纪律注记：基线数字以门日志为准（fem-space lib 294/0，简报 291 为旧值）；主会话抽查复现 = diff 7 行[恰为 5 格式项] + 两侧各 137 (B r,r)。
+
+#### B —— D657 + D658 **关闭**（D658 裁定反转）
+- **D657 根因两层**：①坐标匹配对 ND/RT 结构性失效（canonical 方向 GL 点/face anchor/RT canonical 顶点帧在两 submesh 编号错位——实测两侧各 208 dof 仅 108 命中）；②块 dof 查询只取块首（ND 每边 1 个、RT 每面 1 个；`FaceKey::new` 未排序 vs hdiv 注册键[排序后最小 3 顶点]）⇒ cyl ess 28 vs 正确 576。修法（miniapp 内）：**实体化配对**（物理实体分组 + 几何因子 g(d) 定号，interpolate_vector 常向量场恢复泛函方向 ± 配对，square_xy 插值逐对自验证）+ ess 整块 + IC 对齐 ProjectBdrCoefficientTangent/Normal + **积分阶逐项对齐 MFEM**（mass 2p+2、CurlCurl 2p、MixedWeakCurlCross 2p+2、DivDiv 2p−2、MixedWeakGradDot 2p−1）。**dof/ess 7708/5664、1168/800（ND）与 7296/5120、576/640（RT）= MFEM 全等；ND IC 求和 −4.000000 = C++ 精确**。
+- **D658 裁定无回潮**：C++ 4.10 串行镜像同 gear step 1 即 `PRES 200 4.64e+01` 与当前树**逐位相同**——无 hypre 的 `OrthoSolver(GSSmoother)` 对 26k dof 纯 Neumann 压力 200 it 打不满是 MFEM 固有行为（hypre 版默认 HypreBoomerAMG）。交付：`NavierConfig::pressure_amg`（默认 false 保全部逐位记录）+ `-pc amg`（BoomerAMG 串行 analogue，正交化包同 C++）⇒ PRES 24-28 it（rs=3）/16-17 it（rs=1）全程收敛零 No convergence；navier_mms 逐位哨兵复现。**README「97/100 CFL 末位一致」不可复现（1/101）→ 勘误 D668**。
+- 新债：**D667**（RT cyl 首个 RK3 步后自由接口 Σv²≈2.2× MFEM 发散 + ND 轨迹 0.1-2.8% 偏差同族；传输本身已验证精确拷贝 `cyl_if==blk_if`；嫌疑 DivDiv 1-pt 采样/MixedWeakGradDot 非平行四边形 facet 求值——core 域）。
+- 夹具：`data/channel-bifurcation-2d.mesh`（MD5 6c7954024e71a4d60a9a2cfe093092ec = MFEM 4.10 data）。
+
+#### C —— D654 **豁免（结构性）** + D655 **关闭** + D656 审计交付
+- **D654**：C++ `HypreBoomerAMG(*S)` **零参数覆盖**走 hypre `SetDefaultOptions` 经典族（HMIS coarsen/agg 1 层/θ0.25/ext+i/P4/l1-GS/单 V-cycle/GE 粗解，`linalg/hypre.cpp:5237` 钉死 + 打印互证：6 层 5120→3、grid complexity 1.189）；fem-rs AMG 实际在 **`crates/parallel/src/par_amg.rs`**（`crates/amg` 是 linlvo 串行后端，pex5 不用——C 路权限声明在案）为**聚合式**且无粗化/插值族旋钮。5 组对照实验（E0 基线 95 it；E1 smoothed 102；E2 同档 1+1 sweep 131；E4 113；E6 95）证明同档配置在聚合族上全部更差 ⇒ **95 即示例层最优，豁免成立**（归宿 c），豁免注释落 pex5；误差行维持（2.91889e-5/1.13318e-5）。
+- **D655**：病灶在 pex40（pex5 无此行）——C++ `ex40p.cpp:415` 页脚 = `GetTrueVSize` 本地和 vs 头两行全局；修后 np=1 `Total dofs: 15520` 与 C++ **逐字节**；np=2 语义对齐（7956 vs 7796 = 划分器本地分布差，预期）；Newton 轨迹零漂移。顺带清 6 条预存警告（本例零警告）。
+- **D656**（86 例全扫，只读）：病灶级 = **D672**（`examples/src/maxwell.rs` 共享 `l2_error_hcurl_exact` ND1 硬编码——ex22 `-p 0 -o 2` 实测误差 3.57e-2→5.06e-1 大 14× 且 `-o2 -r2` 加密反升 7.08e-1 = 不收敛垃圾）、**D673**（ex22 死函数 + line 29 文件级 `#![allow(non_snake_case, dead_code, unused_imports)]` 违反死代码零容忍）、**D674**（ex40/pex40 `l2_norm` QuadQk 硬编码[tri 越界为代码推得] + ex18 `is_quad` elem0 嗅探；部分 HYPOTHESIS）。安全核销清单：ex31 三处手写 HCurl（核心无 HCurl L2 API + BIT 档在案）、ex29/pex29 曲面（同由）、ex7/pex7、ex37 设计量、ex27 边界均值（C++ 同款内联）等。
+
+#### D —— 小件族六件全收
+- **D652 裁定反转**："垃圾块"已被 D640 顺带消除（`quad_jacobian` 返回 `det.abs()`）；真缺陷 = **带符号语义**：MFEM 4.10 `Weight()` = 带符号 det（`eltrans.cpp` EvalWeight 链，探针实测负 det 单元 Weight=−1），Mass/Diffusion 全吃负权重 ⇒ S=−镜像正像元、`DenseMatrixInverse` 给 −S⁻¹（无检查不 abort；CalcInverse 奇异检查仅 debug 断言；star.mesh det∈[0.2378] 恒正 = 潜伏态）。修后 det 全程带符号（tri `.abs()` 移除、quad `1/det` 带符号、死 jit 删）；红→绿 pin 测试（模块内，含正确 bow-tie 构造法注记）+ **ex8 stdout 逐字节不变**。
+- **D653**：`l2_err_2d` 硬编码 TriNDk+重心映射（star.mesh 20 quad 上三角求积只盖对角半 = D639 同病）⇒ 换核心 `compute_hdiv_l2_error`：star.mesh `1.34917895677130e-2` = C++ 0.0134918、beam-tri 12 位吻合（优于改前）；**3-D 路径零改动**（与 A 路并行对拍无污染）。
+- **D659**：`beam-tet.vtk` 回填（MD5 `cfca8a890133d872b1f3f95eb5c064b4`）；默认 .vtk 档诚实 rc=3 + 指向 D675 文案；`.mesh` 对拍 = trimmer **GenerateFaces 1:1 重写**（FaceVert 表序[geom.cpp:987/1032/1061 探针互证]+首遇定朝向+fixup_orientation；D132 的 34vs36 根因 = 旧版从不创建切面新边界元）：hex `-a 2` **diff=0 逐字节**、tet `-a 1` `48→24/68→36` 精确 + 82/83（残 1 行 = 切面三角形循环旋转 → **D676**）。
+- **D660 验证性关闭**（D597 已收敛单一来源，前提"若仍有双源"不成立；d468/d493/d572/d584 红线族 26/26）。**D661**：interpolate_vector 按 (et,order) hoist 参考元+对偶矩阵，tet RT2 3072 单元 115.2ms→27.6ms（**4.2×**），sum bits 改前=改后 + 三族 f64 位模式 pin（"旧文件临时换入"复测逐位）。**D662** 定向抽样无新漂移（裁剪声明）。
+- 新债：**D675**（VTK reader GAP，非 HYPOTHESIS）、**D676**（写路径 tet MarkEdge 规范化，与 D663 同族合并追踪）。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2625 / 0**（基线 2624 +1 = D652 sinv pin 测试；⚠️ 批跑 feature 统一显形
+16 条预存警告——parallel 复杂域 8、solver 5、io 1、assembly nonlinear 1，全部位于本轮未触碰
+文件，登记清理候选）；门 2 `--tests` **258 targets / 3999 / 0**（基线 256/3991 + d651[4] +
+d661[3+1 ign] 两新套件，账目闭合；首轮 1 flake[13 测试套件 12+1，round-62 mobius/tmpdir
+同款负载敏感]，全量重跑 258/258 ok 记为实质通过）；门 3 examples **0 错误**（16m53s；~21 条
+预存警告分布于 9 个本轮未触碰示例文件，D673 同族登记）；门 4 pro **rc=0**；门 5 fem-py
+**rc=0**（PYO3_PYTHON=fem-rs/.venv）。磁盘 62G。主会话抽查：ex3 3-D diff=7 行[恰 5 格式项、
+两侧各 137 (B r,r)]、ex3 2-D `1.34917895677130e-2`、ex8 29 it + DPG 0.0183277、pex40 np1
+`Total dofs 15520`、navier `-pc amg` rs=1 16-17 it 零 No convergence、trimmer rc=3 文案 +
+tet `68→36`、D672 ex22 -o2 `5.055557e-1`[=C 报告原文]、multidomain_nd 6800 步健康 +
+ndofs=7708。
+
 ## 第六十三轮（round 63）：D640+D641（D634 收口，头号）+ D639/D644 + miniapps 台账续作 + prism 可写轮
 
 开局 HEAD = round 62 末笔 `a39d228`（已推送，ls-remote 实证）；磁盘 52G；树净。

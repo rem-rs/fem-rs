@@ -35,6 +35,11 @@
 fichera 档、twist = BIT 两档；表中按文件归主档、备注记副档。21 个 DEV 行目中 6 个同时有
 RUN/BIT 副档。）
 
+**round 64 增量（4 文件，B/D 路）**：CRASH 2 → **0**（multidomain_nd/_rt 崩溃修复，转 RUN*）；
+navier_bifurcation RUN* → **RUN**（D658 裁定 + `-pc amg` 档）；trimmer DEV(阻塞) →
+**RUN(.mesh 对拍) + DEV(.vtk 诚实 exit(3))** 双档。净效应：RUN 43→44、RUN* 2→2（成员换为
+multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变（trimmer 主档仍 DEV）。
+
 ## 本轮 BIT 复跑（14 项，全部真对拍；8 项逐字节、4 项记录档复现、2 项拓扑字节同）
 
 | # | miniapp | 档位 | 对照物 | 结果 | 证据 |
@@ -96,7 +101,7 @@ RUN/BIT 副档。）
 | reflector.rs | 默认 NURBS → **DEV** rc=3 ✓；`-m fichera` → **RUN** | fichera 档 NE=14 NBE=40 NV=43 = 记录；**顶点集多重集与 C++ 14/14 全等**（python 实证），角序旋转差 = round 31 有意决定（文件头在案） | |
 | shaper.rs | **RUN\*** | `-m inline-quad`：16→64→256→…→65536（refine_uniform 回退）vs C++ NC 16→52→64 —— **D132 复现（仍开）** | |
 | polar-nc.rs | **DEV** | rc=3 声明（NC mesh v1.0 writer 缺）✓ | |
-| trimmer.rs | **DEV**（阻塞） | 默认 `beam-tet.vtk` rc=1 NotFound（**资产缺失 = D633 残留**）+ `-m beam-tet.vtk` rc=1「expected 'MFEM mesh' header」（**VTK 读取未实现**）→ **D659** | |
+| trimmer.rs | **RUN（.mesh 对拍）+ DEV（.vtk 默认档诚实 exit(3)）**【round 64 D659 关闭】 | `beam-tet.vtk` 已回填（MD5 `cfca8a890133d872b1f3f95eb5c064b4`）；默认 .vtk 档 = rc=3 + 指向 D675（VTK reader 缺）的声明文案；`-m beam-tet.mesh -a 1` tet 档 `48 -> 24`、`68 -> 36` = C++ 精确，trimmer.mesh 82/83 内容行逐字节（残 1 行 = 切面三角形循环旋转 → **D676** 写路径 MarkEdge 规范化）；hex `-a 2` 档 trimmer.mesh **diff=0 逐字节**；GenerateFaces 1:1 重写（FaceVert 表序 + 首遇定朝向 + fixup_orientation） | |
 | mobius-strip.rs / klein-bottle.rs | **RUN** | rc=0，网格写出（D171 记录在案，本轮未重对拍夹具） | |
 | mesh-explorer.rs / mesh-quality.rs | explorer **RUN**（`-m beam-tet` rc=0 打印特征 + 写 mesh-explorer.mesh；2-D 输入按实现拒绝）；quality 见上 | |
 
@@ -146,8 +151,8 @@ RUN/BIT 副档。）
 | 文件 | 档位 | 分类 | 备注 |
 |---|---|---|---|
 | multidomain.rs | **RUN-LONG** | 默认档 300s 推进至 step 8550 / t=0.171（目标 0.25），sum/min/max 正常演化 —— 非挂死 | |
-| multidomain_nd.rs | **CRASH** | panic：`BlockToCylinderMap: no block dof at cyl interface dof 36` → **D657** | |
-| multidomain_rt.rs | **CRASH** | panic：`BlockToCylinderMap: no block dof at cyl interface dof 2296` → **D657** | |
+| multidomain_nd.rs | **RUN\***【round 64 D657 崩溃修复】 | 实体化配对（几何因子定号）替换坐标匹配；dof/ess 7708/5664、1168/800 = MFEM **全等**；IC 求和 −4.000000 = C++ 精确；轨迹 block 偏差 0.10→0.26%、cyl 0.5–2.8%（数值未逐位 → **D667 同族**） | |
+| multidomain_rt.rs | **RUN\***【round 64 D657 崩溃修复】 | dof/ess 7296/5120、576/640 = MFEM 全等；IC −3.8e-17 vs −4.8e-17；block 轨迹 t=4e-5 偏差 3e-6 → t=0.002 偏差 2%；**cyl 首个 RK3 步后自由接口 Σv² ≈ 2.2× MFEM（发散）→ D667** | |
 
 ### shifted/（3）——均需 `-no-vis`（默认档 rc=3 vis 注记，声明兑现）
 | 文件 | 档位 | 分类 | 备注 |
@@ -198,7 +203,7 @@ RUN/BIT 副档。）
 | navier_shear.rs / navier_kovasznay_vs.rs / navier_tgv.rs | **RUN** | 表打印正常（3.401e0 SETUP 等） | |
 | navier_3dfoc.rs | **RUN-LONG** | 600s：DOF 16956/5652 = 记录、HELM 收敛正常推进（t=6.4e-2 未完） | |
 | navier_turbchan.rs | **RUN-LONG** | 默认 o5 = 两侧都 PA-only 不可跑（日志自述，README 在案）；`-o 1`：~140s/步正常收敛（PRES 37/HELM 33/步） | |
-| navier_bifurcation.rs | **RUN\*** | mesh/dof 26433 = 记录 ✓，但 **PRES PCG 200 it 残差 4.64e+01 不收敛**（默认档与 `-Re 1000` 档同，194×"No convergence"），粒子注入 0 → **D658**；另 480s 未跑完 600 步 | |
+| navier_bifurcation.rs | **RUN**【round 64 D658 关闭】 | **回潮裁定 = 不成立**：C++ 4.10 串行镜像同 gear step 1 即 `PRES 200 4.64e+01`（与当前树逐位相同）——无 hypre 的 `OrthoSolver(GSSmoother)` 对 26k dof 纯 Neumann 压力 200 it 打不满是 MFEM 固有行为；新增 `NavierConfig::pressure_amg` + `-pc amg`（HypreBoomerAMG 串行 analogue，`crates/solver/src/navier.rs`）：`-pc amg` 档 PRES 24–28 it（默认 rs=3）/16–17 it（rs=1）全程收敛、零 No convergence；README「97/100 CFL 末位一致」**不可复现**（现树 1/101）→ 勘误 **D668** | |
 | navier_cht.rs | **DEV** | rc=3 部分交付（热求解推进行在案）✓ | |
 
 ### hdiv_linear_solver/（3 = 2 实体 + 1 模块）
@@ -213,22 +218,37 @@ RUN/BIT 副档。）
 |---|---|---|---|
 | adjoint_cvodes_roberts.rs 已列；lor_solvers `-fe l` 拒绝档 | DEV | rc=3 声明 ✓（r61 已 BIT 主档） | |
 
-## CRASH / RUN* 与新债（D657–D659，只登记不修）
+## CRASH / RUN* 与新债（D657–D659，round 63 登记 → round 64 处置）
 
-- **D657（P2，CRASH）**：`multidomain_nd.rs` / `multidomain_rt.rs` — 默认档 panic
-  `BlockToCylinderMap: no block dof at cyl interface dof 36 / 2296`
-  （logs/mini_multidomain_nd.log、mini_multidomain_rt.log）。README 声称「_nd/_rt 版已添加
-  （H(curl)/H(div) 变体）」但无任何通过记录——本轮为首次实跑即 panic。主 H1 版
-  multidomain.rs 正常（RUN-LONG）。修复方向：界面 dof 映射对 ND/RT 的 vdim/自由度布局
-  （TransferMap 的 dof 坐标匹配只按标量 H1 键控）。
-- **D658（P2，RUN\*）**：`navier_bifurcation.rs` — PRES PCG 200 it 残差 4.64e+01 不收敛
-  （默认档与 `-Re 1000` 档均复现，194 步 "No convergence"），粒子注入恒 0，480s 跑不完
-  600 步（logs/mini_navier_bifurc{,4,5,6}.log）。README 记录「DOF 52866/26433 = C++、
-  收敛区 100 步中 97 步 CFL 末位一致」——当前树数值行为与记录冲突（回潮或记录档依赖
-  特定预条件/步长 gear），需对拍 C++ 复核。
-- **D659（P3，DEV 阻塞）**：`trimmer.rs` — ① 默认输入 `data/beam-tet.vtk` 仓库缺失
-  （D633 回填残留，23 文件清单未含 .vtk）；② fem-rs 无 VTK reader
-  （`expected 'MFEM mesh' header`）。两档均 rc=1 报错而非声明的 exit(3)（logs/mini_trimmer_*.log）。
+- **D657（P2，CRASH）——round 64 关闭（B 路）**：根因 = 坐标匹配对 ND/RT 结构性失效
+  （canonical 方向 GL 点 / face anchor / RT canonical 顶点帧在两 submesh 编号错位，实测
+  两侧各 208 dof 仅 108 命中）+ 块 dof 查询只取块首（ND edge_dof 每边 1 个、RT tri_face_dof
+  每面 1 个；FaceKey 未排序与 hdiv 注册键不一致，cyl ess 28 vs 正确 576）。修法 = 实体化配对
+  （物理实体分组 + 几何因子 `g(d)` 定号）+ ess 改整块 + IC 对齐 ProjectBdrCoefficient + 积分阶
+  逐项对齐 MFEM。两文件崩溃清零，dof/ess 计数与 MFEM 全等。残留数值差 → **D667**。
+- **D658（P2，RUN\*）——round 64 关闭（B 路，裁定反转）**：**无回潮**——C++ 4.10 串行镜像
+  同 gear 同样 `PRES 200 4.64e+01`（逐位同）；根因 = 串行无 hypre 的 MFEM 固有停滞。
+  交付 = `NavierConfig::pressure_amg` + `-pc amg`（BoomerAMG analogue）。README「97/100 CFL
+  末位一致」不可复现（1/101）→ 勘误 **D668**。
+- **D659（P3，DEV 阻塞）——round 64 关闭（D 路）**：`beam-tet.vtk` 回填
+  （MD5 `cfca8a890133d872b1f3f95eb5c064b4`）；默认 .vtk 档改诚实 rc=3 + D675 指向；
+  `.mesh` 对拍路线 = GenerateFaces 1:1 重写后 hex 档 trimmer.mesh diff=0、tet 档 82/83
+  （残 1 行 → **D676** 写路径）。
+
+## round 64 新债（B/D 路登记）
+
+- **D667（core，P2，已实测）**：multidomain RT cyl 首个 RK3 步后自由接口 Σv² ≈ 2.2× MFEM
+  （发散）+ ND 轨迹 0.1–2.8% 偏差同族（传输本身已验证精确拷贝 `cyl_if==blk_if`）。嫌疑：
+  RT1-hex 内部基函数 div 在 1-pt DivDiv 规则的采样 / `MixedWeakGradDot` 在非平行四边形
+  facet hex 上的求值（crates/element、crates/assembly、crates/space/hdiv）。
+- **D668（勘误，已实测）**：miniapps/README.md 与本台账旧记录「navier_bifurcation 收敛区
+  100 步中 97 步 CFL 末位一致」在当前树不可复现（101 步仅 step 1 逐位，step 2+ 相对差
+  ~1e-4；停更的 200-it 压力解对舍入混沌敏感）——README 批注 erratum 由主会话执行。
+- **D675（io GAP，非 HYPOTHESIS）**：fem-io 无 VTK reader（fem-io 仅 MFEM 格式；MFEM
+  `Mesh()` 原生读 VTK）。默认输入 `.vtk` 的 miniapp（trimmer 已声明 exit(3)）与未来对照受此限。
+- **D676（io 写路径，已实测）**：fem-rs `.mesh` 写出对 Tet4 边界面做 MarkEdge 循环规范化
+  （`mark_tet_mesh_for_refinement`），MFEM 写 Finalize 后原循环 → trimmer tet 残差 1 行；
+  与 A 路 D663 同族（写路径 tet 朝向/槽位规范化 vs MFEM 存储序），合并追踪。
 
 ### 注记（不立案）
 - **mesh_quality.rs**：数值与 C++ 全同，仅打印格式漂移（`Min skew 1 (in deg)` 多 "1"、

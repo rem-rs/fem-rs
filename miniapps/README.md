@@ -863,10 +863,19 @@ miniapps/
 ├── fluids/navier_bifurcation.rs ← 第 6 个 (navier_bifurcation.cpp 1:1,
 │                                2D 通道分叉 + 粒子追踪): DOF 52866/26433
 │                                = C++, step1 CFL 6.03374E-02 逐位, 粒子
-│                                计数 600 步全一致, CSV 表头逐字节, 收敛区
-│                                100 步中 97 步 CFL 末位一致; 粒子用库内
-│                                crates/mesh/findpts (无裁剪, RNG 逐位复刻);
-│                                裁剪项: GLVis/ParaView/-traj (文档标注)
+│                                计数 600 步全一致, CSV 表头逐字节; 粒子用
+│                                库内 crates/mesh/findpts (无裁剪, RNG 逐位
+│                                复刻); 裁剪项: GLVis/ParaView/-traj (文档标注)
+│                                【D668 勘误·round 64】下述"收敛区 100 步中 97 步
+│                                CFL 末位一致"**不可复现**（round 64 实测 101 步仅
+│                                step 1 逐位、step 2+ 相对差 ~1e-4——停更的 200-it
+│                                压力解对舍入混沌敏感）；无 hypre 串行档 PRES
+│                                200 it 停滞 = MFEM 固有行为（C++ 4.10 串行镜像
+│                                逐位同），收敛档 = -pc amg（NavierConfig::
+│                                pressure_amg，HypreBoomerAMG 串行 analogue）⇒
+│                                PRES 24-28 it 全程收敛。详见 miniapps_ledger
+│                                round 64 节。旧记录：收敛区 100 步中 97 步 CFL
+│                                末位一致（已按 D668 收窄为不可复现）
 ├── fluids/navier_3dfoc.rs     ← 第 7 个 (navier_3dfoc.cpp 1:1, 曲线
 │                                box-cylinder, 内核零改动): DOF 16956/5652,
 │                                vel_ess_tdof 7149 = C++, Time/dt 表逐字节,

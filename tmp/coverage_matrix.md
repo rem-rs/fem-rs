@@ -85,7 +85,7 @@
 | 求解器 | MACH | PCG 位历史（round 32 两套 API 教训在案）、AMG/AMS/ADS、LOR 三腿 mesh-independent、block_solvers dyn（D580 六模式逐位） |
 | LOR | MACH | lor_rt_pcg/lor_nd_pcg/lor_rt_quad_pcg；D72 秩亏已修 |
 | 并行 | BIT（np1/2/4 键表逐位） | D124/D136/D156/D504；残：D527 连续分块（故意不动）、D122 并行 ND2/RT1 ghost（**GAP**） |
-| io mesh | BIT（读侧） | D589（vertices token 流对齐）；INLINE 全类型矩阵 vs MFEM 逐元素全同（D582）；**D117/D118+D624 两段关闭（round 60/61）**：混合高阶 H¹ 编号引擎 → 落存储 attach（ragged CSR 派生、零新字段、uniform 逐位不变；llnl-p3 detJ 1.3e-13、wrong orientation 15/26→0、fichera-mixed-16 翻绿、AMR mindet=粗/4 精确）；**D612/D613 关闭（round 61）**：Hex27 官方 slot 序裁决 + p_refine 修正[连带修体心真 bug] + 曲线标签契约；残：D627/D628/D629/D630/D626/D609/D600/D601 |
+| io mesh | BIT（读侧） | D589（vertices token 流对齐）；INLINE 全类型矩阵 vs MFEM 逐元素全同（D582）；**D117/D118+D624 两段关闭（round 60/61）**：混合高阶 H¹ 编号引擎 → 落存储 attach（ragged CSR 派生、零新字段、uniform 逐位不变；llnl-p3 detJ 1.3e-13、wrong orientation 15/26→0、fichera-mixed-16 翻绿、AMR mindet=粗/4 精确）；**D612/D613 关闭（round 61）**：Hex27 官方 slot 序裁决 + p_refine 修正[连带修体心真 bug] + 曲线标签契约；**D651 关闭（round 64）**：直面 tet 均匀细化顶点编号/子单元发射序对齐 MFEM（ex3 3-D 轨迹逐字节）；残：D627/D628/D629/D630/D626/D609/D600/D601/D663/D675/D676 |
 | io gridfunction | **BIT（双向）** | **D602 关闭（round 60，裁决=误诊）**：写侧本来就 74/74 一致；真缺口是**原生 gf 读取器缺失**——已补 `read_mfem_gf`；三层验收全过（74/0、跨库重构 4.0e-15=MFEM 自写对照同水平、反向 74/74+120/120）。残：D610（只钉了 straight tet ND2）、D611（face_pair_storage_map 仅 tri-face、O(NE) 扫描） |
 | NURBS/IGA | BIT | 九档 diff=0、`-patcha -rint` netlib 位级（D533/D563）、`-pa` 全量（D562，pa_data quirk 镜像 + D593 last-ulp 残差） |
 | 线代核 | BIT | QR/NNLS vs LAPACK/netlib 位级（D533/D561）； csr/spmv 既有 |
@@ -95,6 +95,12 @@
 ## 3. examples / miniapps 矩阵
 
 - **86 examples** 全部移植可编译（每轮 `cargo build --release --examples` 0 错误）。
+- **round 62–64 增量（对照 round 61 初账）**：CRASH 12 → **0**（D633 资产回填 + D635a
+  分区越界修复）；RUN\* 3 → **0**（D634 停机规则族 = ex4 646 it=C++、ex5 397 行逐字节、
+  ex14/ex6/ex29 同族；D635b ex20 辛积分器步进调用修复）；**ex3 双档逼近 BIT**——3-D
+  beam-tet PCG 轨迹 137 行逐字节（round 64 D651）、2-D star.mesh 误差行逐字节级（round 64
+  D653），仅剩 3 项打印格式差 = D664；pex40 页脚 np=1 逐字节（D655）。examples 新债
+  D672/D673/D674（手写误差评估器残留族，D656 审计 86 例全扫产出入账）。
 - **逐例三态台账已建（round 61）**：`tmp/ledger/examples_ledger.md`（85 实跑 + 1 未注册死文件；
   C++ 参考 = 现编 `$HOME/mfem410_ser`，diff 证据 `tmp/ledger/logs/` + `tmp/ledger/ref/`）。
   计数：**BIT 4**（ex1/ex2/ex24/ex31，本轮现编 `$HOME/mfem410_ser` 真对拍逐字节）、
@@ -123,6 +129,12 @@
   （beam-tet.vtk 资产缺失 = D633 残留 + VTK reader 未实现，rc=1 非声明 exit(3)）。
   另：maxwell.cpp 为 MPI-only（串行树永无现编 oracle）；twist 默认档已随 nodes writer
   落地从 exit(3) 升级为 rc=0（README 记载过期）。joule = 电磁半块推进中（D120/D121/D618-620）。
+- **miniapps round 64 增量（B/D 路）**：**CRASH 2 → 0**（D657 multidomain_nd/_rt 崩溃修复：
+  实体化配对 + 几何因子定号，dof/ess 计数与 MFEM 全等；数值残差 = D667）；**RUN\* −1**
+  （D658 navier_bifurcation 裁定**无回潮**——C++ 串行镜像同档逐位同停滞，系无 hypre 的 MFEM
+  固有行为；新增 `-pc amg` 收敛档 24-28 it）；trimmer DEV(阻塞) → RUN(.mesh 对拍，hex diff=0)
+  + DEV(.vtk 诚实 exit(3))。**miniapps CRASH 清零**。新债 D667/D668（勘误）/D675（VTK reader
+  GAP）/D676（写路径 tet 规范化，与 D663 同族合并追踪）。
 
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
@@ -149,7 +161,8 @@
 | **P1（round 62 关闭，台账新债清)）** | ~~D634 停机规则族~~（**根因=七例求解器配置漂移，核心 API 两套语义全对**[round 32 对齐守住]：ex4 字面量预开方松 10 量级→646 it=C++ 且 0-588 行逐字节、ex5 改用 1:1 mfem_minres→397 行逐字节、ex6/ex14/ex29 同族、ex3 初值口径、ex8 内层判据；核心唯一真缺陷=mfem_minres 打印门；**回归红线 ex1/ex2/ex24/ex31/d367/d370/mg 全绿**）；~~D635a pex5/pex40 并行越界~~（二分闭环：`0e19c81` Step 0b 三分量硬编码 dot on dim-len 切片；修复后与回归前父构建**逐位一致**）；~~D635b ex20 辛积分器未演化~~（根因=**步进调用被过期 TODO 注释**，SIAVSolver 早已建成；六配置逐字节=C++）；~~D633 data 资产缺失~~（23 件回填 MD5 校验、ex15dyn 513s 全程 rc=0） |
 | **P1（round 63 关闭，D634 收口）** | ~~D639 ex4/ex5 误差评估器~~（手写版硬编码三角 RT0 假设 vs quad 网格[三角求积只盖左下半，0.495≈1/2 面积]；换核心后 **ex4 0.0161443 / ex5 0.000143587 与 C++ 逐字节**）；~~D640 ex8 块装配~~（**真核心 bug：sinv.rs 四边形分支 J⁻¹/J⁻ᵀ 写反**——轴对齐单元两者相同故历史验证全盲；16 行修复后 ex8 29 it、DPG 0.0183277 逐字节、square-disc 交叉验证 ✓）；~~D641 EliminateVDofsInRHS~~（`form_linear_system_vdofs` 落地 + **修正 round-62 两处诊断**[PartMult=赋值 ⇒ 消元口径本就等价；IterativeSolver 默认 iterative_mode=true]；ex3 剩余残差铁证 = **tet-ND 边编号置换 vs EnumEdges**[A 对角线前 12 项逐位、第 13 项分叉]→ **D651 round 64 头号候选**）；~~D644 pex5/pex40 参考~~（官方源= ex5p/ex40p；ex5p RUN[Schur AMG 参数族 44vs95 it]、ex40p RUN⁺[≤2e-3]） |
 | **P1（round 63 关闭，prism 可写轮五件）** | ~~D597 行表下沉~~（`prism.rs::mfem_nodal_rows` 单一来源，26/26 红线逐位）、~~D605 警告~~、~~D598 coord_twins 夹具~~（2-hex AddHexAsWedges pinched；中和实验证真；**连带更正 d584 docstring：two-wedge 夹具 twin_groups 实为空**）、~~D646 SIAV 双实现~~（symplectic 版零消费方删除，lib 270→264 账目吻合）、~~D647 ex2 升全逐字节~~（**简报前提再修正：MFEM 4.10 ex2.cpp 根本无 Wrote 打印**——删行后 278 行/11783 字节 cmp 全同、stderr 双侧 0） |
-| **P1（新，round 63 登记）** | **D651 tet-ND 边编号置换**（vs EnumEdges；阻 3-D H(curl) GS 序逐位——ex3 唯一剩余障碍）**← round 64 头号候选**；D652（sinv.rs 负 det 垃圾块）、D653（ex3 2-D l2_err_2d 三角专用）、**D657** multidomain_nd/_rt 首跑即挂、**D658** navier_bifurcation 不收敛+README 回潮嫌疑、**D659** trimmer 双重阻塞、D660-662（prism 双源互钉/参考元重建性能债/夹具文档漂移审计） | 待派 |
+| **P1（round 64 关闭）** | ~~D651 tet-ND 边编号置换~~（**根因反转：不在 space[dof_manager/hcurl 无辜]，在 mesh 细化层**——直面 tet 均匀细化顶点编号用 first-touch 而 MFEM `UniformRefinement3D_base` 用字典序 `oedge+e2v`、加镜像子单元发射序[0↔1 转置翻 det(J)]；修 `amr_inner.rs` 两处门后 **ex3 3-D 137 行 (B r,r) 逐字节**；16/16 GetElementDofs 表逐位）；~~D652 sinv 负 det~~（**裁定反转：D640 已顺带消除"垃圾块"[\|det\|]；真缺陷 = 静默修反转单元 vs MFEM Weight() 带符号**——修后带符号语义 + ex8 逐字节不变）；~~D653 ex3 2-D l2_err~~（换核心 compute_hdiv_l2_error，star.mesh `1.34917895677130e-2` = C++ 0.0134918）；~~D657 multidomain_nd/_rt 崩溃~~（实体化配对+几何因子定号；dof/ess 与 MFEM 全等；数值残差 → D667）；~~D658 navier_bifurcation~~（**无回潮裁定**：C++ 串行镜像逐位同停滞；`-pc amg` 档交付）；~~D659 trimmer~~（.vtk 回填+诚实 exit(3)+.mesh 对拍 hex diff=0）；~~D654 ex5p AMG~~（**豁免[结构性]**：hypre 经典 HMIS 族 vs 聚合式不可达，5 组对照实验）；~~D655 Total dofs~~（pex40 页脚改本地真 dof 和，np=1 逐字节）；~~D660 prism 双源~~（验证性关闭，D597 已收敛，26/26 红线）；~~D661 interpolate_vector 重建~~（hoist 4.2×，逐位 pin）；~~D662 漂移审计~~（定向抽样无新漂移）；~~D656 手写误差审计~~（86 例全扫 → D672-674） |
+| **P1（新，round 64 登记）** | **D663**（io 写出直面 Tet4 重跑 mark 规范化 vs MFEM 存储序——refined.mesh 文件级 pin 偏离，内存/求解不受影响）、**D664**（ex3 3-D 距 BIT 仅 3 项打印格式差）、**D665**（HYPOTHESIS：refine_uniform_3d 直面 tet 的 23 个 miniapp 消费方数值将随 D651 变化）、**D667**（multidomain RT cyl 发散 + ND 轨迹 0.1-2.8% 偏差）、**D668**（navier_bifurcation README「97/100 CFL」勘误）、**D672**（maxwell.rs 共享 l2_error_hcurl_exact ND1 硬编码 → ex22/pex3 -o2 静默错，实测爆表）、**D673**（ex22 死函数+文件级 allow 违纪）、**D674**（ex40/pex40/ex18 quad-only 手写范数族）、**D675**（VTK reader GAP）、**D676**（写路径 tet MarkEdge 规范化，与 D663 同族） | 待派 |
 | P1 | ~~D612/D619/D613 slot 序同族~~ + ~~D614 postproc 接线~~ + ~~D615 hex IGLL 装配腿~~ + ~~D617 tet GM fixture~~ | **round 61 关闭（D 路）** |
 | P1 | ~~D632 pyramid 细化家族错配~~（真根因=CurvedMesh 三求值器走 factory；∫|detJ| 0.1434→1/3）+ ~~D636 elem_vol hex 恒 0~~（η 0→√3、ZZ 全 0→全>1e-10）+ ~~D637 flux_recovery 推断~~（显式 D637 拒绝替代静默 0.0） | **round 62 关闭（D 路）** |
 | P1 | ~~D638 HCurl hex IGLL 装配腿~~（曾静默跌落 GL，95184 项 1.88e-14、框架因子=1） | **round 62 关闭（C 路）** |

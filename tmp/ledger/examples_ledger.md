@@ -163,3 +163,26 @@
   **本轮复证未闭合**：存档对的原命令不可复原；本轮自建同档（274625 dof）实况对拍为
   **机器精度级吻合而非逐字节**（iter1 起 4 位有效一致、ARF 末位差 1）⇒ ex26 由历史 BIT 降级为
   RUN（数值吻合口径），历史"逐行一致"结论应收窄为"数值逐字节、打印行有 4 行豁免"。
+
+## round 64 增量（主会话收尾注记）
+
+- **ex3**（上行第 35 行的"119 迭代/归一化残差"记录为 round-62 前旧态，已被 round-62 D634
+  收口与 round-64 D651 双双超越）：**3-D beam-tet 档 PCG 轨迹 137 行 (B r,r) 与 C++ 4.10
+  逐字节全同**（D651 修 mesh 细化顶点编号后）、ARF 0.903118 两侧同、E 0.391631 一致；
+  **2-D star.mesh 档误差行 `1.34917895677130e-2` = C++ 0.0134918**（D653 换核心
+  hdiv_error）。距 BIT 仅剩 3 项纯打印格式差（缺 `Size of linear system:` 行、多
+  `PCG+GSSmoother` 摘要行、E_h 用 `{:.14e}` 而非 cout 6 位）= **D664**（examples 域）。
+- **pex5**（ex5p）：维持 RUN；D654 = **豁免（结构性）**——C++ 侧 `HypreBoomerAMG(*S)` 零参数
+  覆盖走经典 HMIS+ext-i+aggressive 族（hypre.cpp SetDefaultOptions 钉死），fem-rs
+  `crates/parallel/src/par_amg.rs` 为聚合式 AMG 且无粗化/插值族旋钮；示例层 5 组对照实验
+  （E0/E1/E2/E4/E6，tmp/d654/）证明同档配置在聚合族上全部更差（95 即最优）。豁免注释已落
+  示例文件。
+- **pex40**（ex40p）：D655 关闭——页脚 "Total dofs" 从全局口径改 rank 本地真 dof 和
+  （= C++ `RTfes.GetTrueVSize()+L2fes.GetTrueVSize()` 语义）；np=1 `15520` 与 C++ 逐字节；
+  np=2 语义对齐（7956 vs 7796 = 划分器本地分布差，预期）；Newton 轨迹零漂移。
+  顺带清 6 条预存警告（fem-examples 本例零警告）。
+- **D656 审计**（86 例全扫，只读）：新债 **D672**（`examples/src/maxwell.rs` 共享
+  `l2_error_hcurl_exact` ND1 硬编码 → ex22/pex3 `-o 2` 误差行静默错，实测 -o2 误差大 14×
+  且加密反升）、**D673**（ex22 死函数 + 文件级 `#![allow(...)]` 违反死代码零容忍）、
+  **D674**（ex40/pex40/ex18 手写 quad-only L2 范数族，部分 HYPOTHESIS）。详表见 round-64
+  plan 节。
