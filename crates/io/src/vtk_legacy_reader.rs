@@ -32,6 +32,28 @@
 //!      rotated) local edge afterwards, so the reader does the same.
 //!    Hex / prism / pyramid meshes never mark (`meshgen` bit 1 unset).
 //!
+//! # The `Finalize(refine, fix_orientation)` knobs
+//!
+//! The `read_vtk_mesh_with` / `read_vtk_mesh_file_with` variants expose the
+//! `Mesh mesh(file, refine, fix_orientation)` constructor overloads
+//! (`mesh.hpp:823-827`, `Mesh::Finalize` at `mesh.cpp:3766`):
+//!
+//! * `refine = false` skips `MarkForRefinement()` — no longest-edge rotation
+//!   of elements, boundary faces or geometry rows.
+//! * `fix_orientation = false` turns `Finalize`'s `CheckElementOrientation`
+//!   into a check-only pass.  This is the only orientation pass a *quadratic*
+//!   mesh gets; *linear* meshes are oriented unconditionally inside
+//!   `CreateVTKMesh` (`mesh_readers.cpp:488`), so for them the knob is moot.
+//! * The trailing `CheckBdrElementOrientation()` is unconditional in MFEM;
+//!   its 2-D realignment stays on in every combination (it is an identity
+//!   unless an owner's vertex cycle changed).
+//!
+//! `(true, true)` — the [`read_vtk_mesh`] / [`read_vtk_mesh_file`] defaults —
+//! is the historical (and byte-parity-pinned) behaviour.  The C++ trimmer's
+//! `Mesh mesh(mesh_file, 0, 0)` is `(refine, fix_orientation) = (false, true)`
+//! (the constructor's second parameter is `generate_edges`, `fix_orientation`
+//! keeps its `true` default — `mesh.hpp:813`).
+//!
 //! # Supported cell types
 //!
 //! | VTK code | type                               | MFEM geometry  |
@@ -89,17 +111,46 @@ pub struct VtkMeshFile {
     pub mesh3d: Option<Mesh<3>>,
 }
 
-/// Read a legacy VTK mesh from a stream (MFEM `Mesh::Load`'s VTK branch).
+/// Read a legacy VTK mesh from a stream (MFEM `Mesh::Load`'s VTK branch),
+/// with MFEM's default `Load(..., refine = 1, fix_orientation = true)`.
 pub fn read_vtk_mesh<R: Read>(mut reader: R) -> FemResult<VtkMeshFile> {
     let mut text = String::new();
     reader.read_to_string(&mut text)?;
-    read_vtk_mesh_str(&text)
+    read_vtk_mesh_str(&text, true, true)
 }
 
-/// Read a legacy VTK mesh file.
+/// [`read_vtk_mesh`] with explicit `Mesh::Finalize(refine, fix_orientation)`
+/// knobs — the `Mesh mesh(file, refine, fix_orientation)` constructor overload
+/// (`mesh.hpp:823-827`): `refine = false` skips `MarkForRefinement`
+/// (the read-side longest-edge marking), `fix_orientation = false` turns
+/// `CheckElementOrientation` into a check-only pass.  The trailing
+/// `CheckBdrElementOrientation()` runs unconditionally in MFEM, so boundary
+/// realignment stays on in every combination.
+pub fn read_vtk_mesh_with<R: Read>(
+    mut reader: R,
+    refine: bool,
+    fix_orientation: bool,
+) -> FemResult<VtkMeshFile> {
+    let mut text = String::new();
+    reader.read_to_string(&mut text)?;
+    read_vtk_mesh_str(&text, refine, fix_orientation)
+}
+
+/// Read a legacy VTK mesh file (MFEM defaults, `Mesh(file, 1, 1)`).
 pub fn read_vtk_mesh_file(path: impl AsRef<std::path::Path>) -> FemResult<VtkMeshFile> {
+    read_vtk_mesh_file_with(path, true, true)
+}
+
+/// [`read_vtk_mesh_file`] with explicit `Finalize(refine, fix_orientation)`
+/// knobs — e.g. `(false, true)` reproduces the C++ trimmer's
+/// `Mesh mesh(mesh_file, 0, 0)` load exactly.
+pub fn read_vtk_mesh_file_with(
+    path: impl AsRef<std::path::Path>,
+    refine: bool,
+    fix_orientation: bool,
+) -> FemResult<VtkMeshFile> {
     let text = std::fs::read_to_string(path)?;
-    read_vtk_mesh_str(&text)
+    read_vtk_mesh_str(&text, refine, fix_orientation)
 }
 
 /// Write `mesh` in MFEM format exactly the way MFEM prints a mesh that was
@@ -1258,7 +1309,7 @@ fn attach_geometry<const D: usize>(
     });
 }
 
-fn build_mesh_2d(cells: VtkCells) -> FemResult<Mesh<2>> {
+fn build_mesh_2d(cells: VtkCells, refine: bool, fix_orientation: bool) -> FemResult<Mesh<2>> {
     let VtkCells {
         coords,
         conn,
@@ -1306,17 +1357,31 @@ fn build_mesh_2d(cells: VtkCells) -> FemResult<Mesh<2>> {
         nc_vertex_view: None,
         vertex_parents: vec![],
     };
-    // MFEM order: `FinalizeTopology` (faces above) → `CheckElementOrientation`
-    // → `MarkForRefinement`.  The geometry attaches first so the curved
-    // orientation fix (below) and the marking's row rotation can run; MFEM's
-    // `CheckElementOrientation(fix = true)` repairs curved and linear
-    // elements alike.
+    // MFEM orients a *loaded VTK* mesh in two places:
+    //   * `CreateVTKMesh` (mesh_readers.cpp:488): `CheckElementOrientation(true)`
+    //     — **unconditional** for linear meshes, whatever the knobs are;
+    //   * `Mesh::Finalize(refine, fix_orientation)` (mesh.cpp:3793):
+    //     `CheckElementOrientation(fix_orientation)` — knob-controlled, and the
+    //     only orientation pass a quadratic (curved) mesh ever gets.
+    // The geometry attaches so the curved branch (mirrored by
+    // `fix_curved_orientation`) and the marking's row rotation can run; the
+    // extra linear pass under `fix_orientation` is the reader's defensive
+    // split of MFEM's single curved-mesh check (same corner swaps).
     if quadratic {
         attach_geometry(&mut mesh, geo_rows, &extra_coords);
-        fix_curved_orientation(&mut mesh);
+        if fix_orientation {
+            fix_curved_orientation(&mut mesh);
+            mesh.check_element_orientation(true);
+        }
+    } else {
+        mesh.check_element_orientation(true);
     }
-    mesh.check_element_orientation(true);
-    if fams.iter().any(|&f| f == Family::Tri) {
+    // `MarkForRefinement` (`meshgen` bit 1 → 2-D triangles), gated on the
+    // `refine` knob like `Mesh::Finalize`.  The trailing
+    // `CheckBdrElementOrientation()` is unconditional in MFEM: its realignment
+    // is mirrored below and is an identity unless the owners' vertex cycles
+    // changed (marking or an orientation fix).
+    if refine && fams.iter().any(|&f| f == Family::Tri) {
         let shifts = mark_tri_mesh_for_refinement(&mut mesh);
         if quadratic {
             for (e, &shift) in shifts.iter().enumerate() {
@@ -1325,6 +1390,8 @@ fn build_mesh_2d(cells: VtkCells) -> FemResult<Mesh<2>> {
                 }
             }
         }
+    }
+    if fams.iter().any(|&f| f == Family::Tri) {
         // MFEM built the boundary before the marking; `Finalize`'s
         // `CheckBdrElementOrientation` re-aligns every segment with its
         // owner's (possibly rotated) local edge (`bv[0] == fv[0]`).
@@ -1333,7 +1400,7 @@ fn build_mesh_2d(cells: VtkCells) -> FemResult<Mesh<2>> {
     Ok(mesh)
 }
 
-fn build_mesh_3d(cells: VtkCells) -> FemResult<Mesh<3>> {
+fn build_mesh_3d(cells: VtkCells, refine: bool, fix_orientation: bool) -> FemResult<Mesh<3>> {
     let VtkCells {
         coords,
         conn,
@@ -1393,19 +1460,30 @@ fn build_mesh_3d(cells: VtkCells) -> FemResult<Mesh<3>> {
         nc_vertex_view: None,
         vertex_parents: vec![],
     };
-    // MFEM order: `FinalizeTopology` (faces above) → `CheckElementOrientation`
-    // → `MarkForRefinement`.  Tetrahedral meshes mark (`meshgen` bit 1) —
-    // elements and boundary triangles via `mark_tet_mesh_for_refinement`;
-    // quadratic tet rows follow the corner rotation (MFEM's
-    // `PrepareNodeReorder`/`DoNodeReorder` keeps `Nodes` attached to the
-    // rotated frame; the writer re-derives the global dof numbering from the
-    // topology, so only the per-element row permutation is needed here).
+    // MFEM orients a *loaded VTK* mesh in two places (same split as the 2-D
+    // path): `CreateVTKMesh`'s unconditional `CheckElementOrientation(true)`
+    // for linear meshes, and — for quadratic meshes only — the
+    // knob-controlled `CheckElementOrientation(fix_orientation)` inside
+    // `Mesh::Finalize`.  Then `MarkForRefinement` gated on the `refine` knob.
+    // Tetrahedral meshes mark (`meshgen` bit 1) — elements and boundary
+    // triangles via `mark_tet_mesh_for_refinement`; quadratic tet rows follow
+    // the corner rotation (MFEM's `PrepareNodeReorder`/`DoNodeReorder` keeps
+    // `Nodes` attached to the rotated frame; the writer re-derives the global
+    // dof numbering from the topology, so only the per-element row permutation
+    // is needed here).  The trailing `CheckBdrElementOrientation()` is an
+    // identity in this pipeline: the boundary triangles carry the same
+    // first-encounter owner cycles as the face table (and, when marked, were
+    // rotated along with the elements).
     if quadratic {
         attach_geometry(&mut mesh, geo_rows, &extra_coords);
-        fix_curved_orientation(&mut mesh);
+        if fix_orientation {
+            fix_curved_orientation(&mut mesh);
+            mesh.check_element_orientation(true);
+        }
+    } else {
+        mesh.check_element_orientation(true);
     }
-    mesh.check_element_orientation(true);
-    if fams.iter().any(|&f| f == Family::Tet) {
+    if refine && fams.iter().any(|&f| f == Family::Tet) {
         let old_corners: Vec<[u32; 4]> = (0..n_elems as u32)
             .map(|e| {
                 let mut c = [0u32; 4];
@@ -1447,11 +1525,17 @@ fn build_mesh_3d(cells: VtkCells) -> FemResult<Mesh<3>> {
     Ok(mesh)
 }
 
-fn read_vtk_mesh_str(text: &str) -> FemResult<VtkMeshFile> {
+fn read_vtk_mesh_str(text: &str, refine: bool, fix_orientation: bool) -> FemResult<VtkMeshFile> {
     let cells = build_cells(parse_vtk(text)?)?;
     match cells.space_dim {
-        2 => Ok(VtkMeshFile { mesh2d: Some(build_mesh_2d(cells)?), mesh3d: None }),
-        3 => Ok(VtkMeshFile { mesh2d: None, mesh3d: Some(build_mesh_3d(cells)?), }),
+        2 => Ok(VtkMeshFile {
+            mesh2d: Some(build_mesh_2d(cells, refine, fix_orientation)?),
+            mesh3d: None,
+        }),
+        3 => Ok(VtkMeshFile {
+            mesh2d: None,
+            mesh3d: Some(build_mesh_3d(cells, refine, fix_orientation)?),
+        }),
         other => Err(vtk_err(format!("internal: space dimension {other}"))),
     }
 }

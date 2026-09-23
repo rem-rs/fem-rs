@@ -25,11 +25,12 @@
 //!   the source load, so only cut faces whose owner was removed can flip.
 //! * `-m data/beam-tet.mesh -a 1` / `-a 2` are byte-identical to the MFEM
 //!   4.10 trimmer (the `.mesh` twin is stored mark-oriented, so the reader's
-//!   `Load(refine=1)` mirror is a no-op there).  The VTK default tier keeps a
-//!   read-side residual: the port implements `Mesh(file,1,1)` (marked), while
-//!   the C++ trimmer loads with `Mesh(file,0,0)` (unmarked) — every differing
-//!   record is a geometry-preserving vertex-cycle rotation of the same
-//!   element/face (tracked as D688, the `Load(refine=false)` reader knob).
+//!   `Load(refine=1)` mirror is a no-op there).  The VTK default tier loads
+//!   through `read_vtk_mesh_file_with(..., refine = false,
+//!   fix_orientation = true)` since D688 (round 66) — exactly the C++
+//!   trimmer's `Mesh mesh(mesh_file, 0, 0)` — so the read-side longest-edge
+//!   marking (the 91 geometry-preserving cyclic rotations of round 65) is
+//!   gone and all six tiers are byte-identical to the C++ trimmer.
 
 use std::collections::HashMap;
 
@@ -108,9 +109,15 @@ fn main() {
 
     // D675 (round 65): VTK meshes are read natively now — the default input
     // `data/beam-tet.vtk` goes through the 1:1 `Mesh::LoadVtk` port, so the
-    // default run matches the C++ trimmer exactly.
+    // default run matches the C++ trimmer exactly.  D688 (round 66): the
+    // C++ trimmer loads with `Mesh mesh(mesh_file, 0, 0)` whose constructor
+    // signature is `(filename, generate_edges, refine, fix_orientation = true)`
+    // (mesh.hpp:813) — i.e. `refine = 0` while `fix_orientation` keeps its
+    // default `true`; the knobs below pass that through.  (For linear VTK
+    // meshes, like all current `.vtk` assets, `fix_orientation` is moot:
+    // `CreateVTKMesh` orients them unconditionally, mesh_readers.cpp:488.)
     let mesh = if mesh_file.to_ascii_lowercase().ends_with(".vtk") {
-        let vtk = fem_io::vtk_legacy_reader::read_vtk_mesh_file(&mesh_file).unwrap_or_else(|e| {
+        let vtk = fem_io::vtk_legacy_reader::read_vtk_mesh_file_with(&mesh_file, false, true).unwrap_or_else(|e| {
             eprintln!("Error reading mesh: {e}");
             std::process::exit(1);
         });
