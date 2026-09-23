@@ -4470,6 +4470,63 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十六轮（round 66）：D677+D678（头号，A 路失联主会话接力）+ D681/D682/D679（core 裁决大丰收）+ D688/D683 + ex24/ex1/警告专项
+
+开局 HEAD = round 65 末笔 `73db059`（已推送，ls-remote 实证）；磁盘 61G；树净。
+
+### 派单（四路并行，号段 D689–D704）
+
+| 路 | 债务 | 号段 | 独占文件 | 禁区 |
+|----|------|------|----------|------|
+| A | **D677+D678（头号）multidomain RT 收官** | D689-692 | mesh/submesh、multidomain、misc_integrators 缺口 | assembly 其余/io/examples |
+| B | **D681/D682/D679**（ex22 core 病灶 + det.abs 裁决） | D693-696 | assembly 复数/dpg/hdiv_error/assembler、solver | mesh（A）/io/examples |
+| C | **D688+D683**（reader 旋钮 + pex3 仲裁） | D697-699 | io/vtk_legacy_reader、trimmer 调用 | io/mfem.rs、examples |
+| D | **D686/D687/D684+警告专项** | D700-704 | ex24/ex1/maxwell 死 API、45 文件警告 | 三路禁区 |
+
+**流程事件**：A 路代理再度失联（round 65 D 路同款）——代码 + pin 测试 + before/after 轨迹证据均已留树，**主会话按 WIP 证据接力收尾**（复跑与留树数字逐位一致）。
+
+### 四路交付与关门（round 66 主会话收尾）
+
+#### A —— D677+D678 **关闭**（接力收尾；残差登记 D689/D690）
+- **D677**：`extract_submesh_3d` 携带父高阶几何（MFEM `SubMesh` 语义：继承父 `nodes`；节点重映射 + 高阶节点首用追加 + 跨单元共享保持）；**直面父网格惰性**（无表可携 ⇒ 逐位不变红线天然成立，fem-parallel **308/0** 实证 D124/D136/D504 全保持）；另两处 `geometry: None`（曲面 builder，钉死 Tri3/Quad4 无法表达 order-2 面映射、消费者 pex34/pex35 直面）裁决保留 = **D689**。
+- **D678**：multidomain_{rt,nd} 积分阶表换 `mfem_*_order` helper（RT1 GetOrder=p+1 勘误、DivDiv=2k 勘误落地）。
+- **验收**（`-tf 0.005 -dt 1e-5`，C++ 串行镜像真值）：**ND block 与 C++ 吻合 6 位**（sum −4.083137 vs −4.08314、ssq 28.89805 vs 28.898）；RT block rel 2.5e-4（−6.481941 vs −6.48033）；**RT cyl ssq 870× → +21%**（1.733804e-6 vs 1.43051e-6）；ND cyl ssq +0.8%。dof/ess 四组计数不变（7296/576/5120/640）；IC −3.8e-17；d677 套件 3/0；ex8 29 it + 0.0183277 保持；主会话复跑与 A 留树数字**逐位一致**。
+- 残差登记 **D690**：cyl 界面 sum 分量（RT −1.44e-3 vs C++ −6.4e-6；ND 7.9e-4 vs 1.34e-5）——界面耦合敏感项，qp9 边际（1.716e-6）；证据 `tmp/d677/`。
+
+#### B —— D681/D682/D679 **关闭**（裁决型丰收 + 示例侧三件配方登记）
+- **D681**：单 Q2 quad 逐项对拍证明**组装完全正确**（刚度/质量 4.4e-12，dof 指纹/BC/平消解全对）；90× 病灶 = 示例内联评估器拿 `ref_elem(order)` **前 4 个 Q2 角槽位当几何基**（角形函数在单元中心全 0 → det→0 → 映射点塌向全局顶点 → 与 h 无关，解释"加密反升"）。核心交付 `ComplexGridFunction::compute_l2_error`（complex.rs，MFEM ComputeL2Error 语义）；全管线测试 **Re 5.643641e-3 = C++ 5.64364e-3 逐位**（旧 5.055557e-1）。示例侧 2 行修 = **D693**（3-D 同病灶）。
+- **D682**：系统正确性先证（稠密消解 −p1 −o1 = C++ 7 位：3.514695e-2/6.006101e-2）；**停滞与 -o 无关**（-o1 也 1000 it 停 1.742e-4）；根因 = 示例 pc 两处偏离 C++：loss 质量 `VectorMassIntegrator{alpha: σ}` 丢了 ω（**D694**）+ 缺 `DIAG_ONE` 消元（**D695**）；pc 变体阶梯实测：现状 1000 it 停 → +DIAG_ONE 78 it → C++ 全配方 **43 it（-o1）/116 it（-o2）= C++ 116 it**。⚠️ **连带勘误**：round-65 "ex22 -o1 双 -p 逐字节"对 -p 1 不成立（GMRES 轨迹从未一致，仅误差行 4 位吻合）。
+- **D679**：全仓 grep 权威清单 ~130 站；**本车道 26 站全部裁决**（带符号化 + 裁决注释 + 红测 `d679_signed_det_pins`：倒向 tri/quad 的 MFEM 带符号签名 pin，双向验证有牙）；退化保护站（`|det|<ε`）保留+注释。**D696**（HYPOTHESIS）：非车道余量 ~130 站（vector_assembler:1588/1667 为 **D667 漏网**、partial/mixed/bbar/shell_mitc4/vector_convection_nlf/dg_elasticity/ad/wg/reed/iga/physics/postproc 三件/dpg framework 族/par_l2zz_3d）。
+- 红线全绿：ex8 逐字节、ex4 0.0161443 / ex5 0.000143587、fem-assembly **1147/0**、fem-solver **439/0**、ex22 -o1 数值行逐字节。
+- 事件：C: 盘两次打满（target 76G），B 清 PDB/incremental ~56G 后恢复。
+
+#### C —— D688 **关闭** + D683 **仲裁双重成立**
+- **D688**：`read_vtk_mesh_file_with(refine, fix_orientation)` 旋钮（默认 `(true,true)` = 现役调用点逐位不变）。**两处简报外语义发现**：①`CreateVTKMesh`（mesh_readers.cpp:488）对**线性**网格无条件 `CheckElementOrientation(true)`（与旋钮无关）；②`Finalize` 的 `CheckElementOrientation` 只对 curved 生效。**简报修正**：C++ trimmer `Mesh(file,0,0)` 第二参是 `generate_edges`、`fix_orientation` 默认 true ⇒ 真实旋钮 = **(false, true)**（对当前线性资产与 (false,false) 逐位同；curved .vtk 输入只有前者与 C++ 一致）。trimmer 默认档 **91 对循环旋转 → diff=0**；**六档全 diff=0**（mesh a1[83/83]/a2、hex、vtk a1/a2/default）；36 新金标（`fixtures/vtk_d688/`，18 输入 × 两组合，含 tri6r 三态朝向链）；fem-io 136/0 + 集成全绿。
+- **D683**：**双重成立**——台账行过期 **且** HEAD 真回归。证据链：C++ np1/np2 今日实跑 `0.0270053`（17/19 it）= round-30 历史 Rust 值六位一致 ⇒ 历史对照真实；台账行文引用 round-30 值但**同 commit 入库的 fresh log 已是 1.62/2085**（行文与日志自相矛盾）；HEAD `--ranks 1/2` = 271/2085 it、1.62385083285577e0 / 1.62385083181174e0（9 位一致 ⇒ rank 无关 = 组装/BC 消化层，PCG 解的是另一个系统）。头号嫌疑 `25c4c99`（round 54 D124 essential_true_dofs 改接 pex3 非齐次 PEC；该提交自证只验 H1-Q2 且当场登记 D505/D506 = HCurl 边界集已知不对）→ **D697**（HYPOTHESIS；翻转探针 `tmp/d683/probe2.sh` 备好，被磁盘满阻塞待补跑）。台账建议：pex3 行改 RUN* + "行文本数值必须取自同 commit logs/"审计规则。
+- D698/D699 未用。
+
+#### D —— D686/D687/D684 **关闭** + 警告 **96 → 5**
+- **D686**：ex24 四处病灶全修（Options 块补全 10 行、混合解 PCG 从 `solve_pcg_jacobi` 换 **`solve_pcg_dsmoother`**[MFEM CGSolver::Mult+DSmoother 位级移植]、删非 C++ 的 interpolant-norm 行补 C++ 的 Gradient interpolant 行、删多余 Wrote/空行）；**beam-hex -p0 / star -p0 / beam-hex -p2 三口径逐字节 IDENTICAL**（口径勘误：round-65 钉的 23 it/ARF 0.271788 是 star 口径，beam-hex = 29 it/0.364936）；-p1 豁免 5 行 = **D700**（RT/weak-curl 装配 ~1e-5 相对差：iter1 值/ARF/三条 curl 误差行；HYPOTHESIS，B 域）。
+- **D687**：ex1 补 `Options used:` 10 行头 + bool 选项 ENABLE 对规则 + 去前导空行 → **BIT 收官**（`-m star.mesh` 与 `-o 2` 两口径 cmp 全等；仅无 `-m` 默认跑有 mesh 路径行豁免）。
+- **D684**：`hcurl_error_sq_exact`（176 行含 doc）全仓 0 调用 → 删除；fem-examples lib **107/107**。
+- **警告专项**：**96 → 5**（40 文件清零：死 import/死变量/mut/label 机械修；余 5 条全在禁区 pex3[3]+ex40[2] = **D701**，下轮 10 分钟可清）；零行为抽查 ex26/mesh_quality 逐字节同、ex6/ex9 除墙钟行逐字节同；过程坦白：sed 批次 7 处过度替换全部对照 HEAD 复原，终门 0 error 背书。
+- 新债：D700、D701；ex24 无 `-m` 默认网格内置 unit-square vs C++ beam-hex（保留原状，小债候选）。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2626 / 0**（本轮新测试全在集成层，lib 基数不变）；门 2 `--tests`
+**266 targets / 4020 / 0** / 24 ignored（round 65 基线 261/4008 + 五新套件 d677[3]/d681[3]/
+d682_system/d682_stall/d679 pins，账目闭合、零 flake）；门 3 examples **0 错误**（警告余 5 条
+= pex3[3]+ex40[2]，即 D701）；门 4 pro **rc=0**；门 5 fem-py **rc=0**。磁盘 41G（门后）。
+主会话抽查：multidomain_rt/nd 复跑与 A 留树数字**逐位一致** + dof/ess 四组计数不变 +
+ex8 29 it/0.0183277、d681 套件 3/0（含全管线 5.643641e-3 = C++ 逐位）、ex24 beam-hex -p0
+**diff=0**、ex1 **diff=0**、trimmer 默认档 **diff=0**、fem-parallel 308/0（submesh 改动的
+并行 pin 全保持）、d677 套件 3/0。
+
+### round 67 待办（建议）
+
+**① D693/D694/D695（ex22 示例侧收口——配方与锚点全备**：-p0 -o2 期望 5.64364e-3、-p1 期望 43/116 it = C++；examples 域小时级）**；② D697（pex3 回撤回归二分锁定**——翻转探针 `tmp/d683/probe2.sh` 已备，crates/parallel 域，先补磁盘再跑）；③ **D690** cyl 界面残差（multidomain 域）；④ **D696** det.abs() ~130 站分批裁决（D667 同法：mass 族偶次无损换、单 det 次倒向才可见）；⑤ **D700** ex24 -p1 装配偏差（B 域）；⑥ D689/D701 小件；⑦ D586 upstream 投递（仍待用户 GitHub 操作）。
+
 ## 第六十五轮（round 65）：D667（头号，三根因 + 又一颗潜伏核心 bug）+ 评估器族收口（ex40 真值反转）+ D663/D664（io 写路径 + ex3 双档 BIT）+ D675 VTK reader（D 失联接力完成）
 
 开局 HEAD = round 64 末笔 `fd93498`（已推送，ls-remote 实证）；磁盘 57G；树净。

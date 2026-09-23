@@ -101,7 +101,7 @@ multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变�
 | reflector.rs | 默认 NURBS → **DEV** rc=3 ✓；`-m fichera` → **RUN** | fichera 档 NE=14 NBE=40 NV=43 = 记录；**顶点集多重集与 C++ 14/14 全等**（python 实证），角序旋转差 = round 31 有意决定（文件头在案） | |
 | shaper.rs | **RUN\*** | `-m inline-quad`：16→64→256→…→65536（refine_uniform 回退）vs C++ NC 16→52→64 —— **D132 复现（仍开）** | |
 | polar-nc.rs | **DEV** | rc=3 声明（NC mesh v1.0 writer 缺）✓ | |
-| trimmer.rs | **RUN（默认 .vtk 原生）**【round 64 D659 解阻塞 → round 65 D675/D685/D676 关闭】 | `vtk_legacy_reader`（17 cell 类型 C++ 探针金标 + 三资产 Print 逐字节）接线后**默认 `data/beam-tet.vtk` 真 rc=0**（48 elements/36 nodes = C++）；`-m beam-tet.mesh -a 1` tet 档 **83/83 内容行逐字节**（round-64 82/83 → D685 切面 owner 透传+奇置换 Swap；D2 修正 C 配方：MFEM `CheckBdrElementOrientation` 无参 = fix_it=true，奇置换比对必要、循环起点不动）；hex `-a 2` 保持 diff=0；默认档残差 91 对保几何循环旋转 = **D688**（reader 固定 `Mesh(file,1,1)` vs C++ trimmer `(0,0)`——reader 加 refine 旋钮即收官） | |
+| trimmer.rs | **RUN（默认 .vtk 原生，全档 diff=0）**【round 64 D659 → round 65 D675/D685/D676 → round 66 D688 关闭】 | D688 旋钮（`read_vtk_mesh_file_with(refine, fix_orientation)`，默认 (true,true) 现役逐位不变）后**默认 `beam-tet.vtk` 档 91 对循环旋转 → diff=0**；**六档全 diff=0**（mesh a1[83/83]/a2、hex a2、vtk a1/a2/default）；**简报修正**：C++ trimmer `Mesh(file,0,0)` 第二参是 generate_edges、fix_orientation 默认 true ⇒ 真实旋钮 = **(false, true)**（curved .vtk 输入唯此与 C++ 一致）；36 新金标 `fixtures/vtk_d688/` | |
 | mobius-strip.rs / klein-bottle.rs | **RUN** | rc=0，网格写出（D171 记录在案，本轮未重对拍夹具） | |
 | mesh-explorer.rs / mesh-quality.rs | explorer **RUN**（`-m beam-tet` rc=0 打印特征 + 写 mesh-explorer.mesh；2-D 输入按实现拒绝）；quality 见上 | |
 
