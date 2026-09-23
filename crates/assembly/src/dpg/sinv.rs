@@ -215,12 +215,20 @@ impl<M: MeshTopology> SinvBuilder<M> {
                     let jit = tr.as_ref().unwrap().jacobian_inv_t().clone();
                     transform_grads(&jit, &dphi, &mut gp, nt, dim);
                 } else {
-                    // J^{-T} = 1/det * [[J11, -J10], [-J01, J00]]
-                    // where J = [[J00, J01], [J10, J11]] = [[dx/dξ, dy/dξ], [dx/dη, dy/dη]]
+                    // ∇_x φ = J_std^{-T} · ∇_ξ φ where J_std = [[dx/dξ, dx/dη], [dy/dξ, dy/dη]]
+                    // (rows = physical dims) and det = x_ξ·y_η − y_ξ·x_η, so with the
+                    // (j00, j01, j10, j11) = (dx/dξ, dy/dξ, dx/dη, dy/dη) layout of
+                    // `quad_jacobian`:
+                    // jit = J_std^{-T} = 1/det * [[j11, -j01], [-j10, j00]].
+                    // D640: the off-diagonal entries were previously swapped
+                    // (jit01 = -j10, jit10 = -j01, i.e. J_std^{-1} instead of
+                    // J_std^{-T}); identical on axis-aligned quads (where the
+                    // unit-square tests ran) and wrong on sheared ones — the
+                    // star-mesh boundary quads of MFEM ex8.
                     let id = 1.0 / det_j.max(1e-30);
                     let jit00 = j11 * id;  //  dy/dη / det
-                    let jit01 = -j10 * id; // -dx/dη / det
-                    let jit10 = -j01 * id; // -dy/dξ / det
+                    let jit01 = -j01 * id; // -dy/dξ / det
+                    let jit10 = -j10 * id; // -dx/dη / det
                     let jit11 = j00 * id;  //  dx/dξ / det
                     for i in 0..nt {
                         gp[i * dim] = jit00 * dphi[i * dim] + jit01 * dphi[i * dim + 1];

@@ -72,7 +72,7 @@ use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mf
 use fem_linalg::CooMatrix;
 use fem_mesh::{Mesh, MeshTopology, amr::refine_uniform};
 use fem_solver::{solve_pcg, SolverConfig};
-use fem_space::{HCurlSpace, fe_space::FESpace, constraints::{boundary_dofs_hcurl, form_linear_system}};
+use fem_space::{HCurlSpace, fe_space::FESpace, constraints::{boundary_dofs_hcurl, form_linear_system_vdofs}};
 
 fn main() {
     let args = parse_args();
@@ -230,19 +230,20 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
     let qo = args.order as u8 * 2;
     let mut rhs = assemble_linear(args.canonical, &space, &[&Src2D { kappa }], qo);
     let u_proj = project_2d(&space, kappa);
-    let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
     let mut mat =
         assemble_mat_mfem_rule(args.canonical, &space, 1.0, 1.0, args.order.max(1) as u8);
-    // MFEM `FormLinearSystem(..., copy_interior = 0)` leaves the *interior* of
-    // the initial X zeroed — only the essential dofs carry the boundary data
-    // (`form_linear_system` writes those itself).  Starting the solver from
-    // the full projection instead forked the PCG history from iteration 0
-    // (D634: iter-0 (B r, r) 0.12456 vs C++ 146.402, 119 vs 137 iterations;
-    // after this fix 145.78 / 138 — the residual gap is MFEM's
-    // `EliminateVDofsInRHS` rhs convention, see ledger debt D641).
-    let mut x = vec![0.0; n_dofs];
-    form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
+    // MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` with the FULL
+    // projected solution (x.ProjectCoefficient): D641's
+    // `form_linear_system_vdofs` applies `EliminateVDofsInRHS`
+    // (bilinearform.cpp:1239) with the exact `PartMult` assignment on the
+    // essential rows and `copy_interior = 0` (the interior of the projection
+    // is zeroed from the initial X handed to PCG).  The interior values never
+    // reach the free RHS rows, so the eliminated system is identical to the
+    // historical `form_linear_system(bc = x[ess])` path — verified by the
+    // equivalence test in `constraints/dirichlet.rs`.
+    let mut x = u_proj;
+    form_linear_system_vdofs(&mut mat, &mut rhs, &mut x, &ess_bdr, false);
 
     solve_report_2d(&space, &mut x, &rhs, args, kappa, &mat);
     write_mfem_file("refined.mesh", space.mesh()).unwrap();
@@ -368,19 +369,14 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
     let qo = args.order as u8 * 2;
     let mut rhs = assemble_linear(args.canonical, &space, &[&Src3D { kappa }], qo);
     let u_proj = project_3d(&space, kappa);
-    let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
     let mut mat =
         assemble_mat_mfem_rule(args.canonical, &space, 1.0, 1.0, args.order.max(1) as u8);
-    // MFEM `FormLinearSystem(..., copy_interior = 0)` leaves the *interior* of
-    // the initial X zeroed — only the essential dofs carry the boundary data
-    // (`form_linear_system` writes those itself).  Starting the solver from
-    // the full projection instead forked the PCG history from iteration 0
-    // (D634: iter-0 (B r, r) 0.12456 vs C++ 146.402, 119 vs 137 iterations;
-    // after this fix 145.78 / 138 — the residual gap is MFEM's
-    // `EliminateVDofsInRHS` rhs convention, see ledger debt D641).
-    let mut x = vec![0.0; n_dofs];
-    form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
+    // MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` with the FULL
+    // projected solution (x.ProjectCoefficient): see the 2-D path note.
+    let mut x = u_proj;
+    form_linear_system_vdofs(&mut mat, &mut rhs, &mut x, &ess_bdr, false);
+
 
     solve_report(&space, &mut x, &rhs, args, &mat);
     println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_3d(space.mesh(), &space, &x, &|xi| exact_3d(xi, kappa), args.canonical));

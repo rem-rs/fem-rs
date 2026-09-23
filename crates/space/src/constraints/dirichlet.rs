@@ -67,6 +67,74 @@ pub fn apply_dirichlet_diag_one(
     }
 }
 
+/// MFEM `BilinearForm::FormLinearSystem` — full-contract variant of
+/// [`form_linear_system`] (D641).
+///
+/// Takes the **full projected solution** `x` (a value at *every* dof, e.g. an
+/// interpolation of non-homogeneous boundary data — MFEM's
+/// `x.ProjectCoefficient(E)`), then performs the conforming, non-hybridized
+/// `FormLinearSystem` sequence exactly:
+///
+/// 1. `FormSystemMatrix`: eliminate the rows and columns of every constrained
+///    dof with `DIAG_KEEP` (diagonal kept — `BilinearForm::diag_policy`);
+/// 2. `EliminateVDofsInRHS` (`bilinearform.cpp:1239`):
+///    `b -= mat_e · x` (the eliminated off-diagonal row/column entries times
+///    the full `x`), followed by `PartMult` which **assigns**
+///    `b[r] = (mat · x)[r] = A_rr · x[r]` on the constrained rows — so the
+///    interior values of `x` never reach the free rows of the RHS and are
+///    overwritten on the constrained rows;
+/// 3. `copy_interior = false` (MFEM's default) zeroes `x` at the free dofs,
+///    keeping the prescribed values on the constrained dofs — the initial
+///    guess `X` handed to the solver; `copy_interior = true` keeps the full
+///    projection as the initial guess.
+///
+/// The net RHS equals the one produced by [`apply_dirichlet`] with
+/// `values = x[r]` at the constrained dofs (the `mat_e · x` row terms are
+/// overwritten by the `PartMult` assignment on those very rows), which the
+/// caller can rely on; the entry point exists to make the MFEM contract —
+/// *pass the full projection, get back the solver-ready `X`* — expressible
+/// without hand-extracting boundary values.
+///
+/// # Panics
+/// Panics if `constrained_dofs` contains an out-of-range dof.
+pub fn form_linear_system_vdofs(
+    mat:              &mut CsrMatrix<f64>,
+    rhs:              &mut [f64],
+    x:                &mut [f64],
+    constrained_dofs: &[DofId],
+    copy_interior:    bool,
+) {
+    // 1+2. DIAG_KEEP elimination with the essential values of the full x
+    // (column reactions `b[j] -= A[j,r]·x[r]`, `b[r] = A_rr·x[r]`).
+    for &dof in constrained_dofs {
+        let r = dof as usize;
+        let value = x[r];
+        mat.apply_dirichlet_keep_diag(r, value, rhs);
+    }
+    // 3. `PartMult` assignment on the constrained rows: after the DIAG_KEEP
+    // elimination each such row holds only its diagonal, so `(mat·x)[r] =
+    // A_rr·x[r]` — recompute it from the (kept) diagonal for exactness.
+    for &dof in constrained_dofs {
+        let r = dof as usize;
+        let pos = mat.find_entry(r, r);
+        if let Some(k) = pos {
+            rhs[r] = mat.values[k] * x[r];
+        }
+    }
+    // 4. `X.SetSubVectorComplement(ess_tdof_list, 0.0)`.
+    if !copy_interior {
+        let mut ess = vec![false; x.len()];
+        for &dof in constrained_dofs {
+            ess[dof as usize] = true;
+        }
+        for (i, is_ess) in ess.iter().enumerate() {
+            if !is_ess {
+                x[i] = 0.0;
+            }
+        }
+    }
+}
+
 /// Apply Dirichlet BCs following MFEM's `FormLinearSystem` convention.
 ///
 /// Modifies the matrix and RHS in-place so that constrained DOFs are set
@@ -532,4 +600,116 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
     out.sort_unstable();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod vdofs_tests {
+    use super::*;
+
+    /// `[[ 4., -1.,  0.], [-1.,  3., -1.], [ 0., -1.,  2.]]` (SPD).
+    fn mat3() -> CsrMatrix<f64> {
+        let mut coo = CooMatrix::<f64>::new(3, 3);
+        for (i, j, v) in [
+            (0, 0, 4.0),
+            (0, 1, -1.0),
+            (1, 0, -1.0),
+            (1, 1, 3.0),
+            (1, 2, -1.0),
+            (2, 1, -1.0),
+            (2, 2, 2.0),
+        ] {
+            coo.add(i, j, v);
+        }
+        coo.into_csr()
+    }
+
+    /// D641: the full-contract entry reproduces MFEM's `FormLinearSystem`
+    /// exactly — RHS reactions use only the constrained values of the full
+    /// projection (`mat_e·x` row terms are overwritten by the `PartMult`
+    /// assignment), `b[r] = A_rr·x[r]` on the constrained rows, and
+    /// `copy_interior = false` zeroes the interior of `x`.
+    #[test]
+    fn form_linear_system_vdofs_matches_mfem_semantics() {
+        let b = [1.0, 2.0, 3.0];
+        // Full projection with NONZERO interior: if the interior ever reached
+        // the free RHS rows, row 1 would pick up a spurious `-1.0·x[2]` term.
+        let mut x = vec![7.0, -4.0, 5.0];
+        let mut mat = mat3();
+        let mut rhs = b.to_vec();
+        form_linear_system_vdofs(&mut mat, &mut rhs, &mut x, &[0, 2], false);
+
+        // Constrained rows: assignment semantics from the kept diagonal.
+        assert_eq!(rhs[0], 4.0 * 7.0);
+        assert_eq!(rhs[2], 2.0 * 5.0);
+        // Free row: b - A[1,0]·x[0] - A[1,2]·x[2] — no interior-free coupling.
+        assert_eq!(rhs[1], 2.0 - (-1.0) * 7.0 - (-1.0) * 5.0);
+        // Matrix: DIAG_KEEP on rows/cols 0 and 2 (structural zeros retained).
+        let mut kept: Vec<(usize, f64)> = Vec::new();
+        for i in 0..3usize {
+            for k in mat.row_ptr[i]..mat.row_ptr[i + 1] {
+                if mat.values[k] != 0.0 {
+                    kept.push((mat.col_idx[k] as usize, mat.values[k]));
+                }
+            }
+        }
+        assert_eq!(kept, vec![(0, 4.0), (1, 3.0), (2, 2.0)]);
+        // copy_interior = false: interior zeroed, prescribed values kept.
+        assert_eq!(x, vec![7.0, 0.0, 5.0]);
+    }
+
+    /// `copy_interior = true` keeps the full projection as the initial guess.
+    #[test]
+    fn form_linear_system_vdofs_copy_interior_keeps_projection() {
+        let mut x = vec![7.0, -4.0, 5.0];
+        let mut mat = mat3();
+        let mut rhs = vec![1.0, 2.0, 3.0];
+        form_linear_system_vdofs(&mut mat, &mut rhs, &mut x, &[0, 2], true);
+        assert_eq!(x, vec![7.0, -4.0, 5.0]);
+        // Same RHS as the copy_interior = false run.
+        assert_eq!(rhs[1], 2.0 - (-1.0) * 7.0 - (-1.0) * 5.0);
+    }
+
+    /// For conforming systems the new entry is numerically equivalent to the
+    /// historical [`form_linear_system`] with `values = x[ess]` — the net
+    /// `EliminateVDofsInRHS` effect is the sequential `DIAG_KEEP` elimination.
+    #[test]
+    fn form_linear_system_vdofs_equivalent_to_form_linear_system() {
+        let b = [1.0, -2.0, 3.0, 0.5];
+        let mk = || {
+            let mut coo = CooMatrix::<f64>::new(4, 4);
+            let v: [(usize, usize); 10] = [
+                (0, 0),
+                (0, 1),
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (2, 1),
+                (2, 2),
+                (2, 3),
+                (3, 2),
+                (3, 3),
+            ];
+            for (k, &(i, j)) in v.iter().enumerate() {
+                coo.add(i as usize, j as usize, 4.0 - k as f64 * 0.25);
+            }
+            coo.into_csr()
+        };
+        let ess = [0u32, 3];
+        let x_full = vec![1.5, 9.0, -7.0, -2.5];
+
+        let mut mat_a = mk();
+        let mut rhs_a = b.to_vec();
+        let mut x_a = vec![0.0; 4];
+        let bc: Vec<f64> = ess.iter().map(|&d| x_full[d as usize]).collect();
+        form_linear_system(&mut mat_a, &mut rhs_a, &mut x_a, &ess, &bc);
+
+        let mut mat_b = mk();
+        let mut rhs_b = b.to_vec();
+        let mut x_b = x_full.clone();
+        form_linear_system_vdofs(&mut mat_b, &mut rhs_b, &mut x_b, &ess, false);
+
+        assert_eq!(rhs_a, rhs_b);
+        assert_eq!(mat_a.values.to_vec(), mat_b.values.to_vec());
+        assert_eq!(x_a, x_b);
+    }
 }
