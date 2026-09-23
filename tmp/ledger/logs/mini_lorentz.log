@@ -1,0 +1,7 @@
+miniapp_lorentz: NOT PORTED — declared gap D139; the C++ miniapp reads its E/B fields from VisIt DataCollections
+  (-er/-ef/-ec, -br/-bf/-bc) produced by the Volta/Tesla miniapps, while this file's CLI (-ex/-emesh/-efield, ...)
+  has no counterpart in the C++ and its constant-field runs are not comparable, so no input is accepted.
+Missing pieces: parallel VisIt DataCollection reading (fem_io::data_collection_load is not wired here), the field-name/cycle
+  selection, the -xmin/-xmax/-pmin/-pmax/-m/-q particle initialization, the -rdf/-rdm redistribution, and the
+  FindPoints evaluation of a collection grid function. The Boris pusher below is kept for that port.
+C++ reference: MFEM 4.10 miniapps/electromagnetics/lorentz.cpp. Exiting with status 3.

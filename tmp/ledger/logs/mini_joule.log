@@ -1,0 +1,29 @@
+     ____.            .__             
+    |    | ____  __ __|  |   ____     
+    |    |/  _ \|  |  \  | _/ __ \ 
+/\__|    (  <_> )  |  /  |_\  ___/  
+\________|\____/|____/|____/\___  >
+                                \/   
+Options used:
+   --mesh cylinder-hex.mesh
+   --refine-serial 0
+   --refine-parallel 0
+   --order 2
+   --ode-solver 1
+   --t-final 100
+   --time-step 0.5
+   --permeability 1
+   --sigma 62.8319
+   --frequency 0.0166667
+   --visualization
+   --visit
+   --visualization-steps 1
+   --outputfilename Joule
+   --print 0
+   --amr 0
+   --static-condensation 0
+   --debug 0
+   --hypre-print-level 0
+   --problem rod
+   --send-port 19916
+mfem_miniapp_joule: -vis (GLVis socket display) is not ported; pass -no-vis

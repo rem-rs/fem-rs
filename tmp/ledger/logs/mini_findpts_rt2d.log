@@ -1,0 +1,29 @@
+Options used:
+   --mesh data/rt-2d-q3.mesh
+   --order 8
+   --mesh-order 4
+   --refine-serial 0
+   --field-type 0
+   --ncomp 1
+   --no-visualization
+   --no-h-refinement
+   --no-p-refinement
+   --point-ordering 0
+   --fespace-ordering 0
+   --no-mesh-p-refinement
+   --random 0
+   --npt 100
+   --no-surface
+   --surface-aabb-size-inc 0
+Mesh curvature of the original mesh: H1_2D_P3
+--- Generating points for:
+x in [0, 0.5]
+y in [-1, 1]
+Mesh curvature of the curved mesh: H1_2D_P4
+H1-GridFunction
+Searched points:     100
+Found points:        100
+Max interp error:    1.110223024625157e-15
+Max dist^2 (of found): 3.150821389017518e-31
+Points not found:    0
+Points on faces:     0

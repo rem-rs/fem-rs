@@ -1,0 +1,12 @@
+Options used:
+   --mesh data/star.mesh
+   --sltn data/triple-pt-1.gf
+   --piecewise-linear-ref-factor 2
+   --visualization
+   --no-visit
+   --basis-type -1
+   --h1
+   --nbrute 0
+   --rec-depth 4
+   --rel-tol 0.0001
+failed to read gf data/triple-pt-1.gf: The system cannot find the file specified. (os error 2)

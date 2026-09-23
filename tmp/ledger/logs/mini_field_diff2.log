@@ -1,0 +1,17 @@
+Options used:
+   --mesh1 triple-pt-1.mesh
+   --mesh2 triple-pt-2.mesh
+   --solution1 triple-pt-1.gf
+   --solution2 triple-pt-2.gf
+   --points1D 100
+   --no-visualization
+   --send-port 19916
+Mesh curvature: H1_2D_P2 2
+Generating equidistant points for:
+  x in [0, 7]
+  y in [0, 3]
+Avg position difference: -1
+Searched 10000 points.
+Max diff: 1.43502
+Avg diff: 0.0949062
+Vol diff: 1.73608

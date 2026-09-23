@@ -1,0 +1,1027 @@
+   Iteration :   0  (B r, r) = 58.1502 ...
+   Iteration :  78  (B r, r) = 3.04591e-11
+Average reduction factor = 0.834213
+#1
+   Iteration :   0  (B r, r) = 68.356 ...
+   Iteration :  78  (B r, r) = 6.63839e-11
+Average reduction factor = 0.83752
+#2
+   Iteration :   0  (B r, r) = 19.2592 ...
+   Iteration :  77  (B r, r) = 1.06663e-11
+Average reduction factor = 0.832552
+#3
+   Iteration :   0  (B r, r) = 18.3604 ...
+   Iteration :  76  (B r, r) = 1.68959e-11
+Average reduction factor = 0.833326
+#4
+   Iteration :   0  (B r, r) = 17.8882 ...
+   Iteration :  77  (B r, r) = 1.10297e-11
+Average reduction factor = 0.833133
+#5
+   Iteration :   0  (B r, r) = 16.8627 ...
+   Iteration :  77  (B r, r) = 1.11966e-11
+Average reduction factor = 0.833534
+#6
+   Iteration :   0  (B r, r) = 16.3483 ...
+   Iteration :  77  (B r, r) = 9.05127e-12
+Average reduction factor = 0.832551
+#7
+   Iteration :   0  (B r, r) = 16.7862 ...
+   Iteration :  76  (B r, r) = 1.6004e-11
+Average reduction factor = 0.83352
+#8
+   Iteration :   0  (B r, r) = 17.1292 ...
+   Iteration :  76  (B r, r) = 1.66333e-11
+Average reduction factor = 0.833621
+#9
+   Iteration :   0  (B r, r) = 17.1327 ...
+   Iteration :  77  (B r, r) = 9.02061e-12
+Average reduction factor = 0.832279
+#10
+   Iteration :   0  (B r, r) = 16.88 ...
+   Iteration :  77  (B r, r) = 9.04884e-12
+Average reduction factor = 0.832376
+#11
+   Iteration :   0  (B r, r) = 16.4831 ...
+   Iteration :  77  (B r, r) = 9.15101e-12
+Average reduction factor = 0.832565
+#12
+   Iteration :   0  (B r, r) = 16.1248 ...
+   Iteration :  77  (B r, r) = 9.4696e-12
+Average reduction factor = 0.832869
+#13
+   Iteration :   0  (B r, r) = 15.7821 ...
+   Iteration :  77  (B r, r) = 9.18362e-12
+Average reduction factor = 0.83282
+#14
+   Iteration :   0  (B r, r) = 15.2213 ...
+   Iteration :  77  (B r, r) = 8.52859e-12
+Average reduction factor = 0.832615
+#15
+   Iteration :   0  (B r, r) = 14.4041 ...
+   Iteration :  77  (B r, r) = 8.85459e-12
+Average reduction factor = 0.833117
+#16
+   Iteration :   0  (B r, r) = 13.4339 ...
+   Iteration :  77  (B r, r) = 9.57876e-12
+Average reduction factor = 0.833919
+#17
+   Iteration :   0  (B r, r) = 12.1722 ...
+   Iteration :  77  (B r, r) = 9.62152e-12
+Average reduction factor = 0.834478
+#18
+   Iteration :   0  (B r, r) = 10.5689 ...
+   Iteration :  77  (B r, r) = 9.28446e-12
+Average reduction factor = 0.83505
+#19
+   Iteration :   0  (B r, r) = 8.61923 ...
+   Iteration :  78  (B r, r) = 5.50037e-12
+Average reduction factor = 0.835269
+#20
+   Iteration :   0  (B r, r) = 6.53026 ...
+   Iteration :  78  (B r, r) = 5.33433e-12
+Average reduction factor = 0.836592
+#21
+   Iteration :   0  (B r, r) = 5.00522 ...
+   Iteration :  78  (B r, r) = 4.9037e-12
+Average reduction factor = 0.837568
+#22
+   Iteration :   0  (B r, r) = 3.98401 ...
+   Iteration :  79  (B r, r) = 2.60623e-12
+Average reduction factor = 0.837306
+#23
+   Iteration :   0  (B r, r) = 3.14645 ...
+   Iteration :  79  (B r, r) = 2.41019e-12
+Average reduction factor = 0.838143
+#24
+   Iteration :   0  (B r, r) = 2.62066 ...
+   Iteration :  79  (B r, r) = 2.37147e-12
+Average reduction factor = 0.839027
+#25
+   Iteration :   0  (B r, r) = 2.36086 ...
+   Iteration :  79  (B r, r) = 2.32513e-12
+Average reduction factor = 0.839477
+#26
+   Iteration :   0  (B r, r) = 2.0358 ...
+   Iteration :  80  (B r, r) = 1.36639e-12
+Average reduction factor = 0.839301
+#27
+   Iteration :   0  (B r, r) = 1.69313 ...
+   Iteration :  80  (B r, r) = 1.23519e-12
+Average reduction factor = 0.839738
+#28
+   Iteration :   0  (B r, r) = 1.4619 ...
+   Iteration :  80  (B r, r) = 1.19061e-12
+Average reduction factor = 0.840316
+#29
+   Iteration :   0  (B r, r) = 1.25341 ...
+   Iteration :  80  (B r, r) = 1.07686e-12
+Average reduction factor = 0.840597
+#30
+   Iteration :   0  (B r, r) = 1.06534 ...
+   Iteration :  80  (B r, r) = 9.60751e-13
+Average reduction factor = 0.840852
+#31
+   Iteration :   0  (B r, r) = 0.933891 ...
+   Iteration :  80  (B r, r) = 9.24101e-13
+Average reduction factor = 0.84134
+#32
+   Iteration :   0  (B r, r) = 0.842825 ...
+   Iteration :  81  (B r, r) = 5.00386e-13
+Average reduction factor = 0.840482
+#33
+   Iteration :   0  (B r, r) = 0.760741 ...
+   Iteration :  81  (B r, r) = 4.54791e-13
+Average reduction factor = 0.840518
+#34
+   Iteration :   0  (B r, r) = 0.687025 ...
+   Iteration :  81  (B r, r) = 4.10669e-13
+Average reduction factor = 0.840517
+#35
+   Iteration :   0  (B r, r) = 0.631535 ...
+   Iteration :  81  (B r, r) = 3.90219e-13
+Average reduction factor = 0.840689
+#36
+   Iteration :   0  (B r, r) = 0.586951 ...
+   Iteration :  81  (B r, r) = 3.64197e-13
+Average reduction factor = 0.840711
+#37
+   Iteration :   0  (B r, r) = 0.540765 ...
+   Iteration :  81  (B r, r) = 3.5445e-13
+Average reduction factor = 0.840995
+#38
+   Iteration :   0  (B r, r) = 0.491743 ...
+   Iteration :  81  (B r, r) = 3.40266e-13
+Average reduction factor = 0.841277
+#39
+   Iteration :   0  (B r, r) = 0.445502 ...
+   Iteration :  81  (B r, r) = 3.02474e-13
+Average reduction factor = 0.841178
+#40
+   Iteration :   0  (B r, r) = 0.413553 ...
+   Iteration :  81  (B r, r) = 2.92778e-13
+Average reduction factor = 0.841395
+#41
+   Iteration :   0  (B r, r) = 0.400882 ...
+   Iteration :  81  (B r, r) = 3.05326e-13
+Average reduction factor = 0.841775
+#42
+   Iteration :   0  (B r, r) = 0.387044 ...
+   Iteration :  81  (B r, r) = 3.05862e-13
+Average reduction factor = 0.841967
+#43
+   Iteration :   0  (B r, r) = 0.358495 ...
+   Iteration :  81  (B r, r) = 2.92371e-13
+Average reduction factor = 0.84213
+#44
+   Iteration :   0  (B r, r) = 0.327929 ...
+   Iteration :  81  (B r, r) = 2.80276e-13
+Average reduction factor = 0.842374
+#45
+   Iteration :   0  (B r, r) = 0.304044 ...
+   Iteration :  81  (B r, r) = 2.55313e-13
+Average reduction factor = 0.842282
+#46
+   Iteration :   0  (B r, r) = 0.289416 ...
+   Iteration :  81  (B r, r) = 2.56386e-13
+Average reduction factor = 0.84256
+#47
+   Iteration :   0  (B r, r) = 0.279304 ...
+   Iteration :  81  (B r, r) = 2.58709e-13
+Average reduction factor = 0.842792
+#48
+   Iteration :   0  (B r, r) = 0.266606 ...
+   Iteration :  81  (B r, r) = 2.58311e-13
+Average reduction factor = 0.843026
+#49
+   Iteration :   0  (B r, r) = 0.251148 ...
+   Iteration :  81  (B r, r) = 2.28791e-13
+Average reduction factor = 0.842706
+#50
+   Iteration :   0  (B r, r) = 0.242843 ...
+   Iteration :  81  (B r, r) = 2.20059e-13
+Average reduction factor = 0.842678
+#51
+   Iteration :   0  (B r, r) = 0.233665 ...
+   Iteration :  81  (B r, r) = 2.22868e-13
+Average reduction factor = 0.842945
+#52
+   Iteration :   0  (B r, r) = 0.218848 ...
+   Iteration :  81  (B r, r) = 2.08167e-13
+Average reduction factor = 0.842931
+#53
+   Iteration :   0  (B r, r) = 0.206051 ...
+   Iteration :  81  (B r, r) = 1.8824e-13
+Average reduction factor = 0.84272
+#54
+   Iteration :   0  (B r, r) = 0.19702 ...
+   Iteration :  81  (B r, r) = 1.87728e-13
+Average reduction factor = 0.84294
+#55
+   Iteration :   0  (B r, r) = 0.190269 ...
+   Iteration :  81  (B r, r) = 1.82536e-13
+Average reduction factor = 0.842975
+#56
+   Iteration :   0  (B r, r) = 0.181553 ...
+   Iteration :  81  (B r, r) = 1.67234e-13
+Average reduction factor = 0.842763
+#57
+   Iteration :   0  (B r, r) = 0.173319 ...
+   Iteration :  81  (B r, r) = 1.51739e-13
+Average reduction factor = 0.842499
+#58
+   Iteration :   0  (B r, r) = 0.169324 ...
+   Iteration :  81  (B r, r) = 1.53363e-13
+Average reduction factor = 0.842676
+#59
+   Iteration :   0  (B r, r) = 0.164491 ...
+   Iteration :  81  (B r, r) = 1.41508e-13
+Average reduction factor = 0.842408
+#60
+   Iteration :   0  (B r, r) = 0.160169 ...
+   Iteration :  81  (B r, r) = 1.38314e-13
+Average reduction factor = 0.842428
+#61
+   Iteration :   0  (B r, r) = 0.154043 ...
+   Iteration :  81  (B r, r) = 1.31571e-13
+Average reduction factor = 0.842371
+#62
+   Iteration :   0  (B r, r) = 0.147364 ...
+   Iteration :  81  (B r, r) = 1.27024e-13
+Average reduction factor = 0.842418
+#63
+   Iteration :   0  (B r, r) = 0.144389 ...
+   Iteration :  81  (B r, r) = 1.17307e-13
+Average reduction factor = 0.84211
+#64
+   Iteration :   0  (B r, r) = 0.145419 ...
+   Iteration :  81  (B r, r) = 1.16653e-13
+Average reduction factor = 0.842044
+#65
+   Iteration :   0  (B r, r) = 0.144204 ...
+   Iteration :  81  (B r, r) = 1.19997e-13
+Average reduction factor = 0.842235
+#66
+   Iteration :   0  (B r, r) = 0.137018 ...
+   Iteration :  81  (B r, r) = 1.08564e-13
+Average reduction factor = 0.84198
+#67
+   Iteration :   0  (B r, r) = 0.128688 ...
+   Iteration :  81  (B r, r) = 9.24709e-14
+Average reduction factor = 0.841472
+#68
+   Iteration :   0  (B r, r) = 0.12901 ...
+   Iteration :  81  (B r, r) = 9.49792e-14
+Average reduction factor = 0.841599
+#69
+   Iteration :   0  (B r, r) = 0.129753 ...
+   Iteration :  81  (B r, r) = 1.03907e-13
+Average reduction factor = 0.842036
+#70
+   Iteration :   0  (B r, r) = 0.120806 ...
+   Iteration :  81  (B r, r) = 9.43208e-14
+Average reduction factor = 0.841904
+#71
+   Iteration :   0  (B r, r) = 0.114912 ...
+   Iteration :  81  (B r, r) = 9.38279e-14
+Average reduction factor = 0.842137
+#72
+   Iteration :   0  (B r, r) = 0.112374 ...
+   Iteration :  81  (B r, r) = 8.62381e-14
+Average reduction factor = 0.841814
+#73
+   Iteration :   0  (B r, r) = 0.115156 ...
+   Iteration :  81  (B r, r) = 1.00496e-13
+Average reduction factor = 0.842482
+#74
+   Iteration :   0  (B r, r) = 0.11013 ...
+   Iteration :  81  (B r, r) = 9.60892e-14
+Average reduction factor = 0.842481
+#75
+   Iteration :   0  (B r, r) = 0.103823 ...
+   Iteration :  81  (B r, r) = 8.95141e-14
+Average reduction factor = 0.842419
+#76
+   Iteration :   0  (B r, r) = 0.103204 ...
+   Iteration :  81  (B r, r) = 8.80001e-14
+Average reduction factor = 0.842362
+#77
+   Iteration :   0  (B r, r) = 0.104986 ...
+   Iteration :  81  (B r, r) = 1.03178e-13
+Average reduction factor = 0.843101
+#78
+   Iteration :   0  (B r, r) = 0.101495 ...
+   Iteration :  81  (B r, r) = 9.85868e-14
+Average reduction factor = 0.84304
+#79
+   Iteration :   0  (B r, r) = 0.0945557 ...
+   Iteration :  81  (B r, r) = 8.98105e-14
+Average reduction factor = 0.842923
+#80
+   Iteration :   0  (B r, r) = 0.0892855 ...
+   Iteration :  82  (B r, r) = 3.62177e-14
+Average reduction factor = 0.840311
+#81
+   Iteration :   0  (B r, r) = 0.0870787 ...
+   Iteration :  82  (B r, r) = 3.84062e-14
+Average reduction factor = 0.84074
+#82
+   Iteration :   0  (B r, r) = 0.0838964 ...
+   Iteration :  82  (B r, r) = 3.6286e-14
+Average reduction factor = 0.840639
+#83
+   Iteration :   0  (B r, r) = 0.0796703 ...
+   Iteration :  82  (B r, r) = 3.3793e-14
+Average reduction factor = 0.840539
+#84
+   Iteration :   0  (B r, r) = 0.0785357 ...
+   Iteration :  82  (B r, r) = 3.34304e-14
+Average reduction factor = 0.840558
+#85
+   Iteration :   0  (B r, r) = 0.078044 ...
+   Iteration :  82  (B r, r) = 3.26458e-14
+Average reduction factor = 0.840468
+#86
+   Iteration :   0  (B r, r) = 0.0786365 ...
+   Iteration :  82  (B r, r) = 3.28877e-14
+Average reduction factor = 0.840467
+#87
+   Iteration :   0  (B r, r) = 0.0787247 ...
+   Iteration :  82  (B r, r) = 3.27537e-14
+Average reduction factor = 0.840441
+#88
+   Iteration :   0  (B r, r) = 0.0784466 ...
+   Iteration :  82  (B r, r) = 3.27877e-14
+Average reduction factor = 0.840464
+#89
+   Iteration :   0  (B r, r) = 0.0763498 ...
+   Iteration :  82  (B r, r) = 3.25974e-14
+Average reduction factor = 0.840573
+#90
+   Iteration :   0  (B r, r) = 0.0729343 ...
+   Iteration :  82  (B r, r) = 3.09932e-14
+Average reduction factor = 0.840549
+#91
+   Iteration :   0  (B r, r) = 0.0703571 ...
+   Iteration :  82  (B r, r) = 3.05699e-14
+Average reduction factor = 0.840663
+#92
+   Iteration :   0  (B r, r) = 0.0684122 ...
+   Iteration :  82  (B r, r) = 3.09227e-14
+Average reduction factor = 0.840865
+#93
+   Iteration :   0  (B r, r) = 0.066317 ...
+   Iteration :  82  (B r, r) = 3.02895e-14
+Average reduction factor = 0.840919
+#94
+   Iteration :   0  (B r, r) = 0.0634987 ...
+   Iteration :  82  (B r, r) = 3.16037e-14
+Average reduction factor = 0.841359
+#95
+   Iteration :   0  (B r, r) = 0.0601167 ...
+   Iteration :  82  (B r, r) = 2.67628e-14
+Average reduction factor = 0.840787
+#96
+   Iteration :   0  (B r, r) = 0.0593285 ...
+   Iteration :  82  (B r, r) = 2.73777e-14
+Average reduction factor = 0.840972
+#97
+   Iteration :   0  (B r, r) = 0.0592948 ...
+   Iteration :  82  (B r, r) = 2.86127e-14
+Average reduction factor = 0.841201
+#98
+   Iteration :   0  (B r, r) = 0.0566528 ...
+   Iteration :  82  (B r, r) = 2.67391e-14
+Average reduction factor = 0.841087
+#99
+   Iteration :   0  (B r, r) = 0.0549316 ...
+   Iteration :  82  (B r, r) = 2.67303e-14
+Average reduction factor = 0.841244
+#100
+   Iteration :   0  (B r, r) = 0.0546254 ...
+   Iteration :  82  (B r, r) = 2.6203e-14
+Average reduction factor = 0.84117
+#101
+   Iteration :   0  (B r, r) = 0.0534459 ...
+   Iteration :  82  (B r, r) = 2.62117e-14
+Average reduction factor = 0.841284
+#102
+   Iteration :   0  (B r, r) = 0.0529606 ...
+   Iteration :  82  (B r, r) = 2.47393e-14
+Average reduction factor = 0.841034
+#103
+   Iteration :   0  (B r, r) = 0.0547497 ...
+   Iteration :  82  (B r, r) = 2.53956e-14
+Average reduction factor = 0.840998
+#104
+   Iteration :   0  (B r, r) = 0.0561695 ...
+   Iteration :  82  (B r, r) = 2.65519e-14
+Average reduction factor = 0.841095
+#105
+   Iteration :   0  (B r, r) = 0.0564922 ...
+   Iteration :  82  (B r, r) = 2.41672e-14
+Average reduction factor = 0.840583
+#106
+   Iteration :   0  (B r, r) = 0.056049 ...
+   Iteration :  81  (B r, r) = 5.52447e-14
+Average reduction factor = 0.843116
+#107
+   Iteration :   0  (B r, r) = 0.0546753 ...
+   Iteration :  82  (B r, r) = 2.39027e-14
+Average reduction factor = 0.840694
+#108
+   Iteration :   0  (B r, r) = 0.0530341 ...
+   Iteration :  82  (B r, r) = 2.32307e-14
+Average reduction factor = 0.840704
+#109
+   Iteration :   0  (B r, r) = 0.0510381 ...
+   Iteration :  82  (B r, r) = 2.28287e-14
+Average reduction factor = 0.840812
+#110
+   Iteration :   0  (B r, r) = 0.047781 ...
+   Iteration :  82  (B r, r) = 2.1735e-14
+Average reduction factor = 0.840898
+#111
+   Iteration :   0  (B r, r) = 0.0445787 ...
+   Iteration :  82  (B r, r) = 1.95057e-14
+Average reduction factor = 0.840699
+#112
+   Iteration :   0  (B r, r) = 0.0435835 ...
+   Iteration :  82  (B r, r) = 1.94329e-14
+Average reduction factor = 0.840795
+#113
+   Iteration :   0  (B r, r) = 0.0429642 ...
+   Iteration :  82  (B r, r) = 1.88037e-14
+Average reduction factor = 0.8407
+#114
+   Iteration :   0  (B r, r) = 0.0429879 ...
+   Iteration :  82  (B r, r) = 1.9245e-14
+Average reduction factor = 0.840816
+#115
+   Iteration :   0  (B r, r) = 0.042674 ...
+   Iteration :  82  (B r, r) = 1.92685e-14
+Average reduction factor = 0.84086
+#116
+   Iteration :   0  (B r, r) = 0.0408191 ...
+   Iteration :  82  (B r, r) = 1.86395e-14
+Average reduction factor = 0.840918
+#117
+   Iteration :   0  (B r, r) = 0.0397915 ...
+   Iteration :  82  (B r, r) = 1.76579e-14
+Average reduction factor = 0.840771
+#118
+   Iteration :   0  (B r, r) = 0.0395692 ...
+   Iteration :  82  (B r, r) = 1.72443e-14
+Average reduction factor = 0.840678
+#119
+   Iteration :   0  (B r, r) = 0.0402032 ...
+   Iteration :  82  (B r, r) = 1.74391e-14
+Average reduction factor = 0.840654
+#120
+   Iteration :   0  (B r, r) = 0.0391202 ...
+   Iteration :  82  (B r, r) = 1.56908e-14
+Average reduction factor = 0.840253
+#121
+   Iteration :   0  (B r, r) = 0.0386149 ...
+   Iteration :  82  (B r, r) = 1.63994e-14
+Average reduction factor = 0.840546
+#122
+   Iteration :   0  (B r, r) = 0.0376969 ...
+   Iteration :  82  (B r, r) = 1.58748e-14
+Average reduction factor = 0.840503
+#123
+   Iteration :   0  (B r, r) = 0.0372448 ...
+   Iteration :  82  (B r, r) = 1.57415e-14
+Average reduction factor = 0.840521
+#124
+   Iteration :   0  (B r, r) = 0.03524 ...
+   Iteration :  82  (B r, r) = 1.50364e-14
+Average reduction factor = 0.84057
+#125
+   Iteration :   0  (B r, r) = 0.0333092 ...
+   Iteration :  82  (B r, r) = 1.40384e-14
+Average reduction factor = 0.840507
+#126
+   Iteration :   0  (B r, r) = 0.0321311 ...
+   Iteration :  82  (B r, r) = 1.38874e-14
+Average reduction factor = 0.840636
+#127
+   Iteration :   0  (B r, r) = 0.0312153 ...
+   Iteration :  82  (B r, r) = 1.28293e-14
+Average reduction factor = 0.840378
+#128
+   Iteration :   0  (B r, r) = 0.03208 ...
+   Iteration :  82  (B r, r) = 1.27308e-14
+Average reduction factor = 0.840198
+#129
+   Iteration :   0  (B r, r) = 0.0325207 ...
+   Iteration :  81  (B r, r) = 3.23451e-14
+Average reduction factor = 0.843163
+#130
+   Iteration :   0  (B r, r) = 0.0328123 ...
+   Iteration :  81  (B r, r) = 3.1674e-14
+Average reduction factor = 0.843007
+#131
+   Iteration :   0  (B r, r) = 0.0314721 ...
+   Iteration :  81  (B r, r) = 2.93035e-14
+Average reduction factor = 0.842819
+#132
+   Iteration :   0  (B r, r) = 0.0294079 ...
+   Iteration :  81  (B r, r) = 2.85004e-14
+Average reduction factor = 0.843028
+#133
+   Iteration :   0  (B r, r) = 0.0276218 ...
+   Iteration :  81  (B r, r) = 2.58987e-14
+Average reduction factor = 0.842856
+#134
+   Iteration :   0  (B r, r) = 0.028168 ...
+   Iteration :  81  (B r, r) = 2.50685e-14
+Average reduction factor = 0.842584
+#135
+   Iteration :   0  (B r, r) = 0.0298206 ...
+   Iteration :  81  (B r, r) = 2.4158e-14
+Average reduction factor = 0.842096
+#136
+   Iteration :   0  (B r, r) = 0.0295589 ...
+   Iteration :  81  (B r, r) = 2.32311e-14
+Average reduction factor = 0.841938
+#137
+   Iteration :   0  (B r, r) = 0.0298513 ...
+   Iteration :  81  (B r, r) = 2.24303e-14
+Average reduction factor = 0.841705
+#138
+   Iteration :   0  (B r, r) = 0.0286898 ...
+   Iteration :  81  (B r, r) = 2.08268e-14
+Average reduction factor = 0.841525
+#139
+   Iteration :   0  (B r, r) = 0.0280279 ...
+   Iteration :  81  (B r, r) = 2.03808e-14
+Average reduction factor = 0.841534
+#140
+   Iteration :   0  (B r, r) = 0.0274605 ...
+   Iteration :  81  (B r, r) = 2.00852e-14
+Average reduction factor = 0.841565
+#141
+   Iteration :   0  (B r, r) = 0.0275692 ...
+   Iteration :  81  (B r, r) = 2.16901e-14
+Average reduction factor = 0.841943
+#142
+   Iteration :   0  (B r, r) = 0.0282673 ...
+   Iteration :  81  (B r, r) = 2.29897e-14
+Average reduction factor = 0.842116
+#143
+   Iteration :   0  (B r, r) = 0.0279958 ...
+   Iteration :  81  (B r, r) = 2.30253e-14
+Average reduction factor = 0.842174
+#144
+   Iteration :   0  (B r, r) = 0.0282574 ...
+   Iteration :  81  (B r, r) = 2.3817e-14
+Average reduction factor = 0.842302
+#145
+   Iteration :   0  (B r, r) = 0.0278899 ...
+   Iteration :  81  (B r, r) = 2.56199e-14
+Average reduction factor = 0.842749
+#146
+   Iteration :   0  (B r, r) = 0.0258644 ...
+   Iteration :  81  (B r, r) = 2.53567e-14
+Average reduction factor = 0.843088
+#147
+   Iteration :   0  (B r, r) = 0.0255187 ...
+   Iteration :  82  (B r, r) = 1.02727e-14
+Average reduction factor = 0.840272
+#148
+   Iteration :   0  (B r, r) = 0.0252164 ...
+   Iteration :  82  (B r, r) = 1.00796e-14
+Average reduction factor = 0.840235
+#149
+   Iteration :   0  (B r, r) = 0.0259332 ...
+   Iteration :  82  (B r, r) = 1.08228e-14
+Average reduction factor = 0.840456
+#150
+   Iteration :   0  (B r, r) = 0.0261084 ...
+   Iteration :  82  (B r, r) = 1.07421e-14
+Average reduction factor = 0.840383
+#151
+   Iteration :   0  (B r, r) = 0.0261282 ...
+   Iteration :  82  (B r, r) = 1.0941e-14
+Average reduction factor = 0.840474
+#152
+   Iteration :   0  (B r, r) = 0.0258016 ...
+   Iteration :  82  (B r, r) = 1.10401e-14
+Average reduction factor = 0.840584
+#153
+   Iteration :   0  (B r, r) = 0.0248902 ...
+   Iteration :  82  (B r, r) = 1.08787e-14
+Average reduction factor = 0.840693
+#154
+   Iteration :   0  (B r, r) = 0.025225 ...
+   Iteration :  82  (B r, r) = 1.14162e-14
+Average reduction factor = 0.840872
+#155
+   Iteration :   0  (B r, r) = 0.026169 ...
+   Iteration :  82  (B r, r) = 1.18406e-14
+Average reduction factor = 0.840871
+#156
+   Iteration :   0  (B r, r) = 0.0273674 ...
+   Iteration :  82  (B r, r) = 1.29264e-14
+Average reduction factor = 0.841091
+#157
+   Iteration :   0  (B r, r) = 0.0263024 ...
+   Iteration :  82  (B r, r) = 1.22343e-14
+Average reduction factor = 0.841012
+#158
+   Iteration :   0  (B r, r) = 0.0259967 ...
+   Iteration :  82  (B r, r) = 1.28267e-14
+Average reduction factor = 0.841315
+#159
+   Iteration :   0  (B r, r) = 0.0237198 ...
+   Iteration :  82  (B r, r) = 1.19358e-14
+Average reduction factor = 0.841416
+#160
+   Iteration :   0  (B r, r) = 0.024059 ...
+   Iteration :  82  (B r, r) = 1.2623e-14
+Average reduction factor = 0.84163
+#161
+   Iteration :   0  (B r, r) = 0.0234499 ...
+   Iteration :  82  (B r, r) = 1.15367e-14
+Average reduction factor = 0.8413
+#162
+   Iteration :   0  (B r, r) = 0.0235174 ...
+   Iteration :  82  (B r, r) = 1.16508e-14
+Average reduction factor = 0.841336
+#163
+   Iteration :   0  (B r, r) = 0.0248318 ...
+   Iteration :  82  (B r, r) = 1.20741e-14
+Average reduction factor = 0.84124
+#164
+   Iteration :   0  (B r, r) = 0.0245432 ...
+   Iteration :  82  (B r, r) = 1.25312e-14
+Average reduction factor = 0.84149
+#165
+   Iteration :   0  (B r, r) = 0.0242535 ...
+   Iteration :  82  (B r, r) = 1.24528e-14
+Average reduction factor = 0.841519
+#166
+   Iteration :   0  (B r, r) = 0.0241138 ...
+   Iteration :  82  (B r, r) = 1.2927e-14
+Average reduction factor = 0.841741
+#167
+   Iteration :   0  (B r, r) = 0.0229325 ...
+   Iteration :  82  (B r, r) = 1.2086e-14
+Average reduction factor = 0.841653
+#168
+   Iteration :   0  (B r, r) = 0.0227848 ...
+   Iteration :  82  (B r, r) = 1.20836e-14
+Average reduction factor = 0.841685
+#169
+   Iteration :   0  (B r, r) = 0.0228029 ...
+   Iteration :  82  (B r, r) = 1.20786e-14
+Average reduction factor = 0.841679
+#170
+   Iteration :   0  (B r, r) = 0.0238752 ...
+   Iteration :  82  (B r, r) = 1.28843e-14
+Average reduction factor = 0.841775
+#171
+   Iteration :   0  (B r, r) = 0.0251058 ...
+   Iteration :  82  (B r, r) = 1.32318e-14
+Average reduction factor = 0.841653
+#172
+   Iteration :   0  (B r, r) = 0.0261394 ...
+   Iteration :  82  (B r, r) = 1.34292e-14
+Average reduction factor = 0.841522
+#173
+   Iteration :   0  (B r, r) = 0.0263516 ...
+   Iteration :  82  (B r, r) = 1.31399e-14
+Average reduction factor = 0.841369
+#174
+   Iteration :   0  (B r, r) = 0.0255672 ...
+   Iteration :  82  (B r, r) = 1.28841e-14
+Average reduction factor = 0.841423
+#175
+   Iteration :   0  (B r, r) = 0.0247838 ...
+   Iteration :  82  (B r, r) = 1.27507e-14
+Average reduction factor = 0.841529
+#176
+   Iteration :   0  (B r, r) = 0.0237809 ...
+   Iteration :  82  (B r, r) = 1.22819e-14
+Average reduction factor = 0.841549
+#177
+   Iteration :   0  (B r, r) = 0.0235155 ...
+   Iteration :  82  (B r, r) = 1.25556e-14
+Average reduction factor = 0.84172
+#178
+   Iteration :   0  (B r, r) = 0.0228225 ...
+   Iteration :  82  (B r, r) = 1.21816e-14
+Average reduction factor = 0.841718
+#179
+   Iteration :   0  (B r, r) = 0.022287 ...
+   Iteration :  82  (B r, r) = 1.16093e-14
+Average reduction factor = 0.841593
+#180
+   Iteration :   0  (B r, r) = 0.0229291 ...
+   Iteration :  82  (B r, r) = 1.22667e-14
+Average reduction factor = 0.84173
+#181
+   Iteration :   0  (B r, r) = 0.0235549 ...
+   Iteration :  82  (B r, r) = 1.27295e-14
+Average reduction factor = 0.841782
+#182
+   Iteration :   0  (B r, r) = 0.0233553 ...
+   Iteration :  82  (B r, r) = 1.25147e-14
+Average reduction factor = 0.841738
+#183
+   Iteration :   0  (B r, r) = 0.0232529 ...
+   Iteration :  82  (B r, r) = 1.30292e-14
+Average reduction factor = 0.841968
+#184
+   Iteration :   0  (B r, r) = 0.0224321 ...
+   Iteration :  82  (B r, r) = 1.21223e-14
+Average reduction factor = 0.841782
+#185
+   Iteration :   0  (B r, r) = 0.021161 ...
+   Iteration :  82  (B r, r) = 1.17982e-14
+Average reduction factor = 0.841942
+#186
+   Iteration :   0  (B r, r) = 0.0214186 ...
+   Iteration :  82  (B r, r) = 1.15244e-14
+Average reduction factor = 0.841759
+#187
+   Iteration :   0  (B r, r) = 0.0211291 ...
+   Iteration :  82  (B r, r) = 1.10755e-14
+Average reduction factor = 0.841625
+#188
+   Iteration :   0  (B r, r) = 0.0218752 ...
+   Iteration :  82  (B r, r) = 1.15624e-14
+Average reduction factor = 0.841668
+#189
+   Iteration :   0  (B r, r) = 0.0227157 ...
+   Iteration :  82  (B r, r) = 1.14622e-14
+Average reduction factor = 0.84143
+#190
+   Iteration :   0  (B r, r) = 0.0231029 ...
+   Iteration :  82  (B r, r) = 1.18172e-14
+Average reduction factor = 0.8415
+#191
+   Iteration :   0  (B r, r) = 0.0231961 ...
+   Iteration :  82  (B r, r) = 1.17861e-14
+Average reduction factor = 0.841465
+#192
+   Iteration :   0  (B r, r) = 0.0234539 ...
+   Iteration :  82  (B r, r) = 1.22116e-14
+Average reduction factor = 0.841591
+#193
+   Iteration :   0  (B r, r) = 0.0229842 ...
+   Iteration :  82  (B r, r) = 1.18336e-14
+Average reduction factor = 0.841533
+#194
+   Iteration :   0  (B r, r) = 0.0233458 ...
+   Iteration :  82  (B r, r) = 1.24875e-14
+Average reduction factor = 0.841729
+#195
+   Iteration :   0  (B r, r) = 0.0228429 ...
+   Iteration :  82  (B r, r) = 1.16115e-14
+Average reduction factor = 0.841468
+#196
+   Iteration :   0  (B r, r) = 0.0226201 ...
+   Iteration :  82  (B r, r) = 1.15054e-14
+Average reduction factor = 0.841471
+#197
+   Iteration :   0  (B r, r) = 0.0225568 ...
+   Iteration :  82  (B r, r) = 1.09994e-14
+Average reduction factor = 0.841254
+#198
+   Iteration :   0  (B r, r) = 0.0223083 ...
+   Iteration :  82  (B r, r) = 1.15569e-14
+Average reduction factor = 0.841565
+#199
+   Iteration :   0  (B r, r) = 0.0220183 ...
+   Iteration :  82  (B r, r) = 1.12428e-14
+Average reduction factor = 0.841491
+#200
+   Iteration :   0  (B r, r) = 0.021461 ...
+   Iteration :  82  (B r, r) = 1.10994e-14
+Average reduction factor = 0.841556
+#201
+   Iteration :   0  (B r, r) = 0.0202761 ...
+   Iteration :  82  (B r, r) = 9.64037e-15
+Average reduction factor = 0.841125
+#202
+   Iteration :   0  (B r, r) = 0.0205191 ...
+   Iteration :  82  (B r, r) = 1.00448e-14
+Average reduction factor = 0.841274
+#203
+   Iteration :   0  (B r, r) = 0.0211221 ...
+   Iteration :  82  (B r, r) = 1.10528e-14
+Average reduction factor = 0.841616
+#204
+   Iteration :   0  (B r, r) = 0.0218176 ...
+   Iteration :  82  (B r, r) = 1.14803e-14
+Average reduction factor = 0.841645
+#205
+   Iteration :   0  (B r, r) = 0.0214694 ...
+   Iteration :  82  (B r, r) = 1.11036e-14
+Average reduction factor = 0.841556
+#206
+   Iteration :   0  (B r, r) = 0.0206523 ...
+   Iteration :  82  (B r, r) = 1.00939e-14
+Average reduction factor = 0.841266
+#207
+   Iteration :   0  (B r, r) = 0.0208188 ...
+   Iteration :  82  (B r, r) = 1.03739e-14
+Average reduction factor = 0.841365
+#208
+   Iteration :   0  (B r, r) = 0.0211223 ...
+   Iteration :  82  (B r, r) = 1.03699e-14
+Average reduction factor = 0.841289
+#209
+   Iteration :   0  (B r, r) = 0.0211274 ...
+   Iteration :  82  (B r, r) = 1.06284e-14
+Average reduction factor = 0.841414
+#210
+   Iteration :   0  (B r, r) = 0.0207644 ...
+   Iteration :  82  (B r, r) = 9.7881e-15
+Average reduction factor = 0.841081
+#211
+   Iteration :   0  (B r, r) = 0.0203406 ...
+   Iteration :  82  (B r, r) = 1.00824e-14
+Average reduction factor = 0.841338
+#212
+   Iteration :   0  (B r, r) = 0.0205348 ...
+   Iteration :  82  (B r, r) = 9.82648e-15
+Average reduction factor = 0.841158
+#213
+   Iteration :   0  (B r, r) = 0.0212887 ...
+   Iteration :  82  (B r, r) = 1.04776e-14
+Average reduction factor = 0.841302
+#214
+   Iteration :   0  (B r, r) = 0.0207321 ...
+   Iteration :  82  (B r, r) = 1.01595e-14
+Average reduction factor = 0.84128
+#215
+   Iteration :   0  (B r, r) = 0.0208454 ...
+   Iteration :  82  (B r, r) = 1.01628e-14
+Average reduction factor = 0.841253
+#216
+   Iteration :   0  (B r, r) = 0.0213618 ...
+   Iteration :  82  (B r, r) = 1.05744e-14
+Average reduction factor = 0.841332
+#217
+   Iteration :   0  (B r, r) = 0.0210581 ...
+   Iteration :  82  (B r, r) = 1.04958e-14
+Average reduction factor = 0.841367
+#218
+   Iteration :   0  (B r, r) = 0.0206591 ...
+   Iteration :  82  (B r, r) = 1.02952e-14
+Average reduction factor = 0.841366
+#219
+   Iteration :   0  (B r, r) = 0.0199401 ...
+   Iteration :  82  (B r, r) = 9.31217e-15
+Average reduction factor = 0.841033
+#220
+   Iteration :   0  (B r, r) = 0.0198223 ...
+   Iteration :  82  (B r, r) = 9.84354e-15
+Average reduction factor = 0.841348
+#221
+   Iteration :   0  (B r, r) = 0.0198072 ...
+   Iteration :  82  (B r, r) = 9.40179e-15
+Average reduction factor = 0.841116
+#222
+   Iteration :   0  (B r, r) = 0.0199948 ...
+   Iteration :  82  (B r, r) = 9.56008e-15
+Average reduction factor = 0.841154
+#223
+   Iteration :   0  (B r, r) = 0.0197234 ...
+   Iteration :  82  (B r, r) = 9.56141e-15
+Average reduction factor = 0.841224
+#224
+   Iteration :   0  (B r, r) = 0.0194482 ...
+   Iteration :  82  (B r, r) = 9.08288e-15
+Average reduction factor = 0.841033
+#225
+   Iteration :   0  (B r, r) = 0.0188841 ...
+   Iteration :  82  (B r, r) = 8.72434e-15
+Average reduction factor = 0.840977
+#226
+   Iteration :   0  (B r, r) = 0.0178919 ...
+   Iteration :  82  (B r, r) = 8.05054e-15
+Average reduction factor = 0.840842
+#227
+   Iteration :   0  (B r, r) = 0.0181863 ...
+   Iteration :  82  (B r, r) = 8.36675e-15
+Average reduction factor = 0.840956
+#228
+   Iteration :   0  (B r, r) = 0.0181287 ...
+   Iteration :  82  (B r, r) = 8.737e-15
+Average reduction factor = 0.841194
+#229
+   Iteration :   0  (B r, r) = 0.0185107 ...
+   Iteration :  82  (B r, r) = 9.34476e-15
+Average reduction factor = 0.841432
+#230
+   Iteration :   0  (B r, r) = 0.0178973 ...
+   Iteration :  82  (B r, r) = 8.82503e-15
+Average reduction factor = 0.841312
+#231
+   Iteration :   0  (B r, r) = 0.0178197 ...
+   Iteration :  82  (B r, r) = 9.19919e-15
+Average reduction factor = 0.841547
+#232
+   Iteration :   0  (B r, r) = 0.0182054 ...
+   Iteration :  82  (B r, r) = 8.95833e-15
+Average reduction factor = 0.841301
+#233
+   Iteration :   0  (B r, r) = 0.0185539 ...
+   Iteration :  82  (B r, r) = 9.26367e-15
+Average reduction factor = 0.841376
+#234
+   Iteration :   0  (B r, r) = 0.0186055 ...
+   Iteration :  82  (B r, r) = 8.93568e-15
+Average reduction factor = 0.841176
+#235
+   Iteration :   0  (B r, r) = 0.0185786 ...
+   Iteration :  82  (B r, r) = 9.41827e-15
+Average reduction factor = 0.841454
+#236
+   Iteration :   0  (B r, r) = 0.0184079 ...
+   Iteration :  82  (B r, r) = 9.12804e-15
+Average reduction factor = 0.84134
+#237
+   Iteration :   0  (B r, r) = 0.0184784 ...
+   Iteration :  82  (B r, r) = 9.38689e-15
+Average reduction factor = 0.841464
+#238
+   Iteration :   0  (B r, r) = 0.0179591 ...
+   Iteration :  82  (B r, r) = 8.63777e-15
+Average reduction factor = 0.841184
+#239
+   Iteration :   0  (B r, r) = 0.0177016 ...
+   Iteration :  82  (B r, r) = 8.58477e-15
+Average reduction factor = 0.841226
+#240
+   Iteration :   0  (B r, r) = 0.0169156 ...
+   Iteration :  82  (B r, r) = 8.1358e-15
+Average reduction factor = 0.841184
+#241
+   Iteration :   0  (B r, r) = 0.0165587 ...
+   Iteration :  82  (B r, r) = 8.23277e-15
+Average reduction factor = 0.841354
+#242
+   Iteration :   0  (B r, r) = 0.0166271 ...
+   Iteration :  82  (B r, r) = 8.135e-15
+Average reduction factor = 0.841272
+#243
+   Iteration :   0  (B r, r) = 0.0166222 ...
+   Iteration :  82  (B r, r) = 8.36349e-15
+Average reduction factor = 0.841415
+#244
+   Iteration :   0  (B r, r) = 0.0168544 ...
+   Iteration :  82  (B r, r) = 8.528e-15
+Average reduction factor = 0.841444
+#245
+   Iteration :   0  (B r, r) = 0.0166111 ...
+   Iteration :  82  (B r, r) = 8.38419e-15
+Average reduction factor = 0.841431
+#246
+   Iteration :   0  (B r, r) = 0.0160224 ...
+   Iteration :  82  (B r, r) = 8.34283e-15
+Average reduction factor = 0.841591
+#247
+   Iteration :   0  (B r, r) = 0.0154828 ...
+   Iteration :  82  (B r, r) = 7.83133e-15
+Average reduction factor = 0.841442
+#248
+   Iteration :   0  (B r, r) = 0.0156944 ...
+   Iteration :  82  (B r, r) = 7.93496e-15
+Average reduction factor = 0.84144
+#249
+   Iteration :   0  (B r, r) = 0.01671 ...
+   Iteration :  82  (B r, r) = 8.95958e-15
+Average reduction factor = 0.841741
+#250
+   Iteration :   0  (B r, r) = 0.0166752 ...
+   Iteration :  82  (B r, r) = 8.56114e-15
+Average reduction factor = 0.841519
+#251
+   Iteration :   0  (B r, r) = 0.0170105 ...
+   Iteration :  82  (B r, r) = 8.39961e-15
+Average reduction factor = 0.841319
+#252
+   Iteration :   0  (B r, r) = 0.0172359 ...
+   Iteration :  82  (B r, r) = 8.58321e-15
+Average reduction factor = 0.841362
+#253
+   Iteration :   0  (B r, r) = 0.0170078 ...
+   Iteration :  82  (B r, r) = 8.54972e-15
+Average reduction factor = 0.841411
+#254
+   Iteration :   0  (B r, r) = 0.0171019 ...
+   Iteration :  82  (B r, r) = 8.87118e-15
+Average reduction factor = 0.841572
+#255
+   Iteration :   0  (B r, r) = 0.0162938 ...
+   Iteration :  82  (B r, r) = 7.97614e-15
+Average reduction factor = 0.841274
+#256
+   Iteration :   0  (B r, r) = 0.0157742 ...
+   Iteration :  82  (B r, r) = 8.16407e-15
+Average reduction factor = 0.84156

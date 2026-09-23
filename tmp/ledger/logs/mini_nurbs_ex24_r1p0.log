@@ -1,0 +1,33 @@
+Create NURBS finite element
+Number of HCurl finite element unknowns: 144
+Number of H1 finite element unknowns: 27
+   Iteration :   0  (B r, r) = 0.74002
+   Iteration :   1  (B r, r) = 0.0314736
+   Iteration :   2  (B r, r) = 0.0010605
+   Iteration :   3  (B r, r) = 4.28852e-05
+   Iteration :   4  (B r, r) = 2.03973e-05
+   Iteration :   5  (B r, r) = 6.27823e-06
+   Iteration :   6  (B r, r) = 7.06582e-07
+   Iteration :   7  (B r, r) = 3.34847e-07
+   Iteration :   8  (B r, r) = 3.38611e-08
+   Iteration :   9  (B r, r) = 5.99895e-09
+   Iteration :  10  (B r, r) = 5.21735e-09
+   Iteration :  11  (B r, r) = 1.64602e-09
+   Iteration :  12  (B r, r) = 7.74933e-10
+   Iteration :  13  (B r, r) = 5.76955e-10
+   Iteration :  14  (B r, r) = 5.39296e-11
+   Iteration :  15  (B r, r) = 1.44167e-11
+   Iteration :  16  (B r, r) = 3.49526e-12
+   Iteration :  17  (B r, r) = 7.13019e-12
+   Iteration :  18  (B r, r) = 6.27771e-13
+   Iteration :  19  (B r, r) = 3.42447e-13
+   Iteration :  20  (B r, r) = 2.14467e-13
+   Iteration :  21  (B r, r) = 5.90798e-15
+   Iteration :  22  (B r, r) = 5.52968e-18
+   Iteration :  23  (B r, r) = 8.55783e-26
+Average reduction factor = 0.287008
+
+ Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{L_2} = 0.0224956
+
+ Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{L_2} = 0.0039157
+

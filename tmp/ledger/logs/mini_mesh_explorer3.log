@@ -1,0 +1,10 @@
+Read mesh: data/beam-tet.mesh
+Mesh Characteristics:
+  Number of vertices:          36
+  Number of elements:          48
+  Number of boundary elements: 68
+  Geometry type:               Tet4
+  Nodal FE space:              NONE
+boundary attribs   : 1 2 3
+material attribs   : 1 2
+Wrote mesh-explorer.mesh (48 elements, 36 nodes).

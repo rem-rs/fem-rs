@@ -1,0 +1,79 @@
+Options used:
+   --mesh square01.mesh
+   --refine-serial 2
+   --order 2
+   --quad_order 5
+   --visualization
+   --send-port 19916
+Newton iteration  0 : ||r|| = 56.5685
+Energy decrease: 16 --> 3.46403 or 78.3498% with 1 scaling.
+Avg/Max surface fitting error: 0.0224657 0.041274
+Min/Max surface fitting weight: 100 100
+Newton iteration  1 : ||r|| = 47.2689, ||r||/||r_0|| = 0.835603
+Scale = 1 Neg det(J) found.
+Scale = 0.5 Neg det(J) found.
+Energy decrease: 3.46403 --> 3.37433 or 2.58965% with 0.25 scaling.
+Avg/Max surface fitting error: 0.0220837 0.0388721
+Min/Max surface fitting weight: 100 100
+Newton iteration  2 : ||r|| = 39.7788, ||r||/||r_0|| = 0.703197
+Scale = 1 Neg det(J) found.
+Energy decrease: 3.37433 --> 3.17256 or 5.97948% with 0.5 scaling.
+Avg/Max surface fitting error: 0.0214368 0.0390237
+Min/Max surface fitting weight: 100 100
+Newton iteration  3 : ||r|| = 21.0612, ||r||/||r_0|| = 0.372312
+Scale = 1 Surf fit err increased.
+Scale = 0.5 Neg det(J) found.
+Scale = 0.25 Surf fit err increased.
+Energy decrease: 3.17256 --> 3.1693 or 0.102803% with 0.125 scaling.
+Avg/Max surface fitting error: 0.021325 0.0415478
+Min/Max surface fitting weight: 100 100
+Newton iteration  4 : ||r|| = 15.4803, ||r||/||r_0|| = 0.273656
+Scale = 1 Norm increased: 15.4803 --> 31.9966
+Energy decrease: 3.1693 --> 3.05377 or 3.64515% with 0.5 scaling.
+Avg/Max surface fitting error: 0.0208946 0.0410876
+Min/Max surface fitting weight: 100 100
+Newton iteration  5 : ||r|| = 6.51912, ||r||/||r_0|| = 0.115243
+Energy decrease: 3.05377 --> 3.02318 or 1.00166% with 1 scaling.
+Avg/Max surface fitting error: 0.0204267 0.0364956
+Min/Max surface fitting weight: 100 100
+Newton iteration  6 : ||r|| = 1.60285, ||r||/||r_0|| = 0.0283346
+Energy decrease: 3.02318 --> 3.02232 or 0.028614% with 1 scaling.
+Avg/Max surface fitting error: 0.0204047 0.0362888
+Min/Max surface fitting weight: 100 100
+Newton iteration  7 : ||r|| = 0.0518511, ||r||/||r_0|| = 0.000916607
+Energy decrease: 3.02232 --> 3.02232 or 5.08379e-05% with 1 scaling.
+Avg/Max surface fitting error: 0.0204039 0.0362586
+Min/Max surface fitting weight: 100 100
+Newton iteration  8 : ||r|| = 159.466, ||r||/||r_0|| = 2.81899
+Energy decrease: 17.1498 --> 6.35419 or 62.9489% with 1 scaling.
+Avg/Max surface fitting error: 0.00501452 0.0114924
+Min/Max surface fitting weight: 1000 1000
+Newton iteration  9 : ||r|| = 6.72535, ||r||/||r_0|| = 0.118889
+Energy decrease: 6.35419 --> 6.33088 or 0.366762% with 1 scaling.
+Avg/Max surface fitting error: 0.00481827 0.0105195
+Min/Max surface fitting weight: 1000 1000
+Newton iteration 10 : ||r|| = 0.234821, ||r||/||r_0|| = 0.00415108
+Energy decrease: 6.33088 --> 6.33086 or 0.000404392% with 1 scaling.
+Avg/Max surface fitting error: 0.00481598 0.0105096
+Min/Max surface fitting weight: 1000 1000
+Newton iteration 11 : ||r|| = 389.878, ||r||/||r_0|| = 6.89214
+Energy decrease: 14.7756 --> 7.37832 or 50.0641% with 1 scaling.
+Avg/Max surface fitting error: 0.000580784 0.00149907
+Min/Max surface fitting weight: 10000 10000
+Newton iteration 12 : ||r|| = 1.29266, ||r||/||r_0|| = 0.0228512
+Energy decrease: 7.37832 --> 7.37759 or 0.00993607% with 1 scaling.
+Avg/Max surface fitting error: 0.000578622 0.00147952
+Min/Max surface fitting weight: 10000 10000
+Newton iteration 13 : ||r|| = 0.015172, ||r||/||r_0|| = 0.000268206
+Energy decrease: 7.37759 --> 7.37759 or 8.72717e-06% with 1 scaling.
+Avg/Max surface fitting error: 0.00057865 0.00147955
+Min/Max surface fitting weight: 10000 10000
+Newton iteration 14 : ||r|| = 488.187, ||r||/||r_0|| = 8.63002
+Energy decrease: 8.70163 --> 7.51414 or 13.6467% with 1 scaling.
+Avg/Max surface fitting error: 5.92229e-05 0.000155443
+Min/Max surface fitting weight: 100000 100000
+Newton iteration 15 : ||r|| = 0.0394361, ||r||/||r_0|| = 0.000697139
+TMOPNewtonSolver converged based on the surface fitting error.
+Newton: Number of iterations: 15
+   ||r|| = 0.0394361,  ||r||/||r_0|| = 0.000697139
+Newton: No convergence!

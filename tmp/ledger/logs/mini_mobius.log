@@ -1,0 +1,10 @@
+Options used:
+   --mesh-out-file mobius-strip.mesh
+   --num-elements-x 8
+   --num-elements-y 2
+   --mesh-order 3
+   --close-strip 2
+   --cont-mesh
+   --num-twists 0.5
+   --no-visualization
+   --send-port 19916

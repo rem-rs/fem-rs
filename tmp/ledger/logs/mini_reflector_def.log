@@ -1,0 +1,7 @@
+Options used:
+   --mesh ../../data/pipe-nurbs.mesh
+   --normal '0 0 1'
+   --origin '0 0 0'
+   --no-visualization
+   --send-port 19916
+reflector: error reading mesh '../../data/pipe-nurbs.mesh': IO error: The system cannot find the path specified. (os error 3)

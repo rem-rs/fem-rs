@@ -1,0 +1,70 @@
+Options used:
+   --element-subdivisions 1
+   --order 4
+   --time-step 0.001
+   --final-time 0.01
+   --enable-pa
+   --disable-ni
+   --no-visualization
+   --no-checkresult
+Number of elements: 27
+NAVIER version: 0.1
+Velocity #DOFs: 5184
+Pressure #DOFs: 1728
+Setup
+Using Full Assembly
+       Time          dt       u_inf       p_inf          ke
+0.00000E+00 1.00000E-03 9.86914E-01 0.00000E+00 1.24994E-01
+        It   Resid      Reltol
+MVIN     8   2.28e-12   1.00e-12
+PRES    15   3.38e-06   1.00e-06
+HELM     9   4.94e-10   1.00e-08
+1.00000E-03 1.00000E-03 9.87244E-01 5.44238E-01 1.24993E-01
+        It   Resid      Reltol
+MVIN    10   1.16e-13   1.00e-12
+PRES    14   1.94e-06   1.00e-06
+HELM     9   3.51e-10   1.00e-08
+2.00000E-03 1.00000E-03 9.87369E-01 5.33285E-01 1.24993E-01
+        It   Resid      Reltol
+MVIN    10   6.03e-14   1.00e-12
+PRES    13   2.09e-06   1.00e-06
+HELM     9   4.31e-10   1.00e-08
+3.00000E-03 1.00000E-03 9.87440E-01 4.35777E-01 1.24992E-01
+        It   Resid      Reltol
+MVIN    10   5.55e-14   1.00e-12
+PRES    14   4.37e-07   1.00e-06
+HELM     8   1.22e-09   1.00e-08
+4.00000E-03 1.00000E-03 9.87481E-01 3.76165E-01 1.24992E-01
+        It   Resid      Reltol
+MVIN    10   3.75e-14   1.00e-12
+PRES    14   3.46e-08   1.00e-06
+HELM     8   1.15e-09   1.00e-08
+5.00000E-03 1.00000E-03 9.87517E-01 3.75939E-01 1.24991E-01
+        It   Resid      Reltol
+MVIN    10   2.03e-14   1.00e-12
+PRES    14   1.51e-08   1.00e-06
+HELM     8   1.21e-09   1.00e-08
+6.00000E-03 1.00000E-03 9.87554E-01 3.76032E-01 1.24991E-01
+        It   Resid      Reltol
+MVIN    10   1.26e-14   1.00e-12
+PRES    14   1.39e-08   1.00e-06
+HELM     8   1.27e-09   1.00e-08
+7.00000E-03 1.00000E-03 9.87593E-01 3.76104E-01 1.24991E-01
+        It   Resid      Reltol
+MVIN    10   3.18e-15   1.00e-12
+PRES    14   1.05e-08   1.00e-06
+HELM     8   1.28e-09   1.00e-08
+8.00000E-03 1.00000E-03 9.87632E-01 3.76095E-01 1.24990E-01
+        It   Resid      Reltol
+MVIN    10   5.59e-15   1.00e-12
+PRES    14   3.28e-09   1.00e-06
+HELM     8   1.27e-09   1.00e-08
+9.00000E-03 1.00000E-03 9.87670E-01 3.76059E-01 1.24990E-01
+        It   Resid      Reltol
+MVIN    10   2.91e-15   1.00e-12
+PRES    14   1.41e-09   1.00e-06
+HELM     8   1.26e-09   1.00e-08
+1.00000E-02 1.00000E-03 9.87707E-01 3.76033E-01 1.24989E-01
+     SETUP      STEP    EXTRAP  CURLCURL    PSOLVE    HSOLVE
+ 3.401e+00 1.308e+00 1.154e+00 1.211e-01 1.759e-02 5.237e-03
+           1.000e+00 8.821e-01 9.259e-02 1.345e-02 4.005e-03

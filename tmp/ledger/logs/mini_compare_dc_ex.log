@@ -1,0 +1,8 @@
+Options used:
+   --root-file_0 Example5
+   --root-file_1 alt/Example5
+   --cycle 0
+   --pad-digits-cycle 6
+   --pad-digits-rank 6
+   --tolerance -1
+Error loading VisIt data collection: alt/Example5

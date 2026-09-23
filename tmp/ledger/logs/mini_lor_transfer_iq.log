@@ -1,0 +1,10 @@
+Switching the H1 LOR space order from 0 to 1
+HO  space dofs: 81
+LOR space dofs: 289
+H1 HO        mass   = 5.32325526528981685e-1
+H1 R(HO)     mass   = 5.31700243506705528e-1 (0.1175%)
+H1 P(R(HO))  mass   = 6.02998162759398992e-1 (13.2762%)
+|HO - P(R(HO))|_inf   = 1.307900264959e0
+H1 LOR       mass   = 5.31647850262065291e-1
+
+Elapsed: 0.01s

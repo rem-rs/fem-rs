@@ -1,0 +1,2 @@
+True 1D ultraweak DPG for -u'' - k^2 u = f (u = sin(pi x))
+  elements = 16, k = 0, L2 error u = 4.013e-2, sigma = 1.258e-1

@@ -1,0 +1,23 @@
+Options used:
+   --mesh ../../data/star.mesh
+   --order 1
+   --no-visualization
+   --make-mesh
+   --dimension 2
+   --refs 100
+Number of finite element unknowns: 89
+   Iteration :   0  (B r, r) = 0.0074385
+   Iteration :   1  (B r, r) = 0.00237582
+   Iteration :   2  (B r, r) = 0.00148886
+   Iteration :   3  (B r, r) = 0.00014212
+   Iteration :   4  (B r, r) = 4.42131e-05
+   Iteration :   5  (B r, r) = 3.32419e-06
+   Iteration :   6  (B r, r) = 2.46677e-07
+   Iteration :   7  (B r, r) = 1.20766e-08
+   Iteration :   8  (B r, r) = 7.66755e-10
+   Iteration :   9  (B r, r) = 5.24403e-11
+   Iteration :  10  (B r, r) = 2.54227e-12
+   Iteration :  11  (B r, r) = 4.46245e-14
+   Iteration :  12  (B r, r) = 6.72734e-16
+Average reduction factor = 0.286098
+Error of H1 continuity: 1.38778e-17

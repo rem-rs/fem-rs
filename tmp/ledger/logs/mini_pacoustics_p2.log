@@ -1,0 +1,1 @@
+pacoustics: GAP — `-prob 2` (PML) is not ported to fem-rs.  The C++ miniapp assembles the CartesianPML stretched-map coefficients (`util/pml.cpp`: α = JᵀJ/|J|, β = |J| as RestrictedCoefficient/PmlMatrix coefficient pairs) which fem_parallel does not carry; `-prob 3..5` additionally need the meshes/scatter.mesh + GSLIB point-source machinery.

@@ -1,0 +1,13 @@
+Options used:
+   --mesh data/square-nurbs.mesh
+   --refine -1
+   --order 1
+   --div-free
+   --nurbs
+   --device cpu
+   --visualization
+   --send-port 19916
+Device configuration: cpu
+Memory configuration: host-std
+Create NURBS fec and ext
+nurbs_solenoidal (Rust port): partial delivery, exit 3. The C++ default track uses `NURBS_HDivFECollection` + `NURBSFECollection` + `NURBSExtension` (measured dim(R) = 8580, dim(W) = 4225, ||u_h - u_ex|| = 2.08242e-05, ||div u_h - div u_ex|| = 1.4113e-13 on data/square-nurbs.mesh); fem-rs has no NURBS finite-element spaces implementing `FESpace` (D143), so this track cannot be run. Use `-nn` for the RT/L2 track (which this port solves, with its own documented gaps: interpolated rhs, unused block preconditioner, missing ComputeDivError).

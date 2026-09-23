@@ -1,0 +1,10 @@
+miniapp_tesla: NOT PORTED — declared gap D139; no input is solved and no option except -ubbc is honoured.
+  Measured before this guard: `Running solver ... PCG Iterations = 0` / `|A| = 0.000000e0, |B| = 0.000000e0` with exit code 0,
+  and `-m data/beam-tet.mesh` produced the same DOF counts as the built-in unit cube (H1 27 / H(curl) 98 / H(div) 120 / L2 48).
+Missing pieces (MFEM tesla.cpp / tesla_solver.cpp):
+  * read the mesh from -m and refine it (-rs/-rp);
+  * the -maxit AMR loop (ParBilinearForm::Update + ZZ error estimator);
+  * wire -ms/-ha/-cr sources into the RHS (helpers exist below, unused by run());
+  * -vbcs/-vbcv boundary tags;
+  * a non-zero RHS assembly so the solve is not identically zero.
+The scaffolding is kept for that port. Exiting with status 3.

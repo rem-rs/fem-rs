@@ -1,0 +1,49 @@
+0 display_basis
+0 lor_transfer_iq
+0 get_values_ex5
+1 load_dc_ex5
+1 compare_dc_ex
+101 nodal_transfer
+0 automata
+124 life_sp (TIMEOUT 120s)
+0 autodiff
+124 multidomain (TIMEOUT 300s)
+101 multidomain_nd
+101 multidomain_rt
+3 shifted_distance
+3 shifted_diffusion
+3 shifted_extrap
+0 hooke_def
+0 dfem_min_surf
+0 lor_elast_def
+0 plor_solvers_st
+0 adjoint_roberts
+0 adjoint_advdif
+0 dpg_helm_1d
+0 dpg_poisson_2d
+0 dpg_acoustics_2d
+0 dpg_maxwell_2d
+0 dpg_acoustics_3d
+0 dpg_maxwell_3d
+0 pdiffusion
+0 pacoustics
+0 pmaxwell
+1 schrodinger
+0 navier_kov
+0 navier_mms
+0 navier_shear
+0 navier_kov_vs
+0 navier_tgv
+124 navier_3dfoc (TIMEOUT 600s)
+124 navier_turbchan (TIMEOUT 600s)
+101 navier_bifurc
+0 hdiv_darcy
+0 hdiv_grad_div
+0 spde_grf
+1 mesh_explorer
+0 mesh_optimizer_st
+0 fit_node_pos
+0 mobius
+0 klein
+0 toroid_def
+RUN BATCH DONE

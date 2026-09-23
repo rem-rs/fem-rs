@@ -1,0 +1,14 @@
+Options used:
+   --mesh data/beam-tet.mesh
+   --refine-serial 3
+   --order 1
+   --no-visualization
+   --relative-tolerance 0.0001
+   --absolute-tolerance 1e-06
+   --newton-iterations 10
+   --power-parameter 2
+   --print-level 0
+   --integrator 2
+Number of finite element unknowns: 5265
+[pp=2] The solution time is: 3.12396
+[pp=2] The total energy of the system is E=-0.126

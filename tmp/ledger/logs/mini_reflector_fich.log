@@ -1,0 +1,7 @@
+Options used:
+   --mesh data/fichera.mesh
+   --normal '1 0 0'
+   --origin '1 0 0'
+   --no-visualization
+   --send-port 19916
+Wrote reflected.mesh (14 elements, 40 boundary faces, 43 nodes).

@@ -1,0 +1,55 @@
+=== fem-rs plor_solvers (H1 P3) — 1 ranks, 320 elems ===
+Device configuration: cpu
+|b| = 1.847618e1  |x0| = 6.678181e0  |A x0| = 1.318531e1  |r0|/|b| = 7.005144e-1
+   Iteration :   1  (B r, r) = 8.632696e1   true res = 2.947e-1
+   Iteration :   2  (B r, r) = 1.423390e1   true res = 1.548e-1
+   Iteration :   3  (B r, r) = 4.530091e0   true res = 1.292e-1
+   Iteration :   4  (B r, r) = 2.558394e0   true res = 8.407e-2
+   Iteration :   5  (B r, r) = 1.029863e0   true res = 3.607e-2
+   Iteration :   6  (B r, r) = 1.913939e-1   true res = 1.951e-2
+   Iteration :   7  (B r, r) = 5.461008e-2   true res = 8.989e-3
+   Iteration :   8  (B r, r) = 1.119160e-2   true res = 4.375e-3
+   Iteration :   9  (B r, r) = 2.905018e-3   true res = 3.522e-3
+   Iteration :  10  (B r, r) = 1.588648e-3   true res = 1.278e-3
+   Iteration :  11  (B r, r) = 2.729527e-4   true res = 8.278e-4
+   Iteration :  12  (B r, r) = 8.726476e-5   true res = 3.720e-4
+   Iteration :  13  (B r, r) = 1.828155e-5   true res = 1.849e-4
+   Iteration :  14  (B r, r) = 4.839284e-6   true res = 1.120e-4
+   Iteration :  15  (B r, r) = 1.693245e-6   true res = 6.710e-5
+   Iteration :  16  (B r, r) = 6.180855e-7   true res = 4.046e-5
+   Iteration :  17  (B r, r) = 2.410721e-7   true res = 2.820e-5
+   Iteration :  18  (B r, r) = 1.156839e-7   true res = 1.687e-5
+   Iteration :  19  (B r, r) = 4.169074e-8   true res = 1.157e-5
+   Iteration :  20  (B r, r) = 1.838491e-8   true res = 6.074e-6
+   Iteration :  21  (B r, r) = 5.522213e-9   true res = 3.549e-6
+   Iteration :  22  (B r, r) = 1.846438e-9   true res = 2.114e-6
+   Iteration :  23  (B r, r) = 6.537878e-10   true res = 1.016e-6
+   Iteration :  24  (B r, r) = 1.874326e-10   true res = 9.289e-7
+   Iteration :  25  (B r, r) = 1.186127e-10   true res = 5.423e-7
+   Iteration :  26  (B r, r) = 4.601150e-11   true res = 3.994e-7
+   Iteration :  27  (B r, r) = 2.338732e-11   true res = 2.380e-7
+   Iteration :  28  (B r, r) = 7.047987e-12   true res = 9.514e-8
+   Iteration :  29  (B r, r) = 1.390941e-12   true res = 5.851e-8
+   Iteration :  30  (B r, r) = 4.269894e-13   true res = 2.382e-8
+   Iteration :  31  (B r, r) = 8.105266e-14   true res = 1.370e-8
+   Iteration :  32  (B r, r) = 2.586499e-14   true res = 6.411e-9
+   Iteration :  33  (B r, r) = 5.631678e-15   true res = 3.042e-9
+   Iteration :  34  (B r, r) = 1.210310e-15   true res = 1.577e-9
+   Iteration :  35  (B r, r) = 3.437919e-16   true res = 8.296e-10
+   Iteration :  36  (B r, r) = 9.409491e-17   true res = 4.849e-10
+   Iteration :  37  (B r, r) = 3.407193e-17   true res = 2.894e-10
+   Iteration :  38  (B r, r) = 1.254619e-17   true res = 1.756e-10
+   Iteration :  39  (B r, r) = 4.619985e-18   true res = 1.281e-10
+   Iteration :  40  (B r, r) = 2.278382e-18   true res = 7.319e-11
+   Iteration :  41  (B r, r) = 7.573529e-19   true res = 4.273e-11
+   Iteration :  42  (B r, r) = 2.660375e-19   true res = 2.376e-11
+   Iteration :  43  (B r, r) = 7.914095e-20   true res = 1.288e-11
+   Iteration :  44  (B r, r) = 2.255072e-20   true res = 6.604e-12
+   Iteration :  45  (B r, r) = 6.423044e-21   true res = 4.089e-12
+   Iteration :  46  (B r, r) = 2.226445e-21   true res = 2.256e-12
+   Iteration :  47  (B r, r) = 6.799775e-22   true res = 1.077e-12
+   Iteration :  48  (B r, r) = 1.745603e-22   true res = 6.328e-13
+Number of DOFs: 3001
+Average reduction factor = 0.320901
+PCG converged in 48 iterations.
+L2 error: 2.502523e-5

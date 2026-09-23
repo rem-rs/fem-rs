@@ -1,0 +1,12 @@
+Options used:
+   --mesh data/inline-quad.mesh
+   --mesh-order -1
+   --num-elem-in-y -1
+   --width-in-y 1
+   --num-elem-in-z 4
+   --height-in-z 2
+   --no-transform
+   --no-visualization
+   --send-port 19916
+Extruding 2D mesh to a height of 2 using 4 elements.
+Wrote extruder.mesh (64 elements, 96 boundary faces, 125 nodes).

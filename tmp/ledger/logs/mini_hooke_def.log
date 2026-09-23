@@ -1,0 +1,41 @@
+
+         ___ ___ ________   ________   ____  __.___________
+        /   |   \\_____  \  \_____  \ |    |/ _|\_   _____/
+       /    ~    \/   |   \  /   |   \|      <   |    __)_
+       \    Y    /    |    \/    |    \    |  \  |        \
+        \___|_  /\_______  /\_______  /\____|__ \/_______  /
+              \/         \/         \/        \/        \/ 
+      
+Options used:
+   --order 1
+   --device cpu
+   --pctype 0
+   --ref-serial 0
+   --visualization
+   --no-paraview
+Device configuration: cpu
+Memory configuration: host-std
+#dofs: 243
+Newton iteration  0 : ||r|| = 1.84998
+PCG: Number of iterations: 14
+Average reduction factor = 0.838548
+Newton iteration  1 : ||r|| = 0.164486, ||r||/||r_0|| = 0.0889128
+PCG: Number of iterations: 26
+Average reduction factor = 0.906479
+Newton iteration  2 : ||r|| = 0.0135081, ||r||/||r_0|| = 0.00730176
+PCG: Number of iterations: 25
+Average reduction factor = 0.911356
+Newton iteration  3 : ||r|| = 0.00125724, ||r||/||r_0|| = 0.000679597
+PCG: Number of iterations: 14
+Average reduction factor = 0.828331
+Newton iteration  4 : ||r|| = 0.00010698, ||r||/||r_0|| = 5.7828e-05
+PCG: Number of iterations: 18
+Average reduction factor = 0.875667
+Newton iteration  5 : ||r|| = 8.39765e-06, ||r||/||r_0|| = 4.53933e-06
+PCG: Number of iterations: 26
+Average reduction factor = 0.906607
+Newton iteration  6 : ||r|| = 6.82594e-07, ||r||/||r_0|| = 3.68974e-07
+[check] converged = true iters = 6
+[check] final ||r|| = 6.8259366663698787e-7
+[check] ||U|| = 9.5635044634017327e-2 Umax = 1.0000000000000000e-2 Umin = 0.0000000000000000e0
+  GLVis 3D send is not ported (solution not visualized).

@@ -1,0 +1,69 @@
+Number of elements: 32
+NAVIER version: 0.1
+Velocity #DOFs: 2450
+Pressure #DOFs: 1225
+Setup
+Using Full Assembly
+        It   Resid      Reltol
+MVIN     6   1.01e-12   1.00e-12
+PRES    68   6.53e-07   1.00e-06
+HELM    14   1.91e-14   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 1.00E-03 1.00E-03 6.24210E-07 1.18197E-05 err
+        It   Resid      Reltol
+MVIN    10   1.51e-12   1.00e-12
+PRES    80   1.36e-10   1.00e-06
+HELM    14   2.40e-14   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 2.00E-03 1.00E-03 6.36043E-07 4.28551E-06 err
+        It   Resid      Reltol
+MVIN    10   1.75e-12   1.00e-12
+PRES    70   5.02e-11   1.00e-06
+HELM    15   9.75e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 3.00E-03 1.00E-03 6.40832E-07 2.72881E-06 err
+        It   Resid      Reltol
+MVIN    10   2.09e-12   1.00e-12
+PRES    80   3.36e-11   1.00e-06
+HELM    15   9.00e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 4.00E-03 1.00E-03 6.45685E-07 1.79629E-06 err
+        It   Resid      Reltol
+MVIN    11   6.29e-13   1.00e-12
+PRES    75   1.48e-11   1.00e-06
+HELM    15   7.83e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 5.00E-03 1.00E-03 6.49456E-07 1.25320E-06 err
+        It   Resid      Reltol
+MVIN    11   6.77e-13   1.00e-12
+PRES    57   8.11e-12   1.00e-06
+HELM    15   6.54e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 6.00E-03 1.00E-03 6.51897E-07 1.13130E-06 err
+        It   Resid      Reltol
+MVIN    11   7.18e-13   1.00e-12
+PRES    57   5.06e-12   1.00e-06
+HELM    15   5.75e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 7.00E-03 1.00E-03 6.53680E-07 1.09141E-06 err
+        It   Resid      Reltol
+MVIN    11   7.26e-13   1.00e-12
+PRES    64   3.60e-12   1.00e-06
+HELM    15   5.01e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 8.00E-03 1.00E-03 6.55176E-07 1.06046E-06 err
+        It   Resid      Reltol
+MVIN    11   8.32e-13   1.00e-12
+PRES    59   2.53e-12   1.00e-06
+HELM    15   4.27e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 9.00E-03 1.00E-03 6.56459E-07 1.03285E-06 err
+        It   Resid      Reltol
+MVIN    11   7.58e-13   1.00e-12
+PRES    53   1.76e-12   1.00e-06
+HELM    15   3.54e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 1.00E-02 1.00E-03 6.57566E-07 1.01390E-06 err
+     SETUP      STEP    EXTRAP  CURLCURL    PSOLVE    HSOLVE
+ 2.495e-01 1.658e-01 1.047e-01 7.881e-03 3.204e-02 4.917e-03
+           1.000e+00 6.318e-01 4.754e-02 1.933e-01 2.966e-02

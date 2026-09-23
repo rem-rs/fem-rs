@@ -1,0 +1,15 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/beam-hex.mesh
+   --order 1
+   --no-visualization
+   --number-of-wavelengths 1
+   --permeability 1
+   --permittivity 1
+   --delta-order 1
+   --serial-ref 0
+   --no-static-condensation
+   --send-port 19916
+
+  Ref |    Dofs    |    ω    |  L2 Error  |  Rate  | PCG it |
+------------------------------------------------------------
+    0 |        184 |  2.0 π  |  4.909e+00 |   0.00 |     26 | 

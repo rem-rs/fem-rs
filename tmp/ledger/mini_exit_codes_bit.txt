@@ -1,0 +1,20 @@
+0 nurbs_ex1_bh
+101 nurbs_ex3_bh
+0 nurbs_ex24_r1p0
+0 printfunc
+0 curveint_uw9
+0 mesh_quality_iq
+0 hpref_iq100
+0 phpref_n100
+0 ref321_mm
+0 extruder_iq
+0 toroid_o1
+2 field_interp_star
+0 findpts_rt2d
+0 findpts_hex
+2 field_diff
+3 maxwell_novis
+101 absl1_default
+1 gridfn_bounds
+1 nurbs_surface_e1
+BIT BATCH DONE

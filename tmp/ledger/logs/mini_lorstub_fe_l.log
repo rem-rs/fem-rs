@@ -1,0 +1,1 @@
+lor_solvers: -fe l (L2 DG) is not ported — MFEM adds DGDiffusionIntegrator(-1, kappa) as an interior *and* boundary FACE integrator on the bilinear and linear forms (lor_solvers.cpp:153-171); fem-rs's DG machinery is the separate `fem_assembly::dg::DgAssembler` API, not a BilinearForm integrator, so there is no 1:1 expression for it. Exiting with status 3.

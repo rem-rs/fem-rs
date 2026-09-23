@@ -1,0 +1,17 @@
+
+Element Type:          TRIANGLE
+Basis Type:            Discontinuous (L2)
+Basis function order:  3
+Map Type:              VALUE
+Number of basis functions: 10
+Element VDofs: 0 1 2 3 4 5 6 7 8 9
+DoF 1
+DoF 2
+DoF 3
+DoF 4
+DoF 5
+DoF 6
+DoF 7
+DoF 8
+DoF 9
+DoF 10

@@ -1,0 +1,47 @@
+Options used:
+   --mesh data/star-mixed.mesh
+   --order 1
+   --refine-serial 0
+   --jitter 0
+   --metric-id 1
+   --target-id 1
+   --limit-const 0
+   --adapt-limit-const 0
+   --quad-type 1
+   --quad_order 8
+   --solver-type 0
+   --newton-iters 20
+   --newton-rel-tolerance 1.00000e-10
+   --adaptive-rel-tol 0
+   --lin-solver 2
+   --lin-iter 100
+   --move-boundary
+   --combo-type 0
+   --no-balance-explicit-combo
+   --no-hr-adaptivity
+   --h-metric -1
+   --no-normalization
+   --no-fd-approx
+   --no-exact-action
+   --integrate-target
+   --no-visualization
+   --verbosity-level 0
+   --adaptivity-evaluator 0
+   --device cpu
+   --no-partial-assembly
+   --n_hr_iter 5
+   --n_h_iter 1
+   --mesh_node_ordering 0
+   --barrier-type 0
+   --worst-case-type 0
+Device configuration: cpu
+Memory configuration: host-std
+Triangle quadrature points: 16
+Quadrilateral quadrature points: 36
+Minimum det(J) of the original mesh is 0.237761
+Newton: Number of iterations: 20
+   ||r|| = 7.25044e-06,  ||r||/||r_0|| = 9.53674e-07
+Newton: No convergence!
+Initial strain energy: 1.5955e+01 = metrics: 1.5955e+01 + extra terms: 0.0000e+00
+  Final strain energy: 7.4854e+00 = metrics: 7.4854e+00 + extra terms: 0.0000e+00
+The strain energy decreased by: 5.3084e+01 %.

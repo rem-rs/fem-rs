@@ -1,0 +1,8 @@
+Options used:
+   --root-file_0 Example5_000000.mfem_root
+   --root-file_1 Example3_000000.mfem_root
+   --cycle 0
+   --pad-digits-cycle 6
+   --pad-digits-rank 6
+   --tolerance -1
+Error loading VisIt data collection: Example5_000000.mfem_root

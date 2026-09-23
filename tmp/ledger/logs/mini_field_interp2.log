@@ -1,0 +1,13 @@
+Options used:
+   --mesh1 data/square01.mesh
+   --mesh2 data/star.mesh
+   --solution1 must_be_provided_by_the_user.gf
+   --field-type-src 0
+   --ncomp 1
+   --gfo 0
+   --refine 0
+   --field-type -1
+   --order 3
+   --no-visualization
+   --send-port 19916
+Mesh file not found: data/square01.mesh

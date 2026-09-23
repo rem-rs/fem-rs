@@ -1,0 +1,8 @@
+Options used:
+   --mesh data/pipe-nurbs.mesh
+   --normal '0 0 1'
+   --origin '0 0 0'
+   --no-visualization
+   --send-port 19916
+reflector (Rust port): the C++ miniapp reflects NURBS meshes with `ReflectNURBSMesh` and writes an `MFEM NURBS mesh v1.0` file (reflected patches and control points).  This port has no NURBS reflection/output path (`fem_io::nurbs_mesh`'s writer exists, D143, but the patch-level reflection is not ported), so it refuses to emit a linear mesh in its place.
+Gap list (exit 3): [1] NURBS mesh output + `ReflectNURBSMesh` patch reflection (the writer groundwork is `fem_io::nurbs_mesh::write_nurbs_mesh_doc`).  Use `-m <linear hex mesh>` (e.g. `-m ../../data/fichera.mesh -o '1 0 0' -n '1 0 0'`) for the ported linear path.

@@ -1,0 +1,13 @@
+Options used:
+   --num-elements-phi 8
+   --num-shifts 0
+   --mesh-order 3
+   --refine-serial 0
+   --major-radius 1
+   --minor-radius 0.2
+   --initial-angle 0
+   --element-type 0
+   --cont-mesh
+   --no-visualization
+   --send-port 19916
+Wrote toroid-wedge-o3-s0.mesh (8 elements, 24 boundary faces, 24 nodes).

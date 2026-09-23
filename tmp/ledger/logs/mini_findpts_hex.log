@@ -1,0 +1,30 @@
+Options used:
+   --mesh data/inline-hex.mesh
+   --order 3
+   --mesh-order 3
+   --refine-serial 0
+   --field-type 0
+   --ncomp 1
+   --no-visualization
+   --no-h-refinement
+   --no-p-refinement
+   --point-ordering 0
+   --fespace-ordering 0
+   --no-mesh-p-refinement
+   --random 1
+   --npt 4
+   --no-surface
+   --surface-aabb-size-inc 0
+Mesh curvature of the original mesh: (NONE)
+--- Generating points for:
+x in [0, 1]
+y in [0, 1]
+z in [0, 1]
+Mesh curvature of the curved mesh: H1_3D_P3
+H1-GridFunction
+Searched points:     256
+Found points:        256
+Max interp error:    1.77635683940025e-15
+Max dist^2 (of found): 1.263410043518027e-31
+Points not found:    0
+Points on faces:     256 out of 256

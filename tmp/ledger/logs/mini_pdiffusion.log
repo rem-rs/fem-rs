@@ -1,0 +1,15 @@
+=== fem-rs pdiffusion: parallel ultraweak DPG for the Poisson problem ===
+Options used:
+   --mesh data/inline-quad.mesh
+   --order 1
+   --delta_order 1
+   --num-serial-refinements 0
+   --num-parallel-refinements 0
+   --problem 0 (manufactured)
+   --theta-factor 0 (uniform serial refinement only)
+   --ranks 2
+   --no-visualization
+
+  Ref |    Dofs    |  L2 Error  |  Rate  |  Residual  |  Rate  | PCG it |
+------------------------------------------------------------------------
+    0 |        113 |  1.021e+00 |   0.00 |  9.951e-01 |   0.00 |     81 | 

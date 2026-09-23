@@ -1,0 +1,24 @@
+MFEM mesh v1.0
+
+#
+# MFEM Geometry Types (see fem/geom.hpp):
+#
+# POINT       = 0
+# SEGMENT     = 1
+# TRIANGLE    = 2
+# SQUARE      = 3
+# TETRAHEDRON = 4
+# CUBE        = 5
+# PRISM       = 6
+# PYRAMID     = 7
+#
+
+dimension
+3
+
+elements
+8
+1 6 0 1 2 3 4 5
+1 6 3 4 5 6 7 8
+1 6 6 7 8 9 10 11
+1 6 9 10 11 12 13 14

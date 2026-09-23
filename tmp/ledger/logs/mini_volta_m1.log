@@ -1,0 +1,20 @@
+Starting initialization.
+Initialization done.
+
+AMR Iteration 1
+Number of H1      unknowns: 16
+Number of H(Curl) unknowns: 32
+Number of H(Div)  unknowns: 24
+Number of L2      unknowns: 7
+Assembling ... 
+done.
+Running solver ... 
+PCG Iterations = 0
+Computing D ...
+done.
+
+Total charge: 
+   Volume integral of charge density:   0
+   Surface integral of dielectric flux: 0
+Solver done. 
+AMR iteration 1 complete.

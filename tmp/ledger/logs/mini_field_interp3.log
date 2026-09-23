@@ -1,0 +1,16 @@
+Options used:
+   --mesh1 square01.mesh
+   --mesh2 data/star.mesh
+   --solution1 must_be_provided_by_the_user.gf
+   --field-type-src 0
+   --ncomp 1
+   --gfo 0
+   --refine 0
+   --field-type -1
+   --order 3
+   --no-visualization
+   --send-port 19916
+Source mesh curvature: H1_2D_P1
+Target mesh curvature: H1_2D_P1
+Source FE collection: H1_2D_P3
+Target FE collection: H1_2D_P3

@@ -1,0 +1,9 @@
+Options used:
+   --mesh data/beam-tet.mesh
+   --refine-serial 3
+   --refine-parallel 1
+   --generate-data 1
+   --order 1
+   --src_num_procs 4
+   --no-visualization
+Number of finite element unknowns: 37281

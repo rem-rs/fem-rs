@@ -1,0 +1,17 @@
+=== fem-rs pacoustics: parallel ultraweak DPG for the Helmholtz problem ===
+Options used:
+   --mesh data/inline-quad.mesh
+   --order 1
+   --number-of-wavelengths 1
+   --problem 0 (plane_wave)
+   --delta-order 1
+   --theta 0
+   --serial-ref 0
+   --parallel-ref 0
+   --static-condensation-disabled
+   --ranks 2
+   --no-visualization
+
+  Ref |    Dofs    |    ω    |  L2 Error  |  Rate  |  Residual  |  Rate  | PCG it |
+----------------------------------------------------------------------------------
+    0 |        113 |  2.0 π  |  8.008e-01 |   0.00 |  1.374e+00 |   0.00 |     36 | 

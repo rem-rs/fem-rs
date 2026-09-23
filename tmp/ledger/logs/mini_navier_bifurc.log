@@ -1,0 +1,6 @@
+GLVis visualization is not available in the fem-rs port; continuing without it (use -no-vis).
+ParaView output is not reproduced by the fem-rs port (use -pv 0).
+
+thread 'main' (8696) panicked at examples\..\miniapps\fluids\navier_bifurcation.rs:1101:28:
+cannot locate data/channel-bifurcation-2d.mesh; tried ["data/channel-bifurcation-2d.mesh", "C:\\Users\\lilu\\works\\fem-pro\\fem-rs\\examples/../data/channel-bifurcation-2d.mesh", "C:\\Users\\lilu\\works\\fem-pro\\fem-rs\\examples/../../data/channel-bifurcation-2d.mesh"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

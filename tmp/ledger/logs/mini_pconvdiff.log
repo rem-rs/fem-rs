@@ -1,0 +1,17 @@
+=== fem-rs pconvection-diffusion: parallel ultraweak DPG for convection-diffusion ===
+Options used:
+   --mesh ../../data/inline-quad.mesh
+   --order 1
+   --delta_order 1
+   --num-serial-refinements 0
+   --num-parallel-refinements 0
+   --problem 0 (sinusoidal)
+   --ranks 2
+   --no-visualization
+
+pconvection-diffusion: GAP — the parallel DPG machinery (ParDpgWeakForm = distributed broken + trace spaces, P^T A P, essential-DOF elimination on global ids) IS implemented in fem-rs and verified by miniapps/dpg/pdiffusion.rs, but this miniapp cannot be finished because:
+  1. no DPG integrator with a spatially varying / vector / tensor coefficient: fem-rs `DpgMixedScalarWeakDivergenceIntegrator`, `DpgMassIntegrator`, `DpgDiffusionIntegrator` and `DpgVectorFEMassIntegrator` all take a constant `q: f64`; the C++ miniapp needs beta(x) (vector), beta*beta^T (tensor) and the L2(P0) coefficient fields c1, c2 (crates/assembly, owned by another route)
+  2. `setup_test_norm_coeffs` (miniapps/dpg/util/preconditioners.cpp) — the per-element test-norm weights c1, c2 — is not ported; without it the test norm differs and the DPG solution is a different discretisation (no C++ number could be matched)
+  3. `-pmg` (PRefinementMultigrid) is not ported (no p-prolongation for DPG blocks)
+  4. `-pref > 0` (parallel AMR + ParDPGWeakForm::Update) is not ported: fem_parallel::par_refine_marked* rebuilds the partition with compact node ids, which breaks the identity node numbering the DPG trace numbering depends on
+Refusing to print a convergence table: a wrong L2 error / residual must never be reported as success.  Run `pdiffusion` for the verified parallel DPG path.

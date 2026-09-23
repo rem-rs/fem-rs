@@ -1,0 +1,6 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/fichera.mesh
+   --normal '1 0 0'
+   --origin '1 0 0'
+   --visualization
+   --send-port 19916

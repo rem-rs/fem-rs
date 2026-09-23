@@ -1,0 +1,17 @@
+Options used:
+   --mesh triple-pt-1.mesh
+   --sltn triple-pt-1.gf
+   --piecewise-linear-ref-factor 2
+   --visualization
+   --no-visit
+   --basis-type -1
+   --h1
+   --nbrute 0
+   --rec-depth 4
+   --rel-tol 0.0001
+fec name: H1_2D_P2
+Compare function extremum for component 0
+                    PL Bound            PL Bound + recursion
+Minimum:            0.11669             0.167872            
+
+Maximum:            3.00575             2.97382             

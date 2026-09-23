@@ -1,0 +1,27 @@
+     ___    ____                                      
+    /   |  /   /                           __   __    
+   /    |_/ _ /__  ___  _____  _  __ ____ |  | |  |   
+  /         \__  \ \  \/  /\ \/ \/ // __ \|  | |  |   
+ /   /|_/   // __ \_>    <  \     /\  ___/|  |_|  |__ 
+/___/  /_  /(____  /__/\_ \  \/\_/  \___  >____/____/ 
+         \/       \/      \/             \/           
+Options used:
+   --mesh data/ball-nurbs.mesh
+   --spatial-order 1
+   --temporal-order 1
+   --serial-ref-levels 0
+   --parallel-ref-levels 0
+   --dt-safety-factor 0.95
+   --initial-time 0
+   --final-time 40
+   --snapshot-time 1
+   --dielectric-sphere-params ''
+   --magnetic-shell-params ''
+   --conductive-sphere-params ''
+   --dipole-pulse-params ''
+   --absorbing-bc-surf ''
+   --dirichlet-bc-surf ''
+   --no-visualization
+   --no-visualization
+   --send-port 19916
+mfem_miniapp_maxwell: NURBS meshes need the C++ projection (UniformRefinement + SetCurvature(2)); not ported

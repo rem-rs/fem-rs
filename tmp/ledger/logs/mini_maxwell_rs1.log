@@ -1,0 +1,76 @@
+     ___    ____                                      
+    /   |  /   /                           __   __    
+   /    |_/ _ /__  ___  _____  _  __ ____ |  | |  |   
+  /         \__  \ \  \/  /\ \/ \/ // __ \|  | |  |   
+ /   /|_/   // __ \_>    <  \     /\  ___/|  |_|  |__ 
+/___/  /_  /(____  /__/\_ \  \/\_/  \___  >____/____/ 
+         \/       \/      \/             \/           
+Options used:
+   --mesh data/beam-hex.mesh
+   --spatial-order 1
+   --temporal-order 1
+   --serial-ref-levels 1
+   --parallel-ref-levels 0
+   --dt-safety-factor 0.95
+   --initial-time 0
+   --final-time 40
+   --snapshot-time 1
+   --dielectric-sphere-params ''
+   --magnetic-shell-params ''
+   --conductive-sphere-params ''
+   --dipole-pulse-params ''
+   --absorbing-bc-surf ''
+   --dirichlet-bc-surf ''
+   --no-visualization
+   --no-visualization
+   --send-port 19916
+Creating H(Div) Mass Operator
+Creating Weak Curl Operator
+Creating discrete curl operator
+Creating implicit operator for dt = 0
+Number of H(Curl) unknowns: 348
+Number of H(Div)  unknowns: 260
+Energy(0ns):  0J
+Maximum Time Step:     0.566822ns
+Number of Time Steps:  100
+Time Step Size:        0.4ns
+Energy(1.2ns):  0J
+Energy(2ns):  0J
+Energy(3.2ns):  0J
+Energy(4.4ns):  0J
+Energy(5.2ns):  0J
+Energy(6ns):  0J
+Energy(7.2ns):  0J
+Energy(8ns):  0J
+Energy(9.2ns):  0J
+Energy(10ns):  0J
+Energy(11.2ns):  0J
+Energy(12ns):  0J
+Energy(13.2ns):  0J
+Energy(14ns):  0J
+Energy(15.2ns):  0J
+Energy(16ns):  0J
+Energy(17.2ns):  0J
+Energy(18ns):  0J
+Energy(19.2ns):  0J
+Energy(20ns):  0J
+Energy(21.2ns):  0J
+Energy(22ns):  0J
+Energy(23.2ns):  0J
+Energy(24ns):  0J
+Energy(25.2ns):  0J
+Energy(26ns):  0J
+Energy(27.2ns):  0J
+Energy(28ns):  0J
+Energy(29.2ns):  0J
+Energy(30ns):  0J
+Energy(31.2ns):  0J
+Energy(32ns):  0J
+Energy(33.2ns):  0J
+Energy(34.4ns):  0J
+Energy(35.2ns):  0J
+Energy(36.4ns):  0J
+Energy(37.2ns):  0J
+Energy(38.4ns):  0J
+Energy(39.2ns):  0J
+Energy(40.4ns):  0J

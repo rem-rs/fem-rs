@@ -1,0 +1,54 @@
+note: fem-rs implements the LEGACY/FULL (assembled sparse) path; C++ assembly level 3 uses matrix-free operators whose AbsMult differs from the assembled matrix (numbers diverge from C++ at this level)
+Options used:
+   --mesh ref-cube.mesh
+   --order 1
+   --solver 1
+   --integrator 1
+   --assembly 3
+   --preconditioner 1
+   --refine-serial 4
+   --refine-parallel 0
+   --p-order 1
+   --q-order 0
+   --tolerance 1e-10
+   --iterations 3000
+   --Kershaw-y 0
+   --Kershaw-z 0
+   --frequency 1
+   --device cpu
+   --no-monitor
+   --no-visualization
+Number of unknowns: 4913
+   Iteration :   0  (B r, r) = 23.1566
+   Iteration :   1  (B r, r) = 5.38675
+   Iteration :   2  (B r, r) = 2.98188
+   Iteration :   3  (B r, r) = 1.96121
+   Iteration :   4  (B r, r) = 1.42704
+   Iteration :   5  (B r, r) = 1.0407
+   Iteration :   6  (B r, r) = 0.681684
+   Iteration :   7  (B r, r) = 0.434765
+   Iteration :   8  (B r, r) = 0.339669
+   Iteration :   9  (B r, r) = 0.0401247
+   Iteration :  10  (B r, r) = 0.016161
+   Iteration :  11  (B r, r) = 0.00347577
+   Iteration :  12  (B r, r) = 0.00070665
+   Iteration :  13  (B r, r) = 0.00016586
+   Iteration :  14  (B r, r) = 2.14874e-05
+   Iteration :  15  (B r, r) = 1.26579e-06
+   Iteration :  16  (B r, r) = 1.24991e-07
+   Iteration :  17  (B r, r) = 9.13833e-09
+   Iteration :  18  (B r, r) = 1.48468e-09
+   Iteration :  19  (B r, r) = 2.01697e-10
+   Iteration :  20  (B r, r) = 3.85261e-11
+   Iteration :  21  (B r, r) = 6.996e-12
+   Iteration :  22  (B r, r) = 5.89464e-13
+   Iteration :  23  (B r, r) = 6.27214e-14
+   Iteration :  24  (B r, r) = 3.0282e-15
+   Iteration :  25  (B r, r) = 1.35367e-16
+   Iteration :  26  (B r, r) = 5.97705e-18
+   Iteration :  27  (B r, r) = 2.40775e-19
+   Iteration :  28  (B r, r) = 9.85365e-21
+Average reduction factor = 0.415311
+
+|| u_h - u ||_{L^2} = 0.00143671
+

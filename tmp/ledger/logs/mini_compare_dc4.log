@@ -1,0 +1,27 @@
+Options used:
+   --root-file_0 Example5
+   --root-file_1 Example5
+   --cycle 0
+   --pad-digits-cycle 6
+   --pad-digits-rank 6
+   --tolerance -1
+===========================================
+|pressure_0|  = 60.955
+|pressure_1|  = 60.955
+
+|pressure_0 - pressure_1| = 0
+
+2|pressure_0 - pressure_1|
+---------------------------- = 0
+(|pressure_0| + |pressure_1|)
+
+===========================================
+|velocity_0|  = 1.83369
+|velocity_1|  = 1.83369
+
+|velocity_0 - velocity_1| = 0
+
+2|velocity_0 - velocity_1|
+---------------------------- = 0
+(|velocity_0| + |velocity_1|)
+

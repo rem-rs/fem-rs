@@ -1,0 +1,2 @@
+miniapp_volta: --ranks 2 is not supported (only --ranks 1): the multi-rank path aborts inside the parallel assembly
+  (assertion `left == right` failed: left 24, right 48 via crates/parallel/src/launcher/native.rs:154). Run with --ranks 1.

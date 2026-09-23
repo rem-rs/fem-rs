@@ -1,0 +1,9 @@
+Options used:
+   --mesh1 triple-pt-1.mesh
+   --mesh2 triple-pt-2.mesh
+   --solution1 triple-pt-1.gf
+   --solution2 triple-pt-2.gf
+   --points1D 100
+   --no-visualization
+   --send-port 19916
+Mesh file not found or unreadable: triple-pt-2.mesh (IO error: The system cannot find the file specified. (os error 2))

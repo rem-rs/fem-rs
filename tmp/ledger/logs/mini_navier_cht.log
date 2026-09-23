@@ -1,0 +1,27 @@
+Options used:
+   --refine-serial 1 0
+   --refine-serial 2 0
+   --visualization
+Number of elements: 11
+Velocity #DOFs: 418
+Pressure #DOFs: 209
+Number of elements (solid): 24
+Temperature #DOFs: 221
+transfer: npts=221 found=209
+not found: n=12 bbox=[-0.3273,0.3273]x[0.0000,0.8273] (block = [-0.5,0.5]x[0,1])
+Thermal mesh: geometric order 4 (SetCurvature(4)), elements 24
+Temperature #DOFs: 221
+Conduction K = ∫κ∇T·∇v + (u·∇T)v: advection quadrature order 14 (MFEM trial+test+OrderW), diffusion order 8
+advection identity: max|K_adv·T − M(u·c)·1| = 8.396E-16 (T = c·x)
+Essential DOFs (boundary attrs 1,2 — inlet + block base): 18 of 221
+Thermal backward Euler dt = 2.0e-2: PCG(Jacobi) iters = 16, converged = true, residual = 7.615E-5 (min diag of A = 3.213E-2)
+  ‖T₀‖₂ = 6.126446E1, ‖T₁‖₂ = 5.849121E1, max|T₁ − T₀| = 7.419459E0, min/max T₁ = 0.9555/10.0815
+transfer: max|u_interp - u_exact| = 5.551E-16
+navier_cht: NOT a 1:1 port — gaps:
+  * OversetFindPointsGSLIB (multi-mesh / multi-communicator search) — no fem-rs equivalent;
+  * the transfer is re-expressed as a single-process source-mesh lookup
+  * the fluid-side NavierSolver discretization on fluid-cht.mesh — not ported, so the
+  * advecting field of the thermal step is an analytic surrogate (divergence-free, degree 4)
+  * the coupled C++ trajectory is unverifiable here (serial harness FindPoints misses points)
+  * the C++ miniapp needs MFEM_USE_GSLIB=YES, unavailable in every build here
+GLVis visualization is not available in the fem-rs port (-no-vis).

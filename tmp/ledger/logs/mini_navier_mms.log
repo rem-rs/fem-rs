@@ -1,0 +1,71 @@
+Number of elements: 64
+NAVIER version: 0.1
+Velocity #DOFs: 3362
+Pressure #DOFs: 1681
+Adding Velocity Dirichlet BC to attributes 0 1 2 3 
+Adding Acceleration term to attributes 0 
+Setup
+Using Full Assembly
+        It   Resid      Reltol
+MVIN     8   1.69e-12   1.00e-12
+PRES    66   5.52e-10   1.00e-06
+HELM    11   6.01e-11   1.00e-08
+       Time          dt       err_u       err_p
+2.50000E-05 2.50000E-05 2.75455E-08 1.23108E-04 err
+        It   Resid      Reltol
+MVIN     8   1.70e-12   1.00e-12
+PRES    66   1.30e-09   1.00e-06
+HELM    11   1.07e-10   1.00e-08
+       Time          dt       err_u       err_p
+5.00000E-05 2.50000E-05 3.97188E-09 2.31561E-04 err
+        It   Resid      Reltol
+MVIN     8   1.70e-12   1.00e-12
+PRES    66   1.29e-09   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+7.50000E-05 2.50000E-05 2.92523E-09 1.48847E-04 err
+        It   Resid      Reltol
+MVIN     8   1.70e-12   1.00e-12
+PRES    67   4.92e-10   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+1.00000E-04 2.50000E-05 3.29842E-09 1.21529E-05 err
+        It   Resid      Reltol
+MVIN     8   1.71e-12   1.00e-12
+PRES    73   3.49e-11   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+1.25000E-04 2.50000E-05 4.14855E-09 1.18945E-05 err
+        It   Resid      Reltol
+MVIN     8   1.71e-12   1.00e-12
+PRES    73   5.25e-11   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+1.50000E-04 2.50000E-05 5.03355E-09 1.52565E-06 err
+        It   Resid      Reltol
+MVIN     8   1.71e-12   1.00e-12
+PRES    73   2.69e-11   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+1.75000E-04 2.50000E-05 5.92840E-09 9.13301E-07 err
+        It   Resid      Reltol
+MVIN     8   1.72e-12   1.00e-12
+PRES    63   2.65e-11   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+2.00000E-04 2.50000E-05 6.83317E-09 9.52036E-07 err
+        It   Resid      Reltol
+MVIN     8   1.72e-12   1.00e-12
+PRES    61   2.95e-11   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+2.25000E-04 2.50000E-05 7.75070E-09 1.01842E-06 err
+        It   Resid      Reltol
+MVIN     8   1.72e-12   1.00e-12
+PRES    61   2.92e-11   1.00e-06
+HELM    11   1.49e-10   1.00e-08
+       Time          dt       err_u       err_p
+2.50000E-04 2.50000E-05 8.67950E-09 1.11290E-06 err
+     SETUP      STEP    EXTRAP  CURLCURL    PSOLVE    HSOLVE
+ 3.262e-01 1.281e-01 8.961e-02 5.484e-03 2.685e-02 2.032e-03
+           1.000e+00 6.998e-01 4.282e-02 2.097e-01 1.587e-02

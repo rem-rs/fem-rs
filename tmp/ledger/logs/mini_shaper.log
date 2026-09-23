@@ -1,0 +1,7 @@
+Iteration 1: mesh has 16 elements.
+Iteration 2: mesh has 64 elements.
+Iteration 3: mesh has 256 elements.
+Iteration 4: mesh has 1024 elements.
+Iteration 5: mesh has 4096 elements.
+Iteration 6: mesh has 16384 elements.
+Wrote shaper.mesh (65536 elements).

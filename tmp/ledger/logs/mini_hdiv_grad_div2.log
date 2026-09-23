@@ -1,0 +1,3 @@
+grad_div serial cut: -ams/-lor/-hb require the hypre AMS/ADS, LOR-AMS and
+hybridization+BoomerAMG stacks (HypreParMatrix based) which fem-rs does not
+provide; only the -sp (HdivSaddlePointSolver) mode is ported.

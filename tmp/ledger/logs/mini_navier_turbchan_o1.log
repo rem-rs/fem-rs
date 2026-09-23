@@ -1,0 +1,27 @@
+NL=32 NX=64 NY=48 NZ=32 dx+=17.671459
+Number of elements: 98304
+NAVIER version: 0.1
+Velocity #DOFs: 301056
+Pressure #DOFs: 100352
+Adding Acceleration term to attributes 0 
+Adding Velocity Dirichlet BC to attributes 1 3 
+Setup
+Using Full Assembly
+        It   Resid      Reltol
+MVIN    49   1.96e-10   1.00e-12
+PRES    31   4.15e-04   1.00e-06
+HELM    30   9.79e-08   1.00e-08
+       Time          dt
+1.99807E-03 1.99807E-03
+        It   Resid      Reltol
+MVIN    52   2.10e-10   1.00e-12
+PRES    38   1.41e-04   1.00e-06
+HELM    33   1.34e-07   1.00e-08
+       Time          dt
+3.99614E-03 1.99807E-03
+        It   Resid      Reltol
+MVIN    55   1.39e-10   1.00e-12
+PRES    37   1.21e-04   1.00e-06
+HELM    33   1.43e-07   1.00e-08
+       Time          dt
+5.99421E-03 1.99807E-03

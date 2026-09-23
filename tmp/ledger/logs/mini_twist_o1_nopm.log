@@ -1,0 +1,14 @@
+Options used:
+   --num-elements-z 3
+   --num-twists 2
+   --mesh-order 1
+   --refine-serial 0
+   --base-x 1
+   --base-y 1
+   --height 3
+   --element-type 8
+   --non-periodic-mesh
+   --cont-mesh
+   --no-visualization
+   --send-port 19916
+Wrote twist-hex-o1-s2-c.mesh (3 elements, 14 boundary faces, 16 nodes).

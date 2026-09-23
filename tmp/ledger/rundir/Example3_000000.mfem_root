@@ -1,0 +1,31 @@
+{
+  "dsets": {
+    "main": {
+      "cycle": 0,
+      "domains": 1,
+      "fields": {
+        "x": {
+          "path": "Example3_000000/x.%06d",
+          "tags": {
+            "assoc": "nodes",
+            "basis": "NURBS_HCurl1",
+            "comps": "2",
+            "lod": "1",
+            "order": "1"
+          }
+        }
+      },
+      "mesh": {
+        "format": "0",
+        "path": "Example3_000000/mesh.%06d",
+        "tags": {
+          "max_lods": "32",
+          "spatial_dim": "2",
+          "topo_dim": "2"
+        }
+      },
+      "time": 0,
+      "time_step": 0
+    }
+  }
+}

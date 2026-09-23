@@ -1,0 +1,16 @@
+Options used:
+   --mesh ../../data/square-nurbs.mesh
+   --refine -1
+   --order 1
+   --div-free
+   --nurbs
+   --device cpu
+   --visualization
+   --send-port 19916
+Device configuration: cpu
+Memory configuration: host-std
+Create Normal fec
+
+thread 'main' (27380) panicked at examples\..\miniapps\nurbs\nurbs_solenoidal.rs:154:43:
+failed to read mesh: Io(Os { code: 3, kind: NotFound, message: "The system cannot find the path specified." })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

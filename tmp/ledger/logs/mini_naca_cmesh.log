@@ -1,0 +1,25 @@
+
+Boundary identifiers:
+   1   Bottom
+   2   Inflow
+   3   Top
+   4   Outflow
+   5   Foil section
+==========================================================
+  2D mesh generated: naca-cmesh.mesh
+==========================================================
+==========================================================
+ Attempting to read mesh: naca-cmesh.mesh
+==========================================================
+nurbs_naca_cmesh: PrintInfo note: the h_min/h_max/kappa_min/kappa_max lines are omitted (fem-rs cannot construct a multi-patch patches-flavour NURBS Mesh yet); the remaining characteristics are derived from the file.
+Mesh Characteristics:
+Dimension          : 2
+Space dimension    : 2
+Number of vertices : 10
+Number of edges    : 15
+Number of elements : 5  --  5 Square(s)
+Number of bdr elem : 10
+Euler Number       : 0
+
+nurbs_naca_cmesh: the VisItDataCollection save is not ported (fem-rs has no VisIt writer); skipping the 'Naca_cmesh' output.
+nurbs_naca_cmesh: the glvis_*.mesh copy (Mesh::Print of the read-back mesh) and the GLVis socket are not ported; skipping.

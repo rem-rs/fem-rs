@@ -1,0 +1,9 @@
+Parent mesh: 480 elements, 623 vertices
+Cylinder submesh: NE=288 NV=399 ndofs=7296
+Cylinder ess vdofs: 28
+Block submesh: NE=192 NV=336 ndofs=5120
+Block ess vdofs (walls 0-7): 25
+
+thread 'main' (13868) panicked at examples\..\miniapps\multidomain\multidomain_rt.rs:246:36:
+BlockToCylinderMap: no block dof at cyl interface dof 2296
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

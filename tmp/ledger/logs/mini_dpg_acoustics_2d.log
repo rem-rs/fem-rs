@@ -1,0 +1,6 @@
+Ultraweak DPG for Helmholtz (MFEM acoustics.cpp port, plane wave)
+  ω = 6.283185307179586, order=1, delta_order=1
+
+  Ref |    Dofs    |    ω    |  L2 Error  |  Rate  | PCG it |
+--------------------------------------------------------------
+    0 |         12 |   6.283 |    1.222e0 |   0.00 |     15 |

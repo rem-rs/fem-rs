@@ -1,0 +1,24 @@
+Unrecognized option: -e
+
+Usage: /tmp/r63bit/nurbs_surface [options] ...
+Options:
+   -h, --help
+	Print this help message and exit.
+   -ex <int>, --example <int>, current value: 1
+	Example data
+   -nx <int>, --nx <int>, current value: 4
+	Number of elements in x
+   -ny <int>, --ny <int>, current value: 4
+	Number of elements in y
+   -fnx <int>, --fnx <int>, current value: 40
+	Number of resampled elements in x
+   -fny <int>, --fny <int>, current value: 40
+	Number of resampled elements in y
+   -o <int>, --order <int>, current value: 3
+	NURBS finite element order (polynomial degree)
+   -vis, --visualization, -no-vis, --no-visualization, current option: --visualization
+	Enable or disable GLVis visualization.
+   -orig, --compare-original, -no-orig, --no-compare-original, current option: --no-compare-original
+	Compare to the original mesh?
+   -j <double>, --jitter <double>, current value: 0
+	Relative jittering in (0,1) to add to the input point coordinates on a uniform nx x ny grid (0 by default)

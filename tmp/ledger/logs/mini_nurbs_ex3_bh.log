@@ -1,0 +1,5 @@
+Create NURBS fec and ext
+
+thread 'main' (23772) panicked at examples\..\miniapps\nurbs\nurbs_ex3.rs:121:10:
+failed to build the H(curl) NURBS space: "NurbsHCurlSpace: GetCurlExtension only works for single patch NURBS meshes (this one has 2 patches)"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

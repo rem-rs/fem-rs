@@ -1,0 +1,6 @@
+Ultraweak DPG for 2D Maxwell (MFEM maxwell.cpp port, plane wave)
+  ω = 6.283185307179586, order=1, delta_order=1
+
+  Ref |    Dofs    |    ω    |  L2 Error  |  Rate  | PCG it |
+--------------------------------------------------------------
+    0 |         33 |   6.283 |    1.381e0 |   0.00 |     20 |

@@ -1,0 +1,78 @@
+     ___    ____                                      
+    /   |  /   /                           __   __    
+   /    |_/ _ /__  ___  _____  _  __ ____ |  | |  |   
+  /         \__  \ \  \/  /\ \/ \/ // __ \|  | |  |   
+ /   /|_/   // __ \_>    <  \     /\  ___/|  |_|  |__ 
+/___/  /_  /(____  /__/\_ \  \/\_/  \___  >____/____/ 
+         \/       \/      \/             \/           
+Options used:
+   --mesh data/fichera.mesh
+   --spatial-order 1
+   --temporal-order 1
+   --serial-ref-levels 3
+   --parallel-ref-levels 0
+   --dt-safety-factor 0.95
+   --initial-time 0
+   --final-time 10
+   --snapshot-time 0.25
+   --dielectric-sphere-params ''
+   --magnetic-shell-params ''
+   --conductive-sphere-params ''
+   --dipole-pulse-params '-0.5 -0.5 0 -0.5 -0.5 1 0.1 1 0.5 1'
+   --absorbing-bc-surf ''
+   --dirichlet-bc-surf '-1'
+   --no-visualization
+   --no-visualization
+   --send-port 19916
+Configuring Dirichlet BC
+Creating H(Div) Mass Operator
+Creating Weak Curl Operator
+Creating discrete curl operator
+Creating Current Source
+Creating implicit operator for dt = 0
+Number of H(Curl) unknowns: 12336
+Number of H(Div)  unknowns: 11520
+Energy(0ns):  0J
+Maximum Time Step:     0.145761ns
+Number of Time Steps:  100
+Time Step Size:        0.1ns
+Energy(0.3ns):  8.27316e-12J
+Energy(0.5ns):  8.07169e-12J
+Energy(0.8ns):  1.01488e-11J
+Energy(1.1ns):  1.80919e-11J
+Energy(1.3ns):  2.8108e-11J
+Energy(1.5ns):  3.66488e-11J
+Energy(1.8ns):  4.39174e-11J
+Energy(2ns):  4.72531e-11J
+Energy(2.3ns):  4.70544e-11J
+Energy(2.5ns):  4.55306e-11J
+Energy(2.8ns):  4.43209e-11J
+Energy(3ns):  4.36496e-11J
+Energy(3.3ns):  4.24685e-11J
+Energy(3.5ns):  4.22024e-11J
+Energy(3.8ns):  4.2768e-11J
+Energy(4ns):  4.26733e-11J
+Energy(4.3ns):  4.3374e-11J
+Energy(4.5ns):  4.31751e-11J
+Energy(4.8ns):  4.30093e-11J
+Energy(5ns):  4.23941e-11J
+Energy(5.3ns):  4.31236e-11J
+Energy(5.5ns):  4.34294e-11J
+Energy(5.8ns):  4.28174e-11J
+Energy(6ns):  4.2406e-11J
+Energy(6.3ns):  4.26131e-11J
+Energy(6.5ns):  4.31922e-11J
+Energy(6.8ns):  4.28243e-11J
+Energy(7ns):  4.23626e-11J
+Energy(7.3ns):  4.24843e-11J
+Energy(7.5ns):  4.29621e-11J
+Energy(7.8ns):  4.32441e-11J
+Energy(8ns):  4.27983e-11J
+Energy(8.3ns):  4.256e-11J
+Energy(8.6ns):  4.27057e-11J
+Energy(8.8ns):  4.3141e-11J
+Energy(9.1ns):  4.32583e-11J
+Energy(9.3ns):  4.34876e-11J
+Energy(9.6ns):  4.28143e-11J
+Energy(9.8ns):  4.27587e-11J
+Energy(10.1ns):  4.18536e-11J

@@ -1,0 +1,21 @@
+Options:
+   -dt: 0.01
+BDF statistics (PrintInfo analog): steps: 2911 accepted: 1459 rejected: 1452 final order: 2 final dt: 2.335e6
+Final Solution: 40000000
+5.2136378e-05 2.0855625e-10 0.99994786
+ Final Quadrature 
+39982492
+t: 40
+w:
+39925420 39925442 39925560
+u:
+0.71603384 9.1935752e-06 0.28395697
+t: 0
+w:
+39925434 39925442 39925600
+u:
+1 0 0
+dG/dp:
+757450.89 -3.027634 0.0004991621
+Adjoint BDF statistics (PrintInfo analog): steps: 392 accepted: 194 rejected: 198 final order: 1 final dt: 2.000e2
+Checkpoint re-integration steps: 5604

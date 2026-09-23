@@ -1,0 +1,21 @@
+Options used:
+   --order 1
+   --device cpu
+   --no-visualization
+   --refinements 0
+   --derivative-type 0
+   --no-pcamg
+Device configuration: cpu
+Memory configuration: host-std
+[check] ir npts=4 x0=-0.577350 w0=1.000000
+[check] ndofs=25
+Newton iteration  0 : ||r|| = 0.0203548
+PCG: Number of iterations: 1
+Average reduction factor = 2.35378e-16
+Newton iteration  1 : ||r|| = 1.55586e-07, ||r||/||r_0|| = 7.64369e-06
+PCG: Number of iterations: 1
+Average reduction factor = 8.50682e-12
+Newton iteration  2 : ||r|| = 1.75554e-17, ||r||/||r_0|| = 8.6247e-16
+[check] converged = true iters = 2
+[check] final ||r|| = 1.7555414499991900e-17
+[check] ||X|| = 3.6495016050640400e-2 Xmax = 1.2337512873762663e-2 Xmin = -1.2337512873762663e-2

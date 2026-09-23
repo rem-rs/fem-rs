@@ -1,0 +1,28 @@
+Options used:
+   --root-file Example5_000000.mfem_root
+   --cycle 0
+   --pad-digits-cycle 6
+   --pad-digits-rank 6
+   --points '0.5 0.5 0.1 0.1'
+   --field-names pressure
+   --point-file 
+   --output-file 
+
+Collection Name: Example5_000000.mfem_root
+Space Dimension: 2
+Cycle:           0
+Time:            0
+Time Step:       0
+
+fields: [ pressure, velocity ]
+Extracting fields:  "pressure"
+Found 2 points.
+# Number of fields
+2
+# Legend
+# "Index" "Location":2 "pressure":1
+2 1
+# Number of points
+2
+0 0.5 0.5 nan
+1 0.1 0.1 nan

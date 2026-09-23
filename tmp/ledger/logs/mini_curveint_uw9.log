@@ -1,0 +1,22 @@
+Options used:
+   --box-side-length 1
+   --sine-ampl 0.1
+   --ncp 9
+   --order 2
+   --unit-weight
+   --visualization
+   --visit
+==========================================================
+ Attempting to read mesh: sin-fit.mesh
+==========================================================
+nurbs_curveint: PrintInfo note: the h_min/h_max/kappa_min/kappa_max lines are omitted (fem-rs has no patches-flavour NURBS Mesh yet); the remaining characteristics are derived from the file.
+Mesh Characteristics:
+Dimension          : 2
+Space dimension    : 2
+Number of vertices : 64
+Number of edges    : 112
+Number of elements : 49  --  49 Square(s)
+Number of bdr elem : 28
+Euler Number       : 1
+
+nurbs_curveint: VisItDataCollection output is not ported (fem-rs has no VisIt DC); skipping the 'CurveInt' data collection save.

@@ -1,0 +1,40 @@
+Number of elements: 32
+NAVIER version: 0.1
+Velocity #DOFs: 2450
+Pressure #DOFs: 1225
+Adding Velocity Dirichlet BC to attributes 0 1 2 3 
+Setup
+Using Full Assembly
+        It   Resid      Reltol
+MVIN     6   1.01e-12   1.00e-12
+PRES    68   6.53e-07   1.00e-06
+HELM    14   1.91e-14   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 6.23E-02 1.00E-03 1.40E-03 6.24210E-07 1.18197E-05 err
+        It   Resid      Reltol
+MVIN    10   1.75e-12   1.00e-12
+PRES    80   1.31e-10   1.00e-06
+HELM    14   1.94e-14   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 8.72E-02 2.40E-03 1.96E-03 6.38186E-07 5.05225E-06 err
+        It   Resid      Reltol
+MVIN    10   1.88e-12   1.00e-12
+PRES    81   8.10e-11   1.00e-06
+HELM    15   6.12e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 1.22E-01 4.36E-03 2.64E-03 6.38732E-07 4.80622E-06 err
+        It   Resid      Reltol
+MVIN    10   2.14e-12   1.00e-12
+PRES    75   3.94e-11   1.00e-06
+HELM    15   2.59e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 1.64E-01 7.00E-03 3.29E-03 6.38749E-07 2.02099E-06 err
+        It   Resid      Reltol
+MVIN    10   1.65e-12   1.00e-12
+PRES    76   2.01e-11   1.00e-06
+HELM    15   1.60e-15   1.00e-08
+Order      CFL     Time       dt       err_u       err_p
+   06 2.05E-01 1.03E-02 3.89E-03 6.39982E-07 7.62406E-07 err
+     SETUP      STEP    EXTRAP  CURLCURL    PSOLVE    HSOLVE
+ 2.567e-01 1.361e-01 8.815e-02 5.862e-03 3.555e-02 1.806e-03
+           1.000e+00 6.479e-01 4.308e-02 2.613e-01 1.327e-02

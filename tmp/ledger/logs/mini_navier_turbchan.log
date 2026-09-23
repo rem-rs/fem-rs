@@ -1,0 +1,10 @@
+note: the default order 5 (and anything from 3 up) is a partial-assembly configuration: the C++ miniapp hardcodes EnablePA(true), and fem-rs has no partial assembly, so the assembled path needs ~3·(order+1)^3·(64/order+1)-scale DOFs and cannot be run here.  Use -o 1 (the order the C++ reference comparison uses).
+NL=11 NX=22 NY=16 NZ=11 dx+=51.407880
+Number of elements: 3872
+NAVIER version: 0.1
+Velocity #DOFs: 1470150
+Pressure #DOFs: 490050
+Adding Acceleration term to attributes 0 
+Adding Velocity Dirichlet BC to attributes 1 3 
+Setup
+Using Full Assembly

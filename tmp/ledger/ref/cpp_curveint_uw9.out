@@ -1,0 +1,24 @@
+Options used:
+   --box-side-length 1
+   --sine-ampl 0.1
+   --ncp 9
+   --order 2
+   --unit-weight
+   --visualization
+   --visit
+==========================================================
+ Attempting to read mesh: sin-fit.mesh
+==========================================================
+Mesh Characteristics:
+Dimension          : 2
+Space dimension    : 2
+Number of vertices : 64
+Number of edges    : 112
+Number of elements : 49  --  49 Square(s)
+Number of bdr elem : 28
+Euler Number       : 1
+h_min              : 0.135713
+h_max              : 0.149661
+kappa_min          : 1.04409
+kappa_max          : 1.74001
+

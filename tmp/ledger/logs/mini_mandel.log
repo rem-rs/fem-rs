@@ -1,0 +1,13 @@
+Options used:
+   --mesh data/inline-quad.mesh
+   --sub-divisions 2
+   --nc-limit 1
+   --iso
+   --no-visualization
+   --send-port 19916
+Iteration 1: mesh has 1024 elements. 
+Iteration 2: mesh has 2254 elements. 
+Iteration 3: mesh has 5884 elements. 
+Iteration 4: mesh has 16006 elements. 
+Wrote mandel.mesh (16006 elements).
+mandel (Rust port): partial delivery, exit 3. Refinement matches C++ (`Mesh::GeneralRefinement(refs, -1, 1)`; iso: 1024, 2254, 5884, 16006 — aniso `-a`: 1024, 2166, 5364, 13978) and mandel.mesh is written in the MFEM NC mesh v1.0 format (byte-identical to `Mesh::Save`); remaining gap: `-vis` opens no GLVis socket.

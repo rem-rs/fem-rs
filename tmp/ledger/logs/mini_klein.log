@@ -1,0 +1,9 @@
+Options used:
+   --mesh-out-file klein-bottle.mesh
+   --num-elements-x 16
+   --num-elements-y 8
+   --mesh-order 3
+   --transformation-type 1
+   --cont-mesh
+   --no-visualization
+   --send-port 19916

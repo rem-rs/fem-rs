@@ -1,0 +1,13 @@
+Options used:
+   --num-elements-z 3
+   --num-twists 2
+   --mesh-order 1
+   --refine-serial 0
+   --base-x 1
+   --base-y 1
+   --height 3
+   --element-type 8
+   --non-periodic-mesh
+   --cont-mesh
+   --visualization
+   --send-port 19916

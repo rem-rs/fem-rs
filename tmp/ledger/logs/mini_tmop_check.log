@@ -1,0 +1,6 @@
+Options used:
+   --metric-id 2
+   --no-Ametric
+   --no-verbose
+   --iterations 10
+tmop-check-metric (Rust port): partial delivery, exit 3. The C++ program checks metric 2 through the mesh/FE-space `TMOP_Integrator` with the *analytic* `AssembleElementVector` / `AssembleElementGrad` (EvalP/AssembleH convergence rates) and 1000 random `T` from MFEM's RNG. `fem_mesh::tmop` provides only a simplified element energy plus finite-difference gradient/Hessian, and implements 21 of the 40 metric ids the C++ switch accepts (missing: 80, 85, 90, 94, 98, 313, 322, 328, 332, 333, 334, 338, 342, 347 and the A-metrics 11, 36, 51, 107, 126). No check is run — the previous self-check was a different program (and reported 0/0 comparisons in 2-D).

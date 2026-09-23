@@ -1,0 +1,34 @@
+Device configuration: cpu
+Memory configuration: std-internal
+Number of finite element unknowns: 36
+Assembling: r.h.s. ... matrix ... done.
+Size of linear system: 36
+    FGMRES iter    1  ‖r‖/‖b‖ = 9.828070e-1
+    FGMRES iter    2  ‖r‖/‖b‖ = 9.827053e-1
+    FGMRES iter    3  ‖r‖/‖b‖ = 9.793200e-1
+    FGMRES iter    4  ‖r‖/‖b‖ = 9.676349e-1
+    FGMRES iter    5  ‖r‖/‖b‖ = 9.270051e-1
+    FGMRES iter    6  ‖r‖/‖b‖ = 5.228242e-1
+    FGMRES iter    7  ‖r‖/‖b‖ = 5.182937e-1
+    FGMRES iter    8  ‖r‖/‖b‖ = 2.758670e-1
+    FGMRES iter    9  ‖r‖/‖b‖ = 2.350315e-1
+    FGMRES iter   10  ‖r‖/‖b‖ = 1.214955e-1
+    FGMRES iter   11  ‖r‖/‖b‖ = 6.933469e-2
+    FGMRES iter   12  ‖r‖/‖b‖ = 3.030480e-2
+    FGMRES iter   13  ‖r‖/‖b‖ = 1.850534e-2
+    FGMRES iter   14  ‖r‖/‖b‖ = 5.375882e-3
+    FGMRES iter   15  ‖r‖/‖b‖ = 1.209739e-3
+    FGMRES iter   16  ‖r‖/‖b‖ = 5.236160e-4
+    FGMRES iter   17  ‖r‖/‖b‖ = 1.015074e-4
+    FGMRES iter   18  ‖r‖/‖b‖ = 4.935935e-5
+    FGMRES iter   19  ‖r‖/‖b‖ = 9.737431e-6
+    FGMRES iter   20  ‖r‖/‖b‖ = 1.977236e-6
+    FGMRES iter   21  ‖r‖/‖b‖ = 8.401107e-7
+    FGMRES iter   22  ‖r‖/‖b‖ = 2.981624e-7
+    FGMRES iter   23  ‖r‖/‖b‖ = 6.482144e-8
+    FGMRES iter   24  ‖r‖/‖b‖ = 9.229234e-9
+  FGMRES converged iter 24  ‖r‖/‖b‖=9.229e-9
+Elapsed Times
+Assembly (s) = 0.0018317
+Linear Solve (s) = 0.0007546
+Total Solve (s) 0.0027194

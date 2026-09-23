@@ -1,0 +1,5 @@
+Number of elements: 16
+Number of finite element unknowns: 81
+Number of shifted face dofs: 16
+GMRES (BiCGSTAB in MFEM) iterations = 23
+0.9926433979

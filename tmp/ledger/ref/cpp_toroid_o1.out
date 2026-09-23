@@ -1,0 +1,12 @@
+Options used:
+   --num-elements-phi 8
+   --num-shifts 0
+   --mesh-order 1
+   --refine-serial 0
+   --major-radius 1
+   --minor-radius 0.2
+   --initial-angle 0
+   --element-type 0
+   --cont-mesh
+   --visualization
+   --send-port 19916

@@ -1,0 +1,39 @@
+Number of finite element unknowns: 729
+Boundary attributes: 1 2 3 4 5 6 
+
+<Boundary Info>
+ Boundary Conditions:
+<Boundary Info>
+
+
+<Boundary Verify>
+  Boundaries (1, 2, 3, 4, 5, 6, ) are defined on the mesh but not in the boundary attributes (Use Neumann).
+
+<Boundary Verify>
+
+<SPDESolver> Initialize Solver ..
+<SPDESolver> Approximating the fractional exponent 0.75
+<SPDESolver> Solving PDE (A)^1 u = f
+
+<SPDESolver> Solving PDE -Δ u + 15250.16793444775 u = 7.856194831931954 g 
+
+<SPDESolver> Solving PDE -Δ u + 2079.2557445287985 u = 2.113798564953771 g 
+
+<SPDESolver> Solving PDE -Δ u + 644.1541662431629 u = 1.161058594503869 g 
+
+<SPDESolver> Solving PDE -Δ u + 248.5589659700788 u = 0.8053690655063911 g 
+
+<SPDESolver> Solving PDE -Δ u + 103.51139958939223 u = 0.6168147246767529 g 
+
+<SPDESolver> Solving PDE -Δ u + 44.03838557182931 u = 0.49576265955947374 g 
+
+<SPDESolver> Solving PDE -Δ u + 18.54104802250114 u = 0.4112421279218777 g 
+
+<SPDESolver> Solving PDE -Δ u + 7.459811634357854 u = 0.35369502839010636 g 
+
+<SPDESolver> Solving PDE -Δ u + 2.676102418723533 u = 0.32450503866167274 g 
+
+<SPDESolver> Solving PDE -Δ u + 0.7011083125860883 u = 0.34280118934272774 g 
+
+<SPDESolver> Solving PDE -Δ u + 0.03779583206626132 u = 0.6474683352371756 g 
+ParaView export: ParaView\SurrogateMaterial.vtu

@@ -1,0 +1,8 @@
+
+RT DOFs: 5880
+L2 DOFs: 2880
+
+Saddle point solver... Done.
+Iterations: 86
+Elapsed: 0.1796937
+L2 error: 0.0004697000815307859

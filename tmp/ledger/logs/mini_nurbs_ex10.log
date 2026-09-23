@@ -1,0 +1,12 @@
+nurbs_ex10: not implemented in fem-rs — refusing to print numbers that
+cannot be checked against MFEM 4.10. Missing:
+  * vector NURBS H1 space (FiniteElementSpace(mesh, NURBSext, fec, vdim=dim))
+    with per-component essential DOFs (crates/space/src/nurbs_fe_space.rs)
+  * VectorMassIntegrator / VectorDiffusionIntegrator on NURBS elements
+    (crates/assembly)
+  * HyperelasticNLFIntegrator on NURBS elements: Mult / GetGradient /
+    GetEnergy with NeoHookeanModel (crates/assembly/src/physics)
+  * vector ELEMENTL2 projection (ProjectCoefficient) for initial conditions
+  * elastic energy density projection (GetElasticEnergyDensity)
+The scalar/H1 reference port is examples/mfem_ex10_hyperelastic_dyn.rs; the
+NURBS patch-aware assembly groundwork is crates/assembly/src/iga/nurbs_patch.rs.

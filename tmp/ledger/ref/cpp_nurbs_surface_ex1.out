@@ -1,0 +1,13 @@
+Options used:
+   --example 1
+   --nx 4
+   --ny 4
+   --fnx 40
+   --fny 40
+   --order 3
+   --no-visualization
+   --no-compare-original
+   --jitter 0
+Input Surface:  4 x 4 linear elements
+NURBS Surface:  2 x 2 knot elements of order 3
+Output Surface: 40 x 40 linear elements

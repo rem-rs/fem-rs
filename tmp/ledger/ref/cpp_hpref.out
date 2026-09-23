@@ -1,0 +1,162 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/inline-quad.mesh
+   --order 1
+   --device cpu
+   --no-visualization
+   --num-iter 100
+   --dim 2
+   --deterministic
+   --no-project
+   --hp-refinement
+Device configuration: cpu
+Memory configuration: host-std
+hp-refinement iteration 0: h-refinement
+hp-refinement iteration 1: p-refinement
+hp-refinement iteration 2: h-refinement
+hp-refinement iteration 3: h-refinement
+hp-refinement iteration 4: h-refinement
+hp-refinement iteration 5: h-refinement
+hp-refinement iteration 6: p-refinement
+hp-refinement iteration 7: p-refinement
+hp-refinement iteration 8: h-refinement
+hp-refinement iteration 9: p-refinement
+hp-refinement iteration 10: h-refinement
+hp-refinement iteration 11: h-refinement
+hp-refinement iteration 12: h-refinement
+hp-refinement iteration 13: p-refinement
+hp-refinement iteration 14: h-refinement
+hp-refinement iteration 15: p-refinement
+hp-refinement iteration 16: h-refinement
+hp-refinement iteration 17: p-refinement
+hp-refinement iteration 18: p-refinement
+hp-refinement iteration 19: h-refinement
+hp-refinement iteration 20: p-refinement
+hp-refinement iteration 21: h-refinement
+hp-refinement iteration 22: p-refinement
+hp-refinement iteration 23: h-refinement
+hp-refinement iteration 24: h-refinement
+hp-refinement iteration 25: p-refinement
+hp-refinement iteration 26: h-refinement
+hp-refinement iteration 27: h-refinement
+hp-refinement iteration 28: h-refinement
+hp-refinement iteration 29: h-refinement
+hp-refinement iteration 30: h-refinement
+hp-refinement iteration 31: p-refinement
+hp-refinement iteration 32: h-refinement
+hp-refinement iteration 33: p-refinement
+hp-refinement iteration 34: h-refinement
+hp-refinement iteration 35: h-refinement
+hp-refinement iteration 36: p-refinement
+hp-refinement iteration 37: p-refinement
+hp-refinement iteration 38: p-refinement
+hp-refinement iteration 39: p-refinement
+hp-refinement iteration 40: p-refinement
+hp-refinement iteration 41: p-refinement
+hp-refinement iteration 42: h-refinement
+hp-refinement iteration 43: p-refinement
+hp-refinement iteration 44: h-refinement
+hp-refinement iteration 45: h-refinement
+hp-refinement iteration 46: h-refinement
+hp-refinement iteration 47: p-refinement
+hp-refinement iteration 48: p-refinement
+hp-refinement iteration 49: h-refinement
+hp-refinement iteration 50: h-refinement
+hp-refinement iteration 51: p-refinement
+hp-refinement iteration 52: h-refinement
+hp-refinement iteration 53: p-refinement
+hp-refinement iteration 54: p-refinement
+hp-refinement iteration 55: h-refinement
+hp-refinement iteration 56: p-refinement
+hp-refinement iteration 57: p-refinement
+hp-refinement iteration 58: p-refinement
+hp-refinement iteration 59: h-refinement
+hp-refinement iteration 60: p-refinement
+hp-refinement iteration 61: h-refinement
+hp-refinement iteration 62: h-refinement
+hp-refinement iteration 63: p-refinement
+hp-refinement iteration 64: h-refinement
+hp-refinement iteration 65: p-refinement
+hp-refinement iteration 66: p-refinement
+hp-refinement iteration 67: p-refinement
+hp-refinement iteration 68: h-refinement
+hp-refinement iteration 69: h-refinement
+hp-refinement iteration 70: p-refinement
+hp-refinement iteration 71: p-refinement
+hp-refinement iteration 72: p-refinement
+hp-refinement iteration 73: p-refinement
+hp-refinement iteration 74: h-refinement
+hp-refinement iteration 75: h-refinement
+hp-refinement iteration 76: h-refinement
+hp-refinement iteration 77: p-refinement
+hp-refinement iteration 78: h-refinement
+hp-refinement iteration 79: h-refinement
+hp-refinement iteration 80: p-refinement
+hp-refinement iteration 81: p-refinement
+hp-refinement iteration 82: p-refinement
+hp-refinement iteration 83: p-refinement
+hp-refinement iteration 84: h-refinement
+hp-refinement iteration 85: p-refinement
+hp-refinement iteration 86: h-refinement
+hp-refinement iteration 87: h-refinement
+hp-refinement iteration 88: h-refinement
+hp-refinement iteration 89: p-refinement
+hp-refinement iteration 90: p-refinement
+hp-refinement iteration 91: p-refinement
+hp-refinement iteration 92: h-refinement
+hp-refinement iteration 93: p-refinement
+hp-refinement iteration 94: h-refinement
+hp-refinement iteration 95: h-refinement
+hp-refinement iteration 96: p-refinement
+hp-refinement iteration 97: p-refinement
+hp-refinement iteration 98: h-refinement
+hp-refinement iteration 99: h-refinement
+Number of finite element unknowns: 600
+Total number of h-refinements: 51
+Total number of p-refinements: 49
+Maximum order 4
+   Iteration :   0  (B r, r) = 0.00597592
+   Iteration :   1  (B r, r) = 0.00328678
+   Iteration :   2  (B r, r) = 0.00152528
+   Iteration :   3  (B r, r) = 0.000458538
+   Iteration :   4  (B r, r) = 0.000273018
+   Iteration :   5  (B r, r) = 0.000165539
+   Iteration :   6  (B r, r) = 0.000142338
+   Iteration :   7  (B r, r) = 0.000128215
+   Iteration :   8  (B r, r) = 0.000119496
+   Iteration :   9  (B r, r) = 0.000127506
+   Iteration :  10  (B r, r) = 0.000113499
+   Iteration :  11  (B r, r) = 5.70203e-05
+   Iteration :  12  (B r, r) = 1.96885e-05
+   Iteration :  13  (B r, r) = 8.62786e-06
+   Iteration :  14  (B r, r) = 4.98314e-06
+   Iteration :  15  (B r, r) = 6.59407e-06
+   Iteration :  16  (B r, r) = 9.75259e-06
+   Iteration :  17  (B r, r) = 3.85533e-06
+   Iteration :  18  (B r, r) = 2.1043e-06
+   Iteration :  19  (B r, r) = 9.44648e-07
+   Iteration :  20  (B r, r) = 2.69336e-07
+   Iteration :  21  (B r, r) = 6.68166e-08
+   Iteration :  22  (B r, r) = 2.76834e-08
+   Iteration :  23  (B r, r) = 9.60407e-09
+   Iteration :  24  (B r, r) = 2.92879e-09
+   Iteration :  25  (B r, r) = 8.67361e-10
+   Iteration :  26  (B r, r) = 3.68035e-10
+   Iteration :  27  (B r, r) = 3.26677e-10
+   Iteration :  28  (B r, r) = 2.59849e-10
+   Iteration :  29  (B r, r) = 1.35783e-10
+   Iteration :  30  (B r, r) = 8.48906e-11
+   Iteration :  31  (B r, r) = 4.03997e-11
+   Iteration :  32  (B r, r) = 2.17446e-11
+   Iteration :  33  (B r, r) = 1.34037e-11
+   Iteration :  34  (B r, r) = 1.2344e-11
+   Iteration :  35  (B r, r) = 7.07947e-12
+   Iteration :  36  (B r, r) = 4.87078e-12
+   Iteration :  37  (B r, r) = 2.20377e-12
+   Iteration :  38  (B r, r) = 9.18276e-13
+   Iteration :  39  (B r, r) = 3.26041e-13
+   Iteration :  40  (B r, r) = 7.23452e-14
+   Iteration :  41  (B r, r) = 2.48433e-14
+   Iteration :  42  (B r, r) = 9.60187e-15
+   Iteration :  43  (B r, r) = 3.85487e-15
+Average reduction factor = 0.721525
+H1 continuity error 2.08167e-17

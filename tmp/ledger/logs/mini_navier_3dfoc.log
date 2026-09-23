@@ -1,0 +1,391 @@
+Number of elements: 68
+NAVIER version: 0.1
+Velocity #DOFs: 16956
+Pressure #DOFs: 5652
+Adding Velocity Dirichlet BC to attributes 0 2 
+Setup
+Using Full Assembly
+        It   Resid      Reltol
+MVIN     0   0.00e+00   1.00e-12
+PRES    68   3.01e-08   1.00e-06
+HELM    18   3.26e-11   1.00e-08
+       Time          dt
+1.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   4.90e-19   1.00e-12
+PRES    67   6.72e-09   1.00e-06
+HELM    18   6.22e-11   1.00e-08
+       Time          dt
+2.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   3.02e-18   1.00e-12
+PRES    66   5.71e-09   1.00e-06
+HELM    18   8.71e-11   1.00e-08
+       Time          dt
+3.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   4.93e-18   1.00e-12
+PRES    67   2.94e-09   1.00e-06
+HELM    18   9.27e-11   1.00e-08
+       Time          dt
+4.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   8.14e-18   1.00e-12
+PRES    66   3.37e-09   1.00e-06
+HELM    18   9.72e-11   1.00e-08
+       Time          dt
+5.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   1.29e-17   1.00e-12
+PRES    66   3.36e-09   1.00e-06
+HELM    18   1.01e-10   1.00e-08
+       Time          dt
+6.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   1.93e-17   1.00e-12
+PRES    66   3.96e-09   1.00e-06
+HELM    18   1.05e-10   1.00e-08
+       Time          dt
+7.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   2.68e-17   1.00e-12
+PRES    67   2.19e-09   1.00e-06
+HELM    18   1.09e-10   1.00e-08
+       Time          dt
+8.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   3.53e-17   1.00e-12
+PRES    67   2.17e-09   1.00e-06
+HELM    19   5.34e-11   1.00e-08
+       Time          dt
+9.00000E-03 1.00000E-03
+        It   Resid      Reltol
+MVIN    41   4.49e-17   1.00e-12
+PRES    67   2.17e-09   1.00e-06
+HELM    19   5.46e-11   1.00e-08
+       Time          dt
+1.00000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.21e-17   1.00e-12
+PRES    67   2.17e-09   1.00e-06
+HELM    19   5.55e-11   1.00e-08
+       Time          dt
+1.10000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.90e-17   1.00e-12
+PRES    67   2.15e-09   1.00e-06
+HELM    19   5.64e-11   1.00e-08
+       Time          dt
+1.20000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   4.65e-17   1.00e-12
+PRES    67   2.13e-09   1.00e-06
+HELM    19   5.71e-11   1.00e-08
+       Time          dt
+1.30000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   5.47e-17   1.00e-12
+PRES    67   2.11e-09   1.00e-06
+HELM    19   5.77e-11   1.00e-08
+       Time          dt
+1.40000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   6.36e-17   1.00e-12
+PRES    67   2.09e-09   1.00e-06
+HELM    19   5.82e-11   1.00e-08
+       Time          dt
+1.50000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   7.31e-17   1.00e-12
+PRES    67   2.07e-09   1.00e-06
+HELM    18   1.25e-10   1.00e-08
+       Time          dt
+1.60000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   8.32e-17   1.00e-12
+PRES    67   2.04e-09   1.00e-06
+HELM    18   1.26e-10   1.00e-08
+       Time          dt
+1.70000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   9.41e-17   1.00e-12
+PRES    67   2.01e-09   1.00e-06
+HELM    18   1.26e-10   1.00e-08
+       Time          dt
+1.80000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.06e-16   1.00e-12
+PRES    67   1.98e-09   1.00e-06
+HELM    18   1.27e-10   1.00e-08
+       Time          dt
+1.90000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.18e-16   1.00e-12
+PRES    67   1.95e-09   1.00e-06
+HELM    18   1.27e-10   1.00e-08
+       Time          dt
+2.00000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.31e-16   1.00e-12
+PRES    67   1.92e-09   1.00e-06
+HELM    18   1.28e-10   1.00e-08
+       Time          dt
+2.10000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.45e-16   1.00e-12
+PRES    67   1.89e-09   1.00e-06
+HELM    18   1.28e-10   1.00e-08
+       Time          dt
+2.20000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.59e-16   1.00e-12
+PRES    67   1.86e-09   1.00e-06
+HELM    18   1.28e-10   1.00e-08
+       Time          dt
+2.30000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.74e-16   1.00e-12
+PRES    67   1.83e-09   1.00e-06
+HELM    18   1.28e-10   1.00e-08
+       Time          dt
+2.40000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.90e-16   1.00e-12
+PRES    67   1.80e-09   1.00e-06
+HELM    18   1.28e-10   1.00e-08
+       Time          dt
+2.50000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   2.07e-16   1.00e-12
+PRES    67   1.77e-09   1.00e-06
+HELM    18   1.28e-10   1.00e-08
+       Time          dt
+2.60000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   2.24e-16   1.00e-12
+PRES    67   1.73e-09   1.00e-06
+HELM    18   1.27e-10   1.00e-08
+       Time          dt
+2.70000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   2.42e-16   1.00e-12
+PRES    67   1.70e-09   1.00e-06
+HELM    18   1.27e-10   1.00e-08
+       Time          dt
+2.80000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   2.61e-16   1.00e-12
+PRES    67   1.67e-09   1.00e-06
+HELM    18   1.27e-10   1.00e-08
+       Time          dt
+2.90000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   2.81e-16   1.00e-12
+PRES    67   1.64e-09   1.00e-06
+HELM    18   1.26e-10   1.00e-08
+       Time          dt
+3.00000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.01e-16   1.00e-12
+PRES    67   1.62e-09   1.00e-06
+HELM    18   1.26e-10   1.00e-08
+       Time          dt
+3.10000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.22e-16   1.00e-12
+PRES    67   1.59e-09   1.00e-06
+HELM    18   1.25e-10   1.00e-08
+       Time          dt
+3.20000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.44e-16   1.00e-12
+PRES    67   1.56e-09   1.00e-06
+HELM    18   1.25e-10   1.00e-08
+       Time          dt
+3.30000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.66e-16   1.00e-12
+PRES    66   2.78e-09   1.00e-06
+HELM    18   1.24e-10   1.00e-08
+       Time          dt
+3.40000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   3.89e-16   1.00e-12
+PRES    66   2.73e-09   1.00e-06
+HELM    18   1.24e-10   1.00e-08
+       Time          dt
+3.50000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   4.13e-16   1.00e-12
+PRES    66   2.69e-09   1.00e-06
+HELM    18   1.23e-10   1.00e-08
+       Time          dt
+3.60000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   4.37e-16   1.00e-12
+PRES    66   2.64e-09   1.00e-06
+HELM    18   1.22e-10   1.00e-08
+       Time          dt
+3.70000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   4.62e-16   1.00e-12
+PRES    66   2.60e-09   1.00e-06
+HELM    18   1.21e-10   1.00e-08
+       Time          dt
+3.80000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   4.88e-16   1.00e-12
+PRES    66   2.56e-09   1.00e-06
+HELM    18   1.21e-10   1.00e-08
+       Time          dt
+3.90000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   5.14e-16   1.00e-12
+PRES    66   2.52e-09   1.00e-06
+HELM    18   1.20e-10   1.00e-08
+       Time          dt
+4.00000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   5.41e-16   1.00e-12
+PRES    66   2.48e-09   1.00e-06
+HELM    18   1.19e-10   1.00e-08
+       Time          dt
+4.10000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   5.68e-16   1.00e-12
+PRES    66   2.44e-09   1.00e-06
+HELM    18   1.18e-10   1.00e-08
+       Time          dt
+4.20000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   5.96e-16   1.00e-12
+PRES    66   2.40e-09   1.00e-06
+HELM    18   1.17e-10   1.00e-08
+       Time          dt
+4.30000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   6.25e-16   1.00e-12
+PRES    66   2.36e-09   1.00e-06
+HELM    18   1.17e-10   1.00e-08
+       Time          dt
+4.40000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   6.54e-16   1.00e-12
+PRES    66   2.32e-09   1.00e-06
+HELM    18   1.16e-10   1.00e-08
+       Time          dt
+4.50000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   6.83e-16   1.00e-12
+PRES    66   2.28e-09   1.00e-06
+HELM    18   1.15e-10   1.00e-08
+       Time          dt
+4.60000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   7.13e-16   1.00e-12
+PRES    66   2.24e-09   1.00e-06
+HELM    18   1.14e-10   1.00e-08
+       Time          dt
+4.70000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   7.43e-16   1.00e-12
+PRES    66   2.20e-09   1.00e-06
+HELM    18   1.13e-10   1.00e-08
+       Time          dt
+4.80000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   7.74e-16   1.00e-12
+PRES    66   2.16e-09   1.00e-06
+HELM    18   1.13e-10   1.00e-08
+       Time          dt
+4.90000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   8.06e-16   1.00e-12
+PRES    66   2.12e-09   1.00e-06
+HELM    18   1.12e-10   1.00e-08
+       Time          dt
+5.00000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   8.37e-16   1.00e-12
+PRES    66   2.08e-09   1.00e-06
+HELM    18   1.11e-10   1.00e-08
+       Time          dt
+5.10000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   8.70e-16   1.00e-12
+PRES    66   2.04e-09   1.00e-06
+HELM    18   1.10e-10   1.00e-08
+       Time          dt
+5.20000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   9.02e-16   1.00e-12
+PRES    66   2.00e-09   1.00e-06
+HELM    18   1.09e-10   1.00e-08
+       Time          dt
+5.30000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   9.35e-16   1.00e-12
+PRES    66   1.95e-09   1.00e-06
+HELM    18   1.08e-10   1.00e-08
+       Time          dt
+5.40000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   9.69e-16   1.00e-12
+PRES    66   1.91e-09   1.00e-06
+HELM    18   1.08e-10   1.00e-08
+       Time          dt
+5.50000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.00e-15   1.00e-12
+PRES    66   1.87e-09   1.00e-06
+HELM    18   1.07e-10   1.00e-08
+       Time          dt
+5.60000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.04e-15   1.00e-12
+PRES    66   1.83e-09   1.00e-06
+HELM    18   1.06e-10   1.00e-08
+       Time          dt
+5.70000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.07e-15   1.00e-12
+PRES    66   1.78e-09   1.00e-06
+HELM    18   1.05e-10   1.00e-08
+       Time          dt
+5.80000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.11e-15   1.00e-12
+PRES    66   1.74e-09   1.00e-06
+HELM    18   1.05e-10   1.00e-08
+       Time          dt
+5.90000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.14e-15   1.00e-12
+PRES    66   1.69e-09   1.00e-06
+HELM    18   1.04e-10   1.00e-08
+       Time          dt
+6.00000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.18e-15   1.00e-12
+PRES    65   2.35e-09   1.00e-06
+HELM    18   1.03e-10   1.00e-08
+       Time          dt
+6.10000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.21e-15   1.00e-12
+PRES    65   2.31e-09   1.00e-06
+HELM    18   1.03e-10   1.00e-08
+       Time          dt
+6.20000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.25e-15   1.00e-12
+PRES    65   2.27e-09   1.00e-06
+HELM    18   1.02e-10   1.00e-08
+       Time          dt
+6.30000E-02 1.00000E-03
+        It   Resid      Reltol
+MVIN    42   1.29e-15   1.00e-12
+PRES    65   2.23e-09   1.00e-06
+HELM    18   1.01e-10   1.00e-08
+       Time          dt
+6.40000E-02 1.00000E-03

@@ -1,0 +1,18 @@
+Options used:
+   --mesh ../../data/inline-quad.mesh
+   --order 1
+   --no-visualization
+   --number-of-wavelengths 1
+   --permeability 1
+   --permittivity 1
+   --delta-order 1
+   --serial-ref 0
+   --no-static-condensation
+   --send-port 19916
+
+
+MFEM abort: Mesh file not found: ../../data/inline-quad.mesh
+
+ ... in function: mfem::Mesh::Mesh(const std::string&, int, int, bool)
+ ... in file: mesh/mesh.cpp:4851
+

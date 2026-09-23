@@ -1,0 +1,49 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/beam-hex-nurbs.mesh
+   --refine -1
+   --per none
+   --ref-file 
+   --master ''
+   --slave ''
+   --neu ''
+   --order '1'
+   --ibp
+   --strong-bc
+   --kappa -1
+   --no-static-condensation
+   --no-visualization
+   --level-of-detail 0
+   --send-port 19916
+Mesh Characteristics:
+Dimension          : 3
+Space dimension    : 3
+Number of vertices : 5265
+Number of edges    : 14544
+Number of faces    : 13376  --  13376 Square(s)
+Number of elements : 4096  --  4096 Cube(s)
+Number of bdr elem : 2176  --  2176 Square(s)
+Euler Number       : 1
+h_min              : 0.125
+h_max              : 0.125
+kappa_min          : 1
+kappa_max          : 1
+
+Number of finite element unknowns: 5265
+Boundary conditions:
+ - Periodic  : 0 0 0
+ - Essential : 1 1 1
+ - Neumann   : 0 0 0
+Size of linear system: 5265
+   Iteration :   0  (B r, r) = 0.0987513
+   Iteration :   1  (B r, r) = 0.0193554
+   Iteration :   2  (B r, r) = 0.00049695
+   Iteration :   3  (B r, r) = 3.2141e-05
+   Iteration :   4  (B r, r) = 2.62131e-06
+   Iteration :   5  (B r, r) = 1.71929e-07
+   Iteration :   6  (B r, r) = 1.16611e-08
+   Iteration :   7  (B r, r) = 9.51543e-10
+   Iteration :   8  (B r, r) = 3.89617e-11
+   Iteration :   9  (B r, r) = 1.61973e-12
+   Iteration :  10  (B r, r) = 1.25141e-13
+   Iteration :  11  (B r, r) = 7.67699e-15
+Average reduction factor = 0.253583

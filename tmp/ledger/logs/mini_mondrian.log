@@ -1,0 +1,14 @@
+Options used:
+   --mesh data/inline-quad.mesh
+   --img australia.pgm
+   --sub-divisions 2
+   --nc-limit 1
+   --num-colors 3
+   --iso
+   --visualization
+   --send-port 19916
+Iteration 1: mesh has 16 elements. 
+Iteration 2: mesh has 52 elements. 
+Iteration 3: mesh has 145 elements. 
+Continue shaping? --> Wrote mondrian.mesh (145 elements).
+mondrian (Rust port): partial delivery, exit 3. Refinement matches C++ (`Mesh::GeneralRefinement(refs, -1, 1)`; iso: 16, 52, 145 — aniso `-a`: 16, 48, 123) and mondrian.mesh is written in the MFEM NC mesh v1.0 format (byte-identical to `Mesh::Save`); remaining gap: `-vis` opens no GLVis socket.

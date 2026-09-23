@@ -1,0 +1,24 @@
+note: fem-rs implements the LEGACY/FULL (assembled sparse) path; C++ assembly level 3 uses matrix-free operators whose AbsMult differs from the assembled matrix (numbers diverge from C++ at this level)
+Options used:
+   --mesh data/ref-cube.mesh
+   --order 1
+   --solver 1
+   --integrator 1
+   --assembly 3
+   --preconditioner 1
+   --refine-serial 4
+   --refine-parallel 0
+   --p-order 1
+   --q-order 0
+   --tolerance 1e-10
+   --iterations 3000
+   --Kershaw-y 0
+   --Kershaw-z 0
+   --frequency 1
+   --device cpu
+   --no-monitor
+   --no-visualization
+
+thread 'main' (11980) panicked at examples\..\miniapps\diag-smoothers\abs-l1-jacobi.rs:469:29:
+failed to read mesh data/ref-cube.mesh: IO error: The system cannot find the file specified. (os error 2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

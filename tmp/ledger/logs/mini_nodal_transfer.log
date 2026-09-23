@@ -1,0 +1,12 @@
+Options used:
+   --mesh ../../data/beam-tet.mesh
+   --refine-serial 3
+   --refine-parallel 1
+   --generate-data 1
+   --order 1
+   --src_num_procs 4
+   --no-visualization
+
+thread 'main' (28312) panicked at examples\..\miniapps\tools\nodal_transfer.rs:121:29:
+cannot read mesh ../../data/beam-tet.mesh: IO error: The system cannot find the path specified. (os error 3)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
