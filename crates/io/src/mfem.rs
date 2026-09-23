@@ -917,12 +917,20 @@ fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemRe
 /// other combination is refused with an error instead of silently writing a
 /// straight-sided mesh.  See [`NodesSpace`] and [`write_mfem_nodes`].
 ///
-/// For 3D meshes containing tetrahedra *without* high-order geometry, the mesh
-/// is cloned and normalized with `mark_tet_mesh_for_refinement` before writing,
-/// so that programmatically created meshes round-trip with the same canonical
-/// tet orientation that `read_mfem` produces (longest edge = (v0,v1)).  A mesh
-/// that writes a `nodes` section keeps its own vertex order (the normalization
-/// permutes element vertex lists and does not carry the geometry table).
+/// Tetrahedral meshes are written in **storage order** (D663/D676): MFEM's
+/// `Mesh::Printer` emits `elements` / `boundary` verbatim from the stored
+/// tables (`mesh/mesh.cpp:12528-12545`) and never re-runs
+/// `MarkTetMeshForRefinement` at write time — the rotation happens only inside
+/// `Mesh::Finalize(refine = true)` (through `Mesh::Load`'s `refine = 1`
+/// default, `mesh.hpp:824`), which is the read side and is mirrored by
+/// `read_mfem` only.  Re-marking at write time used to rotate every tet whose
+/// longest edge was not already in slot (0,1) — a no-op on meshes fresh from
+/// `read_mfem` (marked storage is a mark fixpoint) but an active deviation for
+/// refined meshes (MFEM's `UniformRefinement` output is *not* in marked
+/// orientation; probe `(b2)`: re-marking the C++ refined beam-tet print rotates
+/// 16128 element lines) and for trimmer cut faces (`Mesh::Finalize()`'s default
+/// is `refine = false`, `mesh.hpp:1169`, so MFEM's trimmer prints the cut
+/// triangles in first-encounter orientation).
 pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
     write_mfem_nodes(writer, mesh_d, mesh_3d, NodesSpace::Continuous)
 }
@@ -947,31 +955,17 @@ pub fn write_mfem_nodes<W: Write>(
     } else {
         nodes_dof_values(mesh_d, space)?
     };
-    // D2: tet io round-trip orientation normalization.
-    // read_mfem applies mark_tet_mesh_for_refinement (MarkTetMeshForRefinement)
-    // on read to canonicalize tet vertex order.  write_mfem must apply the
-    // same normalization so meshes created programmatically round-trip.
-    //
-    // The normalization only permutes each element's *vertex list*; a curved
-    // mesh's geometry table is keyed by reference slot and is not carried
-    // through it, so a mesh that writes a `nodes` section keeps its own vertex
-    // order (the file is then self-consistent, and `read_mfem`'s geometry
-    // table — which is built from the file's own element order — comes back
-    // unchanged).
-    let needs_normalization = nodes.is_none() && mesh_3d.map_or(false, has_tet4);
-    let tet_normalized: Option<Mesh<3>> = if needs_normalization {
-        let mut clone = (*mesh_3d.unwrap()).clone();
-        fem_mesh::mark_tet_mesh_for_refinement(&mut clone);
-        Some(clone)
-    } else {
-        None
-    };
-    // If the 3D mesh contained tets, use the normalized clone; otherwise
-    // fall back to the original mesh reference.
-    let mesh_3d: Option<&Mesh<3>> = match tet_normalized.as_ref() {
-        Some(n) => Some(n),
-        None => mesh_3d,
-    };
+    // D663/D676: no write-time tet normalization.  MFEM `Mesh::Printer` writes
+    // the element and boundary tables in **storage order** and the only place
+    // `MarkTetMeshForRefinement` runs is `Mesh::Finalize(refine = true)` — the
+    // read side (`Mesh::Load`'s `refine = 1` default), which `read_mfem`
+    // mirrors.  The old write-path clone+mark here rotated every tet (and every
+    // program-created boundary triangle) whose longest edge was not already in
+    // slot (0,1): a no-op for meshes fresh from `read_mfem` (marked storage is
+    // a mark fixpoint — probe `(b1)`), but a file-level deviation from MFEM for
+    // refined meshes (MFEM's `UniformRefinement` children are *not* marked —
+    // probe `(b2)`) and for trimmer cut faces (`Mesh::Finalize()` defaults to
+    // `refine = false`).
     let (dim, coords, conn, elem_tags, elem_type, elem_types_opt)
         = if let Some(m3) = mesh_3d {
             (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type, &m3.elem_types)
@@ -1592,14 +1586,6 @@ fn approx_eq(a: f64, b: f64) -> bool {
 }
 
 /// Returns `true` if the 3D mesh contains any Tet4 elements (uniform or mixed).
-fn has_tet4(mesh: &Mesh<3>) -> bool {
-    if let Some(ref etypes) = mesh.elem_types {
-        etypes.iter().any(|et| *et == ElementType::Tet4)
-    } else {
-        mesh.elem_type == ElementType::Tet4
-    }
-}
-
 /// Write the `.mesh` `boundary` section for a 2-D or 3-D mesh.
 ///
 /// `face_nv[f]` is the validated node count of face `f` (from
@@ -3612,8 +3598,6 @@ impl MixedFamily {
     /// node lattice.
     fn pyr(p: usize) -> Self {
         let e = p - 1;
-        let (g_raw, _) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
-        let cp: Vec<f64> = g_raw.iter().map(|&x| 0.5 * (x + 1.0)).collect();
         let mut slots: Vec<MixedSlot> =
             Vec::with_capacity(fem_element::lagrange::fuentes_pyramid_n_dofs(p));
         for v in 0..5 {
@@ -3657,6 +3641,13 @@ impl MixedFamily {
         // element-layer node table — count, vertices, edge-block positions.
         #[cfg(debug_assertions)]
         {
+            // Closed-uniform node coordinates (release builds never evaluate
+            // the pin, so the table is materialised only here).
+            let cp: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+                .0
+                .iter()
+                .map(|&x| 0.5 * (x + 1.0))
+                .collect();
             let truth = fem_element::lagrange::h1_fuentes_pyramid_nodes(p);
             assert_eq!(slots.len(), truth.len(), "pyramid slot count");
             let corner_idx = [

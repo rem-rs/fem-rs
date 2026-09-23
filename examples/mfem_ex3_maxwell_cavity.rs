@@ -234,7 +234,8 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
 
     let space = HCurlSpace::new(mesh, args.order);
     let n_dofs = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {n_dofs}");
+    // MFEM ex3.cpp:132 — no leading blank line.
+    println!("Number of finite element unknowns: {n_dofs}");
 
     let tags = space.mesh().unique_boundary_tags();
     let ess_bdr = boundary_dofs_hcurl(space.mesh(), &space, &tags);
@@ -257,6 +258,9 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
     // equivalence test in `constraints/dirichlet.rs`.
     let mut x = u_proj;
     form_linear_system_vdofs(&mut mat, &mut rhs, &mut x, &ess_bdr, false);
+    // MFEM ex3.cpp:186: `Size of linear system: ` << A->Height() — printed once
+    // after FormLinearSystem, before the solve.
+    println!("Size of linear system: {}", mat.nrows);
 
     solve_report_2d(&space, &mut x, &rhs, args, kappa, &mat);
     write_mfem_file("refined.mesh", space.mesh()).unwrap();
@@ -311,9 +315,10 @@ fn solve_report_2d(
         let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(mat)).unwrap();
         // MFEM prints "PCG: No convergence!" and still reports the error; do
         // the same instead of aborting, so the L^2 number stays comparable.
-        match solve_pcg(mat, b, x, &precond, 1e-12, 500, true) {
-            Ok(r) => println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual),
-            Err(_) => println!("PCG: No convergence!"),
+        // (No summary line: C++ ex3 prints only the PCG iteration log and its
+        // "Average reduction factor" trailer.)
+        if solve_pcg(mat, b, x, &precond, 1e-12, 500, true).is_err() {
+            println!("PCG: No convergence!");
         }
     } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
@@ -325,7 +330,8 @@ fn solve_report_2d(
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp, x, &|xi| exact_2d(xi, k), a.canonical));
+    // MFEM ex3.cpp:215: cout default precision = 6 significant digits (%g).
+    println!("\n|| E_h - E ||_{{L^2}} = {}\n", fem_solver::fmt_g(l2_err_2d(sp, x, &|xi| exact_2d(xi, k), a.canonical)));
 }
 
 // ─── 3D ─────────────────────────────────────────────────────────────────────
@@ -337,7 +343,8 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
 
     let space = HCurlSpace::new(mesh, args.order);
     let n_dofs = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {n_dofs}");
+    // MFEM ex3.cpp:132 — no leading blank line.
+    println!("Number of finite element unknowns: {n_dofs}");
 
     let tags = space.mesh().unique_boundary_tags();
     let ess_bdr = boundary_dofs_hcurl(space.mesh(), &space, &tags);
@@ -353,10 +360,13 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
     // projected solution (x.ProjectCoefficient): see the 2-D path note.
     let mut x = u_proj;
     form_linear_system_vdofs(&mut mat, &mut rhs, &mut x, &ess_bdr, false);
-
+    // MFEM ex3.cpp:186: `Size of linear system: ` << A->Height() — printed once
+    // after FormLinearSystem, before the solve.
+    println!("Size of linear system: {}", mat.nrows);
 
     solve_report(&space, &mut x, &rhs, args, &mat);
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_3d(space.mesh(), &space, &x, &|xi| exact_3d(xi, kappa), args.canonical));
+    // MFEM ex3.cpp:215: cout default precision = 6 significant digits (%g).
+    println!("\n|| E_h - E ||_{{L^2}} = {}\n", fem_solver::fmt_g(l2_err_3d(space.mesh(), &space, &x, &|xi| exact_3d(xi, kappa), args.canonical)));
     write_mfem_file_3d("refined.mesh", space.mesh()).unwrap();
     write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 8).unwrap();
 }
@@ -496,9 +506,10 @@ fn solve_report(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args, ma
         let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(mat)).unwrap();
         // MFEM prints "PCG: No convergence!" and still reports the error; do
         // the same instead of aborting, so the L^2 number stays comparable.
-        match solve_pcg(mat, b, x, &precond, 1e-12, 500, true) {
-            Ok(r) => println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual),
-            Err(_) => println!("PCG: No convergence!"),
+        // (No summary line: C++ ex3 prints only the PCG iteration log and its
+        // "Average reduction factor" trailer.)
+        if solve_pcg(mat, b, x, &precond, 1e-12, 500, true).is_err() {
+            println!("PCG: No convergence!");
         }
     } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
