@@ -16,7 +16,10 @@
 use fem_assembly::dg::dg_base::{
     build_face_elem_map, phys_to_ref, quad_jac_at, ref_elem_vol, simplex_jac, xform_grads,
 };
-use fem_assembly::{Assembler, DgAssembler, InteriorFaceList, standard::DiffusionIntegrator};
+use fem_assembly::{
+    Assembler, DgAssembler, ElimPolicy, InteriorFaceList, eliminate_ess_tdofs,
+    standard::DiffusionIntegrator,
+};
 use fem_element::ReferenceElement;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
 use fem_mesh::amr::HangingNodeConstraint;
@@ -77,14 +80,18 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     apply_hanging_constraints(&mut stiff, &mut rhs, &periodic_constraints);
 
     let ess = boundary_dofs(mesh, space.dof_manager(), &[3]);
-    for &d in &ess {
-        let du = d as usize;
-        let mut dummy = vec![0.0; n];
-        // C++ BilinearForm::FormLinearSystem defaults to diag_policy=DIAG_KEEP
-        // (preserves the original diagonal, zeroes the row/col off-diagonals).
-        stiff.apply_dirichlet_keep_diag(du, a.dbc_val, &mut dummy);
-        for j in 0..n { rhs[j] += dummy[j]; }
-    }
+    // C++ BilinearForm::FormLinearSystem defaults to diag_policy=DIAG_KEEP
+    // (preserves the original diagonal, zeroes the row/col off-diagonals) —
+    // the D706 serial core entry (D739).  The former hand-rolled loop pushed
+    // each dof's deltas through a scratch vector and *added* them to the RHS,
+    // so the essential rows kept the reactions of the earlier eliminated dofs
+    // (`b(r) = A(r,r)·x(r) + Σ A(r,r')·x(r')`) — MFEM's EliminateVDofsInRHS
+    // ends with `mat->PartMult`, i.e. `B(r) = A(r,r)·x(r)` as an assignment
+    // (bilinearform.cpp:1239).  The two agree for homogeneous data (the
+    // example's default `-dbc 0`) and the core entry is used from here on.
+    let mut x_bc = vec![0.0; n];
+    for &d in &ess { x_bc[d as usize] = a.dbc_val; }
+    eliminate_ess_tdofs(&mut stiff, &ess, &x_bc, &mut rhs, ElimPolicy::DiagKeep);
 
     let mut x = vec![0.0; n];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };

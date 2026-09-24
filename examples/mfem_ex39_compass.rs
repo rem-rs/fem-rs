@@ -22,6 +22,7 @@
 
 use fem_assembly::assembler::Assembler;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+use fem_assembly::{ElimPolicy, eliminate_ess_tdofs};
 use fem_io::read_msh_file;
 use fem_mesh::Mesh;
 use fem_solver::{solve_pcg_gssmoother, SolverConfig};
@@ -212,13 +213,12 @@ fn main() {
     );
 
     // 10. Form the linear system with the essential BCs (MFEM FormLinearSystem).
-    for &d in &ess_bdr {
-        let du = d as usize;
-        let mut dummy = vec![0.0; n];
-        a.apply_dirichlet_symmetric(du, 0.0, &mut dummy);
-        if let Some(k) = a.find_entry(du, du) { a.values[k] = 1.0; }
-        rhs[du] = 0.0;
-    }
+    // D739: homogeneous BCs → the D706 core entry under DIAG_ONE.  The former
+    // explicit diagonal fix re-wrote the same A(r,r) = 1 the kernel
+    // (`apply_dirichlet_symmetric`) installs; the ess values are read from a
+    // zero projection `x`.
+    let x_bc = vec![0.0; n];
+    eliminate_ess_tdofs(&mut a, &ess_bdr, &x_bc, &mut rhs, ElimPolicy::DiagOne);
     println!("Size of linear system: {}", a.nrows);
 
     // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner

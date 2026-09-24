@@ -38,11 +38,12 @@
 use std::f64::consts::FRAC_1_SQRT_2;
 
 use fem_assembly::{
-    Assembler,
+    Assembler, ElimPolicy, eliminate_ess_tdofs,
     postproc::vector_l2_norm,
     standard::{VectorDiffusionIntegrator, VectorH1MassIntegrator},
     HyperelasticModel, HyperelasticityForm,
 };
+use fem_core::types::DofId;
 use fem_io::mfem::{read_mfem_file, write_gf_file, write_mfem_file};
 use fem_linalg::CsrMatrix;
 use fem_mesh::{
@@ -216,11 +217,16 @@ impl ReducedSystemOperator<'_> {
         // J = 1.0 * tmp + dt² * grad_H
         let mut jac = tmp.axpby(1.0, &grad_h, dt * dt);
 
-        // Enforce essential BCs: symmetric elimination (row + column).
+        // Enforce essential BCs: symmetric elimination (row + column) — the
+        // D706 core entry under DIAG_ONE on homogeneous data (the Jacobian's
+        // BC rows/cols only; the RHS buffer is a dummy here, exactly as in the
+        // former loop).  The ess dofs of the *coupled* block are filtered to
+        // this scalar block's range, the loop order is preserved (D739).
+        let ess: Vec<DofId> = self.ess_dofs.iter().copied()
+            .filter(|&d| d < n).map(|d| d as DofId).collect();
+        let x_bc = vec![0.0; n];
         let mut dummy = vec![0.0; n];
-        for &d in self.ess_dofs {
-            if d < n { jac.apply_dirichlet_symmetric(d, 0.0, &mut dummy); }
-        }
+        eliminate_ess_tdofs(&mut jac, &ess, &x_bc, &mut dummy, ElimPolicy::DiagOne);
         jac
     }
 }

@@ -11,7 +11,10 @@
 //! ```
 
 
-use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
+use fem_assembly::{
+    Assembler, ElimPolicy, eliminate_ess_tdofs,
+    standard::{DiffusionIntegrator, DomainSourceIntegrator},
+};
 use fem_io::mfem::{
     read_mfem_file, write_mfem, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file,
 };
@@ -160,10 +163,16 @@ where
         let raw_diag = mat.diagonal();
         let raw_dinv: Vec<f64> = raw_diag.iter()
             .map(|&d| if d.abs() > 1e-30 { 1.0 / d } else { 1.0 }).collect();
-        // Apply symmetric BC elimination for the CSR matrix (PCG outer / coarse CG)
+        // Apply symmetric BC elimination for the CSR matrix (PCG outer / coarse CG).
+        // D739: the hand-rolled homogeneous-BC loop is the D706 core entry with
+        // the DIAG_ONE policy — `apply_dirichlet_symmetric` was always exactly
+        // that kernel (row/col zeroing, diagonal = 1), and the homogeneous
+        // projection values are read from a zero `x`; the RHS buffer is a
+        // dummy here (only the matrix is consumed), so nothing else changes.
         let bc = boundary_dofs(space.mesh(), space.dof_manager(), &boundary_tags);
+        let x_bc = vec![0.0; mat.nrows];
         let mut dummy = vec![0.0; mat.nrows];
-        for &d in &bc { mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy); }
+        eliminate_ess_tdofs(&mut mat, &bc, &x_bc, &mut dummy, ElimPolicy::DiagOne);
         // Build element-by-element operator (raw matrices, no BC mods)
         let elem_op = StoredElementOperator {
             elem_dofs: elem_dofs.clone(), elem_mats: elem_mats.clone(),

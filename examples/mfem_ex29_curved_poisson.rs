@@ -23,6 +23,7 @@ use std::f64::consts::PI;
 use fem_assembly::assembler::Assembler;
 use fem_assembly::postproc::coefficient::FnMatrixCoeff;
 use fem_assembly::standard::{DomainSourceIntegrator, TensorDiffusionIntegrator};
+use fem_assembly::{ElimPolicy, eliminate_ess_tdofs};
 use fem_element::ReferenceElement;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
 use fem_solver::{fmt_g, solve_pcg_gssmoother, SolverConfig};
@@ -92,16 +93,13 @@ fn main() {
     let mut a_mat = Assembler::assemble_bilinear(&space, &[&diff], qo);
     let mut rhs = Assembler::assemble_linear(&space, &[&src], qo);
 
-    // 10. Dirichlet BCs
-    for &d in &ess_bdr {
-        let mut dummy = vec![0.0; n_dofs];
-        a_mat.apply_dirichlet_symmetric(d as usize, 0.0, &mut dummy);
-        // Fix diagonal for CG
-        if let Some(k) = a_mat.find_entry(d as usize, d as usize) {
-            a_mat.values[k] = 1.0;
-        }
-        rhs[d as usize] = 0.0;
-    }
+    // 10. Dirichlet BCs — homogeneous, so this is the D706 core entry under
+    // the DIAG_ONE policy: `apply_dirichlet_symmetric` (row/col zeroing +
+    // diagonal = 1) was already the per-dof kernel, and the former explicit
+    // "fix diagonal for CG" re-wrote the very same A(r,r) = 1 that the kernel
+    // installs; the projection values are read from a zero `x` (D739).
+    let x_bc = vec![0.0; n_dofs];
+    eliminate_ess_tdofs(&mut a_mat, &ess_bdr, &x_bc, &mut rhs, ElimPolicy::DiagOne);
 
     println!("Size of linear system: {}", a_mat.nrows);
 

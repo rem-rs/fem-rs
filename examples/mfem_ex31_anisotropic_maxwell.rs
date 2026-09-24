@@ -69,7 +69,7 @@ use fem_assembly::standard::{CurlCurlIntegrator, DiffusionIntegrator, MassIntegr
     VectorMassTensorIntegrator};
 use fem_assembly::coefficient::ConstantMatrixCoeff;
 use fem_assembly::postproc::grid_function::project_bdr_coefficient_tangent_2d;
-use fem_assembly::{VectorAssembler, Assembler, FixedOrder};
+use fem_assembly::{VectorAssembler, Assembler, ElimPolicy, FixedOrder, eliminate_ess_tdofs};
 use fem_core::types::DofId;
 use fem_element::{VectorReferenceElement, ReferenceElement,
     nedelec::{TriNDk, QuadNDk}, lagrange::{TriP1, QuadQk}};
@@ -417,15 +417,16 @@ fn main() {
     }
     let mut mat = sys_coo.into_csr();
 
-    let mut bdr_dofs: Vec<DofId> = nd_bdr.iter().map(|&d| (n_h1 + d as usize) as DofId).collect();
-    let mut bdr_vals: Vec<f64> = nd_bdr.iter().map(|&d| x[n_h1 + d as usize]).collect();
-    for &d in &h1_bdr { bdr_dofs.push(d); bdr_vals.push(x[d as usize]); }
     // MFEM 4.10 BilinearForm default diag_policy = DIAG_KEEP (bilinearform.hpp):
     // EliminateVDofs keeps the diagonal and zeroes the rest of the BC rows/cols,
-    // then EliminateVDofsInRHS adjusts the RHS.  Apply per-DOF in the same way.
-    for (&dof, &val) in bdr_dofs.iter().zip(bdr_vals.iter()) {
-        mat.apply_dirichlet_keep_diag(dof as usize, val, &mut b);
-    }
+    // then EliminateVDofsInRHS adjusts the RHS — the D706 serial
+    // `FormLinearSystem` core entry (D739).  The former hand-built `bdr_vals`
+    // (an index/value pair that could silently decouple) is gone: the ess
+    // values come *from* the projected `x`; the returned X (R·x = bitwise `x`)
+    // is not needed since the solve already starts from that same `x`.
+    let mut bdr_dofs: Vec<DofId> = nd_bdr.iter().map(|&d| (n_h1 + d as usize) as DofId).collect();
+    bdr_dofs.extend(h1_bdr.iter().copied());
+    eliminate_ess_tdofs(&mut mat, &bdr_dofs, &x, &mut b, ElimPolicy::DiagKeep);
 
     // 10. Solve A X = B with PCG + GSSmoother.  C++ calls the free-function
     //     wrapper PCG(*A, M, B, X, 1, 500, 1e-12, 0.0), which sets

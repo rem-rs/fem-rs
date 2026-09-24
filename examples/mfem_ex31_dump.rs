@@ -40,7 +40,8 @@ use std::io::{BufWriter, Write};
 use fem_assembly::standard::{CurlCurlIntegrator, DiffusionIntegrator, MassIntegrator,
     VectorMassTensorIntegrator};
 use fem_assembly::coefficient::ConstantMatrixCoeff;
-use fem_assembly::{VectorAssembler, Assembler, FixedOrder};
+use fem_assembly::{VectorAssembler, Assembler, ElimPolicy, FixedOrder, eliminate_ess_tdofs};
+use fem_core::types::DofId;
 use fem_element::{VectorReferenceElement, ReferenceElement,
     nedelec::{TriNDk, QuadNDk}, lagrange::{TriP1, QuadQk}};
 use fem_io::mfem::read_mfem_file;
@@ -462,13 +463,19 @@ fn main() {
     for &d in &h1_bdr { x[d as usize] = soldofs[d as usize]; }
 
     // eliminate (DIAG_KEEP, MFEM EliminateVDofs style) and dump eliminated system + X0
+    // D739: the former hand-rolled per-dof loop is the D706 serial
+    // `FormLinearSystem` core entry — the ess values are read *from* the
+    // projected `x` (so index and value cannot decouple), the ess list keeps
+    // the former loop order (ND boundary first, then H1), and the returned X0
+    // is MFEM's `R·x` = a bitwise copy of `x` on this conforming space.
     let mut elim_mat = sys_mat.clone();
     let mut elim_b = rhs.clone();
-    for &d in &nd_bdr { elim_mat.apply_dirichlet_keep_diag(n_h1 + d as usize, x[n_h1 + d as usize], &mut elim_b); }
-    for &d in &h1_bdr { elim_mat.apply_dirichlet_keep_diag(d as usize, x[d as usize], &mut elim_b); }
+    let mut ess_elim: Vec<DofId> = nd_bdr.iter().map(|&d| (n_h1 + d as usize) as DofId).collect();
+    ess_elim.extend(h1_bdr.iter().copied());
+    let x0 = eliminate_ess_tdofs(&mut elim_mat, &ess_elim, &x, &mut elim_b, ElimPolicy::DiagKeep);
     dump_csr("rust_elim_A.txt", n_total, &elim_mat.row_ptr, &elim_mat.col_idx, &elim_mat.values);
     dump_vec("rust_elim_B.txt", &elim_b);
-    dump_vec("rust_elim_X0.txt", &x);
+    dump_vec("rust_elim_X0.txt", &x0);
 
     // solve: C++ dump calls PCG(*A, M, B, X, 1, 500, 1e-12, 0.0), i.e. the
     // free-function wrapper with SetRelTol(sqrt(1e-12)) = 1e-6.
