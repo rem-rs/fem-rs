@@ -164,12 +164,6 @@ fn is_inline_mesh(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Compute Jacobian matrix and physical point. Uses library's element_jacobian_at.
-fn element_jacobian(mesh: &Mesh<2>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 2]) {
-    let (J, xp) = element_jacobian_at(mesh, e, xi, 2);
-    (J, [xp[0], xp[1]])
-}
-
 // ─── Main ─────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -326,47 +320,22 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
         Err(e) => eprintln!("  GMRES: {e}"),
     }
 
+    let gf = ComplexGridFunction::from_flat(&X);
     if exact_sol_known {
-        let gf = ComplexGridFunction::from_flat(&X);
-        let mut er2 = 0.0; let mut ei2 = 0.0;
-        for e in 0..mesh.n_elements() as u32 {
-            let et = mesh.element_type(e);
-            let re = et.ref_elem(cfg.order as u8);
-            let nld = re.n_dofs();
-            // MFEM GridFunction::ComputeL2Error uses 2*order+3 (IntRules.Get);
-            // the assembly quad_order (2*order+1) under-samples the strongly
-            // oscillating exact solution (κ=10) and inflates the error ~8x.
-            let q = re.quadrature(2 * cfg.order as u8 + 3);
-            let mut phi = vec![0.0; nld];
-            let mut gr = vec![0.0; nld * 2];
-            let en = mesh.element_nodes(e);
-            let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-            let mut J = nalgebra::DMatrix::<f64>::zeros(2, 2);
-            for (qi, xi) in q.points.iter().enumerate() {
-                re.eval_basis(xi, &mut phi);
-                re.eval_grad_basis(xi, &mut gr);
-                J.fill(0.0);
-                let mut xp = [0.0; 2];
-                for k in 0..en.len() {
-                    let xk = mesh.node_coords(en[k]);
-                    for a in 0..2 { for b in 0..2 { J[(a, b)] += xk[a] * gr[k * 2 + b]; } }
-                    for a in 0..2 { xp[a] += xk[a] * phi[k]; }
-                }
-                let w = q.weights[qi] * J.determinant().abs();
-                let mut ur = 0.0; let mut ui = 0.0;
-                for a in 0..nld { ur += gf.u_re[ed[a]] * phi[a]; ui += gf.u_im[ed[a]] * phi[a]; }
-                let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
-                let d1 = ur - er; er2 += w * d1 * d1;
-                let d2 = ui - ei; ei2 += w * d2 * d2;
-            }
-        }
-        println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er2.sqrt());
-        println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei2.sqrt());
-        save_output(mesh, &gf);
-    } else {
-        let gf = ComplexGridFunction::from_flat(&X);
-        save_output(mesh, &gf);
+        // D693: use the core `ComplexGridFunction::compute_l2_error` (D681
+        // verdict) — the mapped point and integration weight come from the
+        // mesh's element transformation, not from the solution basis' corner
+        // slots, which degenerate on Q2 quads (the former inline evaluator
+        // gave 5.06e-1 where C++ prints 5.64364e-3).  Quadrature order
+        // follows MFEM's ComputeL2Error convention (2*order + 3).
+        let (er, ei) = gf.compute_l2_error(
+            &|x| u0_exact(x, mu, epsilon, sigma, omega).0,
+            &|x| u0_exact(x, mu, epsilon, sigma, omega).1,
+            2 * cfg.order as u8 + 3, &space);
+        println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er);
+        println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei);
     }
+    save_output(mesh, &gf);
 }
 
 // ─── p=1: H(Curl) ─────────────────────────────────────────────────────────
@@ -401,12 +370,23 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     );
     println!("Size of linear system: {}", sys.n_total());
 
-    // pcOp: CurlCurl(1/μ) + ω²ε·M_vec + ωσ·M_vec
+    // pcOp (C++ ex22 9a): CurlCurl(1/μ) + ω²ε·M_vec + ωσ·M_vec.
+    // D694: the loss term carries its own ω here (MFEM lossCoef(ω·σ)); the
+    // system's k_im gets its ω inside ComplexAssembler, so the `loss_coef`
+    // passed to the sesquilinear form is the bare σ.
     let neg_mass_coef = omega * omega * epsilon;
     let pc_vec_mass1 = VectorMassIntegrator { alpha: neg_mass_coef };
-    let pc_vec_mass2 = VectorMassIntegrator { alpha: loss_coef };
-    let pc_mat = VectorAssembler::assemble_bilinear(
+    let pc_vec_mass2 = VectorMassIntegrator { alpha: omega * loss_coef };
+    let mut pc_mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &pc_vec_mass1, &pc_vec_mass2], quad_order);
+    // D695: MFEM `pcOp->SetDiagonalPolicy(DIAG_ONE)` +
+    // `pcOp->FormSystemMatrix(ess_tdof_list)` — zero the essential rows and
+    // columns, put 1 on the diagonal, before handing the matrix to the
+    // Gauss-Seidel smoother (the zero `value` leaves the dummy rhs untouched).
+    let mut pc_rhs = vec![0.0; n];
+    for &d in &ess_bdr {
+        pc_mat.apply_dirichlet_symmetric(d, 0.0, &mut pc_rhs);
+    }
     let pc_linlvo = fem_to_linlvo_csr(&pc_mat);
     let gsmoother = GSSmoother::from_csr(&pc_linlvo).expect("GSSmoother setup");
 
@@ -782,38 +762,14 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 
     let gf = ComplexGridFunction::from_flat(&X);
     if exact_sol_known {
-        let mut er2 = 0.0; let mut ei2 = 0.0;
-        for e in 0..mesh.n_elements() as u32 {
-            let et = mesh.element_type(e);
-            let re = et.ref_elem(cfg.order as u8);
-            let nld = re.n_dofs();
-            // MFEM GridFunction::ComputeL2Error uses 2*order+3 (IntRules.Get);
-            // the assembly quad_order (2*order+1) under-samples the strongly
-            // oscillating exact solution (κ=10) and inflates the error ~8x.
-            let q = re.quadrature(2 * cfg.order as u8 + 3);
-            let mut phi = vec![0.0; nld];
-            let mut gr = vec![0.0; nld * 3];
-            let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-            for (qi, xi) in q.points.iter().enumerate() {
-                re.eval_basis(xi, &mut phi);
-                re.eval_grad_basis(xi, &mut gr);
-                let mut J = nalgebra::DMatrix::<f64>::zeros(3, 3);
-                let mut xp = [0.0; 3];
-                for k in 0..mesh.element_nodes(e).len() {
-                    let xk = mesh.node_coords(mesh.element_nodes(e)[k]);
-                    for a in 0..3 { for b in 0..3 { J[(a, b)] += xk[a] * gr[k * 3 + b]; } }
-                    for a in 0..3 { xp[a] += xk[a] * phi[k]; }
-                }
-                let w = q.weights[qi] * J.determinant().abs();
-                let mut ur = 0.0; let mut ui = 0.0;
-                for a in 0..nld { ur += gf.u_re[ed[a]] * phi[a]; ui += gf.u_im[ed[a]] * phi[a]; }
-                let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
-                let d1 = ur - er; er2 += w * d1 * d1;
-                let d2 = ui - ei; ei2 += w * d2 * d2;
-            }
-        }
-        println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er2.sqrt());
-        println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei2.sqrt());
+        // D693: same fix as the 2-D path — core `compute_l2_error` (D681),
+        // quadrature order = MFEM ComputeL2Error convention (2*order + 3).
+        let (er, ei) = gf.compute_l2_error(
+            &|x| u0_exact(x, mu, epsilon, sigma, omega).0,
+            &|x| u0_exact(x, mu, epsilon, sigma, omega).1,
+            2 * cfg.order as u8 + 3, &space);
+        println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er);
+        println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei);
     }
     save_output_3d(mesh, &gf);
 }
@@ -844,11 +800,18 @@ fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     );
     println!("Size of linear system: {}", sys.n_total());
 
+    // D694: pc loss term carries its own ω (MFEM lossCoef(ω·σ)); see 2-D p1.
     let neg_mass_coef = omega * omega * epsilon;
-    let pc_mat = VectorAssembler::assemble_bilinear(
+    let mut pc_mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl,
                    &VectorMassIntegrator { alpha: neg_mass_coef },
-                   &VectorMassIntegrator { alpha: loss_coef }], quad_order);
+                   &VectorMassIntegrator { alpha: omega * loss_coef }], quad_order);
+    // D695: MFEM DIAG_ONE elimination of the essential dofs on the pc matrix
+    // before the smoother (same as the 2-D p1 path).
+    let mut pc_rhs = vec![0.0; n];
+    for &d in &ess_bdr {
+        pc_mat.apply_dirichlet_symmetric(d, 0.0, &mut pc_rhs);
+    }
     let pc_linlvo = fem_to_linlvo_csr(&pc_mat);
     let gsmoother = GSSmoother::from_csr(&pc_linlvo).expect("GSSmoother");
     let s: f64 = if cfg.herm_conv { -1.0 } else { 1.0 };
