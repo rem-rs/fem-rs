@@ -9,6 +9,12 @@
 //! * GLVis / ParaView output is not available (silent runs).
 //! * Serial port: ParSubMesh → extract_submesh_3d, ParFESpace → HCurlSpace.
 //!
+//! Data flow follows upstream: the cylinder GridFunction is the transfer
+//! destination and is re-seeded from the RK3 output inside the print block
+//! (`multidomain_nd.cpp:391`), so between print steps the transfer reads the
+//! last printed RK3 state plus the interface values written since (D749 —
+//! the round-69/70 ports omitted that refresh).
+//!
 //! Serial mechanism mapping (additions w.r.t. `multidomain.rs`):
 //!
 //! | MFEM (parallel)                             | this port                                     |
@@ -616,10 +622,12 @@ fn main() {
         ConvectionDiffusionTDO::new(&fes_cylinder, ess_tdofs, 1.0, 1.0e-1, order, qp);
 
     let mut magnetic_field_cylinder = vec![0.0_f64; fes_cylinder.n_dofs()];
-    // D708/D716: shadow of C++ `magnetic_field_cylinder_gf` — same data flow
-    // as multidomain_rt (see the D708 note there): MFEM's Transfer reads and
-    // overwrites the destination, and the upstream loop never feeds the RK3
-    // result back, so each step's transfer discards the cylinder evolution.
+    // D708/D716/D749: shadow of C++ `magnetic_field_cylinder_gf` — same data
+    // flow as multidomain_rt (see the D708/D749 note there): MFEM's Transfer
+    // reads and overwrites the destination, and upstream re-seeds it from the
+    // RK3 output at every print step (`multidomain_nd.cpp:391`), so each
+    // transfer reads "the RK3 state as of the last print step, plus the
+    // interface values written since".
     let mut gf_state = vec![0.0_f64; fes_cylinder.n_dofs()];
 
     // Block submesh (domain attribute 2), diffusion-only (alpha=0, sigma=1).
@@ -687,7 +695,8 @@ fn main() {
         rk3ssp_step(&mut d_tdo, &mut magnetic_field_block, &mut t, dt);
 
         // Transfer the block solution onto the cylinder interface — into the
-        // gf shadow (D708/D716); the RK3 state is copied FROM the shadow.
+        // gf shadow (D708/D716); the RK3 state is copied FROM the shadow, and
+        // the shadow itself is only re-seeded at print steps (D749, below).
         let mut transferred = gf_state.clone();
         field_block_to_cylinder_map.transfer(&magnetic_field_block, &mut transferred);
         gf_state = transferred;
@@ -697,6 +706,22 @@ fn main() {
         rk3ssp_step(&mut cd_tdo, &mut magnetic_field_cylinder, &mut t, dt);
 
         if last_step || ti % vis_steps == 0 {
+            // Upstream print-block refresh (D749, `multidomain_nd.cpp:391-392`):
+            // the official loop re-seeds both GridFunctions from the RK3
+            // true-dof vectors inside this branch, so `gf_state` carries the
+            // cylinder's evolution into the NEXT transfer instead of drifting
+            // away from it.  Value-neutral within the block (the printed sums
+            // read the RK3 vectors, exactly as the print-ref harness does) but
+            // not across steps — this is the whole point of D749.  Kept first,
+            // as in the harness.
+            //
+            // No block-side counterpart is needed: the port hands
+            // `magnetic_field_block` to the transfer directly, which is what
+            // upstream's *every-step* `SetFromTrueDofs(magnetic_field_block)`
+            // (`multidomain_nd.cpp:373`) makes equivalent; the print-block write
+            // of the block GridFunction (`:392`) is idempotent on top of it.
+            gf_state.copy_from_slice(&magnetic_field_cylinder);
+
             let bsum: f64 = magnetic_field_block.iter().sum();
             let csum: f64 = magnetic_field_cylinder.iter().sum();
             let bsq: f64 = magnetic_field_block.iter().map(|v| v * v).sum();

@@ -9,6 +9,12 @@
 //! * GLVis / ParaView output is not available (silent runs).
 //! * Serial port: ParSubMesh → extract_submesh_3d, ParFESpace → HDivSpace.
 //!
+//! Data flow follows upstream: the cylinder GridFunction is the transfer
+//! destination and is re-seeded from the RK3 output inside the print block
+//! (`multidomain_rt.cpp:386`), so between print steps the transfer reads the
+//! last printed RK3 state plus the interface values written since (D749 —
+//! the round-69/70 ports omitted that refresh).
+//!
 //! Serial mechanism mapping (additions w.r.t. `multidomain.rs`):
 //!
 //! | MFEM (parallel)                             | this port                                     |
@@ -606,15 +612,16 @@ fn main() {
     );
 
     let mut field_cylinder = vec![0.0_f64; fes_cylinder.n_dofs()];
-    // D708: shadow of C++ `pressure_cylinder_gf`.  MFEM's `Transfer` READS and
-    // OVERWRITES the destination GridFunction (SubMeshToSubMesh uploads the
+    // D708/D749: shadow of C++ `pressure_cylinder_gf`.  MFEM's `Transfer` READS
+    // and OVERWRITES the destination GridFunction (SubMeshToSubMesh uploads the
     // dst's current values into the parent before the interface slots are
-    // overwritten by the source), and the upstream loop never feeds the RK3
-    // result back into `pressure_cylinder_gf` — so every step the transfer
-    // DISCARDS the cylinder's evolution and restarts from "last transfer
-    // output (interior = 0) + this step's interface values".  `field_cylinder`
-    // is the RK3 state; `gf_state` is the transfer destination whose contents
-    // are what C++ actually carries across steps.
+    // overwritten by the source), so the shadow's contents — not the RK3 state
+    // — are what C++ carries across steps.  Upstream re-seeds the shadow from
+    // the RK3 output at every print step (`multidomain_rt.cpp:386`, inside the
+    // `last_step || ti % vis_steps == 0` branch), so each transfer reads "the
+    // RK3 state as of the last print step, plus the interface values written
+    // since".  `field_cylinder` is the RK3 state; `gf_state` is the transfer
+    // destination / GridFunction.
     let mut gf_state = vec![0.0_f64; fes_cylinder.n_dofs()];
 
     // Block submesh (domain attribute 2), diffusion-only (alpha=0, kappa=1).
@@ -685,8 +692,8 @@ fn main() {
         rk3ssp_step(&mut d_tdo, &mut field_block, &mut t, dt);
 
         // Transfer the block solution onto the cylinder interface — into the
-        // gf shadow (D708): the RK3-evolved `field_cylinder` is copied FROM
-        // the shadow, never fed back into it.
+        // gf shadow (D708): the RK3 state is copied FROM the shadow, and the
+        // shadow itself is only re-seeded at print steps (D749, below).
         let mut transferred = gf_state.clone();
         field_block_to_cylinder_map.transfer(&field_block, &mut transferred);
         gf_state = transferred;
@@ -696,6 +703,22 @@ fn main() {
         rk3ssp_step(&mut cd_tdo, &mut field_cylinder, &mut t, dt);
 
         if last_step || ti % vis_steps == 0 {
+            // Upstream print-block refresh (D749, `multidomain_rt.cpp:386-387`):
+            // the official loop re-seeds both GridFunctions from the RK3
+            // true-dof vectors inside this branch, so `gf_state` carries the
+            // cylinder's evolution into the NEXT transfer instead of drifting
+            // away from it.  Value-neutral within the block (the printed sums
+            // read `field_block`/`field_cylinder`, exactly as the print-ref
+            // harness does) but not across steps — this is the whole point of
+            // D749.  Kept first, as in the harness.
+            //
+            // No block-side counterpart is needed: the port hands `field_block`
+            // to the transfer directly, which is what upstream's *every-step*
+            // `SetFromTrueDofs(pressure_block)` (`multidomain_rt.cpp:368`) makes
+            // equivalent; the print-block write of the block GridFunction
+            // (`:387`) is idempotent on top of it.
+            gf_state.copy_from_slice(&field_cylinder);
+
             let bsum: f64 = field_block.iter().sum();
             let csum: f64 = field_cylinder.iter().sum();
             let bsq: f64 = field_block.iter().map(|v| v * v).sum();
