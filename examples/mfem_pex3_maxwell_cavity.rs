@@ -24,14 +24,14 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
-use fem_element::{VectorReferenceElement, nedelec::{TriNDk, QuadNDk}};
+use fem_element::{VectorReferenceElement, nedelec::TriNDk};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_io::glvis::GlVisSocket;
-use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
+use fem_mesh::{Mesh, MeshTopology, amr::refine_uniform};
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
     par_partition::partition_mesh,
-    WorkerConfig, DofPartition, ParAmgConfig, SmootherType, par_solve_pcg_amg,
+    WorkerConfig, ParAmgConfig, SmootherType, par_solve_pcg_amg,
 };
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_solver::SolverConfig;
@@ -50,12 +50,10 @@ impl VectorLinearIntegrator for Src {
     }
 }
 
-#[allow(dead_code)]
 fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
     [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
 }
 
-#[allow(unused_variables, unused_assignments)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut mesh_file: Option<String> = None;
@@ -158,11 +156,17 @@ fn main() {
 
         // DIAG_KEEP elimination for owned essential DOFs (symmetric, keeps
         // diag); ghost-slot essential columns eliminated on the local rows.
+        // D705 (D697): the essential VALUES are the projection of E_exact at
+        // each essential true dof (`u` wraps exactly that projection in
+        // partition order) — `25c4c99` regressed them to hardcoded 0.0,
+        // silently homogenizing the PEC BC (C++ ex3p: x.ProjectCoefficient(E)
+        // feeds FormLinearSystem).  Lazy `then` closures: `then_some` would
+        // eagerly index out of bounds on non-essential ranks' slots.
         let clamped: Vec<(usize, f64)> = bdr
             .iter()
             .filter_map(|&d| {
                 let pid = dp.permute_dof(d) as usize;
-                (pid < dp.n_owned_dofs).then_some((pid, 0.0))
+                (pid < dp.n_owned_dofs).then(|| (pid, u.owned_slice()[pid]))
             })
             .collect();
         for &(pid, bc_val) in &clamped {
@@ -172,7 +176,7 @@ fn main() {
             .iter()
             .filter_map(|&d| {
                 let pid = dp.permute_dof(d) as usize;
-                (pid >= dp.n_owned_dofs).then_some((pid - dp.n_owned_dofs, 0.0))
+                (pid >= dp.n_owned_dofs).then(|| (pid - dp.n_owned_dofs, u.as_slice()[pid]))
             })
             .collect();
         if !ghost_ess.is_empty() {
@@ -180,14 +184,30 @@ fn main() {
         }
 
         let cfg = SolverConfig { rtol: 1e-8, max_iter: 10000, verbose: false, ..Default::default() };
-        let amg_cfg = ParAmgConfig {
-            smoother: SmootherType::SymmetricGaussSeidel,
-            n_pre_smooth: 2,
-            n_post_smooth: 2,
-            smoothed_prolongation: true,
-            block_size: 1,
-            use_global_aggregation: false,
-            ..ParAmgConfig::default()
+        // D703 recipe (-o ≥ 2): the scalar SGS-AMG config stalls on ND2+
+        // systems (10000 it, residual 9.8); switching to a Chebyshev(3,
+        // λ_lo = λ_max/10) smoother + coarse-level CG converges (481 it at
+        // `-o 2`, residual 9.3e-9).  C++ truth (ex3p, np=1, star.mesh):
+        // 22 it / 3.05462e-4 via HypreAMS — the remaining iteration gap and
+        // the error row are preconditioner-family / D697-family (crates
+        // domain), not example-side.  The ND1 default branch keeps the
+        // round-67 baseline config verbatim (parallel lane's D697 line).
+        let amg_cfg = if order >= 2 {
+            ParAmgConfig {
+                smoother: SmootherType::Chebyshev { degree: 3, ratio: 10.0 },
+                coarse_cg: true,
+                ..ParAmgConfig::default()
+            }
+        } else {
+            ParAmgConfig {
+                smoother: SmootherType::SymmetricGaussSeidel,
+                n_pre_smooth: 2,
+                n_post_smooth: 2,
+                smoothed_prolongation: true,
+                block_size: 1,
+                use_global_aggregation: false,
+                ..ParAmgConfig::default()
+            }
         };
         let res = par_solve_pcg_amg(&stiff, &rhs, &mut u, &amg_cfg, &cfg)
             .expect("PCG+AMG solve failed");
@@ -295,7 +315,6 @@ fn main() {
         // Note: u.as_slice() returns DOFs in partition ordering, but
         // element_dofs() returns DOFs in space (DM) ordering.  We must
         // permute via the DofPartition and apply sign corrections.
-        let lm = ps.local_space().mesh();
         let dp = ps.dof_partition();
         let n_owned_elems = pm.partition().n_owned_elems;
         // Refresh ghost DOFs and convert partition order → dm order (with
