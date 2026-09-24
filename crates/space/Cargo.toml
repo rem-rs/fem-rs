@@ -14,3 +14,12 @@ nalgebra    = { workspace = true }
 # D377: the 3-D boundary-dof oracle test loads real MFEM mesh files
 # (beam-tet.mesh / inline-hex.mesh) — same dev-dep pattern as fem-mesh.
 fem-io      = { path = "../io" }
+# D708: the curved-hex RT1 slot/local-mass pins reproduce the exact
+# `VectorAssembler` pairing the multidomain_rt TDO consumes (slot i of the
+# space's element_dofs ↔ basis i of the assembler's reference element), so
+# the pin must assemble through fem-assembly itself.  Dev-dep cycle is
+# intentional (fem-assembly depends on fem-space in the other direction).
+fem-assembly = { path = "../assembly" }
+# D709: the P-conjugacy pin evaluates M1⁻¹ through the MFEM-faithful
+# Jacobi-PCG solver instead of a hand-rolled iteration.
+fem-solver   = { path = "../solver" }
