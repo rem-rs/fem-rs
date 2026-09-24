@@ -1248,14 +1248,15 @@ impl VectorAssembler {
         let n = space.n_dofs();
         let space_order = space.element_order(0);
         let elem_type = space.mesh().element_type(0);
+        let geom_order = space.mesh().geom_order();
         if integrators
             .iter()
-            .any(|i| i.integration_order_for(space_order, elem_type).is_some())
+            .any(|i| i.integration_order_for_space_geom(space.space_type(), space_order, elem_type, geom_order).is_some())
         {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
                 let qo = integ
-                    .integration_order_for(space_order, elem_type)
+                    .integration_order_for_space_geom(space.space_type(), space_order, elem_type, geom_order)
                     .unwrap_or(quad_order);
                 let m = Self::assemble_bilinear_nd_canonical_many(space, &[*integ], qo);
                 acc = Some(match acc {
@@ -1370,16 +1371,20 @@ impl VectorAssembler {
         // individually on their own quadrature rules and accumulate.  The
         // element type is passed through so geometry-aware integrators (e.g.
         // CurlCurlIntegrator's Pk vs Qk distinction) can pick MFEM's order.
+        // D690: the geom order rides along — MFEM's hooks read
+        // `Trans.OrderW()` off the transformation, and a curved map on Hex8
+        // connectivity (OrderW 5 vs 2) changes the default rule.
         let space_order = space.element_order(0);
         let elem_type = mesh.element_type(0);
+        let geom_order = mesh.geom_order();
         if integrators
             .iter()
-            .any(|i| i.integration_order_for(space_order, elem_type).is_some())
+            .any(|i| i.integration_order_for_space_geom(space.space_type(), space_order, elem_type, geom_order).is_some())
         {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
                 let qo = integ
-                    .integration_order_for(space_order, elem_type)
+                    .integration_order_for_space_geom(space.space_type(), space_order, elem_type, geom_order)
                     .unwrap_or(quad_order);
                 let m = Self::assemble_bilinear_single(space, *integ, qo);
                 acc = Some(match acc {
@@ -1497,14 +1502,15 @@ impl VectorAssembler {
         let n_dofs = space.n_dofs();
         let space_order = space.element_order(0);
         let elem_type = mesh.element_type(0);
+        let geom_order = mesh.geom_order();
         if integrators
             .iter()
-            .any(|i| i.integration_order_for(space_order, elem_type).is_some())
+            .any(|i| i.integration_order_for_space_geom(space.space_type(), space_order, elem_type, geom_order).is_some())
         {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
                 let qo = integ
-                    .integration_order_for(space_order, elem_type)
+                    .integration_order_for_space_geom(space.space_type(), space_order, elem_type, geom_order)
                     .unwrap_or(quad_order);
                 let m = Self::assemble_bilinear_single_with_basis(space, *integ, qo, true);
                 acc = Some(match acc {
@@ -1585,7 +1591,10 @@ impl VectorAssembler {
                 let jac = affine_tr.jacobian();
                 let det_j = affine_tr.det_j();
                 let j_inv_t = affine_tr.jacobian_inv_t();
-                let w = *w_ref * det_j.abs();
+                // D696 verdict: **signed** — MFEM `MixedScalarCurlIntegrator`
+                // weights with `ip.weight * Trans.Weight()` (signed det,
+                // EvalWeight); `abs()` silently repaired inverted elements.
+                let w = *w_ref * det_j;
 
                 nd2_elem.eval_basis_vec(xi, &mut ref_nd);
                 rt2_elem.eval_basis_vec(xi, &mut ref_rt);
@@ -1664,7 +1673,10 @@ impl VectorAssembler {
                 let jac = affine_tr.jacobian();
                 let det_j = affine_tr.det_j();
                 let j_inv_t = affine_tr.jacobian_inv_t();
-                let w = *w_ref * det_j.abs();
+                // D696 verdict: **signed** — MFEM `MixedScalarCurlIntegrator`
+                // weights with `ip.weight * Trans.Weight()` (signed det,
+                // EvalWeight); `abs()` silently repaired inverted elements.
+                let w = *w_ref * det_j;
 
                 nd1.eval_basis_vec(xi, &mut ref_nd);
                 rt0.eval_basis_vec(xi, &mut ref_rt);

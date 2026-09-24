@@ -370,7 +370,11 @@ where
                 let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
                 (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
             };
-            let w = quad.weights[q] * det_j.abs();
+            // D696 verdict: **signed** — the MFEM mixed divergence family
+            // (`VectorFEDivergenceIntegrator` etc.) weights with
+            // `ip.weight * Trans.Weight()` (signed det, EvalWeight); the
+            // H(div) Piola divisor below already carries the same signed det.
+            let w = quad.weights[q] * det_j;
 
             ref_r.eval_basis(xi, &mut phi_r);
             ref_c.eval_div(xi, &mut div_c_vec);
@@ -378,7 +382,7 @@ where
             // Apply orientation signs and the contravariant Piola transform:
             // phys_div = ref_div / detJ  (since the Piola transform for H(div)
             // has div_phys = div_ref / detJ).  The quadrature weight already
-            // includes |detJ|, so the product w * div_phys = q_weight * div_ref.
+            // includes detJ, so the product w * div_phys = q_weight * div_ref.
             if let Some(signs) = signs_opt {
                 for i in 0..n_c.min(signs.len()) {
                     div_c_signed[i] = signs[i] * div_c_vec[i] / det_j;
@@ -479,6 +483,8 @@ impl<C: ScalarCoeff> HCurlH1WeakDivIntegrator for HCurlH1WeakDiv<C> {
             Some(qp_scalar.phi), qp_scalar.elem_dofs,
         );
         let q_val = self.coeff.eval(&ctx);
+        // D696 verdict: **keep abs** — magnitude-only degeneracy guard; the
+        // reciprocal itself uses the signed det (as in MFEM, no such guard).
         let inv_det_j = if det_j.abs() > 1e-15 { 1.0 / det_j } else { 0.0 };
 
         for j in 0..n_r {
@@ -574,7 +580,9 @@ where
         let mut vec_col = vec![0.0; n_c * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * tr.det_j().abs();
+            // D696 verdict: **signed** — MFEM mixed vector×scalar forms
+            // weight with `ip.weight * Trans.Weight()` (signed det).
+            let w = quad.weights[q] * tr.det_j();
             let det_j = tr.det_j();
             let j_inv_t = tr.jacobian_inv_t().clone();
             ref_r.eval_basis(xi, &mut phi_r);
@@ -649,7 +657,9 @@ where
         let mut curl_c_vec = vec![0.0; n_c * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * tr.det_j().abs();
+            // D696 verdict: **signed** — MFEM `MixedScalarCurlIntegrator`
+            // weights with `ip.weight * Trans.Weight()` (signed det).
+            let w = quad.weights[q] * tr.det_j();
             ref_r.eval_basis(xi, &mut phi_r);
             ref_c.eval_curl(xi, &mut curl_c_vec);
             let xp = tr.map_to_physical(xi);
@@ -791,13 +801,15 @@ where
                 continue;
             }
 
+            // D696 verdict: **signed** (both branches) — MFEM H(curl)×H¹
+            // gauge-coupling forms weight with `ip.weight * Trans.Weight()`.
             let (w, jit): (f64, nalgebra::DMatrix<f64>) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
                 let (jac, det, _xp) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
-                (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose())
+                (quad.weights[qi] * det, jac.try_inverse().unwrap().transpose())
             } else {
                 let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
-                (quad.weights[qi] * tr.det_j().abs(), tr.jacobian_inv_t().clone())
+                (quad.weights[qi] * tr.det_j(), tr.jacobian_inv_t().clone())
             };
             h1_ref.eval_basis(xi, &mut phi);
             h1_ref.eval_grad_basis(xi, &mut gr);
@@ -931,15 +943,17 @@ where
         let mut j_inv_t;
 
         for (q, xi) in quad.points.iter().enumerate() {
+            // D696 verdict: **signed** (both branches) — MFEM H¹×H(div)
+            // mixed forms weight with `ip.weight * Trans.Weight()`.
             let (w, det_j, xp) = if use_iso {
                 let ge = geo_elem.as_ref().expect("geo_ref_elem");
                 let (jac, det_j, x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
                 j_inv_t = jac.clone().try_inverse().expect("invertible Jacobian").transpose();
-                (quad.weights[q] * det_j.abs(), det_j, x)
+                (quad.weights[q] * det_j, det_j, x)
             } else {
                 let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
                 j_inv_t = tr.jacobian_inv_t().clone();
-                (quad.weights[q] * tr.det_j().abs(), tr.det_j(), tr.map_to_physical(xi))
+                (quad.weights[q] * tr.det_j(), tr.det_j(), tr.map_to_physical(xi))
             };
             ref_r.eval_basis(xi, &mut phi_r);
             ref_r.eval_grad_basis(xi, &mut grad_r);

@@ -161,6 +161,11 @@ fn solve_dense(n: usize, a: &mut [f64], b: &mut [f64]) {
 }
 
 /// Element volume for Tet4 / Tri3.
+///
+/// D696 verdict: **signed** — MFEM's element geometry carries the oriented
+/// Jacobian determinant (inverted tet `GetElementVolume` = −1/6, D679
+/// probe), and the lumped load `f·vol/n_v` below is `f·∫φᵢ` in MFEM's
+/// `DomainLFIntegrator` — signed through `Trans.Weight()`.
 fn element_volume<M: MeshTopology>(mesh: &M, e: u32) -> f64 {
     let ns = mesh.element_nodes(e);
     let c = |i| mesh.node_coords(ns[i]);
@@ -170,13 +175,13 @@ fn element_volume<M: MeshTopology>(mesh: &M, e: u32) -> f64 {
             let j10 = c(1)[1]-c(0)[1]; let j11 = c(2)[1]-c(0)[1]; let j12 = c(3)[1]-c(0)[1];
             let j20 = c(1)[2]-c(0)[2]; let j21 = c(2)[2]-c(0)[2]; let j22 = c(3)[2]-c(0)[2];
             let det = j00*(j11*j22-j12*j21) - j01*(j10*j22-j12*j20) + j02*(j10*j21-j11*j20);
-            det.abs() / 6.0
+            det / 6.0
         }
         3 => {
             let j00 = c(1)[0]-c(0)[0]; let j01 = c(2)[0]-c(0)[0];
             let j10 = c(1)[1]-c(0)[1]; let j11 = c(2)[1]-c(0)[1];
             let det = j00*j11 - j01*j10;
-            det.abs() / 2.0
+            det / 2.0
         }
         _ => 1.0,
     }
@@ -202,7 +207,9 @@ impl<M: MeshTopology> BilinearForm<M> for Poisson2DForm {
         let j00 = x[1]-x[0]; let j01 = x[2]-x[0];
         let j10 = y[1]-y[0]; let j11 = y[2]-y[0];
         let det_j = j00*j11 - j01*j10;
-        let abs_det = det_j.abs();
+        // D696 verdict: **signed** - MFEM Mass/Diffusion-family weight
+        // `ip.weight * Trans.Weight()` (signed det).
+        let abs_det = det_j;
         let inv_det = 1.0/det_j;
 
         let mut mv = vec![0.0; n_test * n_test];
@@ -262,7 +269,9 @@ impl<M: MeshTopology> BilinearForm<M> for Poisson3DForm {
         let j10=y[1]-y[0]; let j11=y[2]-y[0]; let j12=y[3]-y[0];
         let j20=z[1]-z[0]; let j21=z[2]-z[0]; let j22=z[3]-z[0];
         let det_j = j00*(j11*j22-j12*j21)-j01*(j10*j22-j12*j20)+j02*(j10*j21-j11*j20);
-        let abs_det = det_j.abs();
+        // D696 verdict: **signed** - MFEM Mass/Diffusion-family weight
+        // `ip.weight * Trans.Weight()` (signed det).
+        let abs_det = det_j;
         let inv_det = 1.0/det_j;
 
         let it00=(j11*j22-j12*j21)*inv_det; let it01=(j02*j21-j01*j22)*inv_det; let it02=(j01*j12-j02*j11)*inv_det;

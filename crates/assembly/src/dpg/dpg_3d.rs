@@ -65,7 +65,10 @@ pub fn solve_dpg_poisson_3d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64, f64)
         let j20 = z[1] - z[0]; let j21 = z[2] - z[0]; let j22 = z[3] - z[0];
 
         let det_j = j00*(j11*j22 - j12*j21) - j01*(j10*j22 - j12*j20) + j02*(j10*j21 - j11*j20);
-        let abs_det = det_j.abs();
+        // D696 verdict: **signed** - MFEM Mass/Diffusion family weights with
+        // `ip.weight * Trans.Weight()` (signed det); lumped volume below is
+        // the signed (`DomainLFIntegrator`-style) cell integral.
+        let abs_det = det_j;
         let inv_det = 1.0 / det_j;
 
         // J^{-T} (cofactor matrix / det)

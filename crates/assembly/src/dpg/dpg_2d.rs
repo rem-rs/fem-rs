@@ -54,7 +54,11 @@ pub fn solve_dpg_poisson_2d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64) -> f
         let j00 = x[1] - x[0]; let j01 = x[2] - x[0];
         let j10 = y[1] - y[0]; let j11 = y[2] - y[0];
         let det_j = j00 * j11 - j01 * j10;
-        let abs_det = det_j.abs();
+        // D696 verdict: **signed** — the H¹/L² Gram and Poisson blocks are
+        // MFEM `MassIntegrator` / `DiffusionIntegrator` forms, weighted by
+        // `ip.weight * Trans.Weight()` (signed det); the gradients below
+        // already divide by the signed det.
+        let vol_weight = det_j;
         let inv_det = 1.0 / det_j;
 
         let mut mv = vec![0.0; n_test * n_test];
@@ -62,7 +66,7 @@ pub fn solve_dpg_poisson_2d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64) -> f
         let mut bm = vec![0.0; n_test * n_trial];
 
         for (xi, &wr) in qr.points.iter().zip(qr.weights.iter()) {
-            let w = wr * abs_det;
+            let w = wr * vol_weight;
             tri_p3.eval_basis(xi, &mut phi);
             tri_p3.eval_grad_basis(xi, &mut dphi);
 

@@ -113,7 +113,9 @@ impl<S: FESpace, C: ScalarCoeff> MatFreeOperator for PAMassOperator<S, C> {
             let mut y_elem = vec![0.0_f64; n];
 
             for (qi, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[qi] * det_j.abs();
+                // D696 verdict: **signed** — MFEM `MassIntegrator` weights
+                // with `ip.weight * Trans.Weight()` (signed det, EvalWeight).
+                let w = quad.weights[qi] * det_j;
                 re.eval_basis(xi, &mut phi);
 
                 let xp: Vec<f64> = (0..dim)
@@ -184,7 +186,9 @@ impl<S: FESpace, K: ScalarCoeff> MatFreeOperator for PADiffusionOperator<S, K> {
             let mut y_elem = vec![0.0_f64; n];
 
             for (qi, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[qi] * det_j.abs();
+                // D696 verdict: **signed** — MFEM `DiffusionIntegrator`
+                // weights with `ip.weight * Trans.Weight()` (signed det).
+                let w = quad.weights[qi] * det_j;
                 re.eval_grad_basis(xi, &mut grad_ref);
                 xform_grads(&jit, &grad_ref, &mut grad_phys, n, dim);
 
@@ -272,7 +276,10 @@ impl<S: FESpace> LumpedMassOperator<S> {
                 } else {
                     det_j_simplex
                 };
-                let w = quad.weights[qi] * det_j.abs();
+                // D696 verdict: **signed** — row sums of the MFEM
+                // `MassIntegrator` element matrix, i.e. the same signed
+                // `ip.weight * Trans.Weight()` volume weight.
+                let w = quad.weights[qi] * det_j;
                 re.eval_basis(xi, &mut phi);
                 let phi_sum: f64 = phi.iter().sum();
                 for i in 0..nl {
@@ -596,7 +603,9 @@ impl HcurlMatrixFreeOperator {
                 let j_inv_t = jac.clone().try_inverse()
                     .expect("degenerate element in HcurlMatrixFreeOperator")
                     .transpose();
-                let w = quad.weights[q] * det_j.abs();
+                // D696 verdict: **signed** — MFEM `CurlCurlIntegrator` /
+                // `VectorMassIntegrator` weight `ip.weight * Trans.Weight()`.
+                let w = quad.weights[q] * det_j;
 
                 ref_elem.eval_basis_vec(xi, &mut ref_phi);
                 ref_elem.eval_curl(xi, &mut ref_curl);

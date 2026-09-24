@@ -90,7 +90,10 @@ pub fn solve_dpg_stokes_2d<M: MeshTopology>(
         let j00 = x[1] - x[0]; let j01 = x[2] - x[0];
         let j10 = y[1] - y[0]; let j11 = y[2] - y[0];
         let det_j = j00 * j11 - j01 * j10;
-        let abs_det = det_j.abs();
+        // D696 verdict: **signed** - MFEM Mass/Diffusion family weights with
+        // `ip.weight * Trans.Weight()` (signed det); lumped volume below is
+        // the signed (`DomainLFIntegrator`-style) cell integral.
+        let abs_det = det_j;
         let inv_det = 1.0 / det_j;
         let vol = 0.5 * abs_det;
 

@@ -88,6 +88,49 @@ pub trait VectorBilinearIntegrator: Send + Sync {
     ) -> Option<u8> {
         self.integration_order(space_order)
     }
+
+    /// Space-family-aware variant of
+    /// [`integration_order_for`](Self::integration_order_for).
+    ///
+    /// MFEM's `GetIntegrationOrder` hooks receive the concrete
+    /// `FiniteElement`, whose `GetOrder()` differs **by space family** on the
+    /// tensor geometries: every `RT_*Element(p)` carries `GetOrder() = p + 1`
+    /// (`fe/fe_rt.cpp` constructors) while `ND_*Element(p)` carries `p`
+    /// (`fe/fe_nd.cpp`).  A family-blind integrator therefore cannot
+    /// reproduce MFEM's defaults for RT and ND simultaneously (D680: hex RT0
+    /// mass needs `OrderW + 2·(p+1) = 4` where the blind formula gives `3`).
+    /// The default ignores the family and delegates to
+    /// [`integration_order_for`](Self::integration_order_for).
+    fn integration_order_for_space(
+        &self,
+        _space_type: fem_space::fe_space::SpaceType,
+        space_order: u8,
+        elem_type: fem_mesh::element_type::ElementType,
+    ) -> Option<u8> {
+        self.integration_order_for(space_order, elem_type)
+    }
+
+    /// Geometry-order-aware variant of
+    /// [`integration_order_for_space`](Self::integration_order_for_space)
+    /// (D690).
+    ///
+    /// MFEM's order hooks ultimately read `Trans.OrderW()`, a property of the
+    /// **element transformation**: a hex carrying a quadratic (curved) map
+    /// has `OrderW() = 5` even when its connectivity says `Hex8`.  fem-rs
+    /// stores such meshes with straight connectivity plus a separate geometry
+    /// field (`MeshTopology::geom_order()`), so the connectivity-only hooks
+    /// above cannot see it.  The assembler passes `mesh.geom_order()` here;
+    /// the default ignores it and delegates, so every integrator that does
+    /// not opt in keeps its exact previous rule (bitwise on affine meshes).
+    fn integration_order_for_space_geom(
+        &self,
+        space_type: fem_space::fe_space::SpaceType,
+        space_order: u8,
+        elem_type: fem_mesh::element_type::ElementType,
+        _geom_order: u8,
+    ) -> Option<u8> {
+        self.integration_order_for_space(space_type, space_order, elem_type)
+    }
 }
 
 /// Accumulate a linear-form contribution for vector FE into the element
