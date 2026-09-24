@@ -4470,6 +4470,62 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十八轮（round 68）：D708 根因二段反转（数据流而非槽位！）+ D702 反转（虚部 BC 清零）+ D712 边界裁决 + D706/D696 批 3/4
+
+开局 HEAD = round 67 末笔 `e93f1509`（已推送，ls-remote 实证）；磁盘 60G；树净。
+
+### 派单（四路并行，号段 D715–D728）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| A | **D708 hdiv RT1-hex 曲面槽位（头号）**+ D709 P-共轭 pin | D715-717 | crates/space |
+| B | **D702 ex22 -p0 3-D 解层** | D718-720 | assembly/complex + 3-D H1 路径 |
+| C | **D712 ex24 -p1 位级复刻** | D721-723 | crates/element + assembly 向量求值 |
+| D | **D706 FormLinearSystem 入口 + D696 批 3/4** | D724-728 | parallel 入口、postproc/iga/wg/reed/ad/dg/physics、pex3 |
+
+### 四路交付与关门（round 68 主会话收尾）
+
+#### A —— D708 **关闭（根因二段反转）** + D709 落地
+- **round-67 的 hdiv 槽位假设被证伪**：曲面 hex 上 fem-rs 的有序 `GetElementVDofs` 288×36 全表**逐字节相同**、局部质量阵/传递映射与 MFEM 逐位/结构一致（M 116352 条/K 218688 条 max rel 1.8e-11）。
+- **真凶 = multidomain_rt 串行移植的数据流**：MFEM 的 `Transfer` **读并覆写**目的 GridFunction（SubMeshToSubMesh 先上传 dst 现值再被源覆写界面槽），而上游循环从不用 RK3 结果更新 `pressure_cylinder_gf`——**每步传递把圆柱演化丢弃、从"上次传递输出（内部=0）+ 本步界面值"重启；圆柱动力学只存在于打印里**。fem-rs 移植让演化场持续存在 → 逐步累积 −1.42e-3。
+- **判决实验**：Rust 侧复刻 C++ 数据流（gf-shadow）后逐步 per-dof 对拍——step 1 全场逐位（max 3.0e-19）、**step 250 cyl sum = −6.420799e-6 == C++ −6.4208e-06、max per-dof diff 6.3e-18**。
+- **主会话落地 gf-shadow**（rt+nd 各 3 行，transfer 目的改影子、RK3 态从影子拷贝）：**RT cyl sum/ssq = −6.420799e-6/1.430509e-6 = C++ 全吻合；ND cyl sum/ssq = 1.337180e-5/1.594132e-4 = C++ 全吻合（D716 一并兑现）**；block 两侧保持 C++ 6-7 位。multidomain 双变体从 round-63 CRASH → RUN*(870×) → **与 C++ 全对**。
+- 新 pin：`d708_rt1_hex_curved_mfem_align`（7 MFEM 金标 + 数据流 pin）、**`d709_rt1_hex_p_conjugacy`**（RT0⊂RT1 共轭不变量 `(Bu)ᵀM₁⁻¹(Bu) == uᵀM₀u`，直线+曲面全绿——槽位置换类缺陷在此是 O(1) 破坏）。
+- 新债：**D715**（已证：`element_jacobian_at` 曲面 hex 用 P1 顶点表"直化"，`dof_nodal_coords` 节点位随之偏差——fem-mesh 车道，修法在案）、**D717**（HYPOTHESIS：内面跨空间配对应改用 D526 `dof_nodal_coords` 键）。
+
+#### B —— D702 **关闭（根因反转）**
+- **3-D H1 装配/几何/BC 核心完全无罪**：单 hex Q1/Q2、单 tet、双 hex 全管线 K/M ≤2.4e-15、解 ≤3.7e-16（dof 指纹双向双射、tet 局部序 = d157 钉子）。
+- **真凶 = 示例 `solve_3d_p0` 把本质边界虚部清零**（`bc_im = |_| 0.0`；Re 半边逐位正确——2-D 在 D693 修过双分量，3-D 漏网）。**判决探针**：MFEM 加 `-bc 1`（Re 投影 + Im 清零 = 示例的 BC）**逐位复现全部四个 Rust 数字**（hex/tet × o1/o2）。
+- **形态学勘误**：round-67"hex 远 46%/tet 近 0.05%"是错位拼接（2.1285e-1 系 d693 修复前 quad 值）；真实形态 = **o1 近（ess 节点落在 sin 近零点）o2 远（52-83%）、与几何无关**。
+- **主会话落地 D718**（Im 投影两行）：**hex o1 = 1.459737e-1/1.433704e-1、o2 = 1.537551e-2/4.976468e-2 = C++ 括号值全部命中**；2-D quad `-o 1` 3.574095e-2 不回潮 ✓。
+- 新债：**D719**（HYPOTHESIS：ex22 -p1 inline-quad 2-D ND vs C++ 偏差，round-67 即存在）、**D720**（HYPOTHESIS：-p2 tet GMRES 不收敛 = C++ 自身亦不收敛，配置层）。
+
+#### C —— D712 **边界裁决关闭**（代理失联，测试文件即报告，主会话收编）
+- **四向 splice 矩阵**（WSL MFEM 4.10，M/C/v 交叉喂入）：打印对**完全由 M/C 条目级舍入决定**（v 的 11552/107168 dof 1-ulp 差不负载——D714 sin 平台差实证但非承载项）。
+- **根因 = 参考域约定不同**：fem-rs hex RT/ND 在 `[-1,1]³`（求积 ±√0.6、J=0.5I+junk），MFEM 在 `[0,1]³`（点 (1±√0.6)/2、J=I+junk）——数学 1e-11 吻合（D680）但每个中间 double 都不同；`-p 1` 首迭代残差是低于初值 24 个量级的纯相消碎片，把条目噪声放大进打印第 6 位。
+- **收尾这两行需要跨 fem-element/mesh/space 的 [0,1]³ 重约定**（威胁全部字节 gauge，需刻意重基线）= **D721**；solver 层 SpMV 列序 CSR/ARF 折叠次序差 = **D722**。**裁决：2 行保持文档化边界，不硬凑**；`d712_ex24_p1_boundary` 3 pin 入库（27 点 [-1,1]³ 求积指纹 + splice 结论）。
+
+#### D —— D706 **关闭** + D696 批 3/4 **关闭**（含 d365 金字塔红灯实探裁决）
+- **D706**：MFEM `FormLinearSystem` 语义从 4.10 实源钉死（`FormSystemMatrix` + `EliminateBC`：`b -= Ae·x` 含跨 rank offd 反应 + ess 行 `B(r)=A(r,r)·x(r)`）；核心入口 `ParCsrMatrix::eliminate_ess_tdofs` + `ParVectorAssembler::form_linear_system`（`ElimPolicy{DiagKeep,DiagOne}`，值从投影 x 读——**ess 索引与值不可解耦**，D697 事故面根治）；**pex3 迁移**（28 行手搓块 → 一次调用，**ranks1/2 = 87/102 it、2.70053 逐位保持**）；单测 3/3（新入口 vs 旧两步逐位 + EliminateBC 值级 + DiagOne/ghost 覆盖）。
+- **D696 批 3/4**：postproc 五文件（grid_function ~21 站/error_estimate/flux_recovery/postprocess/l2_zz_rt1）+ ad/dg/physics 族全部裁决（SIGNED 为主；`grid_function` 曲面 Gram `sqrt(E·G−F·F)` 保 abs、守卫类保 abs+注释）。**⚠️ d365 金字塔红灯实探裁决**：MFEM 顶点朝下有效金字塔 `GetElementVolume=+1/3、Weight≡+1` 而 fem-rs 直金字塔框架 det<0 ⇒ **金字塔帧保留 |det| = 恢复 MFEM parity（帧归一，非语义偏离）**，simplex/quad/hex 帧保持 SIGNED；d365 5/5 恢复绿。
+- 红线：pex3 逐位 ✓、fem-parallel 245/0+313/0、fem-assembly 1176/0、ex8/ex4/ex5 ✓、ex24 四口径（-p2 vs C++ 现跑 diff=0）✓、ex26/ex30/ex33 ✓、**ex31 BIT diff=0** ✓、fem-io 306/0。
+- 新债：**D724**（ex31 `-m data/inline-segment.mesh` 读取失败：`expected 'ny=', got 'sx = 1.0'`——io/mesh 道，C++ 正常）、**D725**（HYPOTHESIS：曲面金字塔/镜像棱柱框架符号上层——根治方向 = mesh 层复现 MFEM 金字塔映射符号）、**D726**（iga/wg/reed ~60 站 = D696 尾，无 MFEM core 对应需类级裁决）、**D727**（非车道独占站：dgmassinv/cut·moment_fitting/hdiv_error 守卫注释）、**D728**（complex.rs 复数度量站）。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2626 / 0**（+ex22 2-D 前置快查 3.574095e-2 保持）；门 2 `--tests`
+**277 targets / 4061 / 0** / 24 ignored（round 67 基线 270/4037 + 七新套件 d708[7]/d709[3]/
+d702[5]/d712[3]/d706[3]/d696 批3[4]批4[2]，账目闭合、零 flake）；门 3 examples **0 错误、
+非 vendor 警告 0**；门 4 pro **rc=0**；门 5 fem-py **rc=0**。磁盘 63G。主会话合流抽查：
+**multidomain_rt cyl = −6.420799e-6/1.430509e-6 = C++ 全吻合**（gf-shadow 落地后）、
+**multidomain_nd cyl = 1.337180e-5/1.594132e-4 = C++ 全吻合**（D716 一并兑现）、**ex22
+hex o1/o2 = 1.459737e-1/1.433704e-1 与 1.537551e-2/4.976468e-2 = C++ 括号值**（D718 落地）、
+ex22 2-D 3.574095e-2 不回潮、ex8 29 it + 0.0183277、ex40 0.026921483748254076。
+
+### round 69 待办（建议）
+
+**① D721（如立）[0,1]³ 参考域重约定**——跨 element/mesh/space 的刻意重基线，需先立项论证（收益：ex24 -p1 全逐位 + 一整类 ulp 噪声债消失）；**② D715**（element_jacobian_at 曲面 hex isoparametric 化，修法在案）；**③ D706 串行 analog**（assembly form.rs）；**④ D724**（inline-segment.mesh 读取）；**⑤ D719/D720/D725/D726/D727/D728 裁决族**；⑥ **multidomain rt/nd 全 stdout 对拍升 BIT**（轨迹已全对，剩格式对齐）；⑦ D586 upstream（待用户）。
+
 ## 第六十七轮（round 67）：D693-695（头号，ex22 示例侧收口逐位）+ D697 根因反转（crates 无罪）+ D690/D680 合流 + D696 批 1/2 + D705 主会话落地
 
 开局 HEAD = round 66 末笔 `1f3ec6c`（已推送，ls-remote 实证）；磁盘 109G（round 66 清理红利）；树净。
