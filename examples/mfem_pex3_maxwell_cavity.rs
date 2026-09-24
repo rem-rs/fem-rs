@@ -147,41 +147,32 @@ fn main() {
         // Initial guess x = projection of E_exact (dm order → partition order).
         let x0 = ps.local_space().interpolate_vector(&|p| exact_e(p, kappa).to_vec());
         let x0_perm = fem_parallel::par_assembler::permute_vec(x0.as_slice(), dp);
-        let mut u = ParVector::from_local_raw(
+        let u = ParVector::from_local_raw(
             x0_perm,
             n_owned,
             ps.dof_ghost_exchange_arc(),
             comm.clone(),
         );
 
-        // DIAG_KEEP elimination for owned essential DOFs (symmetric, keeps
-        // diag); ghost-slot essential columns eliminated on the local rows.
-        // D705 (D697): the essential VALUES are the projection of E_exact at
+        // D706: MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` — the
+        // one-stop elimination whose VALUES are the projection of E_exact at
         // each essential true dof (`u` wraps exactly that projection in
-        // partition order) — `25c4c99` regressed them to hardcoded 0.0,
-        // silently homogenizing the PEC BC (C++ ex3p: x.ProjectCoefficient(E)
-        // feeds FormLinearSystem).  Lazy `then` closures: `then_some` would
-        // eagerly index out of bounds on non-essential ranks' slots.
-        let clamped: Vec<(usize, f64)> = bdr
-            .iter()
-            .filter_map(|&d| {
-                let pid = dp.permute_dof(d) as usize;
-                (pid < dp.n_owned_dofs).then(|| (pid, u.owned_slice()[pid]))
-            })
-            .collect();
-        for &(pid, bc_val) in &clamped {
-            stiff.apply_dirichlet_par_keep_diag(pid, bc_val, &mut rhs);
-        }
-        let ghost_ess: Vec<(usize, f64)> = bdr
-            .iter()
-            .filter_map(|&d| {
-                let pid = dp.permute_dof(d) as usize;
-                (pid >= dp.n_owned_dofs).then(|| (pid - dp.n_owned_dofs, u.as_slice()[pid]))
-            })
-            .collect();
-        if !ghost_ess.is_empty() {
-            stiff.apply_ghost_ess_columns(&ghost_ess, &mut rhs);
-        }
+        // partition order, C++ ex3p: x.ProjectCoefficient(E) feeds
+        // FormLinearSystem).  This replaces the D705 hand-written
+        // owned/ghost split (`25c4c99` had regressed the values to hardcoded
+        // 0.0, silently homogenizing the PEC BC — the D697 incident the core
+        // entry now makes unreachable).  DIAG_KEEP (symmetric, keeps diag) is
+        // the round-30 adjudicated shape matching the C++ FormLinearSystem
+        // call in ex3p.  X (= the projection, bitwise) becomes the PCG
+        // initial guess, exactly as C++ `pcg.Mult(B, X)` with X = P·x.
+        let mut u = ParVectorAssembler::form_linear_system(
+            &mut stiff,
+            &ps,
+            &bdr,
+            &u,
+            &mut rhs,
+            fem_parallel::ElimPolicy::DiagKeep,
+        );
 
         let cfg = SolverConfig { rtol: 1e-8, max_iter: 10000, verbose: false, ..Default::default() };
         // D703 recipe (-o ≥ 2): the scalar SGS-AMG config stalls on ND2+

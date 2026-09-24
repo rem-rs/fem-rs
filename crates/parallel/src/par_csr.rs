@@ -16,6 +16,20 @@ use crate::ghost::GhostExchange;
 use crate::par_vector::ParVector;
 use fem_mesh::amr::HangingNodeConstraint;
 
+/// MFEM `DiagonalPolicy` (the subset used by `FormLinearSystem` callers) —
+/// the strategy parameter of [`ParCsrMatrix::eliminate_ess_tdofs`] and
+/// [`ParVectorAssembler::form_linear_system`](crate::par_vector_assembler::ParVectorAssembler::form_linear_system).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElimPolicy {
+    /// `DIAG_KEEP`: symmetric row/col elimination, **diagonal preserved** —
+    /// keeps the operator's scaling (CG-friendly; the pex3/ex3p adjudicated
+    /// shape, round-30).
+    DiagKeep,
+    /// `DIAG_ONE`: row and column zeroed, diagonal set to 1 — MFEM's
+    /// `FormLinearSystem` default policy.
+    DiagOne,
+}
+
 /// A distributed CSR matrix: `diag` block (owned columns) + `offd` block
 /// (ghost columns).
 ///
@@ -607,6 +621,54 @@ impl ParCsrMatrix {
                 }
             }
         }
+    }
+
+    /// **MFEM `FormLinearSystem` shape core** (D706): eliminate a full set of
+    /// essential true dofs from the parallel system in one place, using the
+    /// **projected solution values** — the one-stop
+    /// `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` semantics that the
+    /// hand-written call sites kept re-deriving (the D697 accident surface).
+    ///
+    /// MFEM equivalence (`pbilinearform.cpp:475` + `linalg/hypre.cpp:2461`):
+    /// `FormSystemMatrix` eliminates the ess rows/cols from `A` under
+    /// `diag_policy`, then `EliminateBC(Ae, ess, x, b)` computes
+    /// `b -= Ae·x` from the eliminated part and overwrites the ess rows with
+    /// `A(r,r)·x(r)`.  Split over our block structure this is exactly
+    ///   - owned ess dof `p`: row/col elimination in the diag block with the
+    ///     true column entries, `rhs[p] = A(p,p)·v` (DiagKeep) or `rhs[p] = v`
+    ///     (DiagOne, diag set to 1), and the offd row of `p` zeroed;
+    ///   - ghost ess dof slot `g`: `rhs[row] -= offd[row,g]·v` for every owned
+    ///     row, then the offd column zeroed (the cross-rank half of the same
+    ///     `Ae·x` product and column elimination).
+    /// The two passes touch disjoint entries and run in the same order as the
+    /// former example-side code, so the eliminated system is reproduced
+    /// **bitwise** (pex3 87/102 it baseline).
+    pub fn eliminate_ess_tdofs(
+        &mut self,
+        owned_ess: &[(usize, f64)],
+        ghost_ess: &[(usize, f64)],
+        rhs: &mut ParVector,
+        policy: ElimPolicy,
+    ) {
+        for &(pid, v) in owned_ess {
+            debug_assert!(pid < self.n_owned, "owned ess slot out of range");
+            match policy {
+                ElimPolicy::DiagKeep => {
+                    self.apply_dirichlet_par_keep_diag(pid, v, rhs);
+                }
+                ElimPolicy::DiagOne => {
+                    self.diag.apply_dirichlet_symmetric(pid, v, rhs.as_slice_mut());
+                    if self.n_ghost > 0 {
+                        let start = self.offd.row_ptr[pid];
+                        let end = self.offd.row_ptr[pid + 1];
+                        for k in start..end {
+                            self.offd.values[k] = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+        self.apply_ghost_ess_columns(ghost_ess, rhs);
     }
 
     /// MFEM‑style symmetric diagonal elimination: zero row AND column for

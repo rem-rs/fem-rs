@@ -526,7 +526,24 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let mut energy = 0.0;
         for (q, xi) in quad.points.iter().enumerate() {
             let (_, det_j) = geom_jacobian(mesh, element, nodes, xi, dim, elem_type);
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 3 adjudication (revised on the d365 red light):
+            // MFEM ComputeFluxEnergy weights with `Trans.Weight()·ip.weight`
+            // and the MFEM probe `tmp/d696b/bipyramid_probe.cpp` proves
+            // Weight() is +1 at every point of a valid apex-DOWN pyramid
+            // (GetElementVolume = +1/3), while the fem-rs straight-pyramid
+            // frame (D235/D339/D340 axes-permuted collapsed map) carries
+            // det < 0 on such cells.  The measure therefore keeps |det| on
+            // the PYRAMID frames (a frame-normalization that RESTORES MFEM
+            // parity, not a semantic deviation); simplex/quad/hex frames
+            // share MFEM's orientation, where the signed det reproduces
+            // MFEM's Weight bitwise — including the negative signature of
+            // inverted cells (d696_signed_det_pins_batch3).
+            let dj = if matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
+                det_j.abs()
+            } else {
+                det_j
+            };
+            let w = quad.weights[q] * dj;
             ref_elem.eval_basis(xi, &mut phi);
             for d in 0..dim {
                 let mut s = 0.0;

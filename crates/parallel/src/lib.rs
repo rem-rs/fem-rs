@@ -179,6 +179,7 @@ pub use par_amg::{
 };
 pub use par_ams::ParAmsPrecond;
 pub use par_csr::ParCsrMatrix;
+pub use par_csr::ElimPolicy;
 pub use par_discrete_operator::ParDiscreteLinearOperator;
 pub use par_lobpcg::{par_lobpcg, ParLobpcgResult};
 pub use par_mesh::ParallelMesh;

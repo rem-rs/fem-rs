@@ -183,7 +183,9 @@ impl HelmholtzFilter {
             for (q, xi) in quad.points.iter().enumerate() {
                 let (jac, _xp) = element_jacobian_at(mesh, e, xi, dim);
                 let det_j = jac[(0, 0)] * jac[(1, 1)] - jac[(0, 1)] * jac[(1, 0)];
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+                let w = quad.weights[q] * det_j;
                 ref_elem.eval_basis(xi, &mut phi);
                 for (i, &d) in dofs.iter().enumerate() {
                     rhs[d as usize] += rho_e * phi[i] * w;

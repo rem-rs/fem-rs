@@ -817,7 +817,9 @@ where
             let mut f_elem = vec![0.0_f64; n_l];
 
             for (qi, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[qi] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+                let w = quad.weights[qi] * det_j;
                 re.eval_basis(xi, &mut phi);
                 re.eval_grad_basis(xi, &mut grad_ref);
                 xform_grads(&jit, &grad_ref, &mut grad_p, n_l, dim);
@@ -883,7 +885,9 @@ where
             let mut k_elem = vec![0.0_f64; n_l * n_l];
 
             for (qi, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[qi] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+                let w = quad.weights[qi] * det_j;
                 re.eval_basis(xi, &mut phi);
                 re.eval_grad_basis(xi, &mut grad_ref);
                 xform_grads(&jit, &grad_ref, &mut grad_p, n_l, dim);

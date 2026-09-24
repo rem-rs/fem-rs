@@ -197,6 +197,8 @@ pub fn phys_to_ref_quad_01(
         let yv = nx0 * ny0 * y[0] + nx1 * ny0 * y[1] + nx1 * ny1 * y[2] + nx0 * ny1 * y[3];
         let (j, _d) = quad_jac_at_01(x, y, xi[0], xi[1]);
         let det = j[(0, 0)] * j[(1, 1)] - j[(0, 1)] * j[(1, 0)];
+        // D696 batch 4: abs RETAINED — Newton-iteration degeneracy guard
+        // (magnitude test, not a measure); the inverse below uses signed det.
         if det.abs() < 1e-16 {
             break;
         }

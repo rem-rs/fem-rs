@@ -128,7 +128,10 @@ impl MixedHyperelasticityForm {
 
                 let (det_j, ji) = geometry_jacobian(&*self.mesh, e as u32, xi, self.dim);
                 xform_grads(&ji, &gr_u, &mut gp_u, n_du, self.dim);
-                let w = q.weights[qi] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = q.weights[qi] * det_j;
 
                 // Deformation gradient F = I + ∇u
                 let mut F = DMatrix::<f64>::identity(self.dim, self.dim);
@@ -227,7 +230,10 @@ impl MixedHyperelasticityForm {
 
                 let (det_j, ji) = geometry_jacobian(&*self.mesh, e as u32, xi, self.dim);
                 xform_grads(&ji, &gr_u, &mut gp_u, n_du, self.dim);
-                let w = q.weights[qi] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = q.weights[qi] * det_j;
 
                 let mut F = DMatrix::<f64>::identity(self.dim, self.dim);
                 for k in 0..n_du {
@@ -374,7 +380,10 @@ impl MixedHyperelasticityForm {
 
                 let (det_j, ji) = geometry_jacobian(&*self.mesh, e as u32, xi, self.dim);
                 xform_grads(&ji, &gr_u, &mut gp_u, n_du, self.dim);
-                let w = q.weights[qi] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = q.weights[qi] * det_j;
 
                 let mut F = DMatrix::<f64>::identity(self.dim, self.dim);
                 for k in 0..n_du {

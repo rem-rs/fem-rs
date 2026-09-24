@@ -196,7 +196,7 @@ pub struct DgHyperbolicConservationLaws {
     // Stored mesh for volume term direct quadrature
     mesh_elem_nodes: Vec<Vec<u32>>,       // element → [n0, n1, ...] (3 for Tri3, 4 for Quad4)
     mesh_node_coords: Vec<[f64; 2]>,      // node → [x, y]
-    elem_det_j: Vec<f64>,                  // per-element |detJ| (constant for Tri3, centroid for Quad4)
+    elem_det_j: Vec<f64>,                  // per-element detJ, SIGNED — D696 batch 4 (constant for Tri3, centroid for Quad4)
     flux: Box<dyn FluxFunction>,
     interior_faces: Vec<InteriorFace>,
     boundary_faces: Vec<BoundaryFace>,
@@ -236,6 +236,11 @@ fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> (Box<dyn ReferenceElemen
 
 /// Bilinear (Q1) Jacobian and J^{-T} at quadrature point (ξ, η) ∈ [-1,1]².
 /// Returns (detJ, [Jit00, Jit01, Jit10, Jit11]).
+///
+/// D696 batch 4: detJ returned **SIGNED** — the returned det is the
+/// quadrature measure consumed as `w_q·detJ` (MFEM hyperbolic.cpp:103/165
+/// `ip.weight * Tr.Weight()`, signed), and the companion inverse already
+/// divides by the signed det.  Bitwise |det| on valid meshes.
 fn quad4_jac_at_qp(p: &[[f64; 2]; 4], xi: f64, eta: f64) -> (f64, [f64; 4]) {
     // Q1 shape derivatives on [0,1]² (GL nodal basis):
     // N0=(1-ξ)(1-η), N1=ξ(1-η), N2=ξη, N3=(1-ξ)η
@@ -247,7 +252,7 @@ fn quad4_jac_at_qp(p: &[[f64; 2]; 4], xi: f64, eta: f64) -> (f64, [f64; 4]) {
     let j22 = deta[0]*p[0][1] + deta[1]*p[1][1] + deta[2]*p[2][1] + deta[3]*p[3][1];
     let det = j11 * j22 - j12 * j21;
     let inv_det = 1.0 / det;
-    (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+    (det, [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
 }
 
 /// Helper: per-element geometry coordinates (uses the mesh "nodes" section,
@@ -265,6 +270,8 @@ fn get_quad_nodes(mesh: &dyn MeshTopology, elem: u32) -> [[f64; 2]; 4] {
 }
 
 /// Tri3 constant Jacobian (per-element geometry coordinates).
+/// D696 batch 4: detJ SIGNED — same `ip.weight * Tr.Weight()` measure class
+/// (hyperbolic.cpp:103/165).
 fn tri3_jac_at_qp(mesh: &dyn MeshTopology, elem: u32) -> (f64, [f64; 4]) {
     let nodes = mesh.geometry_nodes(elem);
     let p0 = mesh.geom_coords_of(nodes[0]);
@@ -274,11 +281,11 @@ fn tri3_jac_at_qp(mesh: &dyn MeshTopology, elem: u32) -> (f64, [f64; 4]) {
     let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
     let det = j11 * j22 - j12 * j21;
     let inv_det = 1.0 / det;
-    (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+    (det, [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
 }
 
 /// Compute element-wise inverse mass matrix M_e⁻¹ in physical space.
-/// M_e[i,j] = Σ_q w_q · |detJ(ξ_q)| · φ_i(ξ_q) · φ_j(ξ_q)
+/// M_e[i,j] = Σ_q w_q · detJ(ξ_q) · φ_i(ξ_q) · φ_j(ξ_q)   (detJ signed — D696)
 fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_elems: usize, shape: ElemShape) -> Vec<na::DMatrix<f64>> {
     let dp = ref_elem.n_dofs();
     let q_order = 2 * ref_elem.order();
@@ -897,7 +904,9 @@ impl DgHyperbolicConservationLaws {
                         let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
                         let det = j11 * j22 - j12 * j21;
                         let inv_det = 1.0 / det;
-                        (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+                        // D696 batch 4: SIGNED measure (hyperbolic.cpp:103/165
+                        // class); bitwise |det| on valid meshes.
+                        (det, [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
                     }
                     // Quad: use the full 4-node isoparametric Jacobian.  The old
                     // code built J from only (p0,p1,p2) — for a quad the η
@@ -934,7 +943,7 @@ impl DgHyperbolicConservationLaws {
                         // ∇x_φ_i = J^{-T} · ∇ξ_φ_i
                         let gx = jit[0] * gphi[i * dim] + jit[1] * gphi[i * dim + 1];
                         let gy = jit[2] * gphi[i * dim] + jit[3] * gphi[i * dim + 1];
-                        // z[e,i,eq] += w * |detJ| * (F_x * gx + F_y * gy)
+                        // z[e,i,eq] += w * detJ * (F_x * gx + F_y * gy)  (signed — D696)
                         for eq in 0..nq {
                             z[base + i * nq + eq] += w * (flux_qp[eq*dim] * gx + flux_qp[eq*dim+1] * gy);
                         }

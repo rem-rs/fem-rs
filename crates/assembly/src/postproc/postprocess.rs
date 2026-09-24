@@ -335,13 +335,27 @@ pub fn compute_h1_error<S: FESpace>(
             // D265: hex/quad use the isoparametric map (the quadrature and
             // the geometry share the element's reference frame, so `xi` is
             // used directly); simplices keep the affine x0 + J·xi map.
+            // D696 batch 3: SIGNED weights — MFEM `GridFunction::
+            // ComputeH1Error`/`ComputeL2Error` weight with `Trans.Weight()` =
+            // Det(J) signed for square Jacobians (eltrans.cpp:30 →
+            // densemat.cpp `DenseMatrix::Weight`, upstream `fabs` commented
+            // out).  Bitwise the old |det| on valid meshes; inverted elements
+            // carry MFEM's negative-contribution signature.  PYRAMID frames
+            // keep |det| as the frame normalization (probe
+            // tmp/d696b/bipyramid_probe.cpp: MFEM Weight ≡ +1 on valid
+            // apex-down pyramids, while the fem-rs frame gives det < 0).
             let (w, x_phys, j_inv_t) = if use_iso {
                 let (j_iso, det_iso, xp_iso) = iso_jacobian(mesh, e, xi, dim);
                 let jt = j_iso
                     .try_inverse()
                     .expect("degenerate element in compute_h1_error")
                     .transpose();
-                (quad.weights[qi] * det_iso.abs(), xp_iso, jt)
+                let dj = if matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
+                    det_iso.abs()
+                } else {
+                    det_iso
+                };
+                (quad.weights[qi] * dj, xp_iso, jt)
             } else {
                 let mut xp: Vec<f64> = x0.clone();
                 for k in 0..dim {
@@ -352,7 +366,7 @@ pub fn compute_h1_error<S: FESpace>(
                 let jt = j_inv_t
                     .clone()
                     .expect("simplex arm must carry an affine Jacobian");
-                (quad.weights[qi] * det_j.abs(), xp, jt)
+                (quad.weights[qi] * det_j, xp, jt)
             };
 
             // Basis gradients in reference space, then transform to physical.
@@ -652,20 +666,29 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
         };
         let j_inv_t = jac.try_inverse().expect("degenerate element").transpose();
 
-        // Element area/volume: for a simplex |det_j| / d!; for a hex the
-        // integral of |det J| over the [-1,1]³ frame (the corner-difference
+        // Element area/volume: for a simplex det_j / d!; for a hex the
+        // integral of det J over the [-1,1]³ frame (the corner-difference
         // determinant has no simplex meaning there).
+        // D696 batch 3: SIGNED — MFEM `Mesh::GetElementVolume` accumulates
+        // `Trans.Weight()` = Det(J) with sign (D679: inverted tet = −1/6);
+        // PYRAMID frames keep |det| as the frame normalization (probe
+        // tmp/d696b/bipyramid_probe.cpp).
         let elem_area = if use_iso {
             let vol_order = (2 * mesh.geom_order().max(1)).max(2);
             let gq = ref_elem.quadrature(vol_order);
             let mut vol = 0.0_f64;
             for (gx, gw) in gq.points.iter().zip(gq.weights.iter()) {
                 let (_jg, dg, _xp) = iso_jacobian(mesh, e, gx, dim);
-                vol += gw * dg.abs();
+                let dj = if matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
+                    dg.abs()
+                } else {
+                    dg
+                };
+                vol += gw * dj;
             }
             vol
         } else {
-            det_j.abs() / match dim {
+            det_j / match dim {
                 2 => 2.0,
                 3 => 6.0,
                 _ => 1.0,
@@ -754,7 +777,10 @@ pub fn integrate_element_scalar_2d<S: FESpace>(
         let n_ldofs = ref_e.n_dofs();
         let mut phi = vec![0.0; n_ldofs];
         for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * tr.det_j().abs();
+            // D696 batch 3: SIGNED — the MFEM class is LinearForm assembly
+            // (`Trans.Weight()·ip.weight`, signed Det(J) for square
+            // Jacobians); bitwise the old |det| on valid meshes.
+            let w = quad.weights[qi] * tr.det_j();
             ref_e.eval_basis(xi, &mut phi);
             for j in 0..n_ldofs {
                 result[dofs[j]] += w * s * phi[j];
@@ -788,7 +814,10 @@ pub fn integrate_element_scalar_3d<S: FESpace>(
         let n_ldofs = ref_e.n_dofs();
         let mut phi = vec![0.0; n_ldofs];
         for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * tr.det_j().abs();
+            // D696 batch 3: SIGNED — the MFEM class is LinearForm assembly
+            // (`Trans.Weight()·ip.weight`, signed Det(J) for square
+            // Jacobians); bitwise the old |det| on valid meshes.
+            let w = quad.weights[qi] * tr.det_j();
             ref_e.eval_basis(xi, &mut phi);
             for j in 0..n_ldofs {
                 result[dofs[j]] += w * s * phi[j];

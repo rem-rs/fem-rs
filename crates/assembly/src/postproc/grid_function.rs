@@ -477,7 +477,11 @@ pub fn project_grid_function<'a, S1: FESpace, S2: FESpace>(
         let mut phi = vec![0.0; n_ldofs];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — projection/transfer weight = MFEM
+            // `Trans.Weight()·ip.weight` (signed Det(J) for square Jacobians;
+            // for surface meshes `simplex_jacobian` returns the cross-product
+            // norm, where the dropped abs is bitwise a no-op).
+            let w = quad.weights[q] * det_j;
             ref_elem.eval_basis(xi, &mut phi);
 
             // Evaluate u_src at the physical point
@@ -1248,10 +1252,13 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                         let (_j, det, xp) = crate::vector_assembler::isoparametric_jacobian(
                             mesh, geo_nds, ge.as_ref(), xi, dim,
                         );
-                        (quad.weights[q] * det.abs(), xp)
+                        // D696 batch 3: SIGNED — MFEM `ComputeL1Error`/
+                        // `ComputeL2Error` weight with `Trans.Weight()`
+                        // (signed Det(J)); bitwise |det| on valid meshes.
+                        (quad.weights[q] * det, xp)
                     }
                     None => {
-                        let w = quad.weights[q] * det_j.abs();
+                        let w = quad.weights[q] * det_j;
                         let xp = phys_coords(x0, &jac, xi, dim);
                         (w, xp)
                     }
@@ -1409,6 +1416,14 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     let g00 = j[0]*j[0] + j[1]*j[1] + j[2]*j[2];
                     let g01 = j[0]*j[3] + j[1]*j[4] + j[2]*j[5];
                     let g11 = j[3]*j[3] + j[4]*j[4] + j[5]*j[5];
+                    // D696 batch 3 adjudication: abs RETAINED as a degeneracy
+                    // guard — det(G) is a Gram determinant, nonnegative by
+                    // construction for ANY geometry (inverted or not); MFEM's
+                    // 3×2 `DenseMatrix::Weight` branch computes
+                    // `sqrt(E·G − F·F)` with no abs (densemat.cpp), so the
+                    // values agree bitwise on every non-degenerate surface
+                    // and the abs only prevents sqrt(NaN) at the degenerate
+                    // limit MFEM does not guard.
                     let det_g = (g00 * g11 - g01 * g01).abs();
                     let measure = det_g.sqrt();
                     (quad.weights[q] * measure, xp_curved)
@@ -1423,7 +1438,8 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                             mesh, nodes, ge, xi, dim,
                         );
                     let _ = &jac_iso;
-                    (quad.weights[q] * det_iso.abs(), xp_iso)
+                    // D696 batch 3: SIGNED (Trans.Weight(), square J).
+                    (quad.weights[q] * det_iso, xp_iso)
                 } else if use_ho_geo {
                     // Volume element with high-order geometry (curved 2D/3D
                     // body): evaluate through the geometry element, which
@@ -1432,7 +1448,8 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     let ge = geo_elem.as_ref().unwrap();
                     let (_jac, det_j, xp) =
                         iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
-                    (quad.weights[q] * det_j.abs(), xp)
+                    // D696 batch 3: SIGNED (Trans.Weight(), square J).
+                    (quad.weights[q] * det_j, xp)
                 } else if pyramid_geo {
                     // D340: straight pyramid — the linear (rational collapsed)
                     // pyramid map, from the same helper `L2Space::build_pyramid`
@@ -1442,13 +1459,24 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     // pyramid (see the note where `pyramid_geo` is defined).
                     let (j, xp) =
                         fem_mesh::transformation::element_jacobian_at(mesh, e, xi, dim);
+                    // D696 batch 3 (revised on the d365 red light): |det|
+                    // here is the PYRAMID frame normalization — the
+                    // axes-permuted collapsed frame (D235/D339/D340) yields
+                    // det < 0 on apex-down cells where MFEM's Weight is +1
+                    // (probe tmp/d696b/bipyramid_probe.cpp), so |det| IS the
+                    // MFEM-parity measure for this frame.
                     (quad.weights[q] * j.determinant().abs(), xp)
                 } else if is_surface {
-                    let w = quad.weights[q] * det_j.abs();
+                    // D696 batch 3: det_j is the cross-product norm from
+                    // `simplex_jacobian`'s surface arm — the MFEM 3×2 Weight
+                    // analog, nonnegative by construction; dropping abs is
+                    // bitwise a no-op.
+                    let w = quad.weights[q] * det_j;
                     let xp = surface_phys_coords(x0, &e1_3d, &e2_3d, xi);
                     (w, xp)
                 } else {
-                    let w = quad.weights[q] * det_j.abs();
+                    // D696 batch 3: SIGNED (Trans.Weight(), square J).
+                    let w = quad.weights[q] * det_j;
                     let xp = phys_coords(x0, &jac, xi, dim);
                     (w, xp)
                 };
@@ -1559,7 +1587,8 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                         iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
                     let jm = DMatrix::from_fn(dim, dim, |i, d| jac_g[i + d * dim]);
                     let jit = jm.try_inverse().expect("invertible geometry Jacobian").transpose();
-                    (quad.weights[q] * det_g.abs(), jit, xp)
+                    // D696 batch 3: SIGNED (Trans.Weight(), square J).
+                    (quad.weights[q] * det_g, jit, xp)
                 } else if let Some(ge) = geo_vol.as_ref() {
                     let geo_nds = if g_order > 1 {
                         mesh.geometry_nodes(e)
@@ -1573,9 +1602,12 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                         .try_inverse()
                         .expect("invertible geometry Jacobian")
                         .transpose();
-                    (quad.weights[q] * det_iso.abs(), jit, xp_iso)
+                    // D696 batch 3: SIGNED (Trans.Weight(), square J).
+                    (quad.weights[q] * det_iso, jit, xp_iso)
                 } else {
-                    let w = quad.weights[q] * det_j.abs();
+                    // D696 batch 3: SIGNED (square J, or the surface-norm
+                    // det from `simplex_jacobian` where abs is a no-op).
+                    let w = quad.weights[q] * det_j;
                     let xp = phys_coords(x0, &jac, xi, dim);
                     (w, j_inv_t.clone(), xp)
                 };
@@ -1662,6 +1694,8 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let mut grad_phys = vec![0.0; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
+                // D696 batch 3: SIGNED weights (Trans.Weight(), square J;
+                // surface-norm det where the abs was a no-op).
                 let (w, j_inv_t, xp) = match geo.as_ref() {
                     Some(ge) => {
                         let (j_iso, det_iso, xp_iso) =
@@ -1672,10 +1706,10 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                             .try_inverse()
                             .expect("invertible geometry Jacobian")
                             .transpose();
-                        (quad.weights[q] * det_iso.abs(), jit, xp_iso)
+                        (quad.weights[q] * det_iso, jit, xp_iso)
                     }
                     None => {
-                        let w = quad.weights[q] * det_j.abs();
+                        let w = quad.weights[q] * det_j;
                         let xp = phys_coords(x0, &jac, xi, dim);
                         (w, j_inv_t.clone(), xp)
                     }
@@ -1748,7 +1782,10 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                 } else { None };
             for (q, xi) in quad.points.iter().enumerate() {
                 let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
+                // Trans.Weight() = Det(J) signed; bitwise |det| on valid
+                // meshes.
+                let w = quad.weights[q] * det_j;
                 let uh = if let Some(ref gl) = l2gl {
                     let p = order as usize;
                     let (lx, _) = gl.eval_1d(xi[0]);
@@ -1800,7 +1837,9 @@ pub fn compute_coeff_l2_norm(
         let nodes = mesh.element_nodes(e);
         for (q, xi) in quad.points.iter().enumerate() {
             let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
+            // Trans.Weight() = Det(J) signed; bitwise |det| on valid meshes.
+            let w = quad.weights[q] * det_j;
             let fv = coeff(&xp);
             norm2 += w * fv * fv;
         }
@@ -1834,7 +1873,9 @@ pub fn compute_coeff_l2_norm_first_n(
         let nodes = mesh.element_nodes(e);
         for (q, xi) in quad.points.iter().enumerate() {
             let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
+            // Trans.Weight() = Det(J) signed; bitwise |det| on valid meshes.
+            let w = quad.weights[q] * det_j;
             let fv = coeff(&xp);
             norm2 += w * fv * fv;
         }
@@ -2239,10 +2280,13 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
             let (w, jac, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
                 let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
-                (quad.weights[qi] * det.abs(), jac, xp_vec)
+                // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
+                // Trans.Weight() = Det(J) signed; bitwise |det| on valid
+                // meshes.
+                (quad.weights[qi] * det, jac, xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
-                (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
+                (quad.weights[qi] * jac.determinant(), jac, xp_vec)
             };
 
             let jac_inv_t = jac.try_inverse().unwrap_or_else(|| DMatrix::<f64>::identity(dim, dim)).transpose();
@@ -2318,16 +2362,22 @@ pub fn compute_l2_error_hdiv<M: MeshTopology>(
             let (w, jac, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
                 let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
-                (quad.weights[qi] * det.abs(), jac, xp_vec)
+                // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
+                // Trans.Weight() = Det(J) signed; bitwise |det| on valid
+                // meshes.
+                (quad.weights[qi] * det, jac, xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
-                (quad.weights[qi] * jac.determinant().abs(), jac, xp_vec)
+                (quad.weights[qi] * jac.determinant(), jac, xp_vec)
             };
 
             vre.eval_basis_vec(xi, &mut ref_bv);
 
             // H(div) contravariant Piola: ψ_phys = (1/det(J)) · J · ψ̂_ref
             let det_j = jac.determinant();
+            // D696 batch 3: abs RETAINED as a degeneracy guard on the Piola
+            // 1/det (the inverse itself uses the SIGNED det, matching MFEM's
+            // contravariant transform) — a magnitude test, not a measure.
             let inv_det = if det_j.abs() > 1e-80 { 1.0 / det_j } else { 0.0 };
 
             let mut uh = vec![0.0; dim];
@@ -2406,13 +2456,15 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
         let mut phi_buf = if use_lagrange { vec![0.0; n_ldofs] } else { vec![] };
 
         for (qi, xi) in quad.points.iter().enumerate() {
+            // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
+            // Trans.Weight() = Det(J) signed; bitwise |det| on valid meshes.
             let (w, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
                 let (_jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
-                (quad.weights[qi] * det.abs(), xp_vec)
+                (quad.weights[qi] * det, xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
-                (quad.weights[qi] * jac.determinant().abs(), xp_vec)
+                (quad.weights[qi] * jac.determinant(), xp_vec)
             };
 
             let uh = if order == 0 {

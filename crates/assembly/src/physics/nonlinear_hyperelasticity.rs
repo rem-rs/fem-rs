@@ -568,7 +568,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
                 let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = quad.weights[q] * det_j;
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -629,7 +632,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
                 let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = quad.weights[q] * det_j;
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -697,7 +703,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
                 let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = quad.weights[q] * det_j;
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -771,7 +780,9 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
                     ref_elem.eval_basis(xi, &mut phi);
                     ref_elem.eval_grad_basis(xi, &mut gref);
                     let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                    let w = quad.weights[q] * det_j.abs();
+                    // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                    // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+                    let w = quad.weights[q] * det_j;
                     xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                     let mut du = DMatrix::zeros(dim, dim);
@@ -786,6 +797,12 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
                     f_mat += &du;
                     let psi = self.model.elastic_energy_density(&f_mat);
                     let det_f = f_mat.determinant();
+                    // D696 batch 4: abs RETAINED on the ψ↔current-volume
+                    // conversion factor (|detF|⁻¹) — a diagnostic edens, not
+                    // an MFEM 1:1 energy kernel; the epsilon test is a
+                    // degeneracy guard.  MFEM's ComputeElementEnergy instead
+                    // multiplies EvalW(Jpt) by the SIGNED Ttr.Weight()
+                    // (nonlininteg.cpp:420).
                     let w_energy = if det_f.abs() > 1e-30 { psi / det_f.abs() } else { psi };
                     energy += w * w_energy;
                     vol += w;
@@ -829,7 +846,10 @@ impl<M: MeshTopology> HyperelasticityForm<M> {
                 h1_ref.eval_basis(xi, &mut phi_h1);
                 h1_ref.eval_grad_basis(xi, &mut gref_h1);
                 let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = quad.weights[q] * det_j;
                 xform_grads(&jit, &gref_h1, &mut gphys_h1, n_h1, dim);
 
                 // Deformation gradient F = I + ∇u
@@ -901,7 +921,10 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
                 let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = quad.weights[q] * det_j;
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -960,7 +983,10 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut gref);
                 let (_jac, det_j, jit) = jacobian_at_point(mesh, e, xi, dim);
-                let w = quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
+                // valid meshes.
+                let w = quad.weights[q] * det_j;
                 xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
 
                 let mut du = DMatrix::zeros(dim, dim);
@@ -1573,7 +1599,8 @@ mod tests {
             let mut vol = 0.0;
             for (q, xi) in quad.points.iter().enumerate() {
                 let (_j, det_j, _jit) = jacobian_at_point(&mesh, 0, xi, 2);
-                vol += quad.weights[q] * det_j.abs();
+                // D696 batch 4: SIGNED (GetElementVolume accumulation class).
+                vol += quad.weights[q] * det_j;
             }
             eprintln!("D453 quad p={p}: quadrature volume = {vol:.17e}");
             assert!(

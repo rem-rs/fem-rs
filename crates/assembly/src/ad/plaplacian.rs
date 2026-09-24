@@ -197,7 +197,10 @@ impl<S: FESpace> PLaplacianForm<S> {
                 let ipw = quad.weights[q];
                 if affine {
                     let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-                    let w = ipw * tr.det_j().abs();
+                    // D696 batch 4: SIGNED — MFEM element-loop weight is
+                    // `ip.weight * T.Weight()` (nonlininteg.cpp:770 class);
+                    // bitwise |det| on valid meshes.
+                    let w = ipw * tr.det_j();
                     ref_elem.eval_basis(xi, &mut phi);
                     ref_elem.eval_grad_basis(xi, &mut grad_ref);
                     let jit = tr.jacobian_inv_t();
@@ -219,7 +222,10 @@ impl<S: FESpace> PLaplacianForm<S> {
                     let xi_g = geom_quad_point(elem_type, order, xi);
                     let (jac_qp, det_qp, _xp) =
                         isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
-                    let w = ipw * det_qp.abs();
+                    // D696 batch 4: SIGNED — same `ip.weight * T.Weight()`
+                    // class; the gradient transform below already divides by
+                    // the SIGNED det_qp, so the weight must match.
+                    let w = ipw * det_qp;
                     // MFEM: Mult(dshape_iso, InverseJacobian(), dshape_xyz);
                     // evaluated as adj(J)/det to reuse the assembler kernels.
                     let adj = if dim == 3 {

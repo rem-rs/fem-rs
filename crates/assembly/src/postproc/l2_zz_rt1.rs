@@ -320,7 +320,10 @@ pub fn assemble_rt1_system(
                 + xi[0] * c(2)[1] + (1.0 - xi[0]) * c(3)[1];
             let det = j00 * j11 - j01 * j10;
             let inv_det = 1.0 / det;
-            let w = qr.weights[q] * det.abs();
+            // D696 batch 3: SIGNED — quadrature weight = MFEM
+            // `Trans.Weight()·ip.weight` (Det(J) signed; the Piola inv_det
+            // above is signed likewise); bitwise |det| on valid meshes.
+            let w = qr.weights[q] * det;
 
             // RT1 reference basis at xi ∈ [0,1]², contravariant Piola.
             QuadRT1.eval_basis_vec(xi, &mut phi_ref);
@@ -604,7 +607,10 @@ pub fn compute_eta(
                 + xi[0] * c(2)[1] + (1.0 - xi[0]) * c(3)[1];
             let det = j00 * j11 - j01 * j10;
             let inv_det = 1.0 / det;
-            let w = qr.weights[q] * det.abs();
+            // D696 batch 3: SIGNED — quadrature weight = MFEM
+            // `Trans.Weight()·ip.weight` (Det(J) signed; the Piola inv_det
+            // above is signed likewise); bitwise |det| on valid meshes.
+            let w = qr.weights[q] * det;
 
             QuadRT1.eval_basis_vec(xi, &mut phi_ref);
             for i in 0..12 {
@@ -842,7 +848,10 @@ pub fn l2_zz_estimator(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> Vec<f64> {
                 phi[i * 2] = (j00 * phi_ref[i * 2] + j01 * phi_ref[i * 2 + 1]) * inv_det * s;
                 phi[i * 2 + 1] = (j10 * phi_ref[i * 2] + j11 * phi_ref[i * 2 + 1]) * inv_det * s;
             }
-            let w = qr.weights[q] * det.abs();
+            // D696 batch 3: SIGNED — same Trans.Weight()·ip.weight class as
+            // the assemble_rt1_system weights above; bitwise |det| on valid
+            // meshes.
+            let w = qr.weights[q] * det;
             wdet_qp[e as usize][q] = w;
             for i in 0..4 {
                 phi_qp[e as usize][q * 8 + i * 2] = phi[i * 2];

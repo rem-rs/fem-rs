@@ -146,6 +146,8 @@ fn assemble_volume<S: FESpace>(
             space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
         let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+        // D696 batch 4: abs RETAINED — degeneracy guard (skip collapsed
+        // cells); a magnitude test, not a measure.
         if det_j.abs() < 1e-30 {
             continue;
         }
@@ -155,7 +157,9 @@ fn assemble_volume<S: FESpace>(
         let mut gphys = vec![0.0_f64; n_l * dim];
 
         for (qi, xi) in q.points.iter().enumerate() {
-            let w = q.weights[qi] * det_j.abs();
+            // D696 batch 4: SIGNED — `ip.weight * T.Weight()` (MFEM
+            // nonlininteg class); bitwise |det| on valid meshes.
+            let w = q.weights[qi] * det_j;
             re.eval_grad_basis(xi, &mut gref);
             xform_grads(&jit, &gref, &mut gphys, n_l, dim);
 
@@ -510,6 +514,7 @@ fn assemble_boundary_face_stress<S: FESpace>(
 
     let nodes = mesh.element_nodes(elem);
     let (jac, det_j) = simplex_jac(mesh, nodes, dim);
+    // D696 batch 4: abs RETAINED — degeneracy guard (magnitude test).
     if det_j.abs() < 1e-30 {
         return;
     }

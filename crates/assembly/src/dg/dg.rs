@@ -468,6 +468,10 @@ fn assemble_interior_face<S: FESpace>(
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
         // Per-point Jacobian for quads (triangles use constant from simplex_jac).
+        // D696 batch 4: the `.abs().max(…)` here is a **degeneracy clamp**
+        // against singular per-point Jacobians (a magnitude guard feeding both
+        // the measure and the inverse scaling), not a measure adjudication —
+        // abs retained.
         let (_jac_pt_l, det_l, jit_pt_l) = if nodes_l.len() > 3 {
             let (j, d) = quad_jac_at_01(&xl, &yl, xi_l[0], xi_l[1]);
             let d_safe = d.abs().max(1e-14);
@@ -688,6 +692,7 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
             let ji = j.try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
             (d_safe, ji)
         } else {
+            // D696 batch 4: degeneracy clamp (magnitude guard) — abs retained.
             (jac.determinant().abs().max(1e-14), jit.clone())
         };
         // Use the per-point transformed gradients for quads.

@@ -466,42 +466,58 @@ pub fn derefine_mark(eta: &[f64], threshold: f64) -> Vec<u32> {
 /// coplanar; wedges/pyramids degenerated the same way), squashing the whole
 /// ZZ family's `η² ∝ V_K` weights to zero.  Quadrature order tracks the
 /// geometry order (`2·geom_order`, ≥ 2): exact for straight cells, where
-/// `|det J|` is a low-degree polynomial.  Simplices keep the exact corner
+/// `det J` is a low-degree polynomial.  Simplices keep the exact corner
 /// formula and 2-D stays as it was.
+///
+/// D696 batch-3 adjudication: **signed** throughout — MFEM's counterpart
+/// `Mesh::GetElementVolume` accumulates `Trans.Weight()` = `Det(J)` **with
+/// sign** (eltrans.cpp:30 `EvalWeight` → densemat.cpp `DenseMatrix::Weight`,
+/// whose square-matrix branch is `return Det();` with the upstream `fabs`
+/// commented out; the D679 pin: inverted tet = −1/6).  On every valid mesh
+/// the values are bitwise the previous `|det|` ones; inverted elements now
+/// carry MFEM's negative-volume signature (pinned in
+/// `d696_signed_det_pins_batch3.rs`).
 fn elem_vol<M: MeshTopology>(m: &M, e: u32) -> f64 {
     let n = m.element_nodes(e);
     let npe = n.len();
     if m.dim() == 2 {
         if npe == 4 {
-            // Quadrilateral: shoelace formula
+            // Quadrilateral: shoelace formula (signed, MFEM GetElementVolume)
             let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
             0.5 * (x0[0]*x1[1] + x1[0]*x2[1] + x2[0]*x3[1] + x3[0]*x0[1]
-                  - x1[0]*x0[1] - x2[0]*x1[1] - x3[0]*x2[1] - x0[0]*x3[1]).abs()
+                  - x1[0]*x0[1] - x2[0]*x1[1] - x3[0]*x2[1] - x0[0]*x3[1])
         } else if npe >= 3 {
-            // Triangle: cross product
+            // Triangle: cross product (signed, MFEM GetElementVolume)
             let (x0, x1, x2) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]));
-            0.5 * ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x1[1]-x0[1])*(x2[0]-x0[0])).abs()
+            0.5 * ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x1[1]-x0[1])*(x2[0]-x0[0]))
         } else { 1.0 }
     } else {
         let elem_type = m.element_type(e);
         if is_simplex(elem_type) && npe >= 4 {
-            // Tetrahedron volume (exact for the P1 geometry)
+            // Tetrahedron volume (exact for the P1 geometry; signed — D679)
             let (x0, x1, x2, x3) = (m.node_coords(n[0]), m.node_coords(n[1]), m.node_coords(n[2]), m.node_coords(n[3]));
             let a = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
             let b = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
             let c = [x3[0]-x0[0], x3[1]-x0[1], x3[2]-x0[2]];
             let cr = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-            (cr[0]*c[0] + cr[1]*c[1] + cr[2]*c[2]).abs() / 6.0
+            (cr[0]*c[0] + cr[1]*c[1] + cr[2]*c[2]) / 6.0
         } else if npe >= 4 {
-            // D636: ∫|det J| with the element family's own quadrature (the
-            // frames of `ref_elem_vol` and `geom_jacobian` agree — D235/D614).
+            // D636: ∫det J with the element family's own quadrature (the
+            // frames of `ref_elem_vol` and `geom_jacobian` agree — D235/D614),
+            // SIGNED like MFEM's Trans.Weight() accumulation (D696 batch 3) —
+            // except the PYRAMID frames, whose det carries the D235/D339/D340
+            // axes-permuted-frame sign convention (negative on apex-down
+            // cells where MFEM's Weight is +1, probe
+            // `tmp/d696b/bipyramid_probe.cpp`): those keep |det| as the
+            // frame-normalized MFEM-parity measure.
             let ord: u8 = (2 * m.geom_order() as usize).max(2) as u8;
             let ref_elem = ref_elem_vol(elem_type, ord);
             let quad = ref_elem.quadrature(ord);
+            let pyramid = matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13);
             let mut vol = 0.0;
             for (q, xi) in quad.points.iter().enumerate() {
                 let (_, det_j) = geom_jacobian(m, e, n, xi, 3, elem_type);
-                vol += quad.weights[q] * det_j.abs();
+                vol += quad.weights[q] * if pyramid { det_j.abs() } else { det_j };
             }
             vol
         } else { 1.0 }
@@ -760,7 +776,12 @@ where
 
         for (q, xi) in quad.points.iter().enumerate() {
             let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
-            let w_abs_det = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — MFEM's ZZ/estimator kernels weight the
+            // squared-error integrand with `Trans.Weight()` = Det(J) signed
+            // (eltrans.cpp:30); the even integrand makes this bitwise the
+            // old |det| on valid meshes, inverted elements carry the MFEM
+            // negative-contribution signature.
+            let w_abs_det = quad.weights[q] * det_j;
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
@@ -836,7 +857,12 @@ where
 
         for (q, xi) in quad.points.iter().enumerate() {
             let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
-            let w_abs_det = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — MFEM's ZZ/estimator kernels weight the
+            // squared-error integrand with `Trans.Weight()` = Det(J) signed
+            // (eltrans.cpp:30); the even integrand makes this bitwise the
+            // old |det| on valid meshes, inverted elements carry the MFEM
+            // negative-contribution signature.
+            let w_abs_det = quad.weights[q] * det_j;
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
@@ -940,7 +966,12 @@ where
 
         for (q, xi) in quad.points.iter().enumerate() {
             let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
-            let w_abs_det = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — MFEM's ZZ/estimator kernels weight the
+            // squared-error integrand with `Trans.Weight()` = Det(J) signed
+            // (eltrans.cpp:30); the even integrand makes this bitwise the
+            // old |det| on valid meshes, inverted elements carry the MFEM
+            // negative-contribution signature.
+            let w_abs_det = quad.weights[q] * det_j;
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
@@ -1018,7 +1049,12 @@ where
 
         for (q, xi) in quad.points.iter().enumerate() {
             let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
-            let w_abs_det = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — MFEM's ZZ/estimator kernels weight the
+            // squared-error integrand with `Trans.Weight()` = Det(J) signed
+            // (eltrans.cpp:30); the even integrand makes this bitwise the
+            // old |det| on valid meshes, inverted elements carry the MFEM
+            // negative-contribution signature.
+            let w_abs_det = quad.weights[q] * det_j;
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
@@ -1211,7 +1247,10 @@ where
         let mut phi = vec![0.0; n_ldofs];
         for (q, xi) in quad.points.iter().enumerate() {
             let (jac, det_j) = geom_jacobian(m, e, nodes, xi, d, elem_type);
-            let w_det = quad.weights[q] * det_j.abs();
+            // D696 batch 3: SIGNED — mirrors MFEM ComputeFluxEnergy's
+            // `Trans.Weight()·ip.weight` (bilininteg.cpp); bitwise the old
+            // |det| on valid meshes.
+            let w_det = quad.weights[q] * det_j;
             ref_elem.eval_basis(xi, &mut phi);
             // pointflux(k) = Î£_j f[j,k]Â·Ï_j(xi)
             let mut pointflux = vec![0.0; d];
@@ -1549,6 +1588,10 @@ where
             let j00 = x1 - x0; let j01 = x2 - x0;
             let j10 = y1 - y0; let j11 = y2 - y0;
             let det = j00 * j11 - j01 * j10;
+            // D696 batch 3: the `.abs()` here is a **degeneracy guard** on the
+            // 2×2 inverse (1/det itself uses the SIGNED det, matching MFEM's
+            // `CalcInverse`) — a magnitude test, not a measure, so abs is
+            // retained by adjudication.
             let inv_det = if det.abs() > 1e-30 { 1.0 / det } else { 0.0 };
             // (z1 - z0) = âz Â· (x1-x0, y1-y0); (z2 - z0) = âz Â· (x2-x0, y2-y0)
             let dzx = inv_det * ( j11 * (z1 - z0) - j10 * (z2 - z0));
@@ -2666,7 +2709,9 @@ mod d235_ref_elem_volume {
     use fem_io::mfem::read_mfem_file;
     use fem_mesh::{ElementType, Mesh, MeshTopology};
 
-    /// Σ_q w_q·|det J(x_q)| per element — the measure the estimators use.
+    /// Σ_q w_q·det J(x_q) per element — the measure the estimators use.
+    /// (D696 batch 3: SIGNED, matching MFEM `GetElementVolume`'s
+    /// `Trans.Weight()` accumulation; identical on valid meshes.)
     fn element_volumes<M: MeshTopology>(mesh: &M, order: u8, quad_order: u8) -> Vec<f64> {
         let d = mesh.dim() as usize;
         (0..mesh.n_elements() as u32)
@@ -2678,7 +2723,7 @@ mod d235_ref_elem_volume {
                 let mut vol = 0.0;
                 for (qi, xi) in q.points.iter().enumerate() {
                     let (_j, det) = geom_jacobian(mesh, e, nodes, xi, d, et);
-                    vol += q.weights[qi] * det.abs();
+                    vol += q.weights[qi] * det;
                 }
                 vol
             })

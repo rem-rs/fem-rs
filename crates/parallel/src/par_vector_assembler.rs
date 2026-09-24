@@ -168,6 +168,58 @@ impl ParVectorAssembler {
         add_blocks_into(a, &delta);
     }
 
+    /// **MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)`** — the shape
+    /// core entry (D706, root fix of the D697 accident surface).
+    ///
+    /// One-stop essential-BC elimination with the **projected solution
+    /// values**: `ess_tdof_list` (as produced by
+    /// [`ParallelFESpace::essential_true_dofs`](crate::par_space::ParallelFESpace::essential_true_dofs),
+    /// dm order) selects the essential true dofs; their values are read from
+    /// `x` (the projection of the solution / initial guess, partition order —
+    /// MFEM's `x.ProjectCoefficient(…)` restricted to the true dofs).  On
+    /// return
+    ///   - `a` is the eliminated operator (policy [`ElimPolicy`]),
+    ///   - `b` is the eliminated RHS `B` (ess rows carry `A(r,r)·x(r)` /
+    ///     `x(r)`, interior rows the `−Ae·x` reactions, cross-rank reactions
+    ///     through the offd block),
+    ///   - the returned vector is the true-dof solution vector `X`:
+    ///     a bitwise copy of `x` (conforming spaces: `R = I`, i.e. MFEM's
+    ///     `copy_interior = 1` default), ready as the iterative initial guess.
+    ///
+    /// 1:1 with MFEM `ParBilinearForm::FormLinearSystem`
+    /// (pbilinearform.cpp:475): `FormSystemMatrix` = the row/col elimination
+    /// under `diag_policy`, `EliminateBC(Ae, ess, x, b)` (hypre.cpp:2461) =
+    /// the `b -= Ae·x` reactions + ess-row overwrite.  Callers no longer
+    /// hand-derive the owned/ghost split (the pex3 D697 incident: values
+    /// hardcoded to 0.0 silently homogenized the PEC boundary).
+    ///
+    /// `x`'s ghost slots must hold owner-consistent values (the deterministic
+    /// interpolation or a fresh `update_ghosts()`).
+    pub fn form_linear_system<S: FESpace>(
+        a: &mut ParCsrMatrix,
+        par_space: &ParallelFESpace<S>,
+        ess_tdof_list: &[fem_core::types::DofId],
+        x: &ParVector,
+        b: &mut ParVector,
+        policy: crate::par_csr::ElimPolicy,
+    ) -> ParVector {
+        let dp = par_space.dof_partition();
+        let mut owned_ess: Vec<(usize, f64)> = Vec::new();
+        let mut ghost_ess: Vec<(usize, f64)> = Vec::new();
+        for &d in ess_tdof_list {
+            let pid = dp.permute_dof(d) as usize;
+            let v = x.as_slice()[pid];
+            if pid < dp.n_owned_dofs {
+                owned_ess.push((pid, v));
+            } else {
+                ghost_ess.push((pid - dp.n_owned_dofs, v));
+            }
+        }
+        a.eliminate_ess_tdofs(&owned_ess, &ghost_ess, b, policy);
+        // X = R·x; conforming space: R = I → X = x (copy_interior = 1).
+        x.clone_vec()
+    }
+
     /// Shared body of [`Self::assemble_boundary_bilinear`] /
     /// [`Self::add_boundary_bilinear`].
     fn boundary_bilinear_impl<S>(

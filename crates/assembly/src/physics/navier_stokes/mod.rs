@@ -55,7 +55,9 @@ pub fn assemble_convection_matrix<M: MeshTopology + Clone>(
         let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+            // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+            let w = quad.weights[q] * det_j;
             ref_elem.eval_basis(xi, &mut phi);
             ref_elem.eval_grad_basis(xi, &mut gref);
             crate::dg::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
@@ -122,7 +124,9 @@ pub fn assemble_divergence_matrix<M: MeshTopology + Clone>(
         let mut gphys = vec![0.0_f64; n_v * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+            // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+            let w = quad.weights[q] * det_j;
             ref_v.eval_basis(xi, &mut phi_v);
             ref_p.eval_basis(xi, &mut phi_p);
             ref_v.eval_grad_basis(xi, &mut gref);
@@ -200,7 +204,9 @@ pub fn assemble_ale_convection_matrix<M: MeshTopology + Clone>(
         let mut gphys = vec![0.0_f64; n_ldofs * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[q] * det_j.abs();
+            // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
+            // (nonlininteg.cpp class); bitwise |det| on valid meshes.
+            let w = quad.weights[q] * det_j;
             ref_elem.eval_basis(xi, &mut phi);
             ref_elem.eval_grad_basis(xi, &mut gref);
             crate::dg::dg_advection::xform_grads(&jit, &gref, &mut gphys, n_ldofs, dim);
