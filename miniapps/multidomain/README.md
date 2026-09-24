@@ -207,3 +207,58 @@ Validation numbers (tf=0.005, dt=1e-5, MFEM-refined mesh `-nr 1`, C++
 reference `d667_rt_ser`): block ssq 0.26366 (C++) vs 0.26359 (fem-rs,
 `-qp 9`); cyl ssq 1.431e-6 vs 1.196e-6.  After items 2+3 land, the RT/ND
 trajectories should close to the straight-mesh bit-level.
+
+## Round 69: stdout byte-alignment (BIT) — canonical surface and residual
+
+Round 68 (D708) landed the gf shadow and made the rt/nd trajectories
+C++-exact. Round 69 raised the miniapps' stdout to byte-level comparison
+against a fresh print-reference harness (`tmp/dbit/multidomain_{rt,nd}_printref.cpp`,
+compiled on the serial MFEM 4.10 tree at `$HOME/mfem410_ser`; numeric core =
+`tmp/d657/multidomain_{rt,nd}_serial.cpp` verbatim, round-64 probes stripped).
+
+Adjudication: upstream `multidomain_rt.cpp` / `multidomain_nd.cpp` are
+PAR-only and fail to compile on the serial tree (evidence:
+`$HOME/work/dbit/official_{rt,nd}_compile_err.txt`, `ParBilinearForm` /
+`HypreSmoother` / `ParFiniteElementSpace` undefined) — the round-64 precedent
+(harness as reference, compile-fail on record) applies.
+
+Canonical stdout surface (both sides now emit it 1:1):
+
+1. `Options used:` + `   --order/--t-final/--time-step/--visualization-steps`
+   rows — MFEM 4.10's `OptionsParser::ParseCheck` ends with `PrintOptions(out)`
+   on success (optparser.cpp:270), so this block is part of the official
+   stdout; values render in C++ default ostream form (`%g`, 6 significant
+   digits), reproduced by the miniapps' `cxx_ostream_f64` (cross-checked
+   against `printf %.6g` on 19 values incl. fixed/exponential boundary cases).
+2. banner rows (parent/submesh NE, NV, ndofs; essential-dof counts; NEW
+   `Block interface tdofs:` row = `GetEssentialTrueDofs(attr 9)` on the block
+   submesh — rt 384, nd 800, fem-rs equal);
+3. trajectory rows `step <ti>, t = <t>  block: sum=… ssq=…  cyl: sum=… ssq=…`
+   — the literal prefix `step <ti>, t = <t>` is the official upstream print
+   (multidomain_rt.cpp:440 / multidomain_nd.cpp:388); the sum/ssq diagnostics
+   and the float conventions (Rust `{:.6e}` 7-sig, `t` shortest-round-trip)
+   are the round-68 no-regression bytes, applied on the C++ side too.
+
+Verification (all three profiles, byte diffs vs the print-ref):
+`-tf 0.005 -dt 1e-5` (251 rows), `-tf 0.05 -dt 1e-5` (2501 rows) and
+`-tf 0.0002 -dt 1e-5 -vs 2` — every row byte-identical except ONE exempted
+row: `Block initial BC dofs (nonzero): …  IC sum: …`.  Root cause (round-64
+known, now precisely characterized): MFEM's `ProjectBdrCoefficient{Normal,
+Tangent}` integration leaves ±1e-18 dust where the exact trace of the linear
+IC vanishes, fem-rs' `interpolate_vector` yields exact 0.0 there — so the
+nonzero counts differ (rt 640 vs 512, nd 512 vs 416) and the rt IC sum is
+dust-on-zero (−4.796555e-17 vs −3.808677e-17; nd −4.000000e0 matches
+exactly). Both are ~22 orders below the field norm; the evolved trajectories
+are unaffected (byte-exact everywhere). Core-level (projection equivalence up
+to roundoff) — registered D735, not worked around.
+
+Data-flow no-regression: the round-68 pinned step-250 bytes are preserved —
+rt `cyl: sum=-6.420799e-6 ssq=1.430509e-6`, nd
+`cyl: sum=1.337180e-5 ssq=1.594132e-4` (now proven 7-significant-digit exact
+against C++ doubles, stricter than the round-68 6-digit check).
+
+Not run: the full-default profile (`-tf 5`, 5·10^5 rows) — infeasible
+in-session (extrapolated ≈2.4 h rt / ≈7 h nd at measured 7.3 s / 21.8 s per
+251 rows; C++ print-ref 4.6 s). Equality there is a HYPOTHESIS (D736)
+extrapolating from the 2501-row profile. The H1 `multidomain.rs` is not yet
+on the canonical stdout surface (D737).

@@ -479,6 +479,73 @@ fn parse_i32(args: &[String], flag: &str, default: i32) -> i32 {
         .unwrap_or(default)
 }
 
+/// C++ default `ostream << double` rendering (printf `%g`, precision 6): 6
+/// significant digits, trailing zeros stripped, scientific notation outside
+/// [1e-4, 1e6) with a signed two-digit exponent.
+///
+/// Round-69 stdout alignment (tmp/dbit print-ref harness): MFEM 4.10's
+/// `OptionsParser::ParseCheck` ends with `PrintOptions(out)` on success
+/// (optparser.cpp:270), so the upstream stdout opens with the
+/// `Options used:` block whose values render through `WriteValue` in this
+/// exact form.
+fn cxx_ostream_f64(v: f64) -> String {
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0".into() } else { "0".into() };
+    }
+    let sign = if v < 0.0 { "-" } else { "" };
+    let sci = format!("{:.5e}", v.abs()); // "d.ddddde<exp>" — 6 significant digits
+    let epos = sci.find('e').expect("scientific form always carries 'e'");
+    let exp: i32 = sci[epos + 1..].parse().expect("bad exponent");
+    let digits: String = sci[..epos].chars().filter(|c| c.is_ascii_digit()).collect();
+    // %g strips trailing zeros from the fraction only (never from a value
+    // with no decimal point), then drops a bare trailing '.'.
+    let strip = |raw: &str| -> String {
+        match raw.find('.') {
+            None => raw.to_string(),
+            Some(dot) => {
+                let frac = raw[dot + 1..].trim_end_matches('0');
+                if frac.is_empty() {
+                    raw[..dot].to_string()
+                } else {
+                    format!("{}.{}", &raw[..dot], frac)
+                }
+            }
+        }
+    };
+    if (-4..6).contains(&exp) {
+        // Fixed notation: decimal point after `exp + 1` significant digits.
+        if exp < 0 {
+            let raw = format!("0.{}{digits}", "0".repeat((-exp - 1) as usize));
+            format!("{sign}{}", strip(&raw))
+        } else {
+            let point = (exp + 1) as usize;
+            let raw = if digits.len() > point {
+                format!("{}.{}", &digits[..point], &digits[point..])
+            } else {
+                format!("{digits}{}", "0".repeat(point - digits.len()))
+            };
+            format!("{sign}{}", strip(&raw))
+        }
+    } else {
+        let exp_str = if exp < 0 { format!("e-{:02}", -exp) } else { format!("e+{:02}", exp) };
+        let mantissa = strip(&format!("{}.{}", &digits[..1], &digits[1..]));
+        format!("{sign}{mantissa}{exp_str}")
+    }
+}
+
+/// The canonical stdout opening block (MFEM `OptionsParser::PrintOptions`):
+/// `Options used:` plus one `   --<long> <value>` row per option, in add
+/// order.  The canonical option set is the print-ref harness's four rows
+/// (the upstream `-vis` toggle is dropped — silent runs; the `-qp`/`-nr`
+/// probe knobs are not part of the surface).
+fn print_options_block(order: u8, t_final: f64, dt: f64, vis_steps: usize) {
+    println!("Options used:");
+    println!("   --order {order}");
+    println!("   --t-final {}", cxx_ostream_f64(t_final));
+    println!("   --time-step {}", cxx_ostream_f64(dt));
+    println!("   --visualization-steps {vis_steps}");
+}
+
 fn marker_to_tags(marker: &[i32]) -> Vec<i32> {
     (1..=marker.len() as i32)
         .filter(|&a| marker[(a - 1) as usize] != 0)
@@ -506,6 +573,9 @@ fn main() {
         "multidomain-hex.mesh must be an Hex8 mesh"
     );
     let no_refine = parse_i32(&args, "-nr", 0) != 0;
+    // Canonical stdout opening block (upstream: OptionsParser::ParseCheck →
+    // PrintOptions before any mesh work).
+    print_options_block(order, t_final, dt, vis_steps);
     let parent_mesh = if no_refine {
         parent_mesh
     } else {
@@ -571,6 +641,12 @@ fn main() {
     let block_ess_tdofs = hcurl_boundary_dofs(&fes_block, &block_wall_faces);
     println!("Block ess vdofs (walls 1-4): {}", block_ess_tdofs.len());
 
+    // Block-side interface true dofs (canonical surface row; the C++ serial
+    // mirror's `GetEssentialTrueDofs(attr 9)` on the block submesh).
+    let blk_interface_faces = boundary_hex_faces(mesh_blk, &inner_cylinder_wall_tags);
+    let block_interface_tdofs = hcurl_boundary_dofs(&fes_block, &blk_interface_faces);
+    println!("Block interface tdofs: {}", block_interface_tdofs.len());
+
     let mut d_tdo =
         ConvectionDiffusionTDO::new(&fes_block, block_ess_tdofs.clone(), 0.0, 1.0, order, qp);
 
@@ -595,7 +671,7 @@ fn main() {
         &fes_cylinder,
         &cyl_interface_faces,
         &fes_block,
-        &boundary_hex_faces(mesh_blk, &inner_cylinder_wall_tags),
+        &blk_interface_faces,
     );
 
     // Time loop.
