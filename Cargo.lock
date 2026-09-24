@@ -939,11 +939,13 @@ dependencies = [
 name = "fem-space"
 version = "0.1.0"
 dependencies = [
+ "fem-assembly",
  "fem-core",
  "fem-element",
  "fem-io",
  "fem-linalg",
  "fem-mesh",
+ "fem-solver",
  "nalgebra 0.33.3",
 ]
 
