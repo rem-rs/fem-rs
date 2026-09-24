@@ -38,6 +38,41 @@
 //! face centers) are orientation-symmetric, so matching by coordinates is
 //! orientation-independent.
 //!
+//! Round 70 (D737) — canonical stdout surface and upstream data flow:
+//!
+//! * Upstream `multidomain.cpp` is PAR-only (Mpi::Init / ParMesh / ParSubMesh
+//!   / ParFiniteElementSpace / ParBilinearForm / ParLinearForm /
+//!   HypreSmoother) and fails to compile on the serial MFEM 4.10 tree
+//!   (evidence `tmp/d737/official_h1_compile_err.txt`, rc=2). The comparison
+//!   object is therefore the serial print-reference harness
+//!   `tmp/d737/multidomain_h1_printref.cpp` (numeric core = the official
+//!   source's serial-feasible path, print surface 1:1 with this file), per the
+//!   round-64/69 precedent used for the rt/nd variants.
+//! * The canonical stdout is the family surface: the `Options used:` block
+//!   (MFEM's `OptionsParser::ParseCheck` ends with `PrintOptions(out)`,
+//!   optparser.cpp:270), the banner rows, and trajectory rows
+//!   `step <ti>, t = <t>  block: sum=… ssq=…  cyl: sum=… ssq=…` with Rust
+//!   `{:.6e}` 7-significant-digit values and `t` in shortest-round-trip
+//!   `Display` form. The round-64 `bdr_attrs=` probe suffix and the
+//!   `min=/max=` trajectory columns are not part of the surface.
+//! * Default quadrature rules are MFEM's per-integrator defaults
+//!   (bilininteg.cpp: mass `2p + Trans.OrderW()`, diffusion `2p + dim - 1`,
+//!   convection `OrderGrad + Order + p`), NOT the round-64 hardcodes. The
+//!   submeshes carry the parent's P2 geometry (D677), so `OrderW = 3k - 1 = 5`
+//!   and the cylinder/block rules are mass 9, convection 9, diffusion 6 —
+//!   pinned by the harness `-rules` probe (125 / 125 / 64 quadrature points
+//!   per hex). The two stiffness integrators therefore need separate rules and
+//!   are assembled into separate matrices and added.
+//! * Data flow: upstream multidomain.cpp:381-382 refreshes both GridFunctions
+//!   inside the print block, and the cylinder GF is the *transfer destination*
+//!   whose interior is only ever carried through the transfer (the net effect
+//!   above). The RK3-evolved cylinder vector is therefore seeded from the
+//!   transfer destination `cyl_gf_state` every step, and `cyl_gf_state` is
+//!   refreshed from the RK3 output at print steps — dropping that refresh
+//!   changes the trajectory (it is the round-69 rt/nd harness behaviour,
+//!   registered as a deviation from upstream; the harness knob `-norefresh`
+//!   reproduces it for impact measurement only).
+//!
 //! Usage (after wiring the `[[example]]` block in `examples/Cargo.toml`):
 //! ```text
 //! cargo run --example multidomain --                      # upstream defaults (dt=1e-5, tf=5)
@@ -58,7 +93,9 @@
 use std::collections::{HashMap, HashSet};
 
 use fem_assembly::postproc::coefficient::{CoeffCtx, VectorCoeff};
-use fem_assembly::standard::{ConvectionIntegrator, DiffusionIntegrator, MassIntegrator};
+use fem_assembly::standard::{
+    mfem_hex_order_w, ConvectionIntegrator, DiffusionIntegrator, MassIntegrator,
+};
 use fem_assembly::Assembler;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CsrMatrix;
@@ -212,8 +249,23 @@ impl ConvectionDiffusionTDO {
     /// Assemble M and K (C++ constructor, multidomain.cpp:92-144).
     ///
     /// `qp_override > 0` forces one high-order quadrature rule on every form
-    /// (verification aid matching the C++ harness `-qp`; 0 keeps the MFEM
-    /// default-equivalent rules: mass 2·order, K 2·order-1).
+    /// (verification aid matching the C++ harness `-qp`); 0 keeps MFEM's
+    /// default rules, computed per integrator as in `bilininteg.cpp`:
+    ///
+    /// ```text
+    /// mass        p + p + Trans.OrderW()                      = 2p + 3k - 1
+    /// diffusion   p + p + dim - 1   (non-Pk branch, dim = 3)  = 2p + 2
+    /// convection  OrderGrad + Order + p
+    ///             OrderGrad = k(d-1) + (p-1) = 2k + p - 1, Order = k
+    ///                                                         = 3k + 2p - 1
+    /// ```
+    ///
+    /// with `OrderW = 3k - 1` for the Qk hex map (`IsoparametricTransformation`,
+    /// eltrans.cpp:493-530) and `k = mesh.geom_order()`. The submeshes carry
+    /// the parent's P2 geometry (D677), so `k = 2` and the round-70 print-ref
+    /// `-rules` probe reads mass 125 / convection 125 / diffusion 64
+    /// quadrature points per hex (= orders 9 / 9 / 6), never the round-64
+    /// hardcodes 2p / 2p-1.
     fn new(
         space: &H1Space<Mesh<3>>,
         ess_tdofs: Vec<u32>,
@@ -222,9 +274,17 @@ impl ConvectionDiffusionTDO {
         order: u8,
         qp_override: i32,
     ) -> Self {
-        // Mass form: MassIntegrator, exact for degree 2·order → quad_order 2·order.
+        let geom_order = space.mesh().geom_order();
+        // 3k - 1 for the Qk hex map (affine k = 1 → 2, P2-curved k = 2 → 5).
+        let order_w = mfem_hex_order_w(geom_order);
+
+        // Mass form: MassIntegrator, MFEM default order 2p + OrderW.
         let mass = MassIntegrator { rho: 1.0 };
-        let mass_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order };
+        let mass_qp = if qp_override > 0 {
+            qp_override as u8
+        } else {
+            2 * order + order_w
+        };
         let mut m_mat = Assembler::assemble_bilinear(space, &[&mass], mass_qp);
 
         // Mform.FormSystemMatrix(ess_tdofs_): eliminate essential rows/cols
@@ -235,12 +295,24 @@ impl ConvectionDiffusionTDO {
         fem_space::apply_dirichlet(&mut m_mat, &mut zero_rhs, &ess_tdofs, &zero_vals);
 
         // Kform: ConvectionIntegrator(*q, -alpha) + DiffusionIntegrator(-kappa).
+        // The two integrators have different MFEM default rules, so they are
+        // assembled separately and added (same pattern as the rt/nd ports).
         let vel = ScaledVelocity { alpha };
         let conv = ConvectionIntegrator { velocity: vel };
         let diff = DiffusionIntegrator { kappa: -kappa };
-        // Exact for degree max(2p-1, 2p-2) → quad_order 2p-1 (MFEM defaults).
-        let k_qp = if qp_override > 0 { qp_override as u8 } else { 2 * order - 1 };
-        let k_mat = Assembler::assemble_bilinear(space, &[&conv, &diff], k_qp);
+        let diff_qp = if qp_override > 0 {
+            qp_override as u8
+        } else {
+            2 * order + 2 // p + p + dim - 1, dim = 3
+        };
+        let conv_qp = if qp_override > 0 {
+            qp_override as u8
+        } else {
+            (3 * u16::from(geom_order) + 2 * u16::from(order) - 1) as u8
+        };
+        let conv_mat = Assembler::assemble_bilinear(space, &[&conv], conv_qp);
+        let diff_mat = Assembler::assemble_bilinear(space, &[&diff], diff_qp);
+        let k_mat = conv_mat.add(&diff_mat);
 
         // bform.Assemble() with no integrators on the H1 branch → b = 0.
         let b = vec![0.0_f64; n];
@@ -412,6 +484,73 @@ fn parse_i32(args: &[String], flag: &str, default: i32) -> i32 {
         .unwrap_or(default)
 }
 
+/// C++ default `ostream << double` rendering (printf `%g`, precision 6): 6
+/// significant digits, trailing zeros stripped, scientific notation outside
+/// [1e-4, 1e6) with a signed two-digit exponent.
+///
+/// Round-70 stdout alignment (tmp/d737 print-ref harness): MFEM 4.10's
+/// `OptionsParser::ParseCheck` ends with `PrintOptions(out)` on success
+/// (optparser.cpp:270), so the upstream stdout opens with the
+/// `Options used:` block whose values render through `WriteValue` in this
+/// exact form.
+fn cxx_ostream_f64(v: f64) -> String {
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0".into() } else { "0".into() };
+    }
+    let sign = if v < 0.0 { "-" } else { "" };
+    let sci = format!("{:.5e}", v.abs()); // "d.ddddde<exp>" — 6 significant digits
+    let epos = sci.find('e').expect("scientific form always carries 'e'");
+    let exp: i32 = sci[epos + 1..].parse().expect("bad exponent");
+    let digits: String = sci[..epos].chars().filter(|c| c.is_ascii_digit()).collect();
+    // %g strips trailing zeros from the fraction only (never from a value
+    // with no decimal point), then drops a bare trailing '.'.
+    let strip = |raw: &str| -> String {
+        match raw.find('.') {
+            None => raw.to_string(),
+            Some(dot) => {
+                let frac = raw[dot + 1..].trim_end_matches('0');
+                if frac.is_empty() {
+                    raw[..dot].to_string()
+                } else {
+                    format!("{}.{}", &raw[..dot], frac)
+                }
+            }
+        }
+    };
+    if (-4..6).contains(&exp) {
+        // Fixed notation: decimal point after `exp + 1` significant digits.
+        if exp < 0 {
+            let raw = format!("0.{}{digits}", "0".repeat((-exp - 1) as usize));
+            format!("{sign}{}", strip(&raw))
+        } else {
+            let point = (exp + 1) as usize;
+            let raw = if digits.len() > point {
+                format!("{}.{}", &digits[..point], &digits[point..])
+            } else {
+                format!("{digits}{}", "0".repeat(point - digits.len()))
+            };
+            format!("{sign}{}", strip(&raw))
+        }
+    } else {
+        let exp_str = if exp < 0 { format!("e-{:02}", -exp) } else { format!("e+{:02}", exp) };
+        let mantissa = strip(&format!("{}.{}", &digits[..1], &digits[1..]));
+        format!("{sign}{mantissa}{exp_str}")
+    }
+}
+
+/// The canonical stdout opening block (MFEM `OptionsParser::PrintOptions`):
+/// `Options used:` plus one `   --<long> <value>` row per option, in add
+/// order. The canonical option set is the print-ref harness's four rows
+/// (the upstream `-vis` toggle is dropped — silent runs; the `-qp`/`-nr`/
+/// `-dump` probe knobs are not part of the surface).
+fn print_options_block(order: u8, t_final: f64, dt: f64, vis_steps: usize) {
+    println!("Options used:");
+    println!("   --order {order}");
+    println!("   --t-final {}", cxx_ostream_f64(t_final));
+    println!("   --time-step {}", cxx_ostream_f64(dt));
+    println!("   --visualization-steps {vis_steps}");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -449,6 +588,9 @@ fn main() {
     // -nr 1: the mesh file is already refined (verification path — e.g. feed
     // the MFEM-refined mesh to isolate refinement differences).
     let no_refine = parse_i32(&args, "-nr", 0) != 0;
+    // Canonical stdout opening block (upstream: OptionsParser::ParseCheck →
+    // PrintOptions before any mesh work).
+    print_options_block(order, t_final, dt, vis_steps);
     let parent_mesh = if no_refine {
         parent_mesh
     } else {
@@ -467,10 +609,8 @@ fn main() {
     let fes_cylinder = H1Space::new(cylinder_submesh.mesh.clone(), order);
     {
         let m = &cylinder_submesh.mesh;
-        let min = m.face_tags.iter().copied().min().unwrap_or(0);
-        let max = m.face_tags.iter().copied().max().unwrap_or(0);
         println!(
-            "Cylinder submesh: NE={} NV={} ndofs={} bdr_attrs={min}..{max}",
+            "Cylinder submesh: NE={} NV={} ndofs={}",
             m.n_elems(),
             m.n_nodes(),
             fes_cylinder.n_dofs()
@@ -506,7 +646,15 @@ fn main() {
         ConvectionDiffusionTDO::new(&fes_cylinder, ess_tdofs, 0.0, 1.0e-1, order, qp);
 
     // C++ multidomain.cpp:273-280 — zero initial condition in the cylinder.
+    // `temperature_cylinder` is the RK3 state; `cyl_gf_state` mirrors the
+    // upstream `temperature_cylinder_gf`, which is the *transfer destination*
+    // (upstream multidomain.cpp:365-368): MFEM's SubMesh-to-SubMesh transfer
+    // leaves the destination's interior values untouched (it carries the
+    // destination's own values through the root parent), and the upstream loop
+    // re-seeds the RK3 vector from that GF every step. The GF is refreshed
+    // from the RK3 output at print steps only (multidomain.cpp:381-382).
     let mut temperature_cylinder = vec![0.0_f64; fes_cylinder.n_dofs()];
+    let mut cyl_gf_state = vec![0.0_f64; fes_cylinder.n_dofs()];
 
     // C++ multidomain.cpp:282-304 — block submesh (domain attribute 2), heat
     // equation with κ = 1, α = 0, essential walls = bdr attrs 1-4.
@@ -514,10 +662,8 @@ fn main() {
     let fes_block = H1Space::new(block_submesh.mesh.clone(), order);
     {
         let m = &block_submesh.mesh;
-        let min = m.face_tags.iter().copied().min().unwrap_or(0);
-        let max = m.face_tags.iter().copied().max().unwrap_or(0);
         println!(
-            "Block submesh: NE={} NV={} ndofs={} bdr_attrs={min}..{max}",
+            "Block submesh: NE={} NV={} ndofs={}",
             m.n_elems(),
             m.n_nodes(),
             fes_block.n_dofs()
@@ -534,6 +680,15 @@ fn main() {
     let block_ess_tdofs = hex_boundary_dofs(mesh_blk, dm_blk, &marker_to_tags(&block_wall_attributes));
     println!("Block ess vdofs (walls 1-4): {}", block_ess_tdofs.len());
 
+    // Block-side interface true dofs (canonical surface row: the block
+    // submesh's attr-9 faces, upstream multidomain.cpp:295-299).
+    let interface_dofs_blk = hex_boundary_dofs(
+        mesh_blk,
+        dm_blk,
+        &marker_to_tags(&inner_cylinder_wall_attributes),
+    );
+    println!("Block interface tdofs: {}", interface_dofs_blk.len());
+
     let mut d_tdo = ConvectionDiffusionTDO::new(&fes_block, block_ess_tdofs, 0.0, 1.0, order, qp);
 
     // C++ multidomain.cpp:306-313 — T = 1 on the outside walls via
@@ -542,10 +697,9 @@ fn main() {
     for &d in &hex_boundary_dofs(mesh_blk, dm_blk, &marker_to_tags(&block_wall_attributes)) {
         temperature_block[d as usize] = 1.0;
     }
-    println!(
-        "Block initial BC dofs (nonzero): {}",
-        temperature_block.iter().filter(|&&v| v != 0.0).count()
-    );
+    let nonzero = temperature_block.iter().filter(|&&v| v != 0.0).count();
+    let ic_sum: f64 = temperature_block.iter().sum();
+    println!("Block initial BC dofs (nonzero): {nonzero}  IC sum: {ic_sum:.6e}");
 
     // C++ multidomain.cpp:318-322 creates a surface SubMesh of the interface
     // (bdr attr 9) that is never used afterwards — trimmed here.
@@ -554,11 +708,6 @@ fn main() {
     let interface_dofs_cyl = hex_boundary_dofs(
         mesh_cyl,
         dm_cyl,
-        &marker_to_tags(&inner_cylinder_wall_attributes),
-    );
-    let interface_dofs_blk = hex_boundary_dofs(
-        mesh_blk,
-        dm_blk,
         &marker_to_tags(&inner_cylinder_wall_attributes),
     );
     let temperature_block_to_cylinder_map =
@@ -580,31 +729,25 @@ fn main() {
 
         // Transfer the block solution onto the cylinder interface dofs to act
         // as the Dirichlet boundary condition of the convection-diffusion
-        // equation (one-way coupling).
-        temperature_block_to_cylinder_map
-            .transfer(&temperature_block, &mut temperature_cylinder);
+        // equation (one-way coupling) — into the transfer destination GF, from
+        // which the RK3 vector is then re-seeded.
+        temperature_block_to_cylinder_map.transfer(&temperature_block, &mut cyl_gf_state);
+        temperature_cylinder.copy_from_slice(&cyl_gf_state);
 
         // Advance the convection-diffusion equation inside the cylinder.
         rk3ssp_step(&mut cd_tdo, &mut temperature_cylinder, &mut t, dt);
 
         if last_step || ti % vis_steps == 0 {
+            // Upstream multidomain.cpp:381-382 — refresh the GFs from the
+            // true-dof vectors at print steps (data flow, not just output).
+            cyl_gf_state.copy_from_slice(&temperature_cylinder);
+
             let bsum: f64 = temperature_block.iter().sum();
             let csum: f64 = temperature_cylinder.iter().sum();
-            let bmin = temperature_block.iter().cloned().fold(f64::INFINITY, f64::min);
-            let bmax = temperature_block
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let cmin = temperature_cylinder
-                .iter()
-                .cloned()
-                .fold(f64::INFINITY, f64::min);
-            let cmax = temperature_cylinder
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
+            let bsq: f64 = temperature_block.iter().map(|v| v * v).sum();
+            let csq: f64 = temperature_cylinder.iter().map(|v| v * v).sum();
             println!(
-                "step {ti}, t = {t}  block: sum={bsum:.6e} min={bmin:.6e} max={bmax:.6e}  cyl: sum={csum:.6e} min={cmin:.6e} max={cmax:.6e}"
+                "step {ti}, t = {t}  block: sum={bsum:.6e} ssq={bsq:.6e}  cyl: sum={csum:.6e} ssq={csq:.6e}"
             );
         }
 

@@ -61,6 +61,14 @@ this mesh.
    `tmp/multidomain/{cpp,rust}_hexes.txt`). The port therefore cannot be
    compared 1:1 with a C++ run that refines the same parent; validation runs
    both codes on the *same* (MFEM-refined) mesh via `-nr 1`.
+   *Round-70 note:* that figure complicates two effects — the dumps were
+   written at different precisions (17 vs 10 significant digits) and the parent
+   mesh carries P2 geometry (curved refinement moves vertices off the straight
+   lattice), so a corner-set comparison is not a like-for-like test. Rounds
+   69/70 show the two refinements are *effectively equivalent for these
+   spaces*: rt/nd trajectories are byte-equal on the internally refined mesh
+   (round 69) and the round-70 straight-config H1 block rows are byte-equal
+   too. The gap note needs re-derivation before it is quoted again.
 2. **`refine_uniform_3d` panics on Hex8 meshes with quad boundary faces.**
    `rebuild_3d_boundary` looks up new quad-face centers by exact-bit
    coordinates built as (boundary-vertex-order sum)/4, while the refinement
@@ -260,5 +268,77 @@ against C++ doubles, stricter than the round-68 6-digit check).
 Not run: the full-default profile (`-tf 5`, 5·10^5 rows) — infeasible
 in-session (extrapolated ≈2.4 h rt / ≈7 h nd at measured 7.3 s / 21.8 s per
 251 rows; C++ print-ref 4.6 s). Equality there is a HYPOTHESIS (D736)
-extrapolating from the 2501-row profile. The H1 `multidomain.rs` is not yet
-on the canonical stdout surface (D737).
+extrapolating from the 2501-row profile.
+
+## Round 70: H1 joins the canonical surface (D737) and the long window (D736)
+
+**D737 — `multidomain.rs` (H1).** Upstream `multidomain.cpp` is PAR-only like
+the rt/nd variants (rc=2 on the serial MFEM 4.10 tree, error list in
+`tmp/d737/official_h1_compile_err.txt`), so the comparison object is the
+serial print-reference harness `tmp/d737/multidomain_h1_printref.cpp` (numeric
+core = the official source's serial-feasible path; print surface 1:1 with the
+Rust file). The format gaps aligned:
+
+| row | before | after (canonical) |
+|-----|--------|-------------------|
+| opening block | absent | `Options used:` + `--order/--t-final/--time-step/--visualization-steps` |
+| submesh banners | `… ndofs=N bdr_attrs=a..b` probe suffix | `Cylinder submesh: NE=… NV=… ndofs=…` (probe suffix dropped) |
+| interface count | absent | `Block interface tdofs: 416` |
+| IC row | `Block initial BC dofs (nonzero): 416` | `… 416  IC sum: 4.160000e2` |
+| trajectory row | `block: sum=… min=… max=…  cyl: sum=… min=… max=…` | `block: sum=… ssq=…  cyl: sum=… ssq=…` (family form, `{:.6e}` 7-sig) |
+
+Two numeric defects were fixed with it (both D667/D678-class, previously
+registered against the rt/nd ports only):
+
+* **Quadrature rules.** The round-64 hardcodes (mass `2p`, K `2p-1`) are not
+  MFEM's defaults. MFEM's per-integrator defaults (`bilininteg.cpp`) are mass
+  `2p + Trans.OrderW()`, diffusion `2p + dim - 1` and convection
+  `OrderGrad + Order + p = 3k + 2p - 1` (`OrderW = 3k-1`, `eltrans.cpp:493-530`).
+  The submeshes carry the parent's P2 geometry (D677), so `k = 2` and the
+  print-ref `-rules` probe reads **mass 125 / convection 125 / diffusion 64**
+  points per hex (orders 9 / 9 / 6) on the curved map, and 64 / 64 / 64
+  (order 6) once the geometry is straightened. The two stiffness integrators
+  need different rules and are therefore assembled separately and added.
+* **Data flow (upstream `multidomain.cpp:381-382`).** The cylinder GridFunction
+  is the transfer destination; the upstream loop re-seeds the RK3 vector from
+  it every step *and refreshes it from the RK3 output at print steps*. That
+  refresh changes the trajectory (the `-norefresh` harness variant, i.e. the
+  round-69 rt/nd model, drifts to `cyl sum = 2.782465e0` vs `2.783957e0` at
+  step 250 — 5.4e-4 relative), so it is reproduced in the port
+  (`cyl_gf_state`).
+
+Verification (print-ref vs port, `-straight` harness variant so that both
+sides read the mesh as straight-sided — see the re-run caveat below): the alt
+profile (`-tf 0.0002 -vs 2`, 6 rows) is **byte-identical**; the t005 profile
+(`-tf 0.005`, 26 rows) is byte-identical in every block row and differs in
+10/26 cylinder rows from step 100 on, always in the last printed digit
+(~3e-7 relative, registered D750 with candidate causes). Unlike rt/nd there is
+**no IC exemption row**: the constant Dirichlet IC projects to exactly 1.0 on
+all 416 wall dofs in both codes.
+
+Re-run caveat: this round's runs were made while lane A's `[0,1]³` hex
+migration was in flight; that state trips the mesh reader's D41 safety net on
+this mesh (P2 nodes refused → straight read, plus a stdout
+`Elements with wrong orientation` line). The curved-map configuration must be
+re-run once A's migration lands (the curved rules 9/9/6 are already pinned on
+the C++ side by the `-rules` probe).
+
+**D736 — long window.** rt at `-tf 0.5 -dt 1e-5` (50001 steps, 2513 printed
+rows, C++ print-ref 731 s) is byte-identical apart from the single D735 IC
+row; the final row is
+`block: sum=-1.558563e0 ssq=4.112349e-1  cyl: sum=7.995288e-6 ssq=4.711721e-4`
+on both sides. No divergence and no format drift over a 10×-longer window than
+round 69. The full default (`-tf 5`, ≈10× longer again) remains a HYPOTHESIS.
+
+**D749 — the rt/nd harnesses dropped an upstream line.** The round-64/69
+print-refs (and the rt/nd ports) omit the print-block `SetFromTrueDofs` pair
+that upstream has (`multidomain_rt.cpp:386-387`, `multidomain_nd.cpp:391-392`),
+so the D708 "GF interior never refreshed" model reproduces the harness, not
+the official source. Measured at t005 step 250 with fresh C++ runs: rt
+`cyl sum` −6.420799e-6 (harness/port) vs **−2.137667e-4** (upstream-faithful),
+nd 1.337180e-5 vs **6.932270e-5**; the ssq values move by 0.6 % / 0.006 %.
+Ready-made variants define the fix
+(`tmp/d737/multidomain_{rt,nd}_printref_refresh.cpp`, binaries
+`$HOME/work/d737/{rt,nd}_printref_refresh`): add the two lines to the
+harnesses, mirror the refresh in the rt/nd ports, then re-gate (the round-69
+red-line numbers are harness-model values).
