@@ -309,14 +309,8 @@ fn main() {
                     if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
                 })
                 .collect();
-            // S = A01ᵀ·diag(d)·A01: scale A01's transpose rows by d, then
-            // multiply by A01.
-            let mut at_d = a01.transpose();
-            // Scale each row i of at_d by a00_diag[i]  (at_d = A01ᵀ, row i
-            // corresponds to L² dof i … wait: A01 is RT×L2, so A01ᵀ is L2×RT.
-            // S = A01ᵀ·D·A01 requires scaling A01ᵀ's COLUMNS by d, or
-            // equivalently scaling A01's rows.  We scale A01's rows by d
-            // (1/diag(A00)) then S = A01ᵀ·(scaled A01).
+            // S = A01ᵀ·diag(d)·A01: A01ᵀ is L2×RT, so scaling A01's ROWS by
+            // d = 1/diag(A00) and forming A01ᵀ·(scaled A01) is S.
             let mut a01_scaled = a01.clone();
             for r in 0..nr {
                 for p in a01_scaled.row_ptr[r]..a01_scaled.row_ptr[r + 1] {

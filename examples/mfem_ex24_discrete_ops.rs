@@ -387,7 +387,6 @@ fn solve_grad_3d(mesh: &Mesh<3>, order: u8) {
 
 fn solve_curl_3d(mesh: &Mesh<3>, order: u8) {
     let dim = 3;
-    let qo = (2 * order + 1).max(3) as u8;
     let nd_order = order;
     let rt_order = if order > 0 { order - 1 } else { 0 };
 
@@ -399,11 +398,20 @@ fn solve_curl_3d(mesh: &Mesh<3>, order: u8) {
     // Interpolate v = (sin(κy), sin(κz), sin(κx)) onto H(curl)
     let v = nd.interpolate_vector(&|x: &[f64]| v_exact(x)).into_vec();
 
-    // (a) Mixed form: M·w = C·v
-    let c = fem_assembly::mixed::assemble_hcurl_hdiv_weak_curl(&nd, &rt, qo, 1.0);
+    // (a) Mixed form: M·w = C·v.  MFEM's `MixedVectorCurlIntegrator` picks
+    //     its own default rule `trial.GetOrder() + test.GetOrder() +
+    //     Trans.OrderW()` (bilininteg.hpp MixedVectorIntegrator): the ND fe
+    //     order is `order`, the RT fe order is `order` (the RT hex collection
+    //     order `order-1` carries `GetOrder = p+1`, fe_rt.cpp), and `OrderW()`
+    //     is 2 on an affine hex (Qk map `3g−1`) / 0 on an affine tet (Pk).
+    let geom_order = mesh.geom_order().max(1);
+    let is_hex = mesh.element_type(0) == ElementType::Hex8;
+    let order_w = if is_hex { 3 * geom_order - 1 } else { 3 * (geom_order - 1) };
+    let qo_curl = (nd_order + (rt_order + 1) + order_w) as u8;
+    let c = fem_assembly::mixed::assemble_hcurl_hdiv_weak_curl(&nd, &rt, qo_curl, 1.0);
     let mut rhs = vec![0.0; rt.n_dofs()];
     c.spmv(&v, &mut rhs);
-    let mass = VectorAssembler::assemble_bilinear(&rt, &[&VectorMassIntegrator { alpha: 1.0 }], qo);
+    let mass = VectorAssembler::assemble_bilinear(&rt, &[&VectorMassIntegrator { alpha: 1.0 }], qo_curl);
     let mut w_sol = vec![0.0; rt.n_dofs()];
     // C++ ex24 step 9: PCG, relTol 1e-12, maxIter 1000, printLevel 1, DSmoother.
     let cfg = SolverConfig {
@@ -425,9 +433,13 @@ fn solve_curl_3d(mesh: &Mesh<3>, order: u8) {
     //     (the nodal interpolant), not an L² mass solve.
     let w_ex = rt.interpolate_vector(&|x: &[f64]| curlv_exact(x)).into_vec();
 
-    // L² errors — C++ `ComputeL2Error(curlv_coef)` default rule
-    // `2*fe->GetOrder() + 3`; the RT element order is `order - 1`.
-    let err_qo = 2 * order + 1;
+    // L² errors — C++ `ComputeL2Error(curlv_coef)` is called WITHOUT an `irs`
+    // argument, so MFEM uses its per-element default rule
+    // `2*fe->GetOrder() + 3` (fem/gridfunc.cpp) where the RT hex fe order is
+    // `order` (GetOrder = collection order + 1, fe_rt.cpp) — NOT `order - 1`,
+    // which made this an order-3 rule and under-integrated the error
+    // (D700: all three error lines shifted by ~1e-4 relative).
+    let err_qo = 2 * order + 3;
     let curlv_fn = |x: &[f64]| curlv_exact(x);
     let e1 = compute_l2_error_hdiv(&w_sol, &rt, &curlv_fn, err_qo, None);
     let e2 = compute_l2_error_hdiv(&w_interp, &rt, &curlv_fn, err_qo, None);
