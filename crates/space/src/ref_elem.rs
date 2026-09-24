@@ -273,7 +273,7 @@ pub fn equispaced_simplex(elem_type: ElementType, order: u8) -> Box<dyn Referenc
             1 => Box::new(TriP1),
             o => Box::new(TriPk::new(o as usize)),
         },
-        ElementType::Tet4 => match order {
+        ElementType::Tet4 | ElementType::Tet10 => match order {
             1 => Box::new(TetP1),
             2 => Box::new(TetP2),
             o => Box::new(TetPk::new(o as usize)),
@@ -343,7 +343,13 @@ pub fn h1_field_element(
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
         (ElementType::Tri3 | ElementType::Tri6, _) => h1_simplex_slots(elem_type, order),
-        (ElementType::Tet4, _) => h1_simplex_slots(elem_type, order),
+        // D581 pattern for the simplex family: a curved tet mesh carries the
+        // Tet10 *geometry* label, and MFEM has a single TET geometry —
+        // `H1_FECollection(p, 3)` builds `H1_TetrahedronElement(p)` on it, so
+        // the field dispatch follows `h1_simplex_slots` exactly as Tri6 does
+        // (D761: the missing arm panicked on a production-reachable path —
+        // the estimator over curved tet meshes).
+        (ElementType::Tet4 | ElementType::Tet10, _) => h1_simplex_slots(elem_type, order),
         (ElementType::Quad4, 0) => Box::new(P0Tensor { dim: 2 }),
         (ElementType::Quad4, _) => gll_tensor(elem_type, order),
         (ElementType::Hex8, 0) => Box::new(P0Tensor { dim: 3 }),
@@ -431,7 +437,7 @@ pub fn l2_field_element(
             o if gll => legacy_equispaced_element(elem_type, o),
             o => Box::new(TriL2GL::new(o as usize)),
         },
-        ElementType::Tet4 => match order {
+        ElementType::Tet4 | ElementType::Tet10 => match order {
             0 => Box::new(P0Tet),
             o if gll => legacy_equispaced_element(elem_type, o),
             o => Box::new(TetL2GL::new(o as usize)),
@@ -485,16 +491,16 @@ pub fn geometry_node_element(elem_type: ElementType, order: u8) -> Box<dyn Refer
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(H1TriPk::new(3)),
         (ElementType::Quad4, 0) => Box::new(P0QuadCentred),
         (ElementType::Quad4, o) => Box::new(QuadQk::new(o as usize)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(H1TetPk::new(3)),
+        (ElementType::Tet4, 1) | (ElementType::Tet10, 1) => Box::new(TetP1),
+        (ElementType::Tet4, 2) | (ElementType::Tet10, 2) => Box::new(TetP2),
+        (ElementType::Tet4, 3) | (ElementType::Tet10, 3) => Box::new(H1TetPk::new(3)),
         // HexQk: Gauss-Lobatto nodes on [0,1]³ (D721; same family as QuadQk).
         // D581: every hexahedral cell type — curved.rs reads Hex20/Hex27
         // geometry tables with this same `HexQk` family.
         (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, o) => {
             Box::new(HexQk::new(o.max(1) as usize))
         }
-        (ElementType::Tet4, o) => Box::new(H1TetPk::new(o.max(1) as usize)),
+        (ElementType::Tet4, o) | (ElementType::Tet10, o) => Box::new(H1TetPk::new(o.max(1) as usize)),
         // High-order tri geometry readers: GLL at every order (the equispaced
         // TriPk misreads the set_curvature lattice from order 3 on; p ≤ 2 is
         // bit-identical either way).
@@ -527,13 +533,13 @@ pub fn geometry_node_element(elem_type: ElementType, order: u8) -> Box<dyn Refer
 pub fn legacy_equispaced_element(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
-        (ElementType::Tet4, 0) => Box::new(P0Tet),
+        (ElementType::Tet4 | ElementType::Tet10, 0) => Box::new(P0Tet),
         (ElementType::Quad4, 0) => Box::new(P0Tensor { dim: 2 }),
         (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 0) => {
             Box::new(P0Tensor { dim: 3 })
         }
         (ElementType::Tri3 | ElementType::Tri6, _) => equispaced_simplex(elem_type, order),
-        (ElementType::Tet4, _) => equispaced_simplex(elem_type, order),
+        (ElementType::Tet4 | ElementType::Tet10, _) => equispaced_simplex(elem_type, order),
         (ElementType::Quad4, _) => gll_tensor(elem_type, order),
         (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 1) => {
             fixed_order_tensor(elem_type, order)

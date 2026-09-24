@@ -527,14 +527,65 @@ fn elem_vol<M: MeshTopology>(m: &M, e: u32) -> f64 {
     }
 }
 
+/// Reference coordinates of the element's **centroid** — the mean of its
+/// reference vertices ([`ref_vertex_coords`] over the TRUE corner count from
+/// [`elem_vertex_count`], so the quadratic connectivity rows `Tet10`/`Hex20`/
+/// `Hex27`/`Prism18`/`Pyramid13` contribute their corners, never their edge /
+/// face / centre nodes).
+///
+/// This is the one-point station of the collocation estimators
+/// ([`zz_estimator`] — D760).  The centroid is **frame-relative**, so it
+/// follows the family's own reference frame exactly as `vertex_shapes` /
+/// `geom_jacobian` do (D757/D721): barycentric `1/(d+1)` on the simplices,
+/// `(0,0)` on the legacy `[-1,1]²` quads, `(0.5)³` on the `[0,1]³` hexes,
+/// `(0.5, 1/3, 1/3)` on the `(ξ segment)×(η,ζ triangle)` wedges and
+/// `(0.4, 0.4, 0.2)` on the Fuentes pyramids.
+fn sample_point(elem_type: ElementType, npe: usize, dim: usize) -> Vec<f64> {
+    let nv = elem_vertex_count(elem_type, npe, dim);
+    let mut xi = vec![0.0_f64; dim];
+    for k in 0..nv {
+        let v = ref_vertex_coords(dim, nv, k);
+        for c in 0..dim { xi[c] += v[c]; }
+    }
+    for c in xi.iter_mut() { *c /= nv as f64; }
+    xi
+}
+
 /// ZZ gradient-recovery error estimator using GridFunction.
+///
+/// # D760 — the one-point sampling station
+///
+/// The estimator is a one-point collocation of MFEM's `ZZErrorEstimator`
+/// (`fem/gridfunc.cpp:4657`): MFEM evaluates the element flux with
+/// `BilinearFormIntegrator::ComputeElementFlux` and the flux-difference energy
+/// with `ComputeFluxEnergy`, both on the integrator's own rule
+/// (`DiffusionIntegrator`: `IntRules.Get(geom, 2*order)`), and smooths the flux
+/// by the plain arithmetic nodal average (`GridFunction::ComputeFlux` →
+/// `SumFluxAndCount` + `/count`).  Here the flux is sampled at the element's
+/// **reference centroid** ([`sample_point`]) and the energy is that one sample
+/// times the element volume.
+///
+/// The station is frame-relative, so it has to follow the family's own frame:
+/// on the `[0,1]³` hexes it is `(0.5, 0.5, 0.5)`.  Before D760 the station was
+/// dispatched on the dimension only (`[0.25; 3]` for every 3-D cell — the tet
+/// centroid reused for hexes), which after D721 (hex family moved onto
+/// `[0,1]³`) sampled hexes at a point **1/4 of the way across the cube**
+/// instead of their centre.  MFEM's own CUBE rule contains the centroid at
+/// flux order 2 (`IntRules.Get(CUBE, 4)`: 27 points, `(0.5,0.5,0.5)` the
+/// centre node), never at order 1 — the centroid is the symmetric one-point
+/// representative of MFEM's point set, and the only station that survives the
+/// reference-frame relabeling pinned in
+/// `crates/assembly/tests/d760_zz_sample_point.rs`.
 pub fn zz_estimator<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
 where M: MeshTopology, S: FESpace<Mesh = M> {
     let m: &M = gf.space().mesh();
     let ne = m.n_elements(); let d = m.dim() as usize;
-    let xi = if d == 2 { vec![1.0/3.0, 1.0/3.0] } else { vec![0.25, 0.25, 0.25] };
 
-    let eg: Vec<Vec<f64>> = (0..ne as u32).map(|e| gf.evaluate_gradient_at_element(e, &xi)).collect();
+    // Per element: the station of ITS family's frame (D760).
+    let eg: Vec<Vec<f64>> = (0..ne as u32).map(|e| {
+        let xi = sample_point(m.element_type(e), m.element_nodes(e).len(), d);
+        gf.evaluate_gradient_at_element(e, &xi)
+    }).collect();
     let nn = m.n_nodes();
     let mut ns: Vec<Vec<f64>> = (0..nn).map(|_| vec![0.0; d]).collect();
     let mut nc = vec![0u32; nn];
@@ -1749,54 +1800,67 @@ impl AnisotropicErrorEstimator for ElementIndicators {
     }
 }
 
-/// P1/Q1 basis values of the element vertices at a reference point `xi`
-/// (natural domains: simplex [0,1]^d barycentric, quad [-1,1]², hex [0,1]³ —
-/// the hex family was flipped off `[-1,1]³` by D721, D757 re-anchors the
-/// sampling helpers).
-fn vertex_shapes(_elem_type: ElementType, xi: &[f64], npe: usize) -> Vec<f64> {
+/// P1/Q1 basis values of the element's **vertices** at reference point `xi`,
+/// laid out on the connectivity row (length `npe`): the first
+/// [`elem_vertex_count`] entries carry the family's linear corner weights,
+/// every extra node of a quadratic row (`Tet10` edge mids, `Hex20/27` edge /
+/// face / centre nodes, `Prism18`, `Pyramid13`) is weighted **0** — the linear
+/// element-geometry model of `phys_point` / `zz_estimator_aniso`'s recovery
+/// interpolation.
+///
+/// The weights are the family's own linear reference element
+/// (`fem_space::ref_elem` — the same single source of truth `ref_elem_vol`
+/// dispatches to), so the frame is the family's by construction: barycentric
+/// on the simplices, `[-1,1]²` on the quads, `[0,1]³` on the hexes (D721),
+/// `(ξ segment)×((η,ζ) triangle)` on the wedges, the Fuentes frame on the
+/// pyramids, and the slot order is the one the mesh conn / `ref_vertex_coords`
+/// use (D757).  For the hexes that is `HexQ1` = MFEM
+/// `TriLinear3DFiniteElement::CalcShape` verbatim in the MFEM `CUBE::Vertices`
+/// ring order — the slot order the fem-rs hex conn carries (the D250 fix: the
+/// pre-fix Morton `k&1/k&2/k&4` mapping swapped slots 2↔3 and 6↔7 and
+/// scrambled every `phys_point` sample) — and it is `[0,1]³`-native rather
+/// than the old `0.125·(1±ξ)(1±η)(1±ζ)` `[-1,1]³` frame whose ξ → (1+ξ)/2
+/// reading put the sampled point in the upper half of the element (D757: an
+/// 8× `lp_error_estimator` vs `compute_l1_error` disagreement on `HEXX2P1`).
+///
+/// D761: the previous implementation dispatched on the raw `npe` alone — the
+/// quadratic connectivity rows (`Tet10` → 10, `Hex20` → 20, `Hex27` → 27,
+/// `Prism18` → 18, `Pyramid13` → 13) fell into the `_ => {}` arm and
+/// **silently returned all-zero weights**, i.e. `phys_point` evaluated the
+/// exact solution at the ORIGIN (a reachable wrongness: `Tet10` has a
+/// `geom_rule` arm, and `Hex20`/`Hex27` reach the same arm once it does).
+/// Unsupported families now panic loudly instead of zeroing.
+fn vertex_shapes(elem_type: ElementType, xi: &[f64], npe: usize) -> Vec<f64> {
+    let dim = xi.len();
+    let nv = elem_vertex_count(elem_type, npe, dim);
+    let lin: Box<dyn ReferenceElement> = match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10 => {
+            fem_space::ref_elem::h1_simplex_slots(elem_type, 1)
+        }
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+            fem_space::ref_elem::fixed_order_tensor(ElementType::Quad4, 1)
+        }
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            fem_space::ref_elem::fixed_order_tensor(ElementType::Hex8, 1)
+        }
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+            fem_space::ref_elem::h1_prism_slots(1)
+        }
+        ElementType::Pyramid5 | ElementType::Pyramid13 => fem_space::ref_elem::h1_pyramid_slots(
+            1,
+            fem_element::lagrange::PyramidBasisType::default(),
+        ),
+        other => panic!("vertex_shapes: unsupported element type {other:?}"),
+    };
+    debug_assert_eq!(
+        lin.n_dofs(),
+        nv,
+        "linear corner lattice vs elem_vertex_count desync for {elem_type:?}"
+    );
+    let mut phi = vec![0.0_f64; lin.n_dofs()];
+    lin.eval_basis(xi, &mut phi);
     let mut s = vec![0.0_f64; npe];
-    match npe {
-        3 => {
-            s[0] = 1.0 - xi[0] - xi[1];
-            s[1] = xi[0];
-            s[2] = xi[1];
-        }
-        4 if xi.len() == 2 => {
-            let (e, n) = (xi[0], xi[1]);
-            s[0] = 0.25 * (1.0 - e) * (1.0 - n);
-            s[1] = 0.25 * (1.0 + e) * (1.0 - n);
-            s[2] = 0.25 * (1.0 + e) * (1.0 + n);
-            s[3] = 0.25 * (1.0 - e) * (1.0 + n);
-        }
-        4 => {
-            s[0] = 1.0 - xi[0] - xi[1] - xi[2];
-            s[1] = xi[0];
-            s[2] = xi[1];
-            s[3] = xi[2];
-        }
-        8 => {
-            // MFEM `CUBE::Vertices` **ring** order — the fem-rs hex conn
-            // order: slots 0..4 ring the z=0 face CCW from (0,0), slots 4..8
-            // the z=1 face.  (The previous k&1/k&2/k&4 Morton bit mapping
-            // swapped slots 2↔3 and 6↔7 against the actual conn, scrambling
-            // every hex sampling through `phys_point` — D250.)
-            //
-            // D757: `[0,1]³`-native (D721 flipped the hex family off
-            // `[-1,1]³`): every `xi` reaching here comes from `hex_rule` /
-            // `evaluate_gradient_at_element`, both on the unit cube, so the
-            // old `0.125·(1±ξ)(1±η)(1±ζ)` corner weights mapped ξ → (1+ξ)/2 —
-            // the sampled physical point collapsed into the upper half of the
-            // element and `lp_error_estimator` disagreed with
-            // `compute_l1_error` by 8× on the `HEXX2P1` box.
-            for (k, v) in s.iter_mut().enumerate() {
-                let sx = if matches!(k % 4, 1 | 2) { xi[0] } else { 1.0 - xi[0] };
-                let sy = if matches!(k % 4, 2 | 3) { xi[1] } else { 1.0 - xi[1] };
-                let sz = if k >= 4 { xi[2] } else { 1.0 - xi[2] };
-                *v = sx * sy * sz;
-            }
-        }
-        _ => {}
-    }
+    s[..nv].copy_from_slice(&phi[..nv]);
     s
 }
 
@@ -1822,6 +1886,17 @@ fn phys_point<M: MeshTopology>(
 
 /// Gauss-Legendre rule of total polynomial degree `order` on the natural
 /// reference domain of the element geometry.
+///
+/// D761: the `Hex20`/`Hex27` labels join the `Hex8` arm — all three
+/// hexahedral cell types share one CUBE geometry and one H¹ family on MFEM's
+/// `[0,1]³` hex frame (D581/D721, `ref_elem_vol`'s `gll_tensor` arm), so
+/// `hex_rule` is the family rule, exactly as `Hex8` uses it.  The serendipity
+/// hex's own shape functions / rules (`crates/element/src/serendipity.rs`,
+/// the C-lane D743 surface) are NOT involved: `Hex20` here is only the
+/// connectivity label a reader hands over for a 20-node hex (Gmsh type 17,
+/// `ElementType::from_gmsh_type`), and every consumer of this rule evaluates
+/// the shared `HexQk` lattice on it.  Before this arm the two labels hit the
+/// `other => panic!` arm of the dispatch.
 fn geom_rule(elem_type: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
     use fem_element::quadrature as q;
     match elem_type {
@@ -1837,7 +1912,7 @@ fn geom_rule(elem_type: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
             let r = q::tet_rule(order);
             (r.points, r.weights)
         }
-        ElementType::Hex8 => {
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             let r = q::hex_rule(order);
             (r.points, r.weights)
         }
@@ -2226,13 +2301,18 @@ where
     let order = gf.space().order();
 
     // Element gradients at the vertices + nodal recovery (as zz_estimator).
+    // D761: the sampling loop runs over the TRUE vertex count, not the conn
+    // length — a `Tet10`/`Hex20` row's edge / face nodes are not vertices, and
+    // `ref_vertex_coords` has no station for them (they used to fall into its
+    // `_ => {}` arm and contribute an ORIGIN-sampled gradient to the nodal
+    // average).  Same contract as `zz_estimator_stress`'s `.take(..)`.
     let eg: Vec<Vec<Vec<f64>>> = (0..ne as u32)
         .map(|e| {
             let nodes = m.element_nodes(e);
-            let npe = nodes.len();
-            (0..npe)
+            let nv = elem_vertex_count(m.element_type(e), nodes.len(), d);
+            (0..nv)
                 .map(|k| {
-                    let xi = ref_vertex_coords(d, npe, k);
+                    let xi = ref_vertex_coords(d, nv, k);
                     gf.evaluate_gradient_at_element(e, &xi)
                 })
                 .collect()
@@ -2242,7 +2322,8 @@ where
     let mut ns: Vec<Vec<f64>> = (0..nn).map(|_| vec![0.0; d]).collect();
     let mut nc = vec![0_u32; nn];
     for e in 0..ne as u32 {
-        for (k, &n) in m.element_nodes(e).iter().enumerate() {
+        let nodes = m.element_nodes(e);
+        for (k, &n) in nodes.iter().take(eg[e as usize].len()).enumerate() {
             for di in 0..d {
                 ns[n as usize][di] += eg[e as usize][k][di];
             }

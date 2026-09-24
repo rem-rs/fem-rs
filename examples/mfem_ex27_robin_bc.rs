@@ -91,10 +91,27 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     // example's default `-dbc 0`) and the core entry is used from here on.
     let mut x_bc = vec![0.0; n];
     for &d in &ess { x_bc[d as usize] = a.dbc_val; }
-    eliminate_ess_tdofs(&mut stiff, &ess, &x_bc, &mut rhs, ElimPolicy::DiagKeep);
+    // D753: `FormLinearSystem` also returns the **projected solution** as the
+    // initial iterate — `X = R·x` with x's essential entries = dbc_val and the
+    // interior zero (C++ ex27 does `u.ProjectBdrCoefficient(dbcCoef, dbc_bdr)`
+    // before FormLinearSystem, `u = 0` elsewhere).  MFEM's legacy `PCG()`
+    // wrapper leaves `iterative_mode = true`, so `CGSolver::Mult` starts from
+    // `r = B − A·X` (solvers.cpp:875-879).  Starting from `X = 0` (the old
+    // code) inflated the first printed `(B r, r)` to 396.994 where the C++
+    // gold prints 37.0097 — the whole iteration history then diverged.
+    // `eliminate_ess_tdofs` returns exactly that X (form.rs:97: a bitwise copy
+    // of `x` for a conforming space, i.e. MFEM's `copy_interior = 1`).
+    let mut x = eliminate_ess_tdofs(&mut stiff, &ess, &x_bc, &mut rhs, ElimPolicy::DiagKeep);
 
-    let mut x = vec![0.0; n];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
+    // D753 / round-32 lesson (the two PCG API layers): C++ ex27 calls the
+    // legacy `PCG(*A, M, B, X, 1, 500, 1e-12, 0.0)`, and that wrapper does
+    // `SetRelTol(sqrt(RTOLERANCE))` = **rel_tol 1e-6** (solvers.cpp:1076-1077;
+    // the abs tolerance is `sqrt(0.0) = 0`).  This solver's `rtol` *is* MFEM's
+    // `rel_tol` — the criterion is `nom <= max(rtol²·nom0, atol²)`
+    // (solvers.cpp:919, mirrored at `iterative.rs:258`) — so the 1:1 value is
+    // `sqrt(1e-12) = 1e-6`, not 1e-12 (the old value gave 41 iterations /
+    // ARF 0.505 where the C++ gold converges in 29 / 0.603605).
+    let cfg = SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
     let res = fem_solver::solve_pcg_gssmoother(&stiff, &rhs, &mut x, &cfg).expect("PCG+GSSmoother");
     println!("  Solved in {} iterations.", res.iterations);
 
