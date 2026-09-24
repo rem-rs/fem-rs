@@ -65,6 +65,9 @@ fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
 
 /// Parsed MFEM mesh data (supports both 2D and 3D).
 pub struct MfemFile {
+    /// 1-D mesh container (D724): filled by the INLINE reader's
+    /// `type = segment` arm (MFEM `ReadInlineMesh` → `Make1D`).
+    pub mesh1d: Option<Mesh<1>>,
     pub mesh2d: Option<Mesh<2>>,
     pub mesh3d: Option<Mesh<3>>,
 }
@@ -576,7 +579,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         // `FinalizeTriMesh` → `CheckElementOrientation(fix)`); without it a CW
         // triangle silently corrupts the HDiv/HCurl dof gauges.
         mesh.check_element_orientation(true);
-        Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
+        Ok(MfemFile { mesh1d: None, mesh2d: Some(mesh), mesh3d: None })
     } else {
         let mut mesh = Mesh {
             coords,
@@ -699,7 +702,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         // `CheckElementOrientation(fix)` — flipped tets are repaired by
         // `Swap(vi[0], vi[1])` before the refinement marking.
         mesh.check_element_orientation(true);
-        Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+        Ok(MfemFile { mesh1d: None, mesh2d: None, mesh3d: Some(mesh) })
     }
 }
 
@@ -4791,14 +4794,19 @@ fn read_f64_line(r: &mut impl BufRead) -> FemResult<Vec<f64>> {
 /// ```text
 /// MFEM INLINE mesh v1.0
 ///
-/// type = tri|quad|tet|hex
+/// type = segment|tri|quad|tet|hex
 /// nx = N
-/// ny = N
+/// [ny = N]
 /// [nz = N]
 /// sx = size_x
-/// sy = size_y
+/// [sy = size_y]
 /// [sz = size_z]
 /// ```
+///
+/// `type = segment` (D724) carries only `nx`/`sx` and lands in
+/// [`MfemFile::mesh1d`]; tri/quad carry `nx`/`ny`/`sx`/`sy`
+/// ([`MfemFile::mesh2d`]); the 3-D types add `nz`/`sz`
+/// ([`MfemFile::mesh3d`]).
 fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
     // Helper: read a key=value line (usize)
     fn read_param_usize(r: &mut impl BufRead, key: &str) -> FemResult<usize> {
@@ -4830,7 +4838,12 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
     };
 
     let nx = read_param_usize(r, "nx")?;
-    let ny = read_param_usize(r, "ny")?;
+    // D724: `type = segment` is the 1-D inline arm — its file carries only the
+    // `nx` / `sx` keyword pair (MFEM ReadInlineMesh VERIFies nx > 0, sx > 0 and
+    // calls `Make1D`; the old parser required `ny` after `nx` and failed with
+    // "expected 'ny=', got 'sx = ...'").
+    let is_segment = elem_type_str == "segment";
+    let ny = if is_segment { 0 } else { read_param_usize(r, "ny")? };
     // 3-D inline types (tet/hex/wedge/pyramid) also carry nz/sz
     // (MFEM ReadInlineMesh, mesh_readers.cpp).
     let is_3d = matches!(elem_type_str.as_str(), "tet" | "hex" | "wedge" | "pyramid");
@@ -4838,10 +4851,16 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
         Some(read_param_usize(r, "nz")?)
     } else { None };
     let sx = read_param_f64(r, "sx")?;
-    let sy = read_param_f64(r, "sy")?;
+    let sy = if is_segment { 0.0 } else { read_param_f64(r, "sy")? };
     let _sz = if is_3d {
         Some(read_param_f64(r, "sz")?)
     } else { None };
+    if is_segment && (nx == 0 || sx <= 0.0) {
+        return Err(FemError::Mesh(format!(
+            "INLINE mesh: invalid 1-D inline mesh format, all values must be positive \
+             (nx = {nx}, sx = {sx})"
+        )));
+    }
 
     // Generate structured mesh using existing Mesh constructors.
     // The INLINE format always maps to [0, sx] × [0, sy] (× [0, sz]) domains.
@@ -4849,6 +4868,30 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
     // we scale via sx/sy/sz in the coordinate generation below.
 
     match elem_type_str.as_str() {
+        "segment" => {
+            // MFEM `ReadInlineMesh` → `Make1D(nx, sx)` (`mesh/mesh.cpp:4566`):
+            // `nx` segments on `[0, sx]`, vertex `j` at `(j / nx) * sx`,
+            // element `j` = `Segment(j, j+1)` with attribute 1, and two
+            // boundary points — vertex 0 with attribute 1, vertex `nx` with
+            // attribute 2 (`bdr_attributes = [1, 2]`).  D724: the reader used
+            // to refuse this arm outright ("segment inline mesh must be
+            // rejected — no 1-D MfemFile container"); with `MfemFile::mesh1d`
+            // the 1-D grid lands in its own container, byte-faithful to the
+            // C++ `Mesh::Load` dump (`tmp/d724/d724_segment_probe.cpp`,
+            // gold in `crates/io/tests/d602_inline_matrix.rs`).
+            let coords: Vec<f64> = (0..=nx).map(|j| j as f64 / nx as f64 * sx).collect();
+            let conn: Vec<u32> = (0..nx).flat_map(|j| [j as u32, j as u32 + 1]).collect();
+            let elem_tags = vec![1; nx];
+            // Boundary points: `Point1` elements over vertex 0 (attr 1) and
+            // vertex `nx` (attr 2).
+            let face_conn = vec![0u32, nx as u32];
+            let face_tags = vec![1, 2];
+            let mesh = Mesh::<1>::uniform(
+                coords, conn, elem_tags, ElementType::Line2,
+                face_conn, face_tags, ElementType::Point1,
+            );
+            Ok(MfemFile { mesh1d: Some(mesh), mesh2d: None, mesh3d: None })
+        }
         "tri" => {
             // MFEM `ReadInlineMesh` → `Make2D(nx, ny, TRIANGLE, sx, sy, true,
             // true)`, and `Make2D`'s *triangle* branch is **not** the quad one:
@@ -4923,7 +4966,7 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             // dof numbering of any space built on the mesh), so it is part of
             // being 1:1 with MFEM and is applied here too.
             fem_mesh::amr::mark_tri_mesh_for_refinement(&mut mesh);
-            Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
+            Ok(MfemFile { mesh1d: None, mesh2d: Some(mesh), mesh3d: None })
         }
         "quad" => {
             // MFEM's INLINE quad mesh uses Hilbert space-filling-curve element
@@ -4977,7 +5020,7 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
                 coords, conn, elem_tags, ElementType::Quad4,
                 face_conn, face_tags, ElementType::Line2,
             );
-            Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
+            Ok(MfemFile { mesh1d: None, mesh2d: Some(mesh), mesh3d: None })
         }
         "hex" => {
             // MFEM INLINE hex: Make3D(nx,ny,nz, HEX, sx,sy,sz, sfc_ordering=true)
@@ -5051,7 +5094,7 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
                 coords, conn, elem_tags, ElementType::Hex8,
                 face_conn, face_tags, ElementType::Quad4,
             );
-            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+            Ok(MfemFile { mesh1d: None, mesh2d: None, mesh3d: Some(mesh) })
         }
         "tet" => {
             // MFEM ReadInlineMesh → Make3D(nx,ny,nz, TETRAHEDRON, sx,sy,sz,
@@ -5154,7 +5197,7 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             // rotated by MarkTetMeshForRefinement (longest edge → (v0,v1)),
             // exactly like the `tri` arm's marking above (D154).
             fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
-            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+            Ok(MfemFile { mesh1d: None, mesh2d: None, mesh3d: Some(mesh) })
         }
         "wedge" => {
             // MFEM ReadInlineMesh → Make3D(nx, ny, nz, WEDGE, ...) — row-major
@@ -5262,7 +5305,7 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             }
             mesh.face_types = Some(face_kinds);
             mesh.face_offsets = Some(offs);
-            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+            Ok(MfemFile { mesh1d: None, mesh2d: None, mesh3d: Some(mesh) })
         }
         "pyramid" => {
             // MFEM ReadInlineMesh → Make3D(nx,ny,nz, PYRAMID, ...): row-major
@@ -5368,7 +5411,7 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
                 coords, conn, elem_tags, ElementType::Pyramid5,
                 face_conn, face_tags, ElementType::Quad4,
             );
-            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+            Ok(MfemFile { mesh1d: None, mesh2d: None, mesh3d: Some(mesh) })
         }
         other => Err(FemError::Mesh(format!(
             "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet, wedge, pyramid; \

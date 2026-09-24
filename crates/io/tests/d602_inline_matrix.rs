@@ -3,6 +3,10 @@
 //! **every** element type, including the `pyramid` arm added here and the
 //! `tet` / `hex` / `wedge` boundary tables corrected here.
 //!
+//! D724 (round 69) added the last missing arm: `type = segment` (`Make1D`)
+//! now lands in `MfemFile::mesh1d` — `inline_segment_matches_mfem_make1d`
+//! replaced the old rejection pin.
+//!
 //! Ground truth: `fixtures/d602_inline_mfem.txt`, dumped by
 //! `tmp/d602/d602_inline_probe.cpp` against serial MFEM 4.10
 //! (`$HOME/mfem410_ser`) via `Mesh::Load` on the exact same INLINE texts.
@@ -134,15 +138,70 @@ fn inline_all_types_match_mfem() {
     }
 }
 
+/// D724 (round 69): the `type = segment` arm now reads into
+/// `MfemFile::mesh1d`, 1:1 with MFEM 4.10 `ReadInlineMesh` → `Make1D(nx, sx)`
+/// (`mesh/mesh.cpp:4566`).  Ground truth: `tmp/d724/d724_segment_probe.cpp`
+/// (MFEM `Mesh::Load`, the same convention as the fixture blocks above),
+/// dumped 2026-09-24 — `nx = 4, sx = 1.0`: NE 4 / NV 5 / NBE 2, elements
+/// `(j, j+1)` all attribute 1, boundary points `{0}`→1 and `{nx}`→2, vertex
+/// `j` at `(j/nx)·sx`.  The old pin here asserted the rejection ("no 1-D
+/// MfemFile container") — the container exists since D724, so the pin flipped
+/// from reject to match.
 #[test]
-fn inline_segment_is_rejected_clearly() {
-    let text = "MFEM INLINE mesh v1.0\n\ntype = segment\nnx = 4\nsx = 1.0\n";
-    match read_mfem(std::io::Cursor::new(text.as_bytes().to_vec())) {
-        Err(err) => {
-            let msg = format!("{err}");
-            assert!(msg.contains("segment") || msg.contains("ny"), "mentions the gap: {msg}");
+fn inline_segment_matches_mfem_make1d() {
+    use fem_mesh::MeshTopology as _;
+    struct Case {
+        text: &'static str,
+        ne: usize,
+        nv: usize,
+        sx: f64,
+        /// `(j/nx)·sx` per vertex, as printed by the C++ probe (%.17g).
+        verts: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            text: "MFEM INLINE mesh v1.0\n\ntype = segment\nnx = 4\nsx = 1.0\n",
+            ne: 4, nv: 5, sx: 1.0,
+            verts: &["0", "0.25", "0.5", "0.75", "1"],
+        },
+        Case {
+            text: "MFEM INLINE mesh v1.0\n\ntype = segment\nnx = 1\nsx = 2.5\n",
+            ne: 1, nv: 2, sx: 2.5,
+            verts: &["0", "2.5"],
+        },
+        Case {
+            text: "MFEM INLINE mesh v1.0\n\ntype = segment\nnx = 8\nsx = 3.0\n",
+            ne: 8, nv: 9, sx: 3.0,
+            verts: &["0", "0.375", "0.75", "1.125", "1.5", "1.875", "2.25", "2.625", "3"],
+        },
+    ];
+    for c in &cases {
+        let file = read_mfem(std::io::Cursor::new(c.text.as_bytes().to_vec()))
+            .unwrap_or_else(|e| panic!("segment case sx = {}: {e}", c.sx));
+        let mesh = file.mesh1d.expect("segment mesh lands in mesh1d");
+        assert!(file.mesh2d.is_none() && file.mesh3d.is_none());
+        assert_eq!(mesh.n_elems(), c.ne, "NE (nx, sx = {})", c.sx);
+        assert_eq!(mesh.n_nodes(), c.nv, "NV");
+        assert_eq!(mesh.n_faces(), 2, "NBE");
+        for e in 0..c.ne {
+            assert_eq!(
+                mesh.element_nodes(e as u32),
+                &[e as u32, e as u32 + 1],
+                "element {e} = Segment(j, j+1)"
+            );
+            assert_eq!(mesh.element_tag(e as u32), 1, "element {e} attribute 1");
         }
-        Ok(_) => panic!("segment inline mesh must be rejected (no 1-D MfemFile container)"),
+        assert_eq!(mesh.bface_nodes(0), &[0], "boundary point 0");
+        assert_eq!(mesh.face_tags[0], 1, "boundary attr 1");
+        assert_eq!(mesh.bface_nodes(1), &[(c.ne as u32)], "boundary point nx");
+        assert_eq!(mesh.face_tags[1], 2, "boundary attr 2");
+        for (j, want) in c.verts.iter().enumerate() {
+            let got = mesh.coords[j];
+            let want: f64 = want.parse().unwrap();
+            assert_eq!(got, want, "vertex {j} at (j/nx)·sx");
+        }
+        // The span: last vertex exactly at sx.
+        assert_eq!(mesh.coords[c.nv - 1], c.sx, "total length = sx");
     }
 }
 

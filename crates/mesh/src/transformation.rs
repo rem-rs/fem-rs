@@ -104,6 +104,47 @@ struct PyramidGeometry {
     nodes: Vec<NodeId>,
 }
 
+/// Curved-hex geometry (D715): the order-`geom_order` factory hex element
+/// (`HexQk`, `[-1,1]^3`) over the element's own high-order geometry table.
+///
+/// `element_jacobian_at` used to interpolate every non-P1-sized hex through
+/// the P1 vertex table ("straightening"): on a curved hex the whole order-`g`
+/// table — the face/bulk nodes that MFEM's `SetCurvature` projection moved off
+/// the trilinear map — was dropped, and the dyn-`MeshTopology` consumers
+/// (`HDivSpace::dof_nodal_coords`, the hdiv-error / complex-DPG paths)
+/// sampled a straightened ghost of the element.  The in-crate
+/// [`Mesh::element_jacobian`](crate::Mesh::element_jacobian) path has always
+/// evaluated the order-`g` element over the table; D708 aligned it with MFEM
+/// 4.10, and D709's conjugacy measurements consumed it — this helper gives
+/// the dyn path the same geometry.
+///
+/// Gated on `geom_order >= 2` so the straight branch (P1 vertex table, and
+/// the P1-sized tables of geometrically periodic meshes) stays bit-identical;
+/// the table is accepted only when its length matches `HexQk(g).n_dofs()`
+/// (the H1 Gauss-Lobatto lattice the io layer writes — 27 rows for order 2),
+/// mirroring `assembler::geo_ref_elem_from_mesh`'s hex arm.  Returns `None`
+/// for every other element type or shape mismatch (the caller keeps its
+/// previous behavior there).
+fn curved_hex_geometry<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: u32,
+    et: ElementType,
+) -> Option<(Box<dyn ReferenceElement>, Vec<NodeId>)> {
+    if !matches!(et, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
+        return None;
+    }
+    let g = mesh.geom_order();
+    if g < 2 {
+        return None;
+    }
+    let re = et.ref_elem(g);
+    let nodes = mesh.geometry_nodes(elem);
+    if nodes.len() != re.n_dofs() {
+        return None;
+    }
+    Some((re, nodes.to_vec()))
+}
+
 /// The node table to interpolate the geometry with: the element's own table
 /// when it is P1-sized (geometrically periodic meshes — see [`geometry_jacobian`]),
 /// else the plain vertex connectivity.
@@ -465,6 +506,15 @@ pub fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim:
 /// their layer-order geometry table and are *not* handled here — this function
 /// always interpolates with the P1 reference element.)
 ///
+/// D334: a *curved pyramid* (`geom_order > 1`) is interpolated with its own
+/// order-`g` Fuentes element.  D715: a *curved hex* is interpolated the same
+/// way — the order-`g` `HexQk` factory element over the element's high-order
+/// geometry table (see [`curved_hex_geometry`]); the previous P1 vertex-table
+/// interpolation straightened the element away from the curved map MFEM
+/// evaluates.  The branch is gated on `geom_order >= 2`, so straight hexes
+/// (vertex table, or the P1-sized tables of geometrically periodic meshes)
+/// keep the exact previous values bit for bit.
+///
 /// MFEM: `ElementTransformation::Jacobian()` + `ElementTransformation::Transform()`
 pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     mesh: &M,
@@ -476,12 +526,16 @@ pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     // D334: a curved pyramid is interpolated with its own order-`g` element
     // (see [`curved_pyramid_geometry`]); everything else keeps the P1 basis.
     let curved = curved_pyramid_geometry(mesh, elem, et);
+    // D715: a curved hex likewise takes its own order-`g` isoparametric path
+    // (see [`curved_hex_geometry`]).
+    let curved_hex = curved_hex_geometry(mesh, elem, et);
     let p1_re;
     let layer: Option<[NodeId; 5]>;
     let raw: &[NodeId];
-    let (re, nodes): (&dyn ReferenceElement, &[NodeId]) = match &curved {
-        Some(pg) => (pg.re.as_ref(), pg.nodes.as_slice()),
-        None => {
+    let (re, nodes): (&dyn ReferenceElement, &[NodeId]) = match (&curved, &curved_hex) {
+        (Some(pg), _) => (pg.re.as_ref(), pg.nodes.as_slice()),
+        (None, Some((hex_re, hex_nodes))) => (hex_re.as_ref(), hex_nodes.as_slice()),
+        (None, None) => {
             p1_re = et.ref_elem(1);
             // Per-element geometry only when it is a P1-sized table (geometrically
             // periodic meshes); high-order curved geometry keeps the previous
