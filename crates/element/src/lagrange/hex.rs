@@ -1,38 +1,53 @@
-//! Lagrange elements on the reference hexahedron `[-1,1]³`.
+//! Lagrange elements on the reference hexahedron `[0,1]³`.
+//!
+//! D721: the hex family moved from the historical fem-rs `[-1,1]³` frame to
+//! MFEM's natural `[0,1]³` (the quad's D364 migration, done for hexes).  The
+//! slot orders, DOF counts and DOF positions (now MFEM's `[0,1]` values) are
+//! unchanged; only the reference frame of the basis and its chain-rule
+//! factors moved.
 
 use crate::quadrature::hex_rule;
 use crate::reference::{QuadratureRule, ReferenceElement};
 
 // ─── Q1 ───────────────────────────────────────────────────────────────────────
 
-/// Trilinear Lagrange element on the reference hex `[-1,1]³` — 8 DOFs.
+/// Trilinear Lagrange element on the reference hex `[0,1]³` — 8 DOFs.
 ///
-/// Node ordering: bottom face (z=−1) then top face (z=+1), each as a
-/// counter-clockwise quad starting from (−1,−1).
+/// 1:1 with MFEM `TriLinear3DFiniteElement` (`fem/fe/fe_fixed_order.cpp:1597`)
+/// — the element `Mesh::GetTransformationFEforElementType(Element::HEXAHEDRON)`
+/// hands a *straight* hex mesh (`mesh/hexahedron.cpp:60`), i.e. **the hex
+/// geometry element** (and the H¹ order-1 hex element).  Note this is the
+/// naive `ox·oy·oz` form, not the barycentric `H1_HexahedronElement(1)` — the
+/// two coincide on the quadrature points this library uses, and the naive
+/// form is the one that makes the affine-hex Jacobian bit-identical to
+/// MFEM's.
 ///
-/// | Index | (ξ, η, ζ)      |
-/// |-------|----------------|
-/// | 0     | (−1, −1, −1)   |
-/// | 1     | (+1, −1, −1)   |
-/// | 2     | (+1, +1, −1)   |
-/// | 3     | (−1, +1, −1)   |
-/// | 4     | (−1, −1, +1)   |
-/// | 5     | (+1, −1, +1)   |
-/// | 6     | (+1, +1, +1)   |
-/// | 7     | (−1, +1, +1)   |
+/// Node ordering: bottom face (z=0) then top face (z=1), each as a
+/// counter-clockwise quad starting from (0,0).
 ///
-/// Basis: φᵢ = (1 + ξᵢ ξ)(1 + ηᵢ η)(1 + ζᵢ ζ) / 8
+/// | Index | (ξ, η, ζ) |
+/// |-------|----------|
+/// | 0     | (0, 0, 0) |
+/// | 1     | (1, 0, 0) |
+/// | 2     | (1, 1, 0) |
+/// | 3     | (0, 1, 0) |
+/// | 4     | (0, 0, 1) |
+/// | 5     | (1, 0, 1) |
+/// | 6     | (1, 1, 1) |
+/// | 7     | (0, 1, 1) |
+///
+/// Basis: φᵢ = (ξ or 1−ξ)(η or 1−η)(ζ or 1−ζ) — MFEM's `ox·oy·oz` products.
 pub struct HexQ1;
 
 const Q1_NODES: [(f64, f64, f64); 8] = [
-    (-1.0, -1.0, -1.0),
-    (1.0, -1.0, -1.0),
-    (1.0, 1.0, -1.0),
-    (-1.0, 1.0, -1.0),
-    (-1.0, -1.0, 1.0),
-    (1.0, -1.0, 1.0),
+    (0.0, 0.0, 0.0),
+    (1.0, 0.0, 0.0),
+    (1.0, 1.0, 0.0),
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 1.0),
+    (1.0, 0.0, 1.0),
     (1.0, 1.0, 1.0),
-    (-1.0, 1.0, 1.0),
+    (0.0, 1.0, 1.0),
 ];
 
 impl ReferenceElement for HexQ1 {
@@ -47,22 +62,58 @@ impl ReferenceElement for HexQ1 {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        // MFEM TriLinear3DFiniteElement::CalcShape, verbatim.
         let (x, y, z) = (xi[0], xi[1], xi[2]);
-        for (i, &(xi_i, eta_i, zeta_i)) in Q1_NODES.iter().enumerate() {
-            values[i] = 0.125 * (1.0 + xi_i * x) * (1.0 + eta_i * y) * (1.0 + zeta_i * z);
-        }
+        let ox = 1.0 - x;
+        let oy = 1.0 - y;
+        let oz = 1.0 - z;
+        values[0] = ox * oy * oz;
+        values[1] = x * oy * oz;
+        values[2] = x * y * oz;
+        values[3] = ox * y * oz;
+        values[4] = ox * oy * z;
+        values[5] = x * oy * z;
+        values[6] = x * y * z;
+        values[7] = ox * y * z;
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        // MFEM TriLinear3DFiniteElement::CalcDShape, verbatim.
         let (x, y, z) = (xi[0], xi[1], xi[2]);
-        for (i, &(xi_i, eta_i, zeta_i)) in Q1_NODES.iter().enumerate() {
-            let f_xi = 1.0 + xi_i * x;
-            let f_eta = 1.0 + eta_i * y;
-            let f_zeta = 1.0 + zeta_i * z;
-            grads[i * 3] = 0.125 * xi_i * f_eta * f_zeta;
-            grads[i * 3 + 1] = 0.125 * eta_i * f_xi * f_zeta;
-            grads[i * 3 + 2] = 0.125 * zeta_i * f_xi * f_eta;
-        }
+        let ox = 1.0 - x;
+        let oy = 1.0 - y;
+        let oz = 1.0 - z;
+        grads[0] = -oy * oz;
+        grads[1] = -ox * oz;
+        grads[2] = -ox * oy;
+
+        grads[3] = oy * oz;
+        grads[4] = -x * oz;
+        grads[5] = -x * oy;
+
+        grads[6] = y * oz;
+        grads[7] = x * oz;
+        grads[8] = -x * y;
+
+        grads[9] = -y * oz;
+        grads[10] = ox * oz;
+        grads[11] = -ox * y;
+
+        grads[12] = -oy * z;
+        grads[13] = -ox * z;
+        grads[14] = ox * oy;
+
+        grads[15] = oy * z;
+        grads[16] = -x * z;
+        grads[17] = x * oy;
+
+        grads[18] = y * z;
+        grads[19] = x * z;
+        grads[20] = x * y;
+
+        grads[21] = -y * z;
+        grads[22] = ox * z;
+        grads[23] = ox * y;
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
@@ -76,7 +127,7 @@ impl ReferenceElement for HexQ1 {
 
 // ─── Q2 ───────────────────────────────────────────────────────────────────────
 
-/// Quadratic Lagrange element on the reference hex `[-1,1]³` — 27 DOFs.
+/// Quadratic Lagrange element on the reference hex `[0,1]³` — 27 DOFs.
 ///
 /// Slot order = [`crate::lagrange::factory::HexQk`]`::new(2)` = MFEM
 /// `H1_HexahedronElement(2)` (D31 closed the pre-D31 fem-rs legacy order;
@@ -88,60 +139,72 @@ impl ReferenceElement for HexQ1 {
 /// - 16..19: vertical edge mids (`CUBE::Edges[8..11]`: 0→4, 1→5, 2→6, 3→7)
 /// - 20..25: face centres in `CUBE::FaceVert` order
 ///           (z-low, y-low, x-high, y-high, x-low, z-high)
-/// - 26:     volume centre (0,0,0)
+/// - 26:     volume centre (1/2, 1/2, 1/2)
 ///
 /// Basis: φᵢ = L_ix(ξᵢ)(ξ) · L_iy(ηᵢ)(η) · L_iz(ζᵢ)(ζ)
-/// where L(-1), L(0), L(+1) are the quadratic 1-D Lagrange polynomials.
+/// where L(0), L(1/2), L(1) are the quadratic 1-D Lagrange polynomials on the
+/// `[0,1]` frame.
 pub struct HexQ2;
 
 const Q2_NODES_HEX: [(f64, f64, f64); 27] = {
     let mut n = [(0.0, 0.0, 0.0); 27];
     // vertices
-    n[0] = (-1.0, -1.0, -1.0);
-    n[1] = (1.0, -1.0, -1.0);
-    n[2] = (1.0, 1.0, -1.0);
-    n[3] = (-1.0, 1.0, -1.0);
-    n[4] = (-1.0, -1.0, 1.0);
-    n[5] = (1.0, -1.0, 1.0);
+    n[0] = (0.0, 0.0, 0.0);
+    n[1] = (1.0, 0.0, 0.0);
+    n[2] = (1.0, 1.0, 0.0);
+    n[3] = (0.0, 1.0, 0.0);
+    n[4] = (0.0, 0.0, 1.0);
+    n[5] = (1.0, 0.0, 1.0);
     n[6] = (1.0, 1.0, 1.0);
-    n[7] = (-1.0, 1.0, 1.0);
+    n[7] = (0.0, 1.0, 1.0);
     // edges: z-low ring (0→1, 1→2, 3→2, 0→3)
-    n[8] = (0.0, -1.0, -1.0);
-    n[9] = (1.0, 0.0, -1.0);
-    n[10] = (0.0, 1.0, -1.0);
-    n[11] = (-1.0, 0.0, -1.0);
+    n[8] = (0.5, 0.0, 0.0);
+    n[9] = (1.0, 0.5, 0.0);
+    n[10] = (0.5, 1.0, 0.0);
+    n[11] = (0.0, 0.5, 0.0);
     // edges: z-high ring (4→5, 5→6, 7→6, 4→7)
-    n[12] = (0.0, -1.0, 1.0);
-    n[13] = (1.0, 0.0, 1.0);
-    n[14] = (0.0, 1.0, 1.0);
-    n[15] = (-1.0, 0.0, 1.0);
+    n[12] = (0.5, 0.0, 1.0);
+    n[13] = (1.0, 0.5, 1.0);
+    n[14] = (0.5, 1.0, 1.0);
+    n[15] = (0.0, 0.5, 1.0);
     // edges: vertical (0→4, 1→5, 2→6, 3→7)
-    n[16] = (-1.0, -1.0, 0.0);
-    n[17] = (1.0, -1.0, 0.0);
-    n[18] = (1.0, 1.0, 0.0);
-    n[19] = (-1.0, 1.0, 0.0);
+    n[16] = (0.0, 0.0, 0.5);
+    n[17] = (1.0, 0.0, 0.5);
+    n[18] = (1.0, 1.0, 0.5);
+    n[19] = (0.0, 1.0, 0.5);
     // face centres: FaceVert order (z-low, y-low, x-high, y-high, x-low, z-high)
-    n[20] = (0.0, 0.0, -1.0);
-    n[21] = (0.0, -1.0, 0.0);
-    n[22] = (1.0, 0.0, 0.0);
-    n[23] = (0.0, 1.0, 0.0);
-    n[24] = (-1.0, 0.0, 0.0);
-    n[25] = (0.0, 0.0, 1.0);
+    n[20] = (0.5, 0.5, 0.0);
+    n[21] = (0.5, 0.0, 0.5);
+    n[22] = (1.0, 0.5, 0.5);
+    n[23] = (0.5, 1.0, 0.5);
+    n[24] = (0.0, 0.5, 0.5);
+    n[25] = (0.5, 0.5, 1.0);
     // volume centre
-    n[26] = (0.0, 0.0, 0.0);
+    n[26] = (0.5, 0.5, 0.5);
     n
 };
 
-fn hex_q2_1d(x: f64) -> ([f64; 3], [f64; 3]) {
-    let vals = [0.5 * x * (x - 1.0), 1.0 - x * x, 0.5 * x * (x + 1.0)];
-    let ders = [0.5 * (2.0 * x - 1.0), -2.0 * x, 0.5 * (2.0 * x + 1.0)];
+/// 1-D quadratic Lagrange basis on the `[0,1]` frame at the nodes
+/// `{0, 1/2, 1}` — the historical `[-1,1]` form `[½x(x−1), 1−x², ½x(x+1)]`
+/// re-expressed directly on `[0,1]` (D721; derivative factor 2 folded in).
+fn hex_q2_1d(u: f64) -> ([f64; 3], [f64; 3]) {
+    let vals = [
+        (2.0 * u - 1.0) * (u - 1.0), // ℓ at 0
+        4.0 * u * (1.0 - u),         // ℓ at 1/2
+        u * (2.0 * u - 1.0),         // ℓ at 1
+    ];
+    let ders = [
+        4.0 * u - 3.0,
+        4.0 - 8.0 * u,
+        4.0 * u - 1.0,
+    ];
     (vals, ders)
 }
 
 fn coord_to_q2_idx(c: f64) -> usize {
-    if c < -0.5 {
+    if c < 0.25 {
         0
-    } else if c > 0.5 {
+    } else if c > 0.75 {
         2
     } else {
         1
@@ -238,7 +301,7 @@ pub fn hex_tensor_layout(elem: &dyn ReferenceElement) -> (Vec<f64>, Vec<[usize; 
 
 // ─── Q3 ───────────────────────────────────────────────────────────────────────
 
-/// Cubic Lagrange element on the reference hex `[-1,1]³` — 64 DOFs.
+/// Cubic Lagrange element on the reference hex `[0,1]³` — 64 DOFs.
 ///
 /// Slot order = MFEM `H1_HexahedronElement(3)` = [`crate::lagrange::factory::HexQk`]`::new(3)`
 /// (converged, D31 stage A): 8 vertices in `CUBE::Vertices` order, then two
@@ -246,17 +309,19 @@ pub fn hex_tensor_layout(elem: &dyn ReferenceElement) -> (Vec<f64>, Vec<[usize; 
 /// edge), then four slots per face in `CUBE::FaceVert` order (`j` outer,
 /// `i` inner), then the 2×2×2 interior (`k` outer, `i` fastest).
 ///
-/// The 1-D nodes are the Gauss-Lobatto points `{±1, ±1/√5}` — bit-identical
-/// to `HexQk::new(3)`'s `Lagrange1D` nodes (`quadrature::gauss_lobatto_1d(4)`),
-/// matching MFEM `H1_FECollection`'s `BasisType::GaussLobatto`.
+/// The 1-D nodes are the Gauss-Lobatto points `{0, 1, (1±1/√5)/2}` — the
+/// `[0,1]` image of `HexQk::new(3)`'s `Lagrange1D` nodes
+/// (`quadrature::gauss_lobatto_01(4)`), matching MFEM `H1_FECollection`'s
+/// `BasisType::GaussLobatto`.
 pub struct HexQ3;
 
-/// 1-D GLL nodes for `p = 3` on `[-1,1]`.  Must stay bit-identical to
-/// `quadrature::gauss_lobatto_1d(4)` — `HexQk::new(3)` builds its nodes the
-/// same way, and the slot-layout pin test compares coordinates exactly.
+/// 1-D GLL nodes for `p = 3` on `[0,1]`.  Must stay bit-identical to the
+/// `[0,1]` image of `quadrature::gauss_lobatto_arbitrary(4)` — `HexQk::new(3)`
+/// builds its nodes the same way, and the slot-layout pin test compares
+/// coordinates exactly.
 fn q3_nodes_1d() -> [f64; 4] {
     let s = (1.0_f64 / 5.0).sqrt();
-    [-1.0, -s, s, 1.0]
+    [0.0, 0.5 * (1.0 - s), 0.5 * (1.0 + s), 1.0]
 }
 
 /// Slot → tensor-node index `(ix, iy, iz)` (node coordinate = `q3_nodes_1d()[i]`).
@@ -533,10 +598,10 @@ mod tests {
         let mut ga = vec![0.0; n * 3];
         let mut gb = vec![0.0; n * 3];
         let mut pts: Vec<[f64; 3]> = vec![
-            [0.0, 0.0, 0.0],
-            [0.3, -0.5, 0.7],
-            [-0.9, 0.44, 0.12],
-            [-1.0, 1.0, -1.0],
+            [0.5, 0.5, 0.5],
+            [0.65, 0.25, 0.85],
+            [0.05, 0.72, 0.56],
+            [0.0, 1.0, 0.0],
         ];
         for c in &ca {
             pts.push([c[0], c[1], c[2]]);
@@ -573,7 +638,7 @@ mod tests {
             vec![0.0; n],
             vec![0.0; n * 3],
         );
-        for &(x, y, z) in &[(0.3, -0.5, 0.7), (-0.1, 0.2, -0.3)] {
+        for &(x, y, z) in &[(0.65, 0.25, 0.85), (0.45, 0.6, 0.35)] {
             elem.eval_basis(&[x, y, z], &mut vc);
             elem.eval_basis(&[x + h, y, z], &mut vx);
             elem.eval_basis(&[x, y + h, z], &mut vy);
@@ -592,6 +657,47 @@ mod tests {
                     (grads[i * 3 + 2] - fd_z).abs() < 1e-5,
                     "({x},{y},{z}) i={i} gz"
                 );
+            }
+        }
+    }
+
+    /// D721 pin on the flipped reference domain: the `[0,1]³` hex geometry
+    /// basis is now MFEM's `TriLinear3DFiniteElement` (`ox·oy·oz`) rather
+    /// than the historical `(1±ξ)(1±η)(1±ζ)/8` on `[-1,1]³`, and its
+    /// 8-node map on the unit-cube vertices is the identity up to the
+    /// affine-hex FP debris MFEM itself carries (the `J = I + 2⁻⁶⁰·k` junk
+    /// that the D680 gate pins against MFEM's own dump).
+    #[test]
+    fn hex_q1_is_mfem_trilinear_on_unit_cube() {
+        // Vertex (0,0,0) basis at the cube centre: 1/8 for every vertex.
+        let mut phi = vec![0.0; 8];
+        HexQ1.eval_basis(&[0.5, 0.5, 0.5], &mut phi);
+        for v in &phi {
+            assert_eq!(*v, 0.125);
+        }
+        // The 8-node geometry map on the unit-cube vertices is the identity to
+        // within the affine-hex cancellation debris (MFEM's dump: |junk| <=
+        // 2.8e-17, detJ ≡ 1 exactly).  Sampled at the actual 27-point CUBE
+        // rule points (MFEM's qp order: x fastest).
+        let verts: [[f64; 3]; 8] = Q1_NODES.map(|(a, b, c)| [a, b, c]);
+        let mut g = vec![0.0; 24];
+        let (xs, _w) = crate::quadrature::gauss_legendre_01(3);
+        for &zk in &xs {
+            for &yj in &xs {
+                for &xi in &xs {
+                    HexQ1.eval_grad_basis(&[xi, yj, zk], &mut g);
+                    for i in 0..3 {
+                        for d in 0..3 {
+                            let j: f64 = (0..8).map(|k| verts[k][i] * g[k * 3 + d]).sum();
+                            let want = if i == d { 1.0 } else { 0.0 };
+                            assert!(
+                                (j - want).abs() < 1e-16,
+                                "J({i},{d}) = {j} at ({xi},{yj},{zk}) must be {want} \
+                                 up to affine-hex debris"
+                            );
+                        }
+                    }
+                }
             }
         }
     }

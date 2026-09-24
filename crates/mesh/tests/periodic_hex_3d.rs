@@ -126,15 +126,15 @@ fn periodic_elements_are_unit_cubes() {
         for d in 0..3 {
             assert!((c6[d] - c0[d] - h).abs() < 1e-12, "e={e} d={d}");
         }
-        // |det J| = (h/2)³ at the element centre: `element_jacobian_at` maps
-        // the [-1,1]³ reference hex (MFEM convention) to physical space.
+        // |det J| = h³ at the element centre (D721: `element_jacobian_at` maps
+        // the [0,1]³ reference hex — MFEM's convention — to physical space).
         use fem_mesh::element_jacobian_at;
         let pt = [0.5f64; 3];
         let (jac, _xp) = element_jacobian_at(&pm, e, &pt, 3);
         let det = jac[(0, 0)] * (jac[(1, 1)] * jac[(2, 2)] - jac[(1, 2)] * jac[(2, 1)])
             - jac[(0, 1)] * (jac[(1, 0)] * jac[(2, 2)] - jac[(1, 2)] * jac[(2, 0)])
             + jac[(0, 2)] * (jac[(1, 0)] * jac[(2, 1)] - jac[(1, 1)] * jac[(2, 0)]);
-        let expect = (h / 2.0) * (h / 2.0) * (h / 2.0);
+        let expect = h * h * h;
         assert!((det - expect).abs() < 1e-12, "e={e}: det J = {det}");
     }
 }

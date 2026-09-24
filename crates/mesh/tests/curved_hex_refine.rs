@@ -197,20 +197,20 @@ const MFEM_HEX_VERTS: [[f64; 3]; 8] = [
 /// child table in `refine_nonconforming_hex`).
 const CHILD_BC_LOCAL: [usize; 8] = [6, 7, 4, 5, 2, 3, 0, 1];
 
-/// Sample points inside the reference hex (`[-1,1]³`): the 27 Q2 dof points
-/// plus the 8 sub-octant centers.
+/// Sample points inside the reference hex (**`[0,1]³`** since D721): the 27
+/// Q2 dof points plus the 8 sub-octant centers.
 fn ref_samples() -> Vec<[f64; 3]> {
     let mut v = Vec::new();
-    for k in -1..=1 {
-        for j in -1..=1 {
-            for i in -1..=1 {
-                v.push([i as f64, j as f64, k as f64]);
+    for k in 0..=2 {
+        for j in 0..=2 {
+            for i in 0..=2 {
+                v.push([0.5 * i as f64, 0.5 * j as f64, 0.5 * k as f64]);
             }
         }
     }
-    for k in [-0.5, 0.5] {
-        for j in [-0.5, 0.5] {
-            for i in [-0.5, 0.5] {
+    for k in [0.25, 0.75] {
+        for j in [0.25, 0.75] {
+            for i in [0.25, 0.75] {
                 v.push([i, j, k]);
             }
         }
@@ -259,10 +259,12 @@ fn check_child_geometry_reproduces_parent(parent: &Mesh<3>, fine: &Mesh<3>, tol:
         for &(child, fe) in kids {
             let c = MFEM_HEX_VERTS[child];
             for xi in &samples {
+                // D721: `[0,1]^3` halving — the child's octant starts at its
+                // corner `c ∈ {0,1}^3` and spans half the parent per axis.
                 let parent_xi = [
-                    c[0] - 0.5 + 0.5 * xi[0],
-                    c[1] - 0.5 + 0.5 * xi[1],
-                    c[2] - 0.5 + 0.5 * xi[2],
+                    0.5 * (c[0] + xi[0]),
+                    0.5 * (c[1] + xi[1]),
+                    0.5 * (c[2] + xi[2]),
                 ];
                 let (_, _, x_child) = fine.element_jacobian(fe, xi);
                 let (_, _, x_parent) = parent.element_jacobian(pe, &parent_xi);
@@ -301,7 +303,10 @@ fn d111_affine_q2_cube_refines_to_exact_trilinear_children() {
     let mut m: Mesh<3> = f.mesh3d.expect("3d");
     assert_eq!(m.geom_order(), 2);
     let samples = ref_samples();
-    for (level, expected_min_det) in [(1usize, 1.953125e-3_f64), (2, 2.44140625e-4)] {
+    // D721: `det J` is measured over the `[0,1]^3` reference cell, i.e. the
+    // physical child size per axis (1/4 at level 1, 1/8 at level 2) — the
+    // historical `[-1,1]` values were 8× smaller per level.
+    for (level, expected_min_det) in [(1usize, 1.5625e-2_f64), (2, 1.953125e-3)] {
         m = refine_uniform_3d(&m);
         let mut min_det = f64::INFINITY;
         let mut max_dev = 0.0_f64;
@@ -310,18 +315,13 @@ fn d111_affine_q2_cube_refines_to_exact_trilinear_children() {
             for xi in &samples {
                 let (_, det, xp) = m.element_jacobian(e, xi);
                 min_det = min_det.min(det);
-                // trilinear map of the 8 vertices in MFEM order on [-1,1]³
+                // trilinear map of the 8 vertices in MFEM order on [0,1]³
                 let mut want = [0.0_f64; 3];
                 for k in 0..8 {
-                    let r = [
-                        2.0 * MFEM_HEX_VERTS[k][0] - 1.0,
-                        2.0 * MFEM_HEX_VERTS[k][1] - 1.0,
-                        2.0 * MFEM_HEX_VERTS[k][2] - 1.0,
-                    ];
-                    let w = 0.125
-                        * (1.0 + r[0] * xi[0])
-                        * (1.0 + r[1] * xi[1])
-                        * (1.0 + r[2] * xi[2]);
+                    let r = MFEM_HEX_VERTS[k];
+                    let w = (if r[0] == 1.0 { xi[0] } else { 1.0 - xi[0] })
+                        * (if r[1] == 1.0 { xi[1] } else { 1.0 - xi[1] })
+                        * (if r[2] == 1.0 { xi[2] } else { 1.0 - xi[2] });
                     for d in 0..3 {
                         want[d] += w * vs[k][d];
                     }

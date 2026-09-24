@@ -69,12 +69,16 @@ fn consumer_ref_elem(et: ElementType, p: usize) -> Box<dyn ReferenceElement> {
 }
 
 /// MFEM reference-center of each geometry, in the *consumer* frame.
+///
+/// D757 (D721 follow-up): the hex consumer (`HexQk`) shares MFEM's `[0,1]³`
+/// unit cube now, so the hex center is `(0.5,0.5,0.5)` verbatim — the former
+/// `(0,0,0)` was the `[-1,1]³` center.
 fn ref_center(et: ElementType, sdim: usize) -> Vec<f64> {
     match (et, sdim) {
         (ElementType::Tri3 | ElementType::Tri6, _) => vec![1.0 / 3.0; 2],
         (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, _) => vec![0.5, 0.5],
         (ElementType::Tet4 | ElementType::Tet10, _) => vec![0.25; 3],
-        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, _) => vec![0.0; 3],
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, _) => vec![0.5; 3],
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
             vec![0.5, 1.0 / 3.0, 1.0 / 3.0] // PrismPk frame: (z, x, y)
         }
@@ -84,34 +88,33 @@ fn ref_center(et: ElementType, sdim: usize) -> Vec<f64> {
 }
 
 /// Consumer-frame reference volume (for straight elements:
-/// volume = detJ(center) × this).
+/// volume = detJ(center) × this).  D757 (D721 follow-up): the hex frame is the
+/// unit cube, reference volume 1, no longer `[-1,1]³`'s 8.
 fn ref_volume(et: ElementType, sdim: usize) -> f64 {
     match (et, sdim) {
         (ElementType::Tri3 | ElementType::Tri6, 2) => 0.5,
         (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 2) => 1.0,
         (ElementType::Tet4 | ElementType::Tet10, 3) => 1.0 / 6.0,
-        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 3) => 8.0,
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 3) => 1.0,
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, 3) => 0.5,
         (ElementType::Pyramid5 | ElementType::Pyramid13, 3) => 1.0 / 3.0,
         other => panic!("no reference volume for {other:?}"),
     }
 }
 
-/// detJ scale between the consumer frame and MFEM's `[0,1]^d` frames (the
-/// hexahedron is the one family whose consumer element lives on `[-1,1]³`).
-fn det_scale(et: ElementType) -> f64 {
-    match et {
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 8.0,
-        _ => 1.0,
-    }
+/// detJ scale between the consumer frame and MFEM's `[0,1]^d` frames.
+/// D757 (D721 follow-up): every consumer family — the hexahedron included —
+/// now lives on MFEM's frames, so this is uniformly 1.
+fn det_scale(_et: ElementType) -> f64 {
+    1.0
 }
 
 /// Map an MFEM reference point into the consumer family's frame.
+/// D757 (D721 follow-up): the hex is the identity now (its consumer element
+/// was the last `[-1,1]³` holdout); only the prism's `(z, x, y)` axis order
+/// remains.
 fn to_consumer(et: ElementType, pt: &[f64], sdim: usize) -> Vec<f64> {
     match et {
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
-            (0..sdim).map(|k| 2.0 * pt[k] - 1.0).collect()
-        }
         ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
             vec![pt[2], pt[0], pt[1]]
         }

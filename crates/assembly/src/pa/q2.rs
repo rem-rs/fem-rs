@@ -17,20 +17,24 @@ use fem_element::lagrange::hex::{HexQ1, HexQ2};
 use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
-// ─── 1D Q2 Lagrange basis on [-1, 0, +1] ────────────────────────────────────
+// ─── 1D Q2 Lagrange basis on [0, 0.5, 1] (D721 frame) ──────────────────────
 //
 // Bit-identical to `HexQ2::hex_q2_1d` / `HexQk(2)`'s GLL(3) nodes: Gauss-Lobatto
-// for 3 nodes *is* the closed equispaced set {-1, 0, +1}.
-#[inline] fn l0(t: f64) -> f64 { 0.5 * t * (t - 1.0) }  // ℓ at -1
-#[inline] fn l1(t: f64) -> f64 { 1.0 - t * t }           // ℓ at 0
-#[inline] fn l2(t: f64) -> f64 { 0.5 * t * (t + 1.0) }   // ℓ at +1
-#[inline] fn d0(t: f64) -> f64 { t - 0.5 }
-#[inline] fn d1(t: f64) -> f64 { -2.0 * t }
-#[inline] fn d2(t: f64) -> f64 { t + 0.5 }
+// for 3 nodes is the closed equispaced set {0, 1/2, 1} on MFEM's `[0,1]`.
+#[inline] fn l0(t: f64) -> f64 { (2.0 * t - 1.0) * (t - 1.0) } // ℓ at 0
+#[inline] fn l1(t: f64) -> f64 { 4.0 * t * (1.0 - t) }          // ℓ at 1/2
+#[inline] fn l2(t: f64) -> f64 { t * (2.0 * t - 1.0) }          // ℓ at 1
+#[inline] fn d0(t: f64) -> f64 { 4.0 * t - 3.0 }
+#[inline] fn d1(t: f64) -> f64 { 4.0 - 8.0 * t }
+#[inline] fn d2(t: f64) -> f64 { 4.0 * t - 1.0 }
 
-// ─── 3-point Gauss–Legendre on [-1,1] (exact for degree 5) ──────────────────
-const GL3_PTS: [f64; 3] = [-0.7745966692414834, 0.0, 0.7745966692414834];
-const GL3_WTS: [f64; 3] = [0.5555555555555556, 0.8888888888888888, 0.5555555555555556];
+// ─── 3-point Gauss–Legendre on [0,1] (exact for degree 5) ───────────────────
+const GL3_PTS: [f64; 3] = [0.11270166537925831174, 0.5, 0.88729833462074170214];
+const GL3_WTS: [f64; 3] = [
+    0.27777777777777779011,
+    0.44444444444444441977,
+    0.27777777777777779011,
+];
 
 /// `(1-D nodes, slot → tensor index)` of the 27-slot Q2 hex kernel — the
 /// element layer's own layout.
@@ -71,9 +75,14 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                     let mut jac = [[0.0_f64; 3]; 3];
                     for i in 0..8 {
                         let [xi, et, zt] = ref_nodes[i];
-                        let d_xi  = xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
-                        let d_et  = (1.0+xi*qx_pt)*et*(1.0+zt*qz_pt) / 8.0;
-                        let d_zt  = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt / 8.0;
+                        // D721: [0,1] trilinear nodal factors (`ox·oy·oz`
+                        // form, MFEM `TriLinear3DFiniteElement`).
+                        let (fx, dfx) = if xi == 1.0 { (qx_pt, 1.0) } else { (1.0 - qx_pt, -1.0) };
+                        let (fy, dfy) = if et == 1.0 { (qy_pt, 1.0) } else { (1.0 - qy_pt, -1.0) };
+                        let (fz, dfz) = if zt == 1.0 { (qz_pt, 1.0) } else { (1.0 - qz_pt, -1.0) };
+                        let d_xi = dfx * fy * fz;
+                        let d_et = fx * dfy * fz;
+                        let d_zt = fx * fy * dfz;
                         for d in 0..3 {
                             jac[0][d] += d_xi * v[i][d];
                             jac[1][d] += d_et * v[i][d];
@@ -96,7 +105,9 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                     let mut xp = [0.0; 3];
                     for i in 0..8 {
                         let [xi, et, zt] = ref_nodes[i];
-                        let phi = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
+                        let phi = (if xi == 1.0 { qx_pt } else { 1.0 - qx_pt })
+                            * (if et == 1.0 { qy_pt } else { 1.0 - qy_pt })
+                            * (if zt == 1.0 { qz_pt } else { 1.0 - qz_pt });
                         for d in 0..3 { xp[d] += phi * v[i][d]; }
                     }
 

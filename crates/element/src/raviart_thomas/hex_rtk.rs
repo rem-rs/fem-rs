@@ -1,8 +1,9 @@
-//! Raviart-Thomas hexahedral element `RT_k` on the reference hex `[-1,1]^3`.
+//! Raviart-Thomas hexahedral element `RT_k` on the reference hex `[0,1]^3`.
 //!
 //! 1:1 port of both MFEM `RT_HexahedronElement(p, GaussLobatto, ·)` open-basis
-//! variants (MFEM order `p`; `RT_k` with `k = p`), pulled back from MFEM's
-//! natural interval `[0,1]` to `[-1,1]`:
+//! variants (MFEM order `p`; `RT_k` with `k = p`), in MFEM's own `[0,1]³`
+//! reference frame (D721 — the pre-D721 code evaluated everything on the
+//! historical fem-rs `[-1,1]³` frame and carried explicit pull-back factors):
 //!
 //! - [`HexRTk::new_gauss_legendre`] — `ob_type = GaussLegendre`, the element
 //!   `RT_FECollection(p, dim)` builds **by default** (`fem/fe_coll.hpp`): the
@@ -10,19 +11,15 @@
 //!   at the `k+1` open points.  This is the flavour every MFEM VisIt data
 //!   collection / `get-values` / `Project_RT` exchange uses, and its
 //!   contravariant pull-back to the physical hex is *exactly* MFEM's physical
-//!   field point for point: each tensor mode carries two open factors of
-//!   hex scale `1/2`, which cancel the `J = J_MFEM/2` factor 4 of
-//!   `det(J)^-1·J` — reference values are `V_mfem/4` (`div_mfem/8`), the
-//!   physical Piola transform multiplies by 4 (`/8` for the divergence).
+//!   field point for point (bit for bit since D721: the reference basis, the
+//!   Jacobian and the quadrature rule all live on `[0,1]`).
 //! - [`HexRTk::new`] — `ob_type = IntegratedGLL`, the basis pair MFEM
 //!   documents (and `fem/lor/lor.cpp` *requires*) for LOR-compatible RT
 //!   spaces.  Open modes are the integrated (Gerritsma) edge functions
-//!   `-Σ_{j<=i} c'_j` built from the degree-`k+1` GLL closed basis, hex scale
-//!   `1/4` of MFEM's (`EvalIntegrated` chain: `d/dξ = ½ d/dt`, then the
-//!   `1/2` pull-back), i.e. `V_mfem/16` (`div_mfem/32`) — the physical field
-//!   is MFEM's IntegratedGLL field times 4, the standing D227-era frame
-//!   debt that is irrelevant inside the LOR stack (which only ever pairs
-//!   this element with itself).
+//!   `-Σ_{j<=i} c'_j` built from the degree-`k+1` GLL closed basis — the
+//!   `[0,1]` derivatives of `ClosedBasis::new_01`, with no chain factor (the
+//!   historical `1/2` was the `[-1,1]` pull-back) — i.e. exactly MFEM's
+//!   `EvalIntegrated` modes.
 //!
 //! Both variants share the identical dof layout, dof positions and MFEM
 //! `dof_map` orientation encoding (round 40: `probe_map_glvslgl.cpp` — the
@@ -30,7 +27,7 @@
 //! in `fem_space::lor` is variant independent.
 //!
 //! Tensor structure per component (`c` = closed GLL nodal mode of degree
-//! `k+1` on `[-1,1]`, `o` = open mode of the variant, two per axis count
+//! `k+1` on `[0,1]`, `o` = open mode of the variant, two per axis count
 //! `k+1`):
 //!
 //! ```text
@@ -60,7 +57,7 @@
 //! Within each face block the two free (open) indices run (i outer, j inner);
 //! the closed factor is anchored at the face's endpoint GLL node.
 
-use crate::gll_basis::{gl_nodes, gll_nodes, ClosedBasis};
+use crate::gll_basis::{gll_nodes_01, ClosedBasis};
 use crate::nedelec::hex_ndk::open_basis;
 use crate::reference::VectorReferenceElement;
 
@@ -70,7 +67,7 @@ use crate::reference::VectorReferenceElement;
 pub struct IntegratedDofFunctional3D {
     /// `(reference sample point, weight)` pairs over the DOF's sub-cell face;
     /// the weight is the 2-D Gauss product `(w_u·h_1)·(w_v·h_2)` with the
-    /// `[0,1]` Gauss-Legendre rule and the `[-1,1]` GLL sub-cell widths.
+    /// `[0,1]` Gauss-Legendre rule and the `[0,1]` GLL sub-cell widths.
     pub samples: Vec<([f64; 3], f64)>,
     /// Reference normal direction `±e_c` — the `dof_map` flip (MFEM `nk`).
     pub t: [f64; 3],
@@ -172,16 +169,17 @@ impl HexRTk {
         HexRTk { order: p, open: HexRtOpen::GaussLegendre }
     }
 
-    /// The `k+1` open 1-D modes along one axis at `x` (reference `[-1,1]`).
+    /// The `k+1` open 1-D modes along one axis at `x` (reference `[0,1]`).
     ///
-    /// Both variants carry the hex pull-back scale (MFEM's `[0,1]` modes
-    /// halved), so a tensor mode is `V_mfem/4` for GaussLegendre and
-    /// `V_mfem/16` for IntegratedGLL (two open factors) — see the module docs.
+    /// Both variants are MFEM's native `[0,1]` modes (D721 dropped the
+    /// historical hex pull-back scale): a tensor mode is MFEM's reference
+    /// value exactly, so the physical Piola transform `det(J)^-1·J·Φ_ref`
+    /// equals MFEM's point for point.
     fn open_modes(&self, x: f64) -> Vec<f64> {
         match self.open {
             HexRtOpen::GaussLegendre => open_basis(self.order + 1, x).0,
             HexRtOpen::IntegratedGLL => {
-                partial_open(&ClosedBasis::new(self.order + 1).eval(x).dc)
+                partial_open(&ClosedBasis::new_01(self.order + 1).eval_mfem(x).dc)
             }
         }
     }
@@ -194,7 +192,7 @@ impl HexRTk {
         match self.open {
             HexRtOpen::GaussLegendre => open_basis(self.order + 1, x),
             HexRtOpen::IntegratedGLL => {
-                let v = ClosedBasis::new(self.order + 1).eval(x);
+                let v = ClosedBasis::new_01(self.order + 1).eval_mfem(x);
                 (partial_open(&v.dc), partial_open(&v.d2c))
             }
         }
@@ -225,11 +223,11 @@ impl HexRTk {
         );
         let k = self.order;
         let m = k + 1;
-        // Closed GLL nodes of the degree-`k+1` closed basis: `k+2` points
-        // (`gll_nodes` takes the degree), the sub-cell edges of the
-        // integrated dofs — the same nodes `ClosedBasis::new(k + 1)` is
-        // nodal at.
-        let cp = gll_nodes(k + 1);
+        // Closed GLL nodes of the degree-`k+1` closed basis on the `[0,1]`
+        // frame: `k+2` points (`gll_nodes_01` takes the degree), the sub-cell
+        // edges of the integrated dofs — the same nodes
+        // `ClosedBasis::new_01(k + 1)` is nodal at.
+        let cp = gll_nodes_01(k + 1);
         // MFEM `IntRules.Get(Geometry::SQUARE, p+1)`: per-axis SEGMENT rule
         // of order `p+1` (bit-identical `gauss_legendre_01`, D74).
         let npts = (k + 3) / 2;
@@ -319,10 +317,10 @@ impl VectorReferenceElement for HexRTk {
 
         // Closed basis degree k+1 (k+2 GLL modes); open modes of the variant
         // (k+1 modes).
-        let vx = ClosedBasis::new(k + 1).eval(x);
-        let vy = ClosedBasis::new(k + 1).eval(y);
-        let vz = ClosedBasis::new(k + 1).eval(z);
-        let (cx, cy, cz) = (&vx.c, &vy.c, &vz.c);
+        let vx = ClosedBasis::new_01(k + 1).val_mfem(x);
+        let vy = ClosedBasis::new_01(k + 1).val_mfem(y);
+        let vz = ClosedBasis::new_01(k + 1).val_mfem(z);
+        let (cx, cy, cz) = (&vx, &vy, &vz);
         let ox = self.open_modes(x);
         let oy = self.open_modes(y);
         let oz = self.open_modes(z);
@@ -352,7 +350,24 @@ impl VectorReferenceElement for HexRTk {
                 let q = if f2 { m - 1 - j } else { j };
                 for i in 0..m {
                     let p = if f1 { m - 1 - i } else { i };
-                    values[off * 3 + nc] = s * closed * o1[p] * o2[q];
+                    // MFEM `RT_HexahedronElement::CalcVShape` writes the
+                    // closed factor in the position of its own axis inside the
+                    // literal product — `s*cx(i)*oy(j)*oz(k)` for the
+                    // x-component, `s*ox(i)*cy(j)*oz(k)` for y and
+                    // `s*ox(i)*oy(j)*cz(k)` for z — so the *rounding* of the
+                    // triple product depends on which axis the closed factor
+                    // sits on.  Reproducing that association (rather than the
+                    // generic `s*closed*o1*o2`) is what makes the reference
+                    // values bit-identical; the earlier generic order left a
+                    // 1-ulp residue on the z-normal face blocks (D742: 168 of
+                    // the 6912 (q,dof,comp) entries at RT1, visible as 4
+                    // structural + 276 junk misses in the d680 mass gate).
+                    let val = match nc {
+                        0 => s * closed * o1[p] * o2[q],
+                        1 => s * o1[p] * closed * o2[q],
+                        _ => s * o1[p] * o2[q] * closed,
+                    };
+                    values[off * 3 + nc] = val;
                     off += 1;
                 }
             }
@@ -402,9 +417,9 @@ impl VectorReferenceElement for HexRTk {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
         div_vals.fill(0.0);
 
-        let vx = ClosedBasis::new(k + 1).eval(x);
-        let vy = ClosedBasis::new(k + 1).eval(y);
-        let vz = ClosedBasis::new(k + 1).eval(z);
+        let vx = ClosedBasis::new_01(k + 1).eval_mfem(x);
+        let vy = ClosedBasis::new_01(k + 1).eval_mfem(y);
+        let vz = ClosedBasis::new_01(k + 1).eval_mfem(z);
         let (dcx, dcy, dcz) = (&vx.dc, &vy.dc, &vz.dc);
         let ox = self.open_modes(x);
         let oy = self.open_modes(y);
@@ -436,7 +451,16 @@ impl VectorReferenceElement for HexRTk {
                 let q = if f2 { m - 1 - j } else { j };
                 for i in 0..m {
                     let p = if f1 { m - 1 - i } else { i };
-                    div_vals[off] = s * dclosed * o1[p] * o2[q];
+                    // Same positional association as `eval_basis_vec` (and as
+                    // MFEM `RT_HexahedronElement::CalcDivShape`, which also
+                    // writes the differentiated closed factor in its own axis
+                    // position inside the literal product).
+                    let val = match nc {
+                        0 => s * dclosed * o1[p] * o2[q],
+                        1 => s * o1[p] * dclosed * o2[q],
+                        _ => s * o1[p] * o2[q] * dclosed,
+                    };
+                    div_vals[off] = val;
                     off += 1;
                 }
             }
@@ -478,9 +502,9 @@ impl VectorReferenceElement for HexRTk {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
         curl_vals.fill(0.0);
 
-        let vx = ClosedBasis::new(k + 1).eval(x);
-        let vy = ClosedBasis::new(k + 1).eval(y);
-        let vz = ClosedBasis::new(k + 1).eval(z);
+        let vx = ClosedBasis::new_01(k + 1).eval_mfem(x);
+        let vy = ClosedBasis::new_01(k + 1).eval_mfem(y);
+        let vz = ClosedBasis::new_01(k + 1).eval_mfem(z);
         let (cx, cy, cz) = (&vx.c, &vy.c, &vz.c);
         // The curl of an RT tensor function differentiates its two OPEN
         // factors (IntegratedGLL: o'_i = -Σ_{t<=i} c''_t; GaussLegendre: the
@@ -582,17 +606,11 @@ impl VectorReferenceElement for HexRTk {
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let k = self.order;
         let m = k + 1;
-        if k == 0 {
-            return vec![
-                vec![0.0, 0.0, -1.0], // z=-1
-                vec![0.0, -1.0, 0.0], // y=-1
-                vec![1.0, 0.0, 0.0],  // x=+1
-                vec![0.0, 1.0, 0.0],  // y=+1
-                vec![-1.0, 0.0, 0.0], // x=-1
-                vec![0.0, 0.0, 1.0],  // z=+1
-            ];
-        }
-        let gl = gl_nodes(m);
+        // D721: the face/interior nodes are MFEM's `[0,1]³` positions
+        // (`Nodes.IntPoint(idx).Set3(cp[i], op[j], op[k])`), so the general
+        // path below serves `k = 0` too (a single open point at 0.5 per axis,
+        // the face centre) — the historical `[-1,1]` special case is gone.
+        let gl = crate::gll_basis::gl_nodes_01(m);
         let n = self.n_dofs();
         let mut c = Vec::with_capacity(n);
         // Face DOFs in HEX_FACES order.  Free coordinates sit at the open
@@ -600,7 +618,7 @@ impl VectorReferenceElement for HexRTk {
         // enumeration follows `HEX_RT_FACES` (MFEM's node convention, which
         // relabels the reversed faces together with their basis function).
         for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
-            let cnorm = if at_max { 1.0 } else { -1.0 };
+            let cnorm = if at_max { 1.0 } else { 0.0 };
             let (a1, a2) = free_axes(nc);
             for j in 0..m {
                 let q = if f2 { m - 1 - j } else { j };
@@ -625,7 +643,7 @@ impl VectorReferenceElement for HexRTk {
         // `cp = poly1d.ClosedPoints(p + 1, cb_type)` (`fem/fe/fe_rt.cpp:437`),
         // where `i` runs `0..=p+1` (`fe_rt.cpp:431-434`, one entry per slot of
         // the `p+2`-wide closed axis) so `cp` must supply `p+2` points
-        // — because that is the node the closed GLL basis `ClosedBasis::new(k+1)`
+        // — because that is the node the closed GLL basis `ClosedBasis::new_01(k+1)`
         // is nodal at (and the node `HDivSpace::interp_rows` samples).  The
         // old code took the GaussLegendre node (`gl_nodes(k+2)[i]`) instead,
         // which is a *different* point for every k >= 2 while coinciding at
@@ -633,7 +651,7 @@ impl VectorReferenceElement for HexRTk {
         // `gll_nodes`, `QuadRTk::dof_coords` `gll_nodes(k + 2)`).  No RT
         // assembly path reads these coordinates (the interpolation engine and
         // the space use their own tables), so this is a labelling fix.
-        let glc = gll_nodes(m);
+        let glc = gll_nodes_01(m);
         for l in 0..m {
             for j in 0..m {
                 for i in 1..=k {
@@ -680,9 +698,6 @@ fn partial_open(d: &[f64]) -> Vec<f64> {
     o[0] = -d[0];
     for i in 1..n {
         o[i] = o[i - 1] - d[i];
-    }
-    for v in o.iter_mut() {
-        *v *= 0.5;
     }
     o
 }
@@ -731,20 +746,22 @@ mod tests {
     /// RT0 must be the unit-flux Whitney form: each face mode has exactly
     /// unit outward flux through its own face and zero flux through the other
     /// five (MFEM RT0 with the IntegratedGLL open basis), with constant
-    /// reference divergence 1/8 (physical divergence 1).
+    /// reference divergence 1 (D721: the reference frame *is* MFEM's `[0,1]³`,
+    /// so the reference value is the physical one — the historical `1/8`
+    /// reference / `×32` physical pair was the `[-1,1]` pull-back).
     #[test]
     fn rt0_unit_face_fluxes() {
         let e = HexRTk::new(0);
         assert_eq!(e.n_dofs(), 6);
-        let (g1, w1) = crate::quadrature::gauss_legendre_arbitrary(3);
+        let (g1, w1) = crate::quadrature::gauss_legendre_01(3);
         // Faces in HEX_FACES order: bottom z-, front y-, right x+, back y+,
         // left x-, top z+.
         let faces: [(f64, usize); 6] = [
-            (-1.0, 2),
-            (-1.0, 1),
+            (0.0, 2),
+            (0.0, 1),
             (1.0, 0),
             (1.0, 1),
-            (-1.0, 0),
+            (0.0, 0),
             (1.0, 2),
         ];
         let normals: [[f64; 3]; 6] = [
@@ -780,26 +797,23 @@ mod tests {
         for dof in 0..6 {
             for f in 0..6 {
                 let want = if dof == f { 1.0 } else { 0.0 };
-                // D158 ARBITRATION REQUEST: the reference-frame flux carries
-                // the 1/4 pull-back normalization (two halved open modes);
-                // the *physical* flux on the unit cube (`J = diag(1/2)`,
-                // `det J = 1/8`, `phi_phys = J psi / det J = 4 psi`) is
-                // MFEM's unit face flux.
-                let phys = 4.0 * flux[dof][f];
+                // D721: the reference-frame flux *is* MFEM's unit face flux
+                // on the `[0,1]³` frame (the historical `×4` physical
+                // conversion died with the `[-1,1]` pull-back).
                 assert!(
-                    (phys - want).abs() < 1e-13,
-                    "dof {dof} physical flux through face {f}: {phys} (want {want})",
+                    (flux[dof][f] - want).abs() < 1e-13,
+                    "dof {dof} flux through face {f}: {} (want {want})",
+                    flux[dof][f],
                 );
             }
         }
         let mut d = vec![0.0; 6];
-        e.eval_div(&[0.13, -0.42, 0.57], &mut d);
+        e.eval_div(&[0.63, 0.29, 0.785], &mut d);
         for di in &d {
-            // D158 ARBITRATION REQUEST: ref-frame divergence is 1/32 (two
-            // halved open modes x 1/2 xi-chain).  Physical (det J = 1/8):
-            // 1/4, matching MFEM's RT_HexahedronElement(1) [0,1]-frame
-            // tensor value C'(t)/4 at the same normalized point.
-            assert!((32.0 * di - 1.0).abs() < 1e-14, "div {di}");
+            // D721: reference divergence 1 — MFEM's RT0 hex div is the
+            // constant 1 on `[0,1]³` (the `[-1,1]` frame's 1/32 was
+            // `1/8 · 1/4`).
+            assert!((di - 1.0).abs() < 1e-14, "div {di}");
         }
     }
 
@@ -814,7 +828,7 @@ mod tests {
             let e = HexRTk::new(k);
             let n = e.n_dofs();
             let eps = 1e-6;
-            let pt = [0.137, -0.413, 0.621];
+            let pt = [0.5685, 0.2935, 0.8105];
             let eval = |xi: &[f64], out: &mut Vec<f64>| {
                 out.clear();
                 out.resize(n * 3, 0.0);
@@ -857,7 +871,7 @@ mod tests {
             let e = HexRTk::new(k);
             let n = e.n_dofs();
             let eps = 1e-6;
-            let pt = [0.137, -0.413, 0.621];
+            let pt = [0.5685, 0.2935, 0.8105];
             let eval = |xi: &[f64], out: &mut Vec<f64>| {
                 out.clear();
                 out.resize(n * 3, 0.0);
@@ -908,20 +922,17 @@ mod tests {
     /// generic sample points of the round-40 probe.  Both sides enumerate the
     /// identical dof_map (round 40: the maps of the two ob_type variants are
     /// element-for-element equal), and MFEM's reference orientation flips are
-    /// baked into both, so this is a direct per-slot value comparison: on the
-    /// unit cube `V_femrs·4 = V_mfem` and `div_femrs·8 = div_mfem` (two
-    /// `[-1,1]`-pulled-back open factors of scale 1/2 per tensor mode; the
-    /// divergence adds the `d/dξ = ½ d/dt` chain on the closed factor).
+    /// baked into both, so this is a direct per-slot value comparison — and
+    /// after D721 it is an **exact** one: both sides evaluate the same `[0,1]³`
+    /// reference functions at the same points, so `V_femrs = V_mfem` and
+    /// `div_femrs = div_mfem` entry by entry (the historical `×4`/`×8`
+    /// pull-back conversions are gone with the `[-1,1]` frame).
     ///
     /// D342 extends the loop to `k = 3` (the first order the space cap used to
-    /// reject); the table was regenerated with the identical probe/points and
-    /// is verified by the same per-slot comparison, so the `×4`/`×8`
-    /// normalisation is confirmed at the newly-enabled order too (a wrong
-    /// constant factor cannot survive a *value* comparison — see
-    /// [`d342_rt_scaling_factors_measured`] for the measured ratios).
+    /// reject); the table was regenerated with the identical probe/points.
     #[test]
     fn rt_gl_matches_mfem_nodal_dump() {
-        // MFEM unit-cube sample points -> fem-rs reference `2t - 1`.
+        // MFEM `[0,1]³` sample points == the fem-rs reference points (D721).
         let pts = [[0.65_f64, 0.7, 0.75], [0.36, 0.71, 0.44]];
         for k in 1..=3usize {
             let e = HexRTk::new_gauss_legendre(k);
@@ -929,12 +940,12 @@ mod tests {
             let mut v = vec![0.0_f64; n * 3];
             let mut d = vec![0.0_f64; n];
             for (q, t) in pts.iter().enumerate() {
-                let xi = [2.0 * t[0] - 1.0, 2.0 * t[1] - 1.0, 2.0 * t[2] - 1.0];
+                let xi = [t[0], t[1], t[2]];
                 e.eval_basis_vec(&xi, &mut v);
                 e.eval_div(&xi, &mut d);
                 for (i, row) in mfem_gl_dump::v(k, q).iter().enumerate() {
                     for c in 0..3 {
-                        let got = 4.0 * v[i * 3 + c];
+                        let got = v[i * 3 + c];
                         assert!(
                             (got - row[c]).abs() < 1e-12 * (1.0 + row[c].abs()),
                             "RT{k} v{q} slot {i} comp {c}: rust {got} vs mfem {}",
@@ -943,7 +954,7 @@ mod tests {
                     }
                 }
                 for (i, want) in mfem_gl_dump::div(k, q).iter().enumerate() {
-                    let got = 8.0 * d[i];
+                    let got = d[i];
                     assert!(
                         (got - want).abs() < 1e-12 * (1.0 + want.abs()),
                         "RT{k} div{q} slot {i}: rust {got} vs mfem {want}"
@@ -953,15 +964,15 @@ mod tests {
         }
     }
 
-    /// D342: the unit-cube scaling constants `V_femrs·4 = V_mfem` and
-    /// `div_femrs·8 = div_mfem` are *measured* ratios, not assumed ones — for
-    /// every slot/component whose fem-rs value is not negligible the quotient
-    /// must be exactly 4 (resp. 8) to 1e-12 relative.  This is the independent
-    /// check that the D236 convention carries over unchanged to the newly
-    /// enabled order: any order-dependent or wrong global factor (1, 2, 16)
-    /// would show up as a different quotient, while a *reconstruction* test
-    /// alone could not see it (the dual matrix is built from the same basis,
-    /// so a global factor cancels).
+    /// D342/D721: the unit-cube scaling ratios are *measured*, not assumed —
+    /// for every slot/component whose fem-rs value is not negligible the
+    /// quotient `V_mfem/V_femrs` (resp. `div_mfem/div_femrs`) must be exactly
+    /// **1** to 1e-12 relative, because both sides now live on the same
+    /// `[0,1]³` reference frame.  This is the independent check that no
+    /// order-dependent or wrong global factor survived the D721 flip (the
+    /// historical values were 4 and 8; a *reconstruction* test alone could not
+    /// see a global factor because the dual matrix is built from the same
+    /// basis).
     #[test]
     fn d342_rt_scaling_factors_measured() {
         let pts = [[0.65_f64, 0.7, 0.75], [0.36, 0.71, 0.44]];
@@ -974,7 +985,7 @@ mod tests {
             let mut v = vec![0.0_f64; n * 3];
             let mut d = vec![0.0_f64; n];
             for (q, t) in pts.iter().enumerate() {
-                let xi = [2.0 * t[0] - 1.0, 2.0 * t[1] - 1.0, 2.0 * t[2] - 1.0];
+                let xi = [t[0], t[1], t[2]];
                 e.eval_basis_vec(&xi, &mut v);
                 e.eval_div(&xi, &mut d);
                 for (i, row) in mfem_gl_dump::v(k, q).iter().enumerate() {
@@ -983,7 +994,7 @@ mod tests {
                         if rust.abs() < 1e-9 {
                             continue;
                         }
-                        worst_v = worst_v.max((row[c] / rust - 4.0).abs() / 4.0);
+                        worst_v = worst_v.max((row[c] / rust - 1.0).abs());
                         n_cmp += 1;
                     }
                 }
@@ -991,7 +1002,7 @@ mod tests {
                     if d[i].abs() < 1e-9 {
                         continue;
                     }
-                    worst_x = worst_x.max((want / d[i] - 8.0).abs() / 8.0);
+                    worst_x = worst_x.max((want / d[i] - 1.0).abs());
                     n_cmp += 1;
                 }
             }
@@ -1000,22 +1011,22 @@ mod tests {
         // dump (~1e-16); the count is printed so the sample cannot silently
         // thin out.
         println!(
-            "D342 measured unit-cube scaling: V ratio = 4 +- {worst_v:.3e}, \
-             div ratio = 8 +- {worst_x:.3e} over {n_cmp} entries"
+            "D342/D721 measured unit-cube scaling: V ratio = 1 +- {worst_v:.3e}, \
+             div ratio = 1 +- {worst_x:.3e} over {n_cmp} entries"
         );
         assert!(n_cmp > 1000, "sample too thin: {n_cmp} entries");
-        assert!(worst_v < 1e-12, "V_mfem/V_femrs deviates from 4 by {worst_v}");
-        assert!(worst_x < 1e-12, "div_mfem/div_femrs deviates from 8 by {worst_x}");
+        assert!(worst_v < 1e-12, "V_mfem/V_femrs deviates from 1 by {worst_v}");
+        assert!(worst_x < 1e-12, "div_mfem/div_femrs deviates from 1 by {worst_x}");
     }
 
     /// At order 0 both open-basis variants span the same MFEM tensor functions
     /// (`C_i(t)·1·1` — the single open mode is the constant 1 in MFEM's
-    /// normalisation for GaussLegendre *and* IntegratedGLL), so the two
-    /// fem-rs reference bases differ by exactly the scale ratio 4 of their
-    /// pull-back normalisations (`V_mfem/4` vs `V_mfem/16`), componentwise
-    /// and slot for slot.
+    /// normalisation for GaussLegendre *and* IntegratedGLL), so on the `[0,1]³`
+    /// frame the two reference bases are now **identical**, componentwise and
+    /// slot for slot (the historical `4×` scale gap was the `[-1,1]`
+    /// pull-back; D721 removed it).
     #[test]
-    fn rt0_gl_is_4x_rt0_igll_reference() {
+    fn rt0_gl_equals_rt0_igll_reference() {
         let gl = HexRTk::new_gauss_legendre(0);
         let igll = HexRTk::new(0);
         let mut vg = vec![0.0_f64; 18];
@@ -1029,35 +1040,32 @@ mod tests {
             igll.eval_div(&[p.0, p.1, p.2], &mut di);
             for i in 0..18 {
                 assert!(
-                    (vg[i] - 4.0 * vi[i]).abs() < 1e-14,
-                    "slot {i}: gl {} vs 4·igll {}",
+                    (vg[i] - vi[i]).abs() < 1e-14,
+                    "slot {i}: gl {} vs igll {}",
                     vg[i],
                     vi[i]
                 );
             }
             for i in 0..6 {
-                assert!((dg[i] - 4.0 * di[i]).abs() < 1e-14);
+                assert!((dg[i] - di[i]).abs() < 1e-14);
             }
         }
     }
 
-    /// D236: the truly-physical flux of the GaussLegendre variant's face
-    /// modes is MFEM's unit outward flux.  On the brick `h`, the Piola
-    /// transform of the `[-1,1]` frame is `φ_phys = (4/(h_a h_b))·ψ_ref·e_n`
-    /// on the normal axis and `dA = (h_a h_b/4) dξ dη`, so the physical face
-    /// flux equals the plain reference integral `∫∫ ψ_ref dξ dη` — which must
-    /// be ±1 per face mode (MFEM `RT0` flux duals; the IntegratedGLL variant
-    /// integrates to 1/4 by design, the standing D227-era frame debt).
+    /// D236/D721: the GaussLegendre variant's face modes have MFEM's unit
+    /// outward flux on the `[0,1]³` reference frame — the plain reference
+    /// integral `∫∫ ψ_ref dξ dη` is ±1 per face mode, and both variants now
+    /// integrate to 1 (the `4×` gap of the `[-1,1]` frame is gone).
     #[test]
     fn rt0_gl_unit_face_fluxes() {
         let e = HexRTk::new_gauss_legendre(0);
-        let (g1, w1) = crate::quadrature::gauss_legendre_arbitrary(4);
+        let (g1, w1) = crate::quadrature::gauss_legendre_01(4);
         let faces: [(f64, usize); 6] = [
-            (-1.0, 2),
-            (-1.0, 1),
+            (0.0, 2),
+            (0.0, 1),
             (1.0, 0),
             (1.0, 1),
-            (-1.0, 0),
+            (0.0, 0),
             (1.0, 2),
         ];
         let normals: [[f64; 3]; 6] = [
@@ -1112,7 +1120,7 @@ mod tests {
             let e = HexRTk::new_gauss_legendre(k);
             let n = e.n_dofs();
             let eps = 1e-6;
-            let pt = [0.137, -0.413, 0.621];
+            let pt = [0.5685, 0.2935, 0.8105];
             let eval = |xi: &[f64], out: &mut Vec<f64>| {
                 out.clear();
                 out.resize(n * 3, 0.0);

@@ -175,8 +175,8 @@ fn factory_in_range(et: ElementType, fxi: &[f64], t: f64) -> bool {
             s >= -t && x >= -t && y >= -t && x + y <= 1.0 + t
         }
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
-            // HexQk / Hex20 serendipity evaluate on [-1, 1]^3.
-            fxi.iter().all(|&v| v >= -1.0 - t && v <= 1.0 + t)
+            // HexQk / Hex20 serendipity evaluate on [0, 1]^3 (D721).
+            fxi.iter().all(|&v| v >= -t && v <= 1.0 + t)
         }
         _ => fxi.iter().all(|&v| v >= -t && v <= 1.0 + t),
     }
@@ -185,29 +185,24 @@ fn factory_in_range(et: ElementType, fxi: &[f64], t: f64) -> bool {
 /// Map canonical `[0, 1]^D` coordinates to the family's factory convention,
 /// returning `(factory_xi, jacobian_scale)` where `jacobian_scale` is the
 /// factor `d(factory_xi) / d(canonical_xi)` per axis (diagonal map).
+///
+/// D721: every family in the locator's reach evaluates on `[0,1]^D` (the hex
+/// cube was the last `[-1,1]` holdout), so this is the identity for all of
+/// them — the historical `2x − 1` hex shim (and its `2^D` Jacobian scale)
+/// is gone.
 pub(crate) fn to_factory_coords<const D: usize>(
     et: ElementType,
     xi: &[f64; D],
 ) -> (Vec<f64>, [f64; D]) {
-    match et {
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
-            let f: Vec<f64> = xi.iter().map(|&v| 2.0 * v - 1.0).collect();
-            let scale = [2.0; D];
-            (f, scale)
-        }
-        _ => (xi.to_vec(), [1.0; D]),
-    }
+    let _ = et;
+    (xi.to_vec(), [1.0; D])
 }
 
 /// Inverse of [`to_factory_coords`]: factory reference coordinates →
-/// canonical `[0, 1]^D`.
+/// canonical `[0, 1]^D` (the identity since D721).
 fn from_factory_coords<const D: usize>(et: ElementType, fxi: &[f64]) -> [f64; D] {
-    match et {
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
-            std::array::from_fn(|d| 0.5 * (fxi[d] + 1.0))
-        }
-        _ => std::array::from_fn(|d| fxi[d]),
-    }
+    let _ = et;
+    std::array::from_fn(|d| fxi[d])
 }
 
 impl<'a, const D: usize> GslibFindPoints<'a, D> {

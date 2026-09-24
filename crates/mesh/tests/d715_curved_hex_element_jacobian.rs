@@ -40,35 +40,36 @@ fn data(rel: &str) -> String {
     format!("{}/tests/data/{}", env!("CARGO_MANIFEST_DIR"), rel)
 }
 
-/// Sample lattice on `[-1,1]^3`: corners, face centres, mid-edges and
+/// Sample lattice on `[0,1]^3` (D721): corners, face centres, mid-edges and
 /// interior points (the RT0 nodal points are a subset).
 const LATTICE: [[f64; 3]; 16] = [
-    [-1.0, -1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [-1.0, 1.0, -1.0],
-    [1.0, 1.0, -1.0],
-    [-1.0, -1.0, 1.0],
-    [1.0, -1.0, 1.0],
-    [-1.0, 1.0, 1.0],
-    [1.0, 1.0, 1.0],
-    [-1.0, 0.0, 0.0],
-    [1.0, 0.0, 0.0],
-    [0.0, -1.0, 0.0],
-    [0.0, 1.0, 0.0],
-    [0.0, 0.0, -1.0],
-    [0.0, 0.0, 1.0],
     [0.0, 0.0, 0.0],
-    [0.25, -0.5, 0.75],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [0.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 0.5, 0.5],
+    [1.0, 0.5, 0.5],
+    [0.5, 0.0, 0.5],
+    [0.5, 1.0, 0.5],
+    [0.5, 0.5, 0.0],
+    [0.5, 0.5, 1.0],
+    [0.5, 0.5, 0.5],
+    [0.625, 0.25, 0.875],
 ];
 
-/// The six RT0 hex nodal reference points: face centres on `[-1,1]^3`.
+/// The six RT0 hex nodal reference points: face centres on `[0,1]^3` (D721;
+/// the historical `[-1,1]^3` values were `2·ξ − 1`).
 const RT0_FACE_CENTRES: [[f64; 3]; 6] = [
-    [-1.0, 0.0, 0.0],
-    [1.0, 0.0, 0.0],
-    [0.0, -1.0, 0.0],
-    [0.0, 1.0, 0.0],
-    [0.0, 0.0, -1.0],
-    [0.0, 0.0, 1.0],
+    [0.0, 0.5, 0.5],
+    [1.0, 0.5, 0.5],
+    [0.5, 0.0, 0.5],
+    [0.5, 1.0, 0.5],
+    [0.5, 0.5, 0.0],
+    [0.5, 0.5, 1.0],
 ];
 
 /// Worst mismatch between the dyn path and the in-crate isoparametric path

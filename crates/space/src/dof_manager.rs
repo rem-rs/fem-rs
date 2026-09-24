@@ -1802,7 +1802,7 @@ impl DofManager {
         // Pk>=3 fix), derive the edge/face slot runs directly from
         // HexQk's reference DOF coordinates.
         use fem_element::lagrange::factory::HexQk;
-        let ref_coords = HexQk::new(p).dof_coords(); // GLL nodes on [-1,1]^3
+        let ref_coords = HexQk::new(p).dof_coords(); // GLL nodes on [0,1]^3 (D721)
         const BND_TOL: f64 = 1e-12;
         // Q1 vertex layout: sign triples of the 8 vertices (bottom ring CCW
         // 0..3, then top ring 4..7).  NOTE: NOT a binary bit encoding.
@@ -1821,13 +1821,15 @@ impl DofManager {
             let mut sig2run: HashMap<(usize, u8, u8), usize> = HashMap::new();
             for slot in 8..8 + 12 * edge_dofs_per {
                 let rc = &ref_coords[slot];
+                // D721: the reference frame is [0,1]^3, so a boundary
+                // coordinate is 0 or 1 and the "high side" test is > 1/2.
                 let bnd: Vec<usize> = (0..3)
-                    .filter(|&d| (rc[d] + 1.0).abs() < BND_TOL || (rc[d] - 1.0).abs() < BND_TOL)
+                    .filter(|&d| rc[d].abs() < BND_TOL || (rc[d] - 1.0).abs() < BND_TOL)
                     .collect();
                 debug_assert_eq!(bnd.len(), 2, "HexQk slot {slot} expected on an edge");
                 let av = 3 - bnd[0] - bnd[1]; // varying axis (0+1+2 = 3)
-                let s0 = if rc[bnd[0]] > 0.0 { 1u8 } else { 0u8 };
-                let s1 = if rc[bnd[1]] > 0.0 { 1u8 } else { 0u8 };
+                let s0 = if rc[bnd[0]] > 0.5 { 1u8 } else { 0u8 };
+                let s1 = if rc[bnd[1]] > 0.5 { 1u8 } else { 0u8 };
                 let run = *sig2run.entry((av, s0, s1)).or_insert_with(|| {
                     edge_runs.push((0, 0, slot));
                     edge_runs.len() - 1
@@ -1844,7 +1846,7 @@ impl DofManager {
                         Q1_SIGNS.iter().position(|&s| s == slo).unwrap(),
                         Q1_SIGNS.iter().position(|&s| s == shi).unwrap(),
                     );
-                    if rc[av] < 0.0 {
+                    if rc[av] < 0.5 {
                         edge_runs[run] = (lo, hi, slot);
                     } else {
                         edge_runs[run] = (hi, lo, slot);
@@ -1863,11 +1865,11 @@ impl DofManager {
             for slot in 8 + 12 * edge_dofs_per..8 + 12 * edge_dofs_per + 6 * face_dofs_per {
                 let rc = &ref_coords[slot];
                 let bnd: Vec<usize> = (0..3)
-                    .filter(|&d| (rc[d] + 1.0).abs() < BND_TOL || (rc[d] - 1.0).abs() < BND_TOL)
+                    .filter(|&d| rc[d].abs() < BND_TOL || (rc[d] - 1.0).abs() < BND_TOL)
                     .collect();
                 debug_assert_eq!(bnd.len(), 1, "HexQk slot {slot} expected on a face");
                 let ax = bnd[0];
-                let s = if rc[ax] > 0.0 { 1u8 } else { 0u8 };
+                let s = if rc[ax] > 0.5 { 1u8 } else { 0u8 };
                 let run = *sig2run.entry((ax, s)).or_insert_with(|| {
                     let verts: Vec<usize> = (0..8)
                         .filter(|&v| Q1_SIGNS[v][ax] == s as usize)
@@ -1885,14 +1887,16 @@ impl DofManager {
 
         // Physical position of a reference point via trilinear mapping of the
         // element's 8 vertex coordinates.  Vertex i sits at the reference
-        // corner Q1_SIGNS[i] (ring order — NOT the binary bit pattern of i).
+        // corner Q1_SIGNS[i] (ring order — NOT the binary bit pattern of i);
+        // D721: `Q1_SIGNS` indexes the `[0,1]` corners, so the 1-D node factor
+        // is `rc[d]` on the high side and `1 - rc[d]` on the low side.
         let phys_pos = |c: &[[f64; 3]], rc: &[f64]| -> [f64; 3] {
             let mut xp = [0.0; 3];
             for i in 0..8 {
                 let (sx, sy, sz) = (Q1_SIGNS[i][0], Q1_SIGNS[i][1], Q1_SIGNS[i][2]);
-                let nx = if sx == 1 { (1.0 + rc[0]) / 2.0 } else { (1.0 - rc[0]) / 2.0 };
-                let ny = if sy == 1 { (1.0 + rc[1]) / 2.0 } else { (1.0 - rc[1]) / 2.0 };
-                let nz = if sz == 1 { (1.0 + rc[2]) / 2.0 } else { (1.0 - rc[2]) / 2.0 };
+                let nx = if sx == 1 { rc[0] } else { 1.0 - rc[0] };
+                let ny = if sy == 1 { rc[1] } else { 1.0 - rc[1] };
+                let nz = if sz == 1 { rc[2] } else { 1.0 - rc[2] };
                 let ni = nx * ny * nz;
                 for d in 0..3 { xp[d] += ni * c[i][d]; }
             }
@@ -3150,10 +3154,12 @@ impl DofManager {
                                 let mut x = [0.0_f64; 3];
                                 for i in 0..8 {
                                     let sg = HEX_Q1_SIGNS[i];
-                                    let w = (if sg[0] == 1 { 1.0 + rc[0] } else { 1.0 - rc[0] })
-                                        * (if sg[1] == 1 { 1.0 + rc[1] } else { 1.0 - rc[1] })
-                                        * (if sg[2] == 1 { 1.0 + rc[2] } else { 1.0 - rc[2] })
-                                        / 8.0;
+                                    // D721: `rc` is a `[0,1]^3` reference point and
+                                    // the 1-D node factor is `rc` on the high side,
+                                    // `1 - rc` on the low side (no `(1+s·x)/2` map).
+                                    let w = (if sg[0] == 1 { rc[0] } else { 1.0 - rc[0] })
+                                        * (if sg[1] == 1 { rc[1] } else { 1.0 - rc[1] })
+                                        * (if sg[2] == 1 { rc[2] } else { 1.0 - rc[2] });
                                     let ci = c(i);
                                     for d in 0..3 {
                                         x[d] += w * ci[d];

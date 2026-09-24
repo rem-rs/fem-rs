@@ -1911,7 +1911,14 @@ fn hex_slot_map<M: MeshTopology>(
     // The 1-D GLL nodes of the reference basis: the tensor index of a slot is
     // the position of its coordinate in this table (`HexQk` builds its 1-D
     // basis from the same function, so the values match bit-for-bit).
-    let gll = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1).0;
+    // D721: the reference slots live on MFEM's `[0,1]` GLL lattice — map the
+    // 1-D table exactly the way `HexQk` does (`0.5*(x+1)`); the tensor index of
+    // a slot is then the exact position of its coordinate in this table.
+    let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|x| 0.5 * (x + 1.0))
+        .collect();
     if gll.len() != p + 1 {
         return HexSlotErr::unsupported("unexpected Gauss-Lobatto node count");
     }
@@ -3454,12 +3461,16 @@ impl MixedFamily {
     }
 
     fn hex(p: usize) -> Self {
-        // Consumer family: `HexQk` on `[-1,1]³` (MFEM `H1_HexahedronElement`
-        // tensor lattice, D41).
+        // Consumer family: `HexQk` on `[0,1]³` (MFEM `H1_HexahedronElement`
+        // tensor lattice, D41; D721 moved the reference frame to MFEM's
+        // `[0,1]³`).  The 1-D GLL lattice is taken from the shared `gll01`
+        // helper — the same `0.5·(x+1)` image of the `[-1,1]` table that
+        // `HexQk` builds its `dof_coords` from, exactly as the `quad` arm
+        // above.
         let e = p - 1;
         let hex = fem_element::lagrange::factory::HexQk::new(p);
         let coords = hex.dof_coords();
-        let gll = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1).0;
+        let gll = gll01(p);
         let mut slots = Vec::with_capacity(coords.len());
         for c in &coords {
             let mut idx = [0usize; 3];

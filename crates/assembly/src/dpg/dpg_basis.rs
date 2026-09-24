@@ -158,8 +158,8 @@ pub fn hcurl_ref_elem(et: ElementType, order: u8) -> Box<dyn VectorReferenceElem
 }
 
 /// Volume quadrature rule for the element geometry (reference domain matched
-/// to the fem-element families: `[0,1]^dim` for simplices and quads,
-/// `[−1,1]³` for hexahedra — see [`ref_node_coords`]).
+/// to the fem-element families: `[0,1]^dim` for simplices, quads and — since
+/// D721/D757 — hexahedra; see [`ref_node_coords`]).
 pub fn vol_quadrature(et: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
     match et {
         ElementType::Tri3 | ElementType::Tri6 => {
@@ -175,18 +175,18 @@ pub fn vol_quadrature(et: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
             (r.points, r.weights)
         }
         ElementType::Hex8 => {
-            // Tensor-product Gauss-Legendre on `[−1,1]³`, exactly
+            // Tensor-product Gauss-Legendre on `[0,1]³`, exactly
             // [`fem_element::quadrature::hex_rule`]: the argument is the
             // polynomial *degree* MFEM passes to `IntRules.Get(hex, deg)`
             // (`(deg + 2) / 2` Gauss points per direction), matching the
             // degree semantics of `tri_rule`/`tet_rule`/`quad_rule_01` above.
-            // The hexahedral fem-element family (`HexL2GL`/`HexQk`/`HexRTk`/
-            // `HexNDk` and the `HexQ1` geometry element, all of which
+            // Since D721 the hexahedral fem-element family (`HexL2GL`/`HexQk`/
+            // `HexRTk`/`HexNDk` and the `HexQ1` geometry element, all of which
             // `eval_vol_space` and `geo_ref_elem_from_mesh` use) is defined on
-            // `[−1,1]³`, exactly like the rest of fem-rs's 3-D kernels; the
-            // DPG quadrature and reference geometry must use the same domain,
-            // otherwise `x(ξ)` only covers a sub-box of each element and the
-            // measure is off by `2^dim`.
+            // MFEM's `[0,1]³` unit cube, so the DPG quadrature and reference
+            // geometry share that domain.  (D757: the previous `[-1,1]³` note
+            // and the matching `ref_node_coords` corners are gone; the stale
+            // pair left `x(ξ)` covering only a sub-box, off by `2^dim`.)
             let r = hex_rule(order);
             (r.points, r.weights)
         }
@@ -966,11 +966,11 @@ pub fn local_face_canonical_order(nodes: &[u32], lf: &[usize], canonical: &[u32]
 
 /// Reference-domain node coordinates of the element geometries.
 ///
-/// Simplices and quads use the fem-element `[0,1]^dim` convention; the
-/// hexahedral family (`HexQ1`/`HexQk`/`HexL2GL`/`HexRTk`/`HexNDk`) is defined
-/// on `[−1,1]³`, so the hex entries below are the `[−1,1]³` corners in the
-/// same (MFEM) vertex order.  [`vol_quadrature`] and the element bases must
-/// share this convention.
+/// Simplices, quads and — since D721/D757 — hexahedra all use the fem-element
+/// `[0,1]^dim` convention (the hex family `HexQ1`/`HexQk`/`HexL2GL`/`HexRTk`/
+/// `HexNDk` was flipped onto MFEM's unit cube), so the hex entries below are
+/// the `[0,1]³` corners in the same (MFEM) vertex order.  [`vol_quadrature`]
+/// and the element bases must share this convention.
 pub fn ref_node_coords(et: ElementType) -> Vec<[f64; 3]> {
     match et {
         ElementType::Tri3 | ElementType::Tri6 => vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -987,14 +987,14 @@ pub fn ref_node_coords(et: ElementType) -> Vec<[f64; 3]> {
             [0.0, 0.0, 1.0],
         ],
         ElementType::Hex8 => vec![
-            [-1.0, -1.0, -1.0],
-            [1.0, -1.0, -1.0],
-            [1.0, 1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-            [1.0, -1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
             [1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
         ],
         _ => panic!("ref_node_coords: unsupported {et:?}"),
     }
@@ -2728,8 +2728,10 @@ mod trace_tests {
     /// (Gauss-Lobatto) 1-D basis of degree `p` in the two transversal
     /// directions and the *open* (Gauss-Legendre) basis of degree `p−1` in the
     /// tangential one; both 1-D bases span the full 1-D polynomial space of
-    /// their degree).  fem-rs's element uses a different node set and the
-    /// `[−1,1]³` parametrisation, which is a basis (not a space) difference —
+    /// their degree).  fem-rs's element uses a different node set and — at the
+    /// time this pin was written — the `[−1,1]³` parametrisation (D757: D721
+    /// has since moved `HexNDk` onto MFEM's `[0,1]³`, so only the node-set
+    /// difference remains), which is a basis (not a space) difference —
     /// this test pins that so the DPG element normal equations, which are
     /// invariant under a test-basis change, stay comparable with MFEM's.
     #[test]
@@ -2824,12 +2826,12 @@ mod trace_tests {
     ///
     /// (MFEM builds it from a *closed* GLL factor of degree `p+1` in the
     /// normal direction and *open* Gauss–Legendre factors of degree `p` in the
-    /// two tangential ones, all on `[0,1]`; `HexRTk` uses the `[−1,1]` pullback
-    /// and different node sets).  Ranking the fem-rs samples against the
-    /// monomial span is what decides whether the `[−1,1]` vs `[0,1]`
-    /// parametrisation is only a *basis* difference (span preserved) or a
-    /// genuine *space* mismatch — the latter would silently break the 3-D DPG
-    /// test norm.
+    /// two tangential ones, all on `[0,1]`; `HexRTk` used the `[−1,1]` pullback
+    /// and different node sets until D721 put it on `[0,1]³` as well — D757).
+    /// Ranking the fem-rs samples against the monomial span is what decides
+    /// whether a frame difference is only a *basis* difference (span preserved)
+    /// or a genuine *space* mismatch — the latter would silently break the 3-D
+    /// DPG test norm.
     #[test]
     fn rt_hex_span_is_tensor_rt() {
         let ident = nalgebra::DMatrix::<f64>::identity(3, 3);

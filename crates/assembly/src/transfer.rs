@@ -1313,8 +1313,10 @@ fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], 
             Some(pts.iter().zip(nks.iter()).map(|(p, n)| (z2(*p), z2(*n))).collect())
         }
         (HdivRt0Family::Hex, o) => {
-            // The fem-rs/MFEM hex reference element lives on [-1,1]³ — the
-            // published table's points/normals are already in that frame.
+            // D757: the hex reference element (and `HexRTk`) lives on MFEM's
+            // `[0,1]³` unit cube since D721, and `mfem_hex_nodal_dofs` samples
+            // there — the frame must match `hdiv_elem_frame`'s (the stale
+            // `[-1,1]³` pair below was the d468/d493 defect).
             let (pts, nks) = hex_rt1::mfem_hex_nodal_dofs(o as usize);
             Some(pts.iter().zip(nks.iter()).map(|(p, n)| (*p, *n)).collect())
         }
@@ -1419,8 +1421,8 @@ fn hdiv_rt0_elem_edges(family: HdivRt0Family) -> &'static [(usize, usize)] {
 /// node slot occupies on the child (used to fit the affine child embedding F).
 /// Reference corner coordinates of each local node slot, in the family's
 /// reference domain: unit-simplex/unit-square corners for tri/tet/quad and the
-/// [-1,1]³ cube corners for hex (the fem-rs/MFEM hex reference element — its
-/// quadrature lives on [-1,1]).
+/// `[0,1]³` unit-cube corners for hex (D721 flipped the hex family — and its
+/// quadrature/slot rows — off `[-1,1]³`).
 fn hdiv_rt0_ref_corners(family: HdivRt0Family) -> Vec<(f64, f64, f64)> {
     let t = |(a, b, c): (f64, f64, f64)| (a, b, c);
     match family {
@@ -1442,14 +1444,14 @@ fn hdiv_rt0_ref_corners(family: HdivRt0Family) -> Vec<(f64, f64, f64)> {
             t((0.0, 0.0, 1.0)),
         ],
         HdivRt0Family::Hex => vec![
-            t((-1.0, -1.0, -1.0)),
-            t((1.0, -1.0, -1.0)),
-            t((1.0, 1.0, -1.0)),
-            t((-1.0, 1.0, -1.0)),
-            t((-1.0, -1.0, 1.0)),
-            t((1.0, -1.0, 1.0)),
+            t((0.0, 0.0, 0.0)),
+            t((1.0, 0.0, 0.0)),
+            t((1.0, 1.0, 0.0)),
+            t((0.0, 1.0, 0.0)),
+            t((0.0, 0.0, 1.0)),
+            t((1.0, 0.0, 1.0)),
             t((1.0, 1.0, 1.0)),
-            t((-1.0, 1.0, 1.0)),
+            t((0.0, 1.0, 1.0)),
         ],
         HdivRt0Family::Prism => {
             // Reference corner of each node slot in the ENGINE frame
@@ -1663,34 +1665,31 @@ fn hdiv_elem_frame<M: MeshTopology>(
             }
         }
         HdivRt0Family::Hex => {
-            // [-1,1]³ reference cube: return the CENTER and the half-edge
-            // vectors so that x = center + Σ ξ_i·b_i for ξ ∈ [-1,1]³ — the
-            // same affine-algebra shape as the origin-corner families, with
-            // the ±1 corners of `hdiv_rt0_ref_corners`.
-            let mut sum = [0.0_f64; 3];
-            for i in 0..8 {
-                let c = pt(i);
-                sum[0] += c[0] / 8.0;
-                sum[1] += c[1] / 8.0;
-                sum[2] += c[2] / 8.0;
-            }
-            b[0] = [sub(pt(1), pt(0))[0] / 2.0, sub(pt(1), pt(0))[1] / 2.0, sub(pt(1), pt(0))[2] / 2.0];
-            b[1] = [sub(pt(3), pt(0))[0] / 2.0, sub(pt(3), pt(0))[1] / 2.0, sub(pt(3), pt(0))[2] / 2.0];
-            b[2] = [sub(pt(4), pt(0))[0] / 2.0, sub(pt(4), pt(0))[1] / 2.0, sub(pt(4), pt(0))[2] / 2.0];
+            // D757 (D721 follow-up): the hex reference element is the `[0,1]³`
+            // unit cube — the same origin-corner affine shape as the other
+            // families (`hdiv_rt0_ref_corners(Hex)` carries the 0/1 corners
+            // and `hex_rt1::mfem_hex_nodal_dofs` samples on `[0,1]³`).  The
+            // previous center + half-edge parametrisation (`x = center +
+            // Σ ξ_i·b_i`, ξ ∈ [-1,1]³) disagreed with that frame, so the child
+            // embedding `F` and every prolongation row came out wrong on hexes
+            // (d468 `hex RT0 P[4,4] = 0.375 vs 0.25`, d493 `hex RT1
+            // P[0,0] = -0.84375 vs 0.09375`).
+            b[0] = sub(pt(1), v0);
+            b[1] = sub(pt(3), v0);
+            b[2] = sub(pt(4), v0);
             // affine verification on all 8 corners
             for (i, corner) in hdiv_rt0_ref_corners(family).iter().enumerate() {
                 let vp = pt(i);
                 let mut pred = [0.0_f64; 3];
                 let cs = [corner.0, corner.1, corner.2];
                 for dd in 0..3 {
-                    pred[dd] = sum[dd] + cs[0] * b[0][dd] + cs[1] * b[1][dd] + cs[2] * b[2][dd];
+                    pred[dd] = v0[dd] + cs[0] * b[0][dd] + cs[1] * b[1][dd] + cs[2] * b[2][dd];
                 }
                 let res = (pred[0] - vp[0]).abs() + (pred[1] - vp[1]).abs() + (pred[2] - vp[2]).abs();
                 if res > 1e-8 {
                     return None;
                 }
             }
-            return Some((sum, b));
         }
     }
     Some((v0, b))
@@ -1999,10 +1998,10 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
                     continue;
                 };
                 let eps = 1e-9;
-                let (lo, hi) = match family {
-                    HdivRt0Family::Hex => (-1.0 - eps, 1.0 + eps),
-                    _ => (-eps, 1.0 + eps),
-                };
+                // D757: the hex parent frame is the `[0,1]³` unit cube (D721),
+                // so its containment box is the same `(0-eps, 1+eps)` box the
+                // quad/prism/pyramid families use.
+                let (lo, hi) = (-eps, 1.0 + eps);
                 let sum: f64 = (0..dim).map(|i| xi[i]).sum();
                 let inside = match family {
                     HdivRt0Family::Tri | HdivRt0Family::Tet => {

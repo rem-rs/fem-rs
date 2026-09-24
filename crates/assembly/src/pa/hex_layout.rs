@@ -89,12 +89,16 @@ mod tests {
     fn hex_qk_nodes_are_gauss_lobatto() {
         for p in 1..=5 {
             let (nodes, _) = hex_slots(&HexQk::new(p));
+            // D721: the kernel's nodes live on `[0,1]` — the centralized
+            // `0.5·(x+1)` image of the `[-1,1]` GLL table the element layer
+            // documents.
             let (want, _) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
             assert_eq!(nodes.len(), want.len(), "p={p}: node count");
             for (i, (got, want)) in nodes.iter().zip(want.iter()).enumerate() {
                 assert_eq!(
-                    got, want,
-                    "p={p}: 1-D node {i} must be bit-identical to gauss_lobatto_arbitrary"
+                    *got,
+                    0.5 * (want + 1.0),
+                    "p={p}: 1-D node {i} must be bit-identical to the [0,1] image of                      gauss_lobatto_arbitrary"
                 );
             }
         }

@@ -236,8 +236,9 @@ fn d224_tri_probe() {
 
 #[test]
 fn d224_find_points_hex_factory_domain() {
-    // `transformation::find_points` reports hex coordinates in [-1, 1]^3.
-    // Single-cell mesh so the local coordinates are 2*p - 1.
+    // D721: `transformation::find_points` reports hex coordinates in
+    // MFEM's `[0,1]^3` frame.  Single-cell mesh so the local coordinates are
+    // the physical ones.
     let mesh = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, true);
     let pts = vec![0.1, 0.2, 0.3, 0.6, 0.7, 0.8, 0.25, 0.25, 0.25];
     let (ids, xis) = find_points(&mesh, &pts, 3);
@@ -245,7 +246,7 @@ fn d224_find_points_hex_factory_domain() {
     for (i, xi) in xis.iter().enumerate() {
         assert_eq!(xi.len(), 3);
         for d in 0..3 {
-            let expected = 2.0 * pts[i * 3 + d] - 1.0;
+            let expected = pts[i * 3 + d];
             assert!(
                 (xi[d] - expected).abs() < 1e-12,
                 "point {i} axis {d}: {} vs {expected}",
@@ -279,8 +280,9 @@ fn d224_find_points_hex_factory_domain() {
         let (_j, xp) = element_jacobian_at(&mesh2, ids2[i] as u32, xi, 3);
         for d in 0..3 {
             assert!((xp[d] - pts2[i * 3 + d]).abs() < 1e-12, "pt {i} axis {d}");
-            assert!(xi[d] >= -1.0 - 1e-9 && xi[d] <= 1.0 + 1e-9);
-            let expected = 2.0 * (pts2[i * 3 + d] - lo[d]) / (hi[d] - lo[d]) - 1.0;
+            // D721: hex factory coordinates are MFEM's [0,1]^3 locals.
+            assert!(xi[d] >= -1e-9 && xi[d] <= 1.0 + 1e-9);
+            let expected = (pts2[i * 3 + d] - lo[d]) / (hi[d] - lo[d]);
             assert!((xi[d] - expected).abs() < 1e-12, "pt {i} axis {d} local");
         }
     }
@@ -293,9 +295,9 @@ fn d224_locate_outside_is_none() {
     assert!(mt.locate(&[1.5, 0.2, 0.3], 1e-10).is_none());
     assert!(mt.locate(&[0.2, -0.3, 0.3], 1e-10).is_none());
     let inside = mt.locate(&[0.2, 0.3, 0.4], 1e-10).expect("inside");
-    // Hex factory domain: coordinates in [-1, 1]^3.
+    // D721: hex factory domain is MFEM's [0, 1]^3.
     for v in &inside.1 {
-        assert!(*v >= -1.0 - 1e-9 && *v <= 1.0 + 1e-9, "hex xi {inside:?}");
+        assert!(*v >= -1e-9 && *v <= 1.0 + 1e-9, "hex xi {inside:?}");
     }
 }
 

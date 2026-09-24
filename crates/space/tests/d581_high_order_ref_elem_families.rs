@@ -14,7 +14,8 @@
 //! exactly.
 //!
 //! Reference families (the contract the arms below pin):
-//! * Hex20/Hex27 → `HexQk` on `[-1,1]³` (the same family
+//! * Hex20/Hex27 → `HexQk` on `[0,1]³` (the same family **D721**: the hex
+//!   cube frame is MFEM's `[0,1]³` — replaced `[-1,1]³`
 //!   `crates/mesh/src/curved.rs` reads Hex27 geometry tables with and
 //!   `ElementType::Hex27::ref_elem` hands out; `HexQk::new(2)` = 27 dofs).
 //! * Prism15/Prism18 → the prism tensor family: H¹ slots `H1PrismPk`
@@ -106,17 +107,17 @@ fn element_volume(family: &dyn ReferenceElement, table: &[[f64; 3]], quad_order:
 #[test]
 fn d581_hex27_hex20_gll_tensor_and_h1_arms() {
     for et in [ElementType::Hex20, ElementType::Hex27] {
-        // gll_tensor: HexQk on [-1,1]^3 — 27 dofs at order 2, 8 at order 1.
+        // gll_tensor: HexQk on [0,1]^3 (D721) — 27 dofs at order 2, 8 at order 1.
         let e2 = gll_tensor(et, 2);
         assert_eq!(e2.n_dofs(), 27, "{et:?} gll_tensor order 2");
         let dc = e2.dof_coords();
-        assert_eq!(dc[0], vec![-1.0, -1.0, -1.0], "{et:?} HexQk frame origin");
+        assert_eq!(dc[0], vec![0.0, 0.0, 0.0], "{et:?} HexQk frame origin");
         assert!(dc.iter().any(|c| c[0] == 1.0), "{et:?} HexQk frame max");
         assert_eq!(gll_tensor(et, 1).n_dofs(), 8, "{et:?} gll_tensor order 1");
-        // quadrature on the fem-rs cube frame: weight sum = 8 (2^3).
+        // quadrature on the cube frame: weight sum = 1 (D721).
         let q = e2.quadrature(10);
         let wsum: f64 = q.weights.iter().sum();
-        assert!((wsum - 8.0).abs() < 1e-14, "{et:?} hex rule weight sum {wsum}");
+        assert!((wsum - 1.0).abs() < 1e-14, "{et:?} hex rule weight sum {wsum}");
 
         // h1_field_element: order 0 → P0 cube, order 1 → trilinear HexQ1,
         // order ≥ 2 → the HexQk GLL family (MFEM H1_FECollection semantics).
@@ -193,11 +194,11 @@ fn d581_hex27_warped_volume_matches_mfem() {
     let dc = family.dof_coords();
     let table: Vec<[f64; 3]> = dc
         .iter()
-        .map(|c| warp_hex([(c[0] + 1.0) / 2.0, (c[1] + 1.0) / 2.0, (c[2] + 1.0) / 2.0]))
+        .map(|c| warp_hex([c[0], c[1], c[2]]))
         .collect();
     let straight: Vec<[f64; 3]> = dc
         .iter()
-        .map(|c| [(c[0] + 1.0) / 2.0, (c[1] + 1.0) / 2.0, (c[2] + 1.0) / 2.0])
+        .map(|c| [c[0], c[1], c[2]])
         .collect();
 
     let vol_straight = element_volume(family.as_ref(), &straight, 10);
@@ -468,10 +469,8 @@ fn d581_hex27_p1_geometry_of_prefined_cells_integrates_unit_cube() {
     // exactly — the truth source for the D612 convention reconciliation.
     let family = geometry_node_element(ElementType::Hex27, 2);
     let dc = family.dof_coords();
-    let table: Vec<[f64; 3]> = dc
-        .iter()
-        .map(|c| [(c[0] + 1.0) / 2.0, (c[1] + 1.0) / 2.0, (c[2] + 1.0) / 2.0])
-        .collect();
+    // D721: the family's reference coords are already unit-cube coords.
+    let table: Vec<[f64; 3]> = dc.iter().map(|c| [c[0], c[1], c[2]]).collect();
     let vol = element_volume(family.as_ref(), &table, 10);
     assert!((vol - 1.0).abs() < 1e-14, "HexQk(2) identity lattice: {vol:.17e}");
 }
@@ -483,6 +482,6 @@ fn d581_fixed_order_tensor_hex20_hex27_order1() {
     for et in [ElementType::Hex20, ElementType::Hex27] {
         let e = fixed_order_tensor(et, 1);
         assert_eq!(e.n_dofs(), 8, "{et:?} trilinear arm");
-        assert_eq!(e.dof_coords()[0], vec![-1.0, -1.0, -1.0]);
+        assert_eq!(e.dof_coords()[0], vec![0.0, 0.0, 0.0]);
     }
 }

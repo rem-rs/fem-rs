@@ -236,21 +236,24 @@ fn d667_geometry_diagnostics() {
     assert_eq!(dofs, (0..36).collect::<Vec<_>>(), "single-element slot map");
     assert!(space.element_signs(0).iter().all(|&s| s == 1.0), "signs all +1");
 
-    // reference basis at the [-1,1] center vs MFEM CalcVShape at [0,1] center
+    // reference basis at the [0,1]³ center vs MFEM CalcVShape at [0,1] center
+    // (D757 re-anchor after D721: the center is the unit-cube center, and the
+    // `[-1,1]` pull-back factor 4 collapsed to 1 — the basis is now MFEM's
+    // verbatim on the shared `[0,1]³` frame)
     use fem_element::reference::VectorReferenceElement;
     use fem_element::raviart_thomas::HexRTk;
     let elem = HexRTk::new_gauss_legendre(1);
     let mut phi = vec![0.0_f64; 36 * 3];
-    elem.eval_basis_vec(&[0.0, 0.0, 0.0], &mut phi);
+    elem.eval_basis_vec(&[0.5, 0.5, 0.5], &mut phi);
     let vref = parse_vshape("PROBE vref_center");
     let mut bad = 0usize;
     for i in 0..36 {
         for c in 0..3 {
-            let got = phi[i * 3 + c] * 4.0;
+            let got = phi[i * 3 + c];
             if ((got - vref[i][c]) as f64).abs() > 1e-14 * (vref[i][c].abs().max(1e-12)) {
                 if bad < 12 {
                     println!(
-                        "VREF mismatch slot {i} comp {c}: fem-rs*4 = {got:.17e}, mfem = {:.17e}",
+                        "VREF mismatch slot {i} comp {c}: fem-rs = {got:.17e}, mfem = {:.17e}",
                         vref[i][c]
                     );
                 }
@@ -261,9 +264,10 @@ fn d667_geometry_diagnostics() {
     println!("vref mismatches: {bad}/108");
     assert_eq!(bad, 0, "reference V-shape mismatch vs MFEM");
 
-    // reference V-shapes at the 8 order-2 CUBE rule points (the [0,1] rule
-    // points map to [-1,1] via xi -> 2*xi - 1; matched by VALUE since the
-    // rule point orderings differ between the two codes)
+    // reference V-shapes at the 8 order-2 CUBE rule points (both codes now
+    // carry the SAME `[0,1]³` rule points — D721 — so the MFEM probe's `ip=`
+    // values are matched directly by the fem-rs `hex_rule(2)` points; the
+    // orderings differ between the two codes, hence the by-value join)
     let mut mfem_q: Vec<([f64; 3], Vec<[f64; 3]>)> = Vec::new();
     {
         let mut lines = FIXTURE.lines();
@@ -290,11 +294,7 @@ fn d667_geometry_diagnostics() {
     let q2 = fem_element::quadrature::hex_rule(2);
     let mut mismatch_pts = Vec::new();
     for xi_rs in q2.points.iter() {
-        let ip = [
-            (xi_rs[0] + 1.0) / 2.0,
-            (xi_rs[1] + 1.0) / 2.0,
-            (xi_rs[2] + 1.0) / 2.0,
-        ];
+        let ip = [xi_rs[0], xi_rs[1], xi_rs[2]];
         let (_, vq) = mfem_q
             .iter()
             .find(|(p, _)| (p[0] - ip[0]).abs() < 1e-13 && (p[1] - ip[1]).abs() < 1e-13 && (p[2] - ip[2]).abs() < 1e-13)
@@ -303,11 +303,11 @@ fn d667_geometry_diagnostics() {
         let mut badq = 0usize;
         for i in 0..36 {
             for c in 0..3 {
-                let got = phi[i * 3 + c] * 4.0;
+                let got = phi[i * 3 + c];
                 if (got - vq[i][c]).abs() > 1e-13 * (vq[i][c].abs().max(1e-12)) {
                     if badq < 2 {
                         println!(
-                            "qpoint {ip:?} slot {i} comp {c}: fem-rs*4 = {got:.17e}, mfem = {:.17e}",
+                            "qpoint {ip:?} slot {i} comp {c}: fem-rs = {got:.17e}, mfem = {:.17e}",
                             vq[i][c]
                         );
                     }
@@ -326,22 +326,20 @@ fn d667_geometry_diagnostics() {
 
     // physical shapes at the center through the P2 geometry (re-evaluate the
     // reference basis at the center first — the q2 loop overwrote `phi`)
-    elem.eval_basis_vec(&[0.0, 0.0, 0.0], &mut phi);
+    elem.eval_basis_vec(&[0.5, 0.5, 0.5], &mut phi);
     use fem_element::lagrange::factory::{ref_elem, ElemType};
     let geo27 = ref_elem(ElemType::Hex, 2);
     let (j, det, _xp) = fem_assembly::isoparametric_jacobian(
         &mesh,
         mesh.geometry_nodes(0),
         geo27.as_ref(),
-        &[0.0, 0.0, 0.0],
+        &[0.5, 0.5, 0.5],
         3,
     );
     let vphys = parse_vshape("PROBE vphys_center");
     let mut bad = 0usize;
     for i in 0..36 {
         for c in 0..3 {
-            let v = phi[i * 3] * 4.0;
-            let _ = v;
             let got = (j[(c, 0)] * phi[i * 3] + j[(c, 1)] * phi[i * 3 + 1]
                 + j[(c, 2)] * phi[i * 3 + 2])
                 / det;
@@ -350,7 +348,7 @@ fn d667_geometry_diagnostics() {
             {
                 if bad < 12 {
                     println!(
-                        "VPHY mismatch slot {i} comp {c}: fem-rs*4 = {got:.17e}, mfem = {:.17e}",
+                        "VPHY mismatch slot {i} comp {c}: fem-rs = {got:.17e}, mfem = {:.17e}",
                         vphys[i][c]
                     );
                 }
@@ -359,6 +357,7 @@ fn d667_geometry_diagnostics() {
         }
     }
     println!("vphys mismatches: {bad}/108");
+    assert_eq!(bad, 0, "physical V-shape mismatch vs MFEM");
 }
 
 /// The `-nr 1` validation mesh (MFEM-refined parent, 480 hexes) must keep its
@@ -394,12 +393,15 @@ fn d667_refined_mesh_curvature_and_folds() {
     println!("refined mesh: folded hexes (order-9 survey) = {folded}, det_min = {det_min:.6e}");
     // MFEM survey (probe tmp/d667/d667_refined_survey.cpp, MFEM 4.10):
     //   REFINED SURVEY: folded=0 gmin=0.00040277375351502911 NE=480
-    // The weight scales by 8 between the [-1,1] and [0,1] frames, so
-    // fem-rs det_min * 8 must reproduce MFEM's gmin exactly.
+    // D757: the `[-1,1]³ → [0,1]³` weight factor of 8 is GONE — D721 moved the
+    // hex geometry element (and `hex_rule(9)`) onto MFEM's own unit cube, so
+    // the fem-rs `det` IS MFEM's `Weight` verbatim (formerly `det_femrs · 8`).
+    // The survey numbers below reproduce the C++ gmin to the last printed
+    // digit, which is the evidence for the collapse.
     assert_eq!(folded, 0, "MFEM agrees: no folded hexes in the refined mesh");
     let gmin_mfem = 4.0277375351502911e-4_f64;
-    let gmin_femrs_scaled = det_min * 8.0;
-    println!("gmin: fem-rs*8 = {gmin_femrs_scaled:.17e}, mfem = {gmin_mfem:.17e}");
+    let gmin_femrs_scaled = det_min;
+    println!("gmin: fem-rs = {gmin_femrs_scaled:.17e}, mfem = {gmin_mfem:.17e}");
     assert!(
         (gmin_femrs_scaled - gmin_mfem).abs() <= 1e-10 * gmin_mfem,
         "refined-mesh minimum Weight mismatch vs MFEM survey"
@@ -452,9 +454,14 @@ fn d667_rt1_curved_hex_parity() {
 }
 
 /// The reference div of the GaussLegendre RT1 hex at the rule center: fem-rs
-/// `HexRTk::new_gauss_legendre(1).eval_div` on the `[-1,1]` hex equals MFEM's
-/// `RT_HexahedronElement::CalcDivShape` at `[0,1]` center divided by 8 (the
-/// `[0,1] → [-1,1]` frame factor: `dc/2 · o/2 · o/2`).
+/// `HexRTk::new_gauss_legendre(1).eval_div` on the `[0,1]³` hex equals MFEM's
+/// `RT_HexahedronElement::CalcDivShape` at the `[0,1]³` center verbatim.
+///
+/// D757 (frame re-anchor, D721): both the evaluation point — the unit-cube
+/// center `(0.5,0.5,0.5)`, formerly the `[-1,1]³` center `(0,0,0)` — and the
+/// `×8` divisor collapse.  The `dc/2 · o/2 · o/2` `[0,1] → [-1,1]` pull-back
+/// factor disappeared when D721 re-expressed `HexRTk` natively on the unit
+/// cube, so `fem-rs div == mfem div` bit-for-bit at the mapped point.
 #[test]
 fn d667_rt1_hex_divref_center_matches_mfem() {
     use fem_element::reference::VectorReferenceElement;
@@ -467,12 +474,12 @@ fn d667_rt1_hex_divref_center_matches_mfem() {
 
     let elem = HexRTk::new_gauss_legendre(1);
     let mut div = vec![0.0_f64; 36];
-    elem.eval_div(&[0.0, 0.0, 0.0], &mut div);
+    elem.eval_div(&[0.5, 0.5, 0.5], &mut div);
     for i in 0..36 {
-        let got = div[i] * 8.0;
+        let got = div[i];
         assert!(
             (got - mfem[i]).abs() <= 1e-14 * (mfem[i].abs().max(1e-12)),
-            "divref[{i}]: fem-rs*8 = {got:.17e}, mfem = {:.17e}",
+            "divref[{i}]: fem-rs = {got:.17e}, mfem = {:.17e}",
             mfem[i]
         );
     }

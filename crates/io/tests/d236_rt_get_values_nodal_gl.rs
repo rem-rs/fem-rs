@@ -15,9 +15,10 @@
 //! GaussLegendre evaluation to the same transcripts.
 //!
 //! The evaluation below is the get-values pipeline itself:
-//! `find_points` reports `[-1,1]^3` reference coordinates (D224), the basis
-//! is evaluated there and transformed with the contravariant Piola map of the
-//! `[-1,1]` isoparametric frame, `phi = J psi / det J` — exactly
+//! `find_points` reports `[0,1]^3` reference coordinates (D224, re-anchored by
+//! D757 after the D721 hex flip), the basis is evaluated there and transformed
+//! with the contravariant Piola map of the `[0,1]` isoparametric frame,
+//! `phi = J psi / det J` — exactly
 //! `GridFunction::evaluate_vector_at_element`'s H(div) arm.
 
 use fem_element::raviart_thomas::{HexRTk, HexRtOpen};
@@ -130,7 +131,10 @@ fn unit_field_values<const N: usize>(open: HexRtOpen) -> Vec<f64> {
     assert_eq!(sp.element_dofs(0), &(0..n as u32).collect::<Vec<_>>()[..]);
     assert!(sp.element_signs(0).iter().all(|&s| s == 1.0));
 
-    // find_points reports [-1,1]^3 reference coordinates on hexes (D224).
+    // find_points reports `[0,1]^3` reference coordinates on hexes since D721
+    // (`to_factory_coords` became the identity); the basis is evaluated there
+    // and transformed with the contravariant Piola map, `phi = J psi / det J` —
+    // exactly `GridFunction::evaluate_vector_at_element`'s H(div) arm.
     let pt = [0.65_f64, 0.84, 0.6];
     let (elem_ids, ips) = find_points(&mesh, &pt, 1);
     assert_eq!(elem_ids[0], 0, "point must be found in the single hex");
@@ -143,10 +147,14 @@ fn unit_field_values<const N: usize>(open: HexRtOpen) -> Vec<f64> {
     let mut psi = vec![0.0_f64; el.n_dofs() * 3];
     el.eval_basis_vec(&xi, &mut psi);
 
-    // Contravariant Piola of the [-1,1] isoparametric hex frame:
-    // J = diag(h/2), phi = J psi / det J  (componentwise (h_c/2)/det J).
-    let det = 0.5 * 0.6 * 0.4;
-    let jscale = [0.5 / det, 0.6 / det, 0.4 / det];
+    // Contravariant Piola of the `[0,1]³` isoparametric hex frame (D757
+    // re-anchor after D721: `HexRTk` and `find_points` both live on MFEM's
+    // unit cube now, so `J = diag(h)` with the raw edge lengths
+    // `h = (1.0, 1.2, 0.8)` — the former `[-1,1]` frame used `h/2` and a
+    // `det = 0.12` three-quarters smaller, which is the exact ×4 the transcript
+    // comparison flagged).  `phi = J psi / det J`.
+    let det = 1.0 * 1.2 * 0.8;
+    let jscale = [1.0 / det, 1.2 / det, 0.8 / det];
 
     // Transcript field order: alphabetical over "f0".."f{n-1}".
     let mut order: Vec<usize> = (0..n).collect();

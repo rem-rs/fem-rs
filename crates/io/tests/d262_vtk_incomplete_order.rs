@@ -103,18 +103,19 @@ fn curved_hex20_vtk_matches_cpp_canonical_order() {
     }
 
     // locate: every geometry node maps back to its *reference* position
-    // (factory = [-1,1]^3; the reference table is the corners + Gmsh edge
-    // mids), and every C++ sample point maps to its factory coordinate
-    // (samples are dumped in MFEM's [0,1] reference coordinates).
+    // locate: every geometry node maps back to its *reference* position
+    // (factory = `[0,1]³` since the D721 flip; the reference table is the
+    // corners + Gmsh edge mids), and every C++ sample point maps to its
+    // reference coordinates, which *is* the factory frame now.
     let corners: [[f64; 3]; 8] = [
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
         [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
     ];
     let gmsh_edges: [[usize; 2]; 12] = [
         [0, 1],
@@ -153,11 +154,7 @@ fn curved_hex20_vtk_matches_cpp_canonical_order() {
         assert!(err < 1e-9, "slot {slot}: xi {xi:?} vs {r:?} (err {err:e})");
     }
     for (ref_mfem, _phys) in dump_samples("HEX20") {
-        let factory: [f64; 3] = [
-            2.0 * ref_mfem[0] - 1.0,
-            2.0 * ref_mfem[1] - 1.0,
-            2.0 * ref_mfem[2] - 1.0,
-        ];
+        let factory: [f64; 3] = [ref_mfem[0], ref_mfem[1], ref_mfem[2]];
         // locate the *dumped* physical point (bit-faithful C++ evaluation).
         // The C++ hex reference cube is [0,1]^3 with nodes 0.5(F(2ξ−1)+1),
         // i.e. its map is the affine pullback of the fixture's F; the point

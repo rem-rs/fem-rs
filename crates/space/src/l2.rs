@@ -422,7 +422,8 @@ impl<M: MeshTopology> L2Space<M> {
                 }
             }
         } else {
-            // Trilinear Q1 geometry map via HexQ1 ([-1,1]³ reference domain).
+            // Trilinear Q1 geometry map via HexQ1 ([0,1]³ reference domain,
+            // D721 — same frame as the physical unit cube).
             let q1 = HexQ1;
             let mut phi = vec![0.0_f64; 8];
             for e in 0..n_elems as u32 {
@@ -646,25 +647,24 @@ mod tests {
             let n = fe.n_dofs();
             let mut phi = vec![0.0_f64; n];
             let mut rowsum = vec![0.0_f64; n];
-            // Unit cube: physical = (ξ+1)/2 per axis → |J| = 1/8.
+            // D721: the reference cube *is* the physical unit cube, so the
+            // quadrature weights (sum 1) need no domain factor.
             for (qi, xi) in q.points.iter().enumerate() {
                 fe.eval_basis(xi, &mut phi);
-                let w = q.weights[qi] / 8.0;
+                let w = q.weights[qi];
                 // Σ_j φ_j = 1 (partition of unity), so ∫φ_i = Σ_q w φ_i.
                 for (i, p) in phi.iter().enumerate() {
                     rowsum[i] += w * p;
                 }
             }
             let p1 = order as usize + 1;
-            let (nodes, mut wts) = fem_element::quadrature::gauss_legendre_arbitrary(p1);
-            if nodes.len() > 1 && nodes[0] > nodes[nodes.len() - 1] {
-                wts.reverse(); // HexL2GL keeps the ascending MFEM order
-            }
+            // D721: the [0,1] GL weights (sum 1) are the L² nodal weights.
+            let (_nodes, wts) = fem_element::quadrature::gauss_legendre_01(p1);
             for iz in 0..p1 {
                 for iy in 0..p1 {
                     for ix in 0..p1 {
                         let dof = ix + iy * p1 + iz * p1 * p1;
-                        let want = (wts[ix] / 2.0) * (wts[iy] / 2.0) * (wts[iz] / 2.0);
+                        let want = wts[ix] * wts[iy] * wts[iz];
                         assert!(
                             (rowsum[dof] - want).abs() < 1e-14,
                             "order {order} dof {dof}: {} != {want}",

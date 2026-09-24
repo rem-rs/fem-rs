@@ -25,8 +25,8 @@ use crate::Assembler;
 /// carries (no local table): `Quad4` from order 3 on through the `QuadQk` GLL
 /// family re-framed onto the legacy `[-1,1]²` frame by [`QuadPM1Frame`]; hexes
 /// (`HexQ1` at order 1 — the H¹ space's own element — and `HexQk` on the
-/// fem-rs `[-1,1]³` cube from order 2 on, `Hex20`/`Hex27` cells included —
-/// D614); `Tet10` cells through the shared tet lattice; wedges (`Prism6` and
+/// fem-rs `[0,1]³` cube from order 2 on, `Hex20`/`Hex27` cells included —
+/// D614/D721); `Tet10` cells through the shared tet lattice; wedges (`Prism6` and
 /// the quadratic `Prism15`/`Prism18` labels, D614) through the H¹ wedge family
 /// (`H1PrismPk`, MFEM entity slot order — the slots `DofManager::build_prism_h1`
 /// numbers the space's `element_dofs` in); pyramids (`Pyramid5`/`Pyramid13`,
@@ -131,15 +131,18 @@ fn elem_vertex_count(elem_type: ElementType, npe: usize, dim: usize) -> usize {
 /// **Simplex** (Tri3, Tri6, Tet4): P1 mapping â constant Jacobian from nodes 0..dim
 /// (exact; the unit-simplex frame of every basis/quadrature in this file).
 /// **Tensor** (Quad4, Hex8): the **isoparametric** geometry Jacobian at `xi`
-/// (D250 â the `geom_jacobian` twin of the D242 grid-function fix).  The
-/// previous corner-difference fallback was the [0,1]Â³âphysical map while the
-/// hex quadratures/bases here are [-1,1]Â³-framed (â 8Ã |det J| and
-/// half-strength gradients on hexes), and warped geometries have a
-/// non-constant Jacobian.  Quads evaluate the `QuadQk` [0,1]Â² geometry at
-/// `t = (Î¾+1)/2` and rescale (`J_[-1,1] = J_[0,1]/2`, det by 2^dim â the
+/// (D250 — the `geom_jacobian` twin of the D242 grid-function fix).  The
+/// previous corner-difference fallback was the [0,1]³→physical map while the
+/// hex quadratures/bases were then [-1,1]³-framed (⇒ 8× |det J| and
+/// half-strength gradients on hexes; D721 has since moved the whole hex family
+/// onto `[0,1]³`, so that particular factor is gone while the warped-geometry
+/// argument for the isoparametric arm stands), and warped geometries have a
+/// non-constant Jacobian.  Quads evaluate the `QuadQk` [0,1]² geometry at
+/// `t = (ξ+1)/2` and rescale (`J_[-1,1] = J_[0,1]/2`, det by 2^dim — the
 /// straight-quad analytic arm below stays bit-identical); hexes evaluate the
-/// `HexQk` [-1,1]Â³ geometry directly.  Curved (geom_order > 1) geometries read
-/// the geometry-node table through `geo_ref_elem_from_mesh`.
+/// `HexQk` `[0,1]³` geometry directly (D721; D757 audited the remaining
+/// `[-1,1]³` sampling helpers of this file).  Curved (geom_order > 1) geometries
+/// read the geometry-node table through `geo_ref_elem_from_mesh`.
 ///
 /// D235 completes the 3-D arms along the D365 flux-recovery pattern: wedges
 /// evaluate the isoparametric `PrismPk` geometry (the family
@@ -713,10 +716,12 @@ fn ref_vertex_coords(d: usize, npe: usize, k: usize) -> Vec<f64> {
         (3, 8, kk) => {
             // MFEM `CUBE::Vertices` ring order (matches the hex conn; see
             // the vertex_shapes hex arm note — the previous Morton mapping
-            // swapped slots 2↔3 and 6↔7).
-            xi[0] = if matches!(kk % 4, 1 | 2) { 1.0 } else { -1.0 };
-            xi[1] = if matches!(kk % 4, 2 | 3) { 1.0 } else { -1.0 };
-            xi[2] = if kk >= 4 { 1.0 } else { -1.0 };
+            // swapped slots 2↔3 and 6↔7).  D757: corners on the `[0,1]³` hex
+            // frame (D721) — the `gf.evaluate_gradient_at_element` consumer
+            // evaluates the element's own `[0,1]³` basis.
+            xi[0] = if matches!(kk % 4, 1 | 2) { 1.0 } else { 0.0 };
+            xi[1] = if matches!(kk % 4, 2 | 3) { 1.0 } else { 0.0 };
+            xi[2] = if kk >= 4 { 1.0 } else { 0.0 };
         }
         _ => {}
     }
@@ -1745,7 +1750,9 @@ impl AnisotropicErrorEstimator for ElementIndicators {
 }
 
 /// P1/Q1 basis values of the element vertices at a reference point `xi`
-/// (natural domains: simplex [0,1]^d barycentric, quad/hex [-1,1]^d).
+/// (natural domains: simplex [0,1]^d barycentric, quad [-1,1]², hex [0,1]³ —
+/// the hex family was flipped off `[-1,1]³` by D721, D757 re-anchors the
+/// sampling helpers).
 fn vertex_shapes(_elem_type: ElementType, xi: &[f64], npe: usize) -> Vec<f64> {
     let mut s = vec![0.0_f64; npe];
     match npe {
@@ -1769,15 +1776,23 @@ fn vertex_shapes(_elem_type: ElementType, xi: &[f64], npe: usize) -> Vec<f64> {
         }
         8 => {
             // MFEM `CUBE::Vertices` **ring** order — the fem-rs hex conn
-            // order: slots 0..4 ring the z=−1 face CCW from (−,−), slots
-            // 4..8 the z=+1 face.  (The previous k&1/k&2/k&4 Morton bit
-            // mapping swapped slots 2↔3 and 6↔7 against the actual conn,
-            // scrambling every hex sampling through `phys_point` — D250.)
+            // order: slots 0..4 ring the z=0 face CCW from (0,0), slots 4..8
+            // the z=1 face.  (The previous k&1/k&2/k&4 Morton bit mapping
+            // swapped slots 2↔3 and 6↔7 against the actual conn, scrambling
+            // every hex sampling through `phys_point` — D250.)
+            //
+            // D757: `[0,1]³`-native (D721 flipped the hex family off
+            // `[-1,1]³`): every `xi` reaching here comes from `hex_rule` /
+            // `evaluate_gradient_at_element`, both on the unit cube, so the
+            // old `0.125·(1±ξ)(1±η)(1±ζ)` corner weights mapped ξ → (1+ξ)/2 —
+            // the sampled physical point collapsed into the upper half of the
+            // element and `lp_error_estimator` disagreed with
+            // `compute_l1_error` by 8× on the `HEXX2P1` box.
             for (k, v) in s.iter_mut().enumerate() {
-                let sx = if matches!(k % 4, 1 | 2) { xi[0] } else { -xi[0] };
-                let sy = if matches!(k % 4, 2 | 3) { xi[1] } else { -xi[1] };
-                let sz = if k >= 4 { xi[2] } else { -xi[2] };
-                *v = 0.125 * (1.0 + sx) * (1.0 + sy) * (1.0 + sz);
+                let sx = if matches!(k % 4, 1 | 2) { xi[0] } else { 1.0 - xi[0] };
+                let sy = if matches!(k % 4, 2 | 3) { xi[1] } else { 1.0 - xi[1] };
+                let sz = if k >= 4 { xi[2] } else { 1.0 - xi[2] };
+                *v = sx * sy * sz;
             }
         }
         _ => {}
@@ -2894,10 +2909,10 @@ mod d235_ref_elem_volume {
     /// The D614 table arms land on the D581-pinned families and frames.
     #[test]
     fn d614_ref_elem_vol_high_order_arms() {
-        // Hexes: HexQk on [-1,1]^3 (order 2 lattice = the Hex27 node set).
+        // Hexes: HexQk on [0,1]^3 (D721; order 2 lattice = the Hex27 node set).
         let h27 = ref_elem_vol(ElementType::Hex27, 2);
         assert_eq!(h27.n_dofs(), 27);
-        assert_eq!(h27.dof_coords()[0], vec![-1.0, -1.0, -1.0]);
+        assert_eq!(h27.dof_coords()[0], vec![0.0, 0.0, 0.0]);
         assert_eq!(ref_elem_vol(ElementType::Hex20, 1).n_dofs(), 8);
         assert_eq!(ref_elem_vol(ElementType::Hex27, 1).n_dofs(), 8);
         // Wedges: H1PrismPk (MFEM entity order) — 18 dofs at order 2, the
@@ -2969,13 +2984,13 @@ mod d235_ref_elem_volume {
             single_cell(coords, (0..13).collect(), ElementType::Pyramid13)
         };
 
-        // Hex27: straight geometry = corner trilinear map; at the centre
-        // J = diag(1/2), det = 1/8 — MFEM's straight CUBE Jacobian.
+        // Hex27: straight geometry = corner trilinear map; at the `[0,1]^3`
+        // centre (D721: MFEM's own frame) J = I, det = 1.
         let nodes = hex27.element_nodes(0);
-        let (j, det) = geom_jacobian(&hex27, 0, nodes, &[0.0, 0.0, 0.0], 3, ElementType::Hex27);
-        assert!((det - 1.0 / 8.0).abs() < 1e-15, "Hex27 centre det {det:.17e}");
+        let (j, det) = geom_jacobian(&hex27, 0, nodes, &[0.5, 0.5, 0.5], 3, ElementType::Hex27);
+        assert!((det - 1.0).abs() < 1e-15, "Hex27 centre det {det:.17e}");
         for kk in 0..3 {
-            assert!((j[(kk, kk)] - 0.5).abs() < 1e-15, "Hex27 centre J diag");
+            assert!((j[(kk, kk)] - 1.0).abs() < 1e-15, "Hex27 centre J diag");
         }
 
         // Prism18: unit right prism, det = ±1 by frame orientation (the

@@ -360,35 +360,42 @@ fn locate_point_3d_tet<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f6
     None
 }
 
-/// `CUBE` corner reference signs in MFEM hex vertex order (the `HexQk`
-/// `[-1,1]³` reference frame).
-const HEX8_SIGNS: [(f64, f64, f64); 8] = [
-    (-1.0, -1.0, -1.0),
-    (1.0, -1.0, -1.0),
-    (1.0, 1.0, -1.0),
-    (-1.0, 1.0, -1.0),
-    (-1.0, -1.0, 1.0),
-    (1.0, -1.0, 1.0),
-    (1.0, 1.0, 1.0),
-    (-1.0, 1.0, 1.0),
+/// `CUBE` corner reference coordinates on `[0,1]³` in MFEM hex vertex order
+/// (the `HexQk` reference frame — MFEM's hex frame since the D721 flip, so
+/// the historical `±1` sign table is gone).
+const HEX8_CORNERS: [[f64; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
 ];
 
 /// Newton-invert the trilinear Q1 corner map of a straight hex; returns the
-/// reference coordinate ξ on `[-1,1]³` if the point is inside.
+/// reference coordinate ξ on `[0,1]³` if the point is inside.
 ///
 /// Exact port of `fem_solver::geometric_mg::invert_hex_trilinear` (D376,
 /// verified bitwise against MFEM's `RefinementOperator` values) — duplicated
 /// here because fem-space cannot depend on fem-solver (D386).
 fn invert_hex_trilinear(c: &[[f64; 3]; 8], x: [f64; 3]) -> Option<[f64; 3]> {
-    let mut xi = [0.0f64; 3];
+    // `[0,1]³` centre (the pre-D721 `[0,0,0]` of the symmetric frame).
+    let mut xi = [0.5f64; 3];
     for _ in 0..40 {
         let mut n = [0.0f64; 8];
         let mut g = [0.0f64; 24]; // g[i*3 + d] = ∂N_i/∂ξ_d
-        for (i, &(sx, sy, sz)) in HEX8_SIGNS.iter().enumerate() {
-            n[i] = 0.125 * (1.0 + sx * xi[0]) * (1.0 + sy * xi[1]) * (1.0 + sz * xi[2]);
-            g[i * 3] = 0.125 * sx * (1.0 + sy * xi[1]) * (1.0 + sz * xi[2]);
-            g[i * 3 + 1] = 0.125 * sy * (1.0 + sx * xi[0]) * (1.0 + sz * xi[2]);
-            g[i * 3 + 2] = 0.125 * sz * (1.0 + sx * xi[0]) * (1.0 + sy * xi[1]);
+        for (i, &r) in HEX8_CORNERS.iter().enumerate() {
+            // Product of three 1-D Q1 factors: `ξ` on the high side, `1 − ξ`
+            // on the low side, derivative `±1`.
+            let (f0, d0) = if r[0] == 1.0 { (xi[0], 1.0) } else { (1.0 - xi[0], -1.0) };
+            let (f1, d1) = if r[1] == 1.0 { (xi[1], 1.0) } else { (1.0 - xi[1], -1.0) };
+            let (f2, d2) = if r[2] == 1.0 { (xi[2], 1.0) } else { (1.0 - xi[2], -1.0) };
+            n[i] = f0 * f1 * f2;
+            g[i * 3] = d0 * f1 * f2;
+            g[i * 3 + 1] = f0 * d1 * f2;
+            g[i * 3 + 2] = f0 * f1 * d2;
         }
         let mut res = [0.0f64; 3];
         let mut jac = [[0.0f64; 3]; 3]; // jac[d][k] = ∂x_d/∂ξ_k
@@ -429,18 +436,19 @@ fn invert_hex_trilinear(c: &[[f64; 3]; 8], x: [f64; 3]) -> Option<[f64; 3]> {
         if step < 1e-26 {
             break;
         }
-        if xi.iter().any(|v| v.abs() > 1.5) {
-            return None; // wandered outside the element
+        if xi.iter().any(|v| *v < -0.25 || *v > 1.25) {
+            return None; // wandered outside the element (1.5 × the 0.5 half-width)
         }
     }
-    if xi.iter().any(|v| v.abs() > 1.0 + 1e-9) {
+    if xi.iter().any(|v| *v < -1e-9 || *v > 1.0 + 1e-9) {
         return None;
     }
     Some(xi)
 }
 
 /// Locate a physical point in a hexahedral mesh; returns
-/// `(element, reference ξ)` with ξ on `[-1,1]³` (the `HexQk` reference frame).
+/// `(element, reference ξ)` with ξ on `[0,1]³` (the `HexQk` reference frame —
+/// MFEM's hex frame since the D721 flip).
 /// Exact port of `fem_solver::geometric_mg::locate_point_hex` (D386).
 fn locate_point_3d_hex<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f64; 3])> {
     const BBOX_EPS: f64 = 1e-12;

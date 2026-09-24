@@ -121,10 +121,17 @@ pub const LAGRANGE_HEX_Q3_SLOTS: [[usize; 3]; 64] = [
 /// MFEM `LagrangeHexFiniteElement(3)` — the geometry element of the legacy
 /// `Cubic` finite element collection for hexahedra.
 ///
-/// The reference domain is `[-1,1]³` (the domain of [`HexQk`], the element the
-/// rest of the library uses for hexahedral geometry), so a value table built
-/// for this element can be handed to `HexQk` after the change of basis in
+/// The reference domain is `[0,1]³` — MFEM's own `CUBE` domain, and (since the
+/// D721 hex flip) the domain of [`HexQk`], the element the rest of the library
+/// uses for hexahedral geometry.  A value table built for this element can
+/// therefore be handed to `HexQk` after the change of basis in
 /// `fem_io::mfem::rewrite_legacy_nodes`.
+///
+/// D757: the nodes were `-1 + 2i/3` (the `[-1,1]³` equispaced lattice) and were
+/// left behind by the flip, so `rewrite_legacy_nodes` evaluated the legacy
+/// basis at `[0,1]³` Gauss-Lobatto points — a silent change of basis between
+/// two different frames — and every legacy `Cubic` hex geometry came out
+/// scrambled (`legacy_fec_nodes`: element 0 slot 0 `0.5197` vs MFEM `0.0236`).
 ///
 /// Only order 3 exists here: MFEM's *legacy* collections are fixed-order
 /// (`Linear`/`Quadratic`/`Cubic`) and at `p ≤ 2` the closed-uniform and closed
@@ -142,9 +149,7 @@ impl Default for LegacyHexQ3 {
 
 impl LegacyHexQ3 {
     pub fn new() -> Self {
-        let lag1d = Lagrange1D::from_nodes(
-            (0..4).map(|i| -1.0 + 2.0 * i as f64 / 3.0).collect(),
-        );
+        let lag1d = Lagrange1D::from_nodes((0..4).map(|i| i as f64 / 3.0).collect());
         let nodes = LAGRANGE_HEX_Q3_SLOTS
             .iter()
             .map(|s| [lag1d.nodes[s[0]], lag1d.nodes[s[1]], lag1d.nodes[s[2]]])
@@ -184,7 +189,7 @@ impl ReferenceElement for LegacyHexQ3 {
         }
     }
 
-    /// Quadrature on the same `[-1,1]³` domain as [`HexQk`]; only used when the
+    /// Quadrature on the same `[0,1]³` domain as [`HexQk`]; only used when the
     /// element takes part in an integration (the D112 reinterpretation itself
     /// only needs `eval_basis`).
     fn quadrature(&self, order: u8) -> QuadratureRule {
@@ -219,8 +224,9 @@ mod tests {
     }
 
     /// The DOFs must sit on the equispaced lattice `i/3` — i.e. every
-    /// coordinate is one of `{-1, -1/3, 1/3, 1}` — and every tensor node of the
-    /// `4×4×4` grid must be used exactly once.
+    /// coordinate is one of `{0, 1/3, 2/3, 1}` on the `[0,1]³` reference cube
+    /// (D757; the old lattice was `{-1, -1/3, 1/3, 1}`) — and every tensor node
+    /// of the `4×4×4` grid must be used exactly once.
     #[test]
     fn legacy_hex_q3_slots_cover_the_lattice() {
         let e = LegacyHexQ3::new();
@@ -229,12 +235,12 @@ mod tests {
             let idx: Vec<usize> = c
                 .iter()
                 .map(|&x| {
-                    let i = ((x + 1.0) * 1.5).round() as i64;
+                    let i = (x * 3.0).round() as i64;
                     assert!(
-                        (x - (-1.0 + 2.0 * i as f64 / 3.0)).abs() < 1e-14,
+                        (x - i as f64 / 3.0).abs() < 1e-14,
                         "coordinate {x} is not on the equispaced lattice"
                     );
-                    assert!((0..4).contains(&i), "coordinate {x} leaves [-1,1]");
+                    assert!((0..4).contains(&i), "coordinate {x} leaves [0,1]");
                     i as usize
                 })
                 .collect();

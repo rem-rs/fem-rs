@@ -23,14 +23,15 @@
 //! | unit simplex (area ½ / volume 1/6) | `TriP1`, `TriPk`, `H1TriPk`, `TriL2GL`, `P0Tri`, `TetP1`, `TetP2`, `TetPk`, `H1TetPk`, `TetL2GL`, `P0Tet` |
 //! | `[0,1]²` square | `QuadQk` (closed GLL), `QuadL2GL` (open GL), `P0Tensor{dim:2}`, `P0QuadCentred` |
 //! | `[-1,1]²` square (**legacy**) | `QuadQ1`, `QuadQ2` — only the ZZ-estimator flux paths still evaluate these |
-//! | `[-1,1]³` cube | `HexQ1`, `HexQk` (closed GLL), `HexL2GL` (open GL), `P0Tensor{dim:3}` — one family for **all three hexahedral cell types** `Hex8`/`Hex20`/`Hex27` (D581; MFEM has a single CUBE geometry, `HexQk::new(2)`'s 27-dof lattice is the Hex27 node set) |
+//! | `[0,1]³` cube | `HexQ1`, `HexQk` (closed GLL), `HexL2GL` (open GL), `P0Tensor{dim:3}` — one family for **all three hexahedral cell types** `Hex8`/`Hex20`/`Hex27` (D581; MFEM has a single CUBE geometry, `HexQk::new(2)`'s 27-dof lattice is the Hex27 node set).  D721 moved this family from the historical fem-rs `[-1,1]³` to MFEM's natural `[0,1]³` (the quad's D364 migration, done for hexes) |
 //! | unit prism (triangle × `[0,1]`, volume ½) | `PrismPk` (equispaced, layer-major), `H1PrismPk` (closed GLL, entity order) |
 //! | unit pyramid (`x,y ∈ [0,1−z]`, `z ∈ [0,1]`, volume ⅓) | `PyramidPk` (equispaced layers), `h1_pyramid_element` (Fuentes/Bergot, entity order), `l2_pyramid_element`, `P0Pyr` |
 //!
-//! Note the two square frames (`[0,1]²` GLL vs legacy `[-1,1]²`) and the two
-//! cube conventions (fem-rs hexes are `[-1,1]³`, MFEM's are `[0,1]³` — D371
-//! compensated the 2^dim domain factor at the consumers); prisms/pyramids have
-//! *two* slot conventions each (equispaced vs GLL/Fuentes entity order).
+//! Note the two square frames (`[0,1]²` GLL vs legacy `[-1,1]²`); the hex
+//! cube frame is MFEM's `[0,1]³` since D721 (the `[-1,1]³` convention and
+//! the 2^dim domain factors D371 used to compensate are gone).  Prisms and
+//! pyramids have *two* slot conventions each (equispaced vs GLL/Fuentes entity
+//! order).
 //!
 //! D581 note on the high-order cell labels: `Hex20`/`Hex27`, `Prism15`/
 //! `Prism18` and `Pyramid13` are *cell connectivity* types — every dispatch
@@ -79,11 +80,11 @@ use crate::L2Basis;
 
 /// Constant (P0) reference element on the tensor domains: 1 DOF, basis ≡ 1.0,
 /// gradient ≡ 0.  `dim` selects the domain — 2 → `[0,1]²` (square rule),
-/// 3 → `[-1,1]³` (hex rule) — so the quadrature lives on the same domain as
-/// the tensor geometry element the isoparametric Jacobian uses.  The DOF sits
-/// at the frame origin (historical assembler placement).
+/// 3 → `[0,1]³` (hex rule, D721) — so the quadrature lives on the same
+/// domain as the tensor geometry element the isoparametric Jacobian uses.  The
+/// DOF sits at the frame origin (historical assembler placement).
 pub struct P0Tensor {
-    /// 2 → square `[0,1]²` rule; 3 → hex `[-1,1]³` rule.
+    /// 2 → square `[0,1]²` rule; 3 → hex `[0,1]³` rule.
     pub dim: u8,
 }
 
@@ -219,9 +220,9 @@ pub fn h1_simplex_slots(elem_type: ElementType, order: u8) -> Box<dyn ReferenceE
     }
 }
 
-/// Closed Gauss-Lobatto tensor element on the fem-rs tensor frames:
-/// `QuadQk` on **`[0,1]²`**, `HexQk` on **`[-1,1]³`** (fem-rs hex convention;
-/// MFEM's cube is `[0,1]³`), MFEM `H1_FECollection` lexicographic-cum-entity
+/// Closed Gauss-Lobatto tensor element on MFEM's tensor frames: `QuadQk` on
+/// **`[0,1]²`** (D364), `HexQk` on **`[0,1]³`** (D721 — the same frame as
+/// MFEM's cube), MFEM `H1_FECollection` lexicographic-cum-entity
 /// slot order.  All three hexahedral cell types share the one full-tensor
 /// family: `Hex8`, the serendipity `Hex20`, and the complete `Hex27`
 /// (D581 — MFEM has a single CUBE geometry, and `HexQk::new(2)`'s 27-dof
@@ -241,11 +242,12 @@ pub fn gll_tensor(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement
     }
 }
 
-/// Legacy **fixed-order** tensor elements on the `[-1,1]^d` frames:
-/// `QuadQ1` (bilinear, `[-1,1]²`), `QuadQ2` (biquadratic, `[-1,1]²`),
-/// `HexQ1` (trilinear, `[-1,1]³`).  These predate the `[0,1]`-domain GLL
-/// migration; the ZZ-estimator flux paths still evaluate them because their
-/// bilinear geometry Jacobians are written in the `[-1,1]` frame.  The
+/// **Fixed-order** tensor elements: `QuadQ1` (bilinear, legacy `[-1,1]²`),
+/// `QuadQ2` (biquadratic, legacy `[-1,1]²`), `HexQ1` (trilinear, **`[0,1]³`**
+/// since D721 — MFEM's `TriLinear3DFiniteElement`, the hex geometry element).
+/// The two quad entries predate the `[0,1]`-domain GLL migration; the
+/// ZZ-estimator flux paths still evaluate them because their bilinear geometry
+/// Jacobians are written in the `[-1,1]` frame.  The
 /// trilinear arm accepts every hexahedral cell type (`Hex8`/`Hex20`/`Hex27`,
 /// D581): an order-1 space on a higher-order hex cell is the same
 /// vertex-only trilinear element (`DofManager::build` routes order 1 through
@@ -382,7 +384,8 @@ pub fn h1_field_element(
 /// plus the GaussLobatto arms of `ref_elem_vol_for_space`.
 ///
 /// * `GaussLegendre` (the `DG_FECollection` default): open GL tensor nodes —
-///   `QuadL2GL` on `[0,1]²`, `HexL2GL` on `[-1,1]³`, `TriL2GL`/`TetL2GL`
+///   `QuadL2GL` on `[0,1]²`, `HexL2GL` on `[0,1]³` (D721),
+///   `TriL2GL`/`TetL2GL`
 ///   open barycentric nodes on the unit simplices (D269), and the Fuentes
 ///   `l2_pyramid_element` on pyramid cells (D340).
 /// * `GaussLobatto`: GLL nodes with **lexicographic** DOF order on the tensor
@@ -413,9 +416,8 @@ pub fn l2_field_element(
         // one CUBE geometry in MFEM, one family here.
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => match order {
             0 => Box::new(P0Tensor { dim: 3 }),
-            // HexL2GL keeps the fem-rs hex reference domain [-1,1]³ (same as
-            // HexQk/hex_rule) so quadrature and the isoparametric Jacobian
-            // stay on a common domain.
+            // D721: HexL2GL lives on MFEM's [0,1]³ (same as HexQk/hex_rule)
+            // so quadrature and the isoparametric Jacobian share one domain.
             o if gll => Box::new(HexQk::new_lex(o as usize)),
             o => Box::new(HexL2GL::new(o as usize)),
         },
@@ -470,7 +472,7 @@ pub fn field_element_for_space<S: FESpace>(
 ///
 /// This is the family `Mesh::set_curvature_{tri3,tet4,pyramid5}` writes the
 /// geometry table in: `H1TriPk`/`H1TetPk` GLL lattices (D178/D187/D157),
-/// `QuadQk`/`HexQk` on the tensor frames, the equispaced `PrismPk` wedge
+/// `QuadQk`/`HexQk` on the `[0,1]^d` tensor frames, the equispaced `PrismPk` wedge
 /// table, and the **Fuentes** pyramid (D334/D347 — the same call
 /// `crates/mesh/src/transformation.rs::curved_pyramid_geometry` makes; one
 /// table, one family, no third hand-rolled pyramid map).  Generic arms clamp
@@ -486,7 +488,7 @@ pub fn geometry_node_element(elem_type: ElementType, order: u8) -> Box<dyn Refer
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(H1TetPk::new(3)),
-        // HexQk: Gauss-Lobatto nodes on [-1,1]³ (same family as QuadQk).
+        // HexQk: Gauss-Lobatto nodes on [0,1]³ (D721; same family as QuadQk).
         // D581: every hexahedral cell type — curved.rs reads Hex20/Hex27
         // geometry tables with this same `HexQk` family.
         (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, o) => {

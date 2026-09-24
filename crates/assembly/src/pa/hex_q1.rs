@@ -5,20 +5,20 @@
 use crate::pa::types::PaData;
 use fem_mesh::topology::MeshTopology;
 
-// ─── 1D Gauss–Legendre on [-1,1] for p=2 (exact) ────────────────────────────
-const GL_PTS: [f64; 2] = [-0.57735_02691_89626, 0.57735_02691_89626];
-const GL_WTS: [f64; 2] = [1.0, 1.0];
+// ─── 1D Gauss–Legendre on [0,1] for p=2 (exact, D721) ───────────────────────
+const GL_PTS: [f64; 2] = [0.21132486540518710671, 0.78867513459481286553];
+const GL_WTS: [f64; 2] = [0.5, 0.5];
 
-// ─── 1D Lagrange basis (Q1) on [-1,1] ───────────────────────────────────────
-#[inline] fn l0(t: f64) -> f64 { 0.5 * (1.0 - t) }
-#[inline] fn l1(t: f64) -> f64 { 0.5 * (1.0 + t) }
-#[inline] fn d0(_: f64) -> f64 { -0.5 }
-#[inline] fn d1(_: f64) -> f64 {  0.5 }
+// ─── 1D Lagrange basis (Q1) on [0,1] (D721 frame) ───────────────────────────
+#[inline] fn l0(t: f64) -> f64 { 1.0 - t }
+#[inline] fn l1(t: f64) -> f64 { t }
+#[inline] fn d0(_: f64) -> f64 { -1.0 }
+#[inline] fn d1(_: f64) -> f64 {  1.0 }
 
 /// Hex node → (a,b,c) ∈ {0,1}³ mapping.
-/// Standard ordering: bottom face z=-1 CCW, then top face z=+1 CCW:
-///   0:(-1,-1,-1) 1:(+1,-1,-1) 2:(+1,+1,-1) 3:(-1,+1,-1)
-///   4:(-1,-1,+1) 5:(+1,-1,+1) 6:(+1,+1,+1) 7:(-1,+1,+1)
+/// Standard ordering: bottom face z=0 CCW, then top face z=1 CCW:
+///   0:(0,0,0) 1:(1,0,0) 2:(1,1,0) 3:(0,1,0)
+///   4:(0,0,1) 5:(1,0,1) 6:(1,1,1) 7:(0,1,1)
 fn hex_abc(n: usize) -> (usize, usize, usize) {
     let a = (n & 1) ^ ((n >> 1) & 1);  // XOR of bits 0 and 1
     let b = (n >> 1) & 1;

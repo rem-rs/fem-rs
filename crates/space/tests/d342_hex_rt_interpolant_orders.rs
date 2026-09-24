@@ -19,7 +19,7 @@
 //!   (`hdiv_interpolant_available`) and must accept exactly the pairs the
 //!   space can actually build.
 
-use fem_element::quadrature::{gauss_lobatto_arbitrary, gauss_legendre_arbitrary};
+use fem_element::quadrature::{gauss_lobatto_arbitrary, gauss_legendre_01};
 use fem_element::raviart_thomas::{free_axes, HEX_RT_FACES};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::Mesh;
@@ -43,12 +43,14 @@ fn project_rt_rows(k: usize) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
     let m = k + 1;
     let mut pts = Vec::new();
     let mut nks = Vec::new();
-    let gl = gauss_legendre_arbitrary(m).0;
+    // D721: MFEM's `[0,1]³` node frame (open points on `[0,1]`, face
+    // coordinates 0/1).
+    let gl = gauss_legendre_01(m).0;
     for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
-        let cnorm = if at_max { 1.0 } else { -1.0 };
+        let cnorm = if at_max { 1.0 } else { 0.0 };
         let (a1, a2) = free_axes(nc);
         let mut nk = [0.0_f64; 3];
-        nk[nc] = cnorm;
+        nk[nc] = if at_max { 1.0 } else { -1.0 };
         for j in 0..m {
             let q = if f2 { m - 1 - j } else { j };
             for i in 0..m {
@@ -63,7 +65,11 @@ fn project_rt_rows(k: usize) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
         }
     }
     if k >= 1 {
-        let cp = gauss_lobatto_arbitrary(k + 2).0;
+        let cp: Vec<f64> = gauss_lobatto_arbitrary(k + 2)
+            .0
+            .iter()
+            .map(|x| 0.5 * (x + 1.0))
+            .collect();
         let push =
             |s: f64, axis: usize, xi: [f64; 3], pts: &mut Vec<[f64; 3]>, nks: &mut Vec<[f64; 3]>| {
                 let mut nk = [0.0_f64; 3];
@@ -122,13 +128,12 @@ fn d342_hex_rt_orders_3_to_6_construct_and_count_dofs() {
 }
 
 /// D342: `HDivSpace::interpolate_vector` must be MFEM's `Project_RT` —
-/// `dof_i = nk_i·adj(J)·u(x_i)` — at every order the cap allows.  On the unit
-/// cube `adj(J_mfem) = I` (the `[0,1]`-frame Jacobian is the identity) and the
-/// reference-frame unit normals `nk_i` are the physical unit normals, so the
-/// prediction is `nk_i·u(x_phys(xi_i))` with `x_phys = (xi+1)/2`: the element
-/// samples the field at the **physical** node, while `interp_rows` lists the
-/// reference-frame points.  A wrong slot ordering, a wrong outward normal, a
-/// wrong D225 interior flip or a wrong geometric map all break this identity.
+/// `dof_i = nk_i·adj(J)·u(x_i)` — at every order the cap allows.  D721: the
+/// reference frame *is* MFEM's `[0,1]³`, so on the unit cube `adj(J) = I`,
+/// `x_phys = xi` and the reference-frame unit normals `nk_i` are the physical
+/// unit normals: the prediction is `nk_i·u(xi_i)` directly.  A wrong slot
+/// ordering, a wrong outward normal, a wrong D225 interior flip or a wrong
+/// geometric map all break this identity.
 #[test]
 fn d342_hex_rt_interpolant_is_mfem_project_rt_orders_0_to_6() {
     let mesh = Mesh::<3>::unit_cube_hex(1);
@@ -139,8 +144,9 @@ fn d342_hex_rt_interpolant_is_mfem_project_rt_orders_0_to_6() {
         assert_eq!(got.len(), pts.len(), "order {k}: slot count");
         let mut worst = 0.0_f64;
         for i in 0..got.len() {
-            // Reference `[-1,1]` sample -> physical point on the `[0,1]^3` cube.
-            let x: Vec<f64> = (0..3).map(|d| 0.5 * (pts[i][d] + 1.0)).collect();
+            // D721: the reference sample point *is* the physical point on the
+            // unit cube (no `(xi+1)/2` frame map).
+            let x: Vec<f64> = pts[i].to_vec();
             let f = u(&x);
             let want: f64 = (0..3).map(|d| nks[i][d] * f[d]).sum();
             worst = worst.max((got[i] - want).abs());

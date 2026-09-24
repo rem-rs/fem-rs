@@ -242,7 +242,20 @@ pub fn geo_ref_elem_from_mesh(
             // [0,1]² reference domain — use QuadQk for every geometric order.
             return Some(factory_ref_elem(FactoryElemType::Quad, g.max(1)));
         }
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => FactoryElemType::Hex,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            // D721: a *straight* hex mesh (geom_order 1) has MFEM's fixed-order
+            // `TriLinear3DFiniteElement` as its geometry map — the naive
+            // `ox·oy·oz` formulas of `HexQ1`, NOT the barycentric
+            // `H1_HexahedronElement(1)` the generic factory returns (the two
+            // differ in the last bits, and the affine-unit-hex Jacobian junk is
+            // sensitive to exactly those bits — `d721_affine_unit_hex_jacobian_*`
+            // pins it against MFEM's dump).  A curved map (`g > 1`) is MFEM's
+            // `H1_HexahedronElement(g)` — the barycentric `HexQk` family.
+            if g <= 1 {
+                return Some(Box::new(HexQ1));
+            }
+            FactoryElemType::Hex
+        }
         ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
             FactoryElemType::Prism
         }

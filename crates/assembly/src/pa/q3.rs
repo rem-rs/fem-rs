@@ -16,9 +16,9 @@ use fem_element::lagrange::hex::{HexQ1, HexQ3};
 use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
-// ─── 4-point Gauss–Legendre on [-1, 1] ──────────────────────────────────────
-const GL4_PTS: [f64; 4] = [-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526];
-const GL4_WTS: [f64; 4] = [0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538];
+// ─── 4-point Gauss–Legendre on [0, 1] (D721) ───────────────────────────────
+const GL4_PTS: [f64; 4] = [0.069431844202973699853, 0.33000947820757187134, 0.66999052179242812866, 0.93056815579702634178];
+const GL4_WTS: [f64; 4] = [0.1739274225687268971, 0.32607257743127299188, 0.32607257743127299188, 0.1739274225687268971];
 
 /// `(1-D GLL nodes, slot → tensor index)` of the 64-slot Q3 hex kernel.
 fn hex_q3_slots() -> (Vec<f64>, Vec<[usize; 3]>) {
@@ -63,11 +63,22 @@ pub fn build_hex_q3_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
         for (qz,&qz_pt) in GL4_PTS.iter().enumerate() { for (qy,&qy_pt) in GL4_PTS.iter().enumerate() { for (qx,&qx_pt) in GL4_PTS.iter().enumerate() {
             let qi = qz*16 + qy*4 + qx;
             let mut jac=[[0.0;3];3];
-            for i in 0..8{let[xi,et,zt]=hex8_ref[i];let d_xi=xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;let d_et=(1.0+xi*qx_pt)*et*(1.0+zt*qz_pt)/8.0;let d_zt=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt/8.0;for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}}
+            for i in 0..8{
+                let[xi,et,zt]=hex8_ref[i];
+                let (fx,dfx)=if xi==1.0{(qx_pt,1.0)}else{(1.0-qx_pt,-1.0)};
+                let (fy,dfy)=if et==1.0{(qy_pt,1.0)}else{(1.0-qy_pt,-1.0)};
+                let (fz,dfz)=if zt==1.0{(qz_pt,1.0)}else{(1.0-qz_pt,-1.0)};
+                let d_xi=dfx*fy*fz;let d_et=fx*dfy*fz;let d_zt=fx*fy*dfz;
+                for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}
+            }
             let d=jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])-jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])+jac[0][2]*(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0]);
             let det_j=d.abs();let inv=1.0/d;
             let jit=|i:usize,j:usize|->f64{match(i,j){(0,0)=>(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])*inv,(0,1)=>(jac[0][2]*jac[2][1]-jac[0][1]*jac[2][2])*inv,(0,2)=>(jac[0][1]*jac[1][2]-jac[0][2]*jac[1][1])*inv,(1,0)=>(jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*inv,(1,1)=>(jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*inv,(1,2)=>(jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*inv,(2,0)=>(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*inv,(2,1)=>(jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*inv,(2,2)=>(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*inv,_=>0.0}};
-            let mut xp=[0.0;3];for i in 0..8{let[xi,et,zt]=hex8_ref[i];let phi=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;for d in 0..3{xp[d]+=phi*v[i][d];}}
+            let mut xp=[0.0;3];for i in 0..8{
+                let[xi,et,zt]=hex8_ref[i];
+                let phi=(if xi==1.0{qx_pt}else{1.0-qx_pt})*(if et==1.0{qy_pt}else{1.0-qy_pt})*(if zt==1.0{qz_pt}else{1.0-qz_pt});
+                for d in 0..3{xp[d]+=phi*v[i][d];}
+            }
             let qd=pd.elem_qp_mut(e,qi);
             for a in 0..3{for b in 0..3{qd[a*3+b]=jit(a,b);}}qd[9]=det_j;qd[10]=kappa(&xp);
         }}}

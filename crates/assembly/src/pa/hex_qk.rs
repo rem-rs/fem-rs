@@ -49,9 +49,10 @@ fn build_1d_basis_qp(nodes: &[f64], qpts: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64
     crate::pa::tensor_1d::basis_at_points(nodes, qpts)
 }
 
-/// Gauss–Legendre quadrature on [-1, 1] for arbitrary n.
+/// Gauss–Legendre quadrature on **[0, 1]** for arbitrary n (D721: the hex
+/// kernel's reference frame is MFEM's `[0,1]³`).
 fn gauss_legendre_1d_n(n: usize) -> (Vec<f64>, Vec<f64>) {
-    fem_element::quadrature::gauss_legendre_arbitrary(n)
+    fem_element::quadrature::gauss_legendre_01(n)
 }
 
 /// Build PA data for Hex Qk diffusion with given degree p.
@@ -90,9 +91,13 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
                     let mut jac = [[0.0; 3]; 3];
                     for i in 0..8 {
                         let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
-                        let d_xi = xi * (1.0 + et * qy_pt) * (1.0 + zt * qz_pt) / 8.0;
-                        let d_et = (1.0 + xi * qx_pt) * et * (1.0 + zt * qz_pt) / 8.0;
-                        let d_zt = (1.0 + xi * qx_pt) * (1.0 + et * qy_pt) * zt / 8.0;
+                        // D721: `[0,1]` trilinear nodal factors.
+                        let (fx, dfx) = if xi == 1.0 { (qx_pt, 1.0) } else { (1.0 - qx_pt, -1.0) };
+                        let (fy, dfy) = if et == 1.0 { (qy_pt, 1.0) } else { (1.0 - qy_pt, -1.0) };
+                        let (fz, dfz) = if zt == 1.0 { (qz_pt, 1.0) } else { (1.0 - qz_pt, -1.0) };
+                        let d_xi = dfx * fy * fz;
+                        let d_et = fx * dfy * fz;
+                        let d_zt = fx * fy * dfz;
                         for d in 0..3 {
                             jac[0][d] += d_xi * v[i][d];
                             jac[1][d] += d_et * v[i][d];
@@ -128,9 +133,9 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
                     let mut xp = [0.0; 3];
                     for i in 0..8 {
                         let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
-                        let phi =
-                            (1.0 + xi * qx_pt) * (1.0 + et * qy_pt) * (1.0 + zt * qz_pt)
-                                / 8.0;
+                        let phi = (if xi == 1.0 { qx_pt } else { 1.0 - qx_pt })
+                            * (if et == 1.0 { qy_pt } else { 1.0 - qy_pt })
+                            * (if zt == 1.0 { qz_pt } else { 1.0 - qz_pt });
                         for d in 0..3 {
                             xp[d] += phi * v[i][d];
                         }

@@ -2250,9 +2250,14 @@ fn l2_err_hex(uh: &[f64], space: &H1Space<Mesh<3>>) -> f64 {
         let n2 = mesh.node_coords(nd[2]); let n4 = mesh.node_coords(nd[4]);
         let hx = n1[0]-n0[0]; let hy = n2[1]-n0[1]; let hz = n4[2]-n0[2];
         for (qi, xi) in q.points.iter().enumerate() {
-            let w = q.weights[qi] * hx * hy * hz / 8.0; re.eval_basis(xi, &mut phi);
+            // D757 re-anchor (D721): the hex rule/basis live on `[0,1]³`, so the
+            // measure is `w·hx·hy·hz` (weights sum to 1) and the physical point is
+            // `n0 + ξ·h` — the former `…/8.0` and `(ξ+1)/2` maps were the
+            // `[-1,1]³` frame, and left the hex Q1 L² arm measuring the wrong
+            // point at half the element scale (rate 0.99 instead of 2).
+            let w = q.weights[qi] * hx * hy * hz; re.eval_basis(xi, &mut phi);
             let uh_q: f64 = df.iter().zip(phi.iter()).map(|(&d,&p)| uh[d as usize]*p).sum();
-            let xp = [n0[0]+(xi[0]+1.0)*hx/2.0, n0[1]+(xi[1]+1.0)*hy/2.0, n0[2]+(xi[2]+1.0)*hz/2.0];
+            let xp = [n0[0]+xi[0]*hx, n0[1]+xi[1]*hy, n0[2]+xi[2]*hz];
             es += w * (uh_q - u_h3d(&xp)).powi(2);
         }
     }

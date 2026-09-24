@@ -1,9 +1,13 @@
-//! Nedelec-I lowest-order element on the reference hexahedron `[-1,1]^3`.
+//! Nedelec-I lowest-order element on the reference hexahedron `[0,1]^3`.
 //!
 //! Local edge ordering:
-//! - e0..e3: bottom face perimeter (z=-1)
-//! - e4..e7: top face perimeter (z=+1)
+//! - e0..e3: bottom face perimeter (z=0)
+//! - e4..e7: top face perimeter (z=1)
 //! - e8..e11: vertical edges (z direction)
+//!
+//! D721: the reference frame is MFEM's `[0,1]³` (the basis below is MFEM's
+//! `ND_HexahedronElement(1)` Whitney form on the unit cube, with the physical
+//! covariant Piola map `J^-T` making it a unit edge integral on a unit hex).
 
 use crate::quadrature::hex_rule;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
@@ -21,113 +25,87 @@ impl VectorReferenceElement for HexND1 {
         let y = xi[1];
         let z = xi[2];
 
-        // x-directed edges: e0..e3
-        values[0] = 0.125 * (1.0 - y) * (1.0 - z);
+        // x-directed edges: e0..e3 (against MFEM's `-e_x` for the two
+        // descending-x edges, as in MFEM `dof2tk`).
+        values[0] = (1.0 - y) * (1.0 - z);
         values[1] = 0.0;
         values[2] = 0.0;
 
-        values[3] = -0.125 * (1.0 + y) * (1.0 - z);
+        values[3] = -y * (1.0 - z);
         values[4] = 0.0;
         values[5] = 0.0;
 
-        values[6] = 0.125 * (1.0 - y) * (1.0 + z);
+        values[6] = (1.0 - y) * z;
         values[7] = 0.0;
         values[8] = 0.0;
 
-        values[9] = -0.125 * (1.0 + y) * (1.0 + z);
+        values[9] = -y * z;
         values[10] = 0.0;
         values[11] = 0.0;
 
         // y-directed edges: e4..e7
         values[12] = 0.0;
-        values[13] = 0.125 * (1.0 + x) * (1.0 - z);
+        values[13] = x * (1.0 - z);
         values[14] = 0.0;
 
         values[15] = 0.0;
-        values[16] = 0.125 * (1.0 - x) * (1.0 - z);
+        values[16] = (1.0 - x) * (1.0 - z);
         values[17] = 0.0;
 
         values[18] = 0.0;
-        values[19] = 0.125 * (1.0 + x) * (1.0 + z);
+        values[19] = x * z;
         values[20] = 0.0;
 
         values[21] = 0.0;
-        values[22] = 0.125 * (1.0 - x) * (1.0 + z);
+        values[22] = (1.0 - x) * z;
         values[23] = 0.0;
 
         // z-directed edges: e8..e11
         values[24] = 0.0;
         values[25] = 0.0;
-        values[26] = 0.125 * (1.0 - x) * (1.0 - y);
+        values[26] = (1.0 - x) * (1.0 - y);
 
         values[27] = 0.0;
         values[28] = 0.0;
-        values[29] = 0.125 * (1.0 + x) * (1.0 - y);
+        values[29] = x * (1.0 - y);
 
         values[30] = 0.0;
         values[31] = 0.0;
-        values[32] = 0.125 * (1.0 + x) * (1.0 + y);
+        values[32] = x * y;
 
         values[33] = 0.0;
         values[34] = 0.0;
-        values[35] = 0.125 * (1.0 - x) * (1.0 + y);
+        values[35] = (1.0 - x) * y;
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
+        // True curl of the `[0,1]³` basis above (D721 frame; the old
+        // `[-1,1]³` block was the same with each `(1±u)` mapped and the
+        // chain factor 2 folded in).
         let x = xi[0];
         let y = xi[1];
         let z = xi[2];
-
-        // e0
-        curl_vals[0] = 0.0;
-        curl_vals[1] = -0.125 * (1.0 - y);
-        curl_vals[2] = 0.125 * (1.0 - z);
-        // e1
-        curl_vals[3] = 0.0;
-        curl_vals[4] = 0.125 * (1.0 + y);
-        curl_vals[5] = 0.125 * (1.0 - z);
-        // e2
-        curl_vals[6] = 0.0;
-        curl_vals[7] = -0.125 * (1.0 - y);
-        curl_vals[8] = -0.125 * (1.0 + z);
-        // e3
-        curl_vals[9] = 0.0;
-        curl_vals[10] = 0.125 * (1.0 + y);
-        curl_vals[11] = -0.125 * (1.0 + z);
-
-        // e4
-        curl_vals[12] = 0.125 * (1.0 - z);
-        curl_vals[13] = 0.0;
-        curl_vals[14] = -0.125 * (1.0 + x);
-        // e5
-        curl_vals[15] = 0.125 * (1.0 - z);
-        curl_vals[16] = 0.0;
-        curl_vals[17] = 0.125 * (1.0 - x);
-        // e6
-        curl_vals[18] = -0.125 * (1.0 + z);
-        curl_vals[19] = 0.0;
-        curl_vals[20] = -0.125 * (1.0 + x);
-        // e7
-        curl_vals[21] = -0.125 * (1.0 + z);
-        curl_vals[22] = 0.0;
-        curl_vals[23] = 0.125 * (1.0 - x);
-
-        // e8
-        curl_vals[24] = -0.125 * (1.0 - x);
-        curl_vals[25] = 0.125 * (1.0 - y);
-        curl_vals[26] = 0.0;
-        // e9
-        curl_vals[27] = -0.125 * (1.0 + x);
-        curl_vals[28] = -0.125 * (1.0 - y);
-        curl_vals[29] = 0.0;
-        // e10
-        curl_vals[30] = 0.125 * (1.0 + x);
-        curl_vals[31] = -0.125 * (1.0 + y);
-        curl_vals[32] = 0.0;
-        // e11
-        curl_vals[33] = 0.125 * (1.0 - x);
-        curl_vals[34] = 0.125 * (1.0 + y);
-        curl_vals[35] = 0.0;
+        let (ox, oy, oz) = (1.0 - x, 1.0 - y, 1.0 - z);
+        let zero = 0.0_f64;
+        let curl: [[f64; 3]; 12] = [
+            [zero, -oy, oz],    // e0:  (1-y)(1-z) e_x
+            [zero, y, oz],      // e1: -y(1-z) e_x
+            [zero, oy, z],      // e2:  (1-y)z e_x
+            [zero, -y, z],      // e3: -y z e_x
+            [x, zero, oz],      // e4:  x(1-z) e_y
+            [ox, zero, -oz],    // e5:  (1-x)(1-z) e_y
+            [-x, zero, z],      // e6:  x z e_y
+            [-ox, zero, -z],    // e7:  (1-x)z e_y
+            [-ox, oy, zero],    // e8:  (1-x)(1-y) e_z
+            [-x, -oy, zero],    // e9:  x(1-y) e_z
+            [x, -y, zero],      // e10: x y e_z
+            [ox, y, zero],      // e11: (1-x)y e_z
+        ];
+        for (i, c) in curl.iter().enumerate() {
+            curl_vals[i * 3] = c[0];
+            curl_vals[i * 3 + 1] = c[1];
+            curl_vals[i * 3 + 2] = c[2];
+        }
     }
 
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
@@ -142,18 +120,18 @@ impl VectorReferenceElement for HexND1 {
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![0.0, -1.0, -1.0],
-            vec![0.0, 1.0, -1.0],
-            vec![0.0, -1.0, 1.0],
-            vec![0.0, 1.0, 1.0],
-            vec![1.0, 0.0, -1.0],
-            vec![-1.0, 0.0, -1.0],
-            vec![1.0, 0.0, 1.0],
-            vec![-1.0, 0.0, 1.0],
-            vec![-1.0, -1.0, 0.0],
-            vec![1.0, -1.0, 0.0],
-            vec![1.0, 1.0, 0.0],
-            vec![-1.0, 1.0, 0.0],
+            vec![0.5, 0.0, 0.0],
+            vec![0.5, 1.0, 0.0],
+            vec![0.5, 0.0, 1.0],
+            vec![0.5, 1.0, 1.0],
+            vec![1.0, 0.5, 0.0],
+            vec![0.0, 0.5, 0.0],
+            vec![1.0, 0.5, 1.0],
+            vec![0.0, 0.5, 1.0],
+            vec![0.0, 0.0, 0.5],
+            vec![1.0, 0.0, 0.5],
+            vec![1.0, 1.0, 0.5],
+            vec![0.0, 1.0, 0.5],
         ]
     }
 }
@@ -181,7 +159,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
         ];
-        let edge_len = [2.0_f64; 12];
+        let edge_len = [1.0_f64; 12];
 
         for (j, (mid, (t, l))) in elem
             .dof_coords()

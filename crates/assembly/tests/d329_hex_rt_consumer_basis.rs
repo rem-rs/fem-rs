@@ -83,10 +83,13 @@ fn hex_rt0_dofs_reconstruct_exactly_in_gauss_legendre_basis() {
     }
 }
 
-/// The IntegratedGLL variant is *not* interchangeable: at RT0 it reconstructs
-/// exactly `1/4` of the field (the documented `V_mfem/16` vs `V_mfem/4`
-/// per-mode normalization), which is why the LOR readers must not consume
-/// these dofs.
+/// D721 re-base: the historical `V_mfem/16` vs `V_mfem/4` per-mode frame
+/// normalization is gone — the hex reference basis *is* MFEM's `[0,1]³`
+/// basis now, and at RT0 the `IntegratedGLL` and `GaussLegendre` variants
+/// coincide exactly (both open degree-0 modes are the constant `1`), so the
+/// integrated variant reconstructs the field **exactly** like the
+/// GaussLegendre arm above.  (Pre-flip this pinned the documented `1/4`
+/// factor of the `[-1,1]³` frame.)
 #[test]
 fn hex_rt0_integrated_gll_basis_is_the_documented_fourth() {
     let mesh = Mesh::<3>::unit_cube_hex(2);
@@ -96,9 +99,11 @@ fn hex_rt0_integrated_gll_basis_is_the_documented_fourth() {
         .as_slice()
         .to_vec();
     let igll = HexRTk::new(0);
-    let xi = [0.25, -0.3, 0.4];
+    // `HexRTk` lives on MFEM's `[0,1]³` (D721), so the sample point must be
+    // inside the unit cube.
+    let xi = [0.25, 0.35, 0.4];
     let uh = reconstruct(&mesh, &space, &dofs, &igll, &xi);
-    for (i, want) in [0.0, 0.0, 0.25].iter().enumerate() {
+    for (i, want) in [0.0, 0.0, 1.0].iter().enumerate() {
         assert!(
             (uh[i] - want).abs() < 1e-14,
             "xi {xi:?} component {i}: IntegratedGLL reconstruction {:.17e} vs {want}",

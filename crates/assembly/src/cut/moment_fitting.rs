@@ -581,16 +581,11 @@ impl LsData {
     fn grad_ref(&self, e: u32, xi: &[f64]) -> Vec<f64> {
         let n = self.ref_elem.n_dofs();
         let mut grads = vec![0.0; n * self.dim];
-        // QuadQk uses the [0,1]^2 reference domain (matching MFEM's H1 quad);
-        // HexQk uses [-1,1]^3, so map the [0,1]^3 integration point there
-        // (and rescale the gradient back to the [0,1]^3 convention, where
-        // d/dξ = 2·d/dxi_hex).
-        let scale = if self.dim == 3 { 2.0 } else { 1.0 };
-        let xi_e = if self.dim == 3 {
-            vec![2.0 * xi[0] - 1.0, 2.0 * xi[1] - 1.0, 2.0 * xi[2] - 1.0]
-        } else {
-            xi.to_vec()
-        };
+        // D721: every family in this path (QuadQk, HexQk) evaluates on MFEM's
+        // `[0,1]^d`, i.e. the integration point's own frame — the historical
+        // `2·ξ − 1` map (and its `×2` gradient rescale) is gone with the
+        // hex flip.
+        let xi_e = xi.to_vec();
         self.ref_elem.eval_grad_basis(&xi_e, &mut grads);
         let dofs = &self.elem_dofs[e as usize];
         let mut g = vec![0.0; self.dim];
@@ -599,9 +594,6 @@ impl LsData {
             for j in 0..self.dim {
                 g[j] += grads[i * self.dim + j] * c;
             }
-        }
-        for j in 0..self.dim {
-            g[j] *= scale;
         }
         g
     }

@@ -65,17 +65,18 @@ const MFEM_DIV: &str = "
 1.00000000000000133e+00 9.99999999999997224e-01 9.99999999999998002e-01
 ";
 
-/// The three probe points in `[-1,1]^3` reference coordinates (as used by the
-/// C++ probe; identical frames on both sides).  Probe 2 is the hex centroid
-/// (the `compute_element_divergence` sample point).
+/// The three probe points in `[0,1]^3` reference coordinates (D721: MFEM's own
+/// frame — the C++ probe's `(x+1)/2` images of the historical `[-1,1]` points).
+/// Probe 2 is the hex centroid (the `compute_element_divergence` sample point).
 const PROBE_XI: [[f64; 3]; 3] = [
-    [0.30000000000000004, 0.39999999999999991, 0.49999999999999978],
-    [0.0, 0.0, 0.0],
-    [0.0, -0.16666666666666663, 0.25],
+    [0.65, 0.7, 0.75],
+    [0.5, 0.5, 0.5],
+    [0.5, 0.41666666666666668517, 0.625],
 ];
 
-/// `det J` of the `[-1,1]^3` isoparametric map of the hex.
-const DET_RS: f64 = 0.5 * 0.6 * 0.4;
+/// `det J` of the `[0,1]^3` isoparametric map of the `1.0 × 1.2 × 0.8` brick
+/// (D721: twice the historical `[-1,1]` value per axis).
+const DET_RS: f64 = 1.0 * 1.2 * 0.8;
 
 fn interp_dofs(order: u8, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
     let space = HDivSpace::new(hex_mesh(), order);
@@ -86,7 +87,7 @@ fn interp_dofs(order: u8, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
 }
 
 /// `GridFunction::GetDivergence` counterpart: div u_phys(xi)
-/// = (sum_i c_i s_i div_hat_i(xi)) / det J  ([-1,1] isoparametric frame).
+/// = (sum_i c_i s_i div_hat_i(xi)) / det J  (`[0,1]` isoparametric frame, D721).
 fn physical_div(space: &HDivSpace<Mesh<3>>, g: &[f64], xi: &[f64; 3]) -> f64 {
     let re = HexRTk::new_gauss_legendre(space.order() as usize);
     let n = re.n_dofs();

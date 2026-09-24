@@ -1260,6 +1260,110 @@ impl Lagrange1D {
     }
 }
 
+// ─── MFEM barycentric 1-D basis on [0,1] (shared by QuadQk and HexQk) ───────
+
+/// Barycentric weights of the nodes `x` in MFEM's `Poly_1D::Basis::Basis`
+/// accumulation order (`for i { for j < i { xij = x(i)−x(j); w(i) *= xij;
+/// w(j) *= −xij } }` then one reciprocal) — matching that order keeps the
+/// weights bit-identical (a `j != i` full loop permutes the accumulation and
+/// differs by ~1 ulp).
+fn mfem_bary_weights(x: &[f64]) -> Vec<f64> {
+    let n = x.len();
+    let mut w = vec![1.0; n];
+    for i in 0..n {
+        for j in 0..i {
+            let xij = x[i] - x[j];
+            w[i] *= xij;
+            w[j] *= -xij;
+        }
+    }
+    for v in w.iter_mut() {
+        *v = 1.0 / *v;
+    }
+    w
+}
+
+/// MFEM's stable-centre split of `∏(y−x_i)`: advance the "centre" `k` while
+/// `y` lies right of the midpoint of the current node interval, then take the
+/// remaining product on the other side.  Returns `(k, lk, l)` with
+/// `lk = ∏_{i<k}(y−x_i)·∏_{i>k}(y−x_i)` and `l = lk·(y−x_k)`.
+fn mfem_bary_centre(x: &[f64], y: f64) -> (usize, f64, f64) {
+    let p = x.len() - 1;
+    let mut k = 0usize;
+    let mut lk = 1.0;
+    while k < p {
+        if y >= (x[k] + x[k + 1]) / 2.0 {
+            lk *= y - x[k];
+            k += 1;
+        } else {
+            for i in k + 1..=p {
+                lk *= y - x[i];
+            }
+            break;
+        }
+    }
+    let l = lk * (y - x[k]);
+    (k, lk, l)
+}
+
+/// MFEM `Poly_1D::Basis::Eval(y, u)` (the **value-only** overload, used by
+/// `CalcShape`): barycentric Lagrange values with the **division** form
+/// `u(i) = l·w(i)/(y − x(i))`.
+pub(crate) fn mfem_bary_val_01(x: &[f64], y: f64) -> Vec<f64> {
+    let p = x.len() - 1;
+    if p == 0 {
+        return vec![1.0];
+    }
+    let w = mfem_bary_weights(x);
+    let (k, lk, l) = mfem_bary_centre(x, y);
+    let mut u = vec![0.0; p + 1];
+    for i in 0..k {
+        u[i] = l * w[i] / (y - x[i]);
+    }
+    u[k] = lk * w[k];
+    for i in k + 1..=p {
+        u[i] = l * w[i] / (y - x[i]);
+    }
+    u
+}
+
+/// MFEM `Poly_1D::Basis::Eval(y, u, d)` (the **value+derivative** overload,
+/// used by `CalcDShape`): values through the reciprocal-multiplication form
+/// `u(i) = l·si·w(i)` with `si = 1/(y−x(i))` — 1 ulp apart from
+/// [`mfem_bary_val_01`], and picking the wrong one breaks bit-identical
+/// assembly.
+pub(crate) fn mfem_bary_1d_01(x: &[f64], y: f64) -> (Vec<f64>, Vec<f64>) {
+    let p = x.len() - 1;
+    if p == 0 {
+        return (vec![1.0], vec![0.0]);
+    }
+    let w = mfem_bary_weights(x);
+    let (k, lk, l) = mfem_bary_centre(x, y);
+    let mut u = vec![0.0; p + 1];
+    let mut sk = 0.0;
+    for i in 0..k {
+        let si = 1.0 / (y - x[i]);
+        sk += si;
+        u[i] = l * si * w[i];
+    }
+    u[k] = lk * w[k];
+    for i in k + 1..=p {
+        let si = 1.0 / (y - x[i]);
+        sk += si;
+        u[i] = l * si * w[i];
+    }
+    let lp = l * sk + lk;
+    let mut d = vec![0.0; p + 1];
+    for i in 0..k {
+        d[i] = (lp * w[i] - u[i]) / (y - x[i]);
+    }
+    d[k] = sk * u[k];
+    for i in k + 1..=p {
+        d[i] = (lp * w[i] - u[i]) / (y - x[i]);
+    }
+    (u, d)
+}
+
 // ─── QuadPosQk (Bernstein / H1 Positive basis) ─────────────────────────────
 
 /// Binomial coefficient `C(n, k)` as an integer.
@@ -1564,67 +1668,7 @@ impl QuadQk {
     /// divides: `u(i) = l·w(i)/(y−x(i))` — the two differ by 1 ulp and
     /// picking the wrong one breaks bit-identical assembly.
     fn mfem_bary_1d(&self, y: f64) -> (Vec<f64>, Vec<f64>) {
-        let p = self.order;
-        let n = p + 1;
-        let x = &self.gll01;
-        // Barycentric weights — MFEM Poly_1D::Basis::Basis(Barycentric)
-        // accumulates with the j<i double loop (`w(i) *= xij; w(j) *= -xij`)
-        // then takes one reciprocal; matching the exact multiply order keeps
-        // the weights bit-identical (a `j != i` full loop permutes the
-        // accumulation order and differs by ~1 ulp).
-        let mut w = vec![1.0; n];
-        for i in 0..n {
-            for j in 0..i {
-                let xij = x[i] - x[j];
-                w[i] *= xij;
-                w[j] *= -xij;
-            }
-        }
-        for i in 0..n {
-            w[i] = 1.0 / w[i];
-        }
-        // Stable centre k: lk = ∏ over the nodes on one side of y.
-        let mut k = 0usize;
-        let mut lk = 1.0;
-        while k < p {
-            if y >= (x[k] + x[k + 1]) / 2.0 {
-                lk *= y - x[k];
-                k += 1;
-            } else {
-                for i in k + 1..=p {
-                    lk *= y - x[i];
-                }
-                break;
-            }
-        }
-        let l = lk * (y - x[k]);
-        let mut sk = 0.0;
-        let mut u = vec![0.0; n];
-        for i in 0..k {
-            // MFEM Poly_1D::Basis::Eval(y, u, d) (value+derivative overload)
-            // uses the reciprocal-multiplication form `u(i) = l·si·w(i)` with
-            // `si = 1/(y−x(i))` (fe_base.cpp:1905) — NOT the division form
-            // used by the value-only overload (which `mfem_bary_val` mirrors).
-            let si = 1.0 / (y - x[i]);
-            sk += si;
-            u[i] = l * si * w[i];
-        }
-        u[k] = lk * w[k];
-        for i in k + 1..=p {
-            let si = 1.0 / (y - x[i]);
-            sk += si;
-            u[i] = l * si * w[i];
-        }
-        let lp = l * sk + lk;
-        let mut d = vec![0.0; n];
-        for i in 0..k {
-            d[i] = (lp * w[i] - u[i]) / (y - x[i]);
-        }
-        d[k] = sk * u[k];
-        for i in k + 1..=p {
-            d[i] = (lp * w[i] - u[i]) / (y - x[i]);
-        }
-        (u, d)
+        mfem_bary_1d_01(&self.gll01, y)
     }
 
     /// MFEM `Poly_1D::Basis::Eval(y, u)` (value-only overload, used by
@@ -1632,49 +1676,7 @@ impl QuadQk {
     /// `u(i) = l·w(i)/(y − x(i))` — bit-for-bit different (1 ulp) from the
     /// reciprocal-multiplication form in [`QuadQk::mfem_bary_1d`].
     fn mfem_bary_val(&self, y: f64) -> Vec<f64> {
-        let p = self.order;
-        let n = p + 1;
-        let x = &self.gll01;
-        // Barycentric weights — MFEM Poly_1D::Basis::Basis(Barycentric)
-        // accumulates with the j<i double loop (`w(i) *= xij; w(j) *= -xij`)
-        // then takes one reciprocal; matching the exact multiply order keeps
-        // the weights bit-identical.
-        let mut w = vec![1.0; n];
-        for i in 0..n {
-            for j in 0..i {
-                let xij = x[i] - x[j];
-                w[i] *= xij;
-                w[j] *= -xij;
-            }
-        }
-        for i in 0..n {
-            w[i] = 1.0 / w[i];
-        }
-        // Stable centre k (identical to mfem_bary_1d).
-        let mut k = 0usize;
-        let mut lk = 1.0;
-        while k < p {
-            if y >= (x[k] + x[k + 1]) / 2.0 {
-                lk *= y - x[k];
-                k += 1;
-            } else {
-                for i in k + 1..=p {
-                    lk *= y - x[i];
-                }
-                break;
-            }
-        }
-        let l = lk * (y - x[k]);
-        let mut u = vec![0.0; n];
-        // MFEM value-only Eval: u(i) = l * w(i) / (y - x(i)).
-        for i in 0..k {
-            u[i] = l * w[i] / (y - x[i]);
-        }
-        u[k] = lk * w[k];
-        for i in k + 1..=p {
-            u[i] = l * w[i] / (y - x[i]);
-        }
-        u
+        mfem_bary_val_01(&self.gll01, y)
     }
 
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
@@ -1959,34 +1961,29 @@ impl ReferenceElement for QuadL2GL {
 
 // ─── HexL2GL ─────────────────────────────────────────────────────────────────
 
-/// Arbitrary-order L² Lagrange element on the reference hex `[-1,1]³` with
+/// Arbitrary-order L² Lagrange element on the reference hex `[0,1]³` with
 /// **Gauss-Legendre** nodes — `(p+1)³` DOFs, matching MFEM's
 /// `L2_HexahedronElement` (`L2_FECollection`'s default
 /// `BasisType::GaussLegendre`): interior-only GL points, lexicographic
 /// tensor-product DOF order (`L2_DOF_MAP`: dof = `ix + iy·(p+1) + iz·(p+1)²`,
 /// x fastest) — NOT the H1 topological ordering of [`HexQk`].
 ///
-/// MFEM places the GL nodes on `[0,1]³` (`Poly_1D::OpenPoints`, ascending);
-/// this element keeps the fem-rs hex convention `[-1,1]³` (same domain as
-/// [`HexQ1`]/[`HexQk`] and `hex_rule`), i.e. the MFEM basis composed with the
-/// affine map `ξ = 2x−1` — the same polynomial space with identical
-/// quadrature/Jacobian treatment in the assembler.  The 1D basis uses the
-/// direct Lagrange formula [`lagrange_1d_val`] on the GL nodes (same
-/// construction as [`QuadL2GL`]).
+/// D721: the nodes are MFEM's `[0,1]³` `Poly_1D::OpenPoints` values directly
+/// (the element previously composed the MFEM basis with `ξ = 2x−1` to live on
+/// the fem-rs hex frame).  The 1D basis uses the direct Lagrange formula
+/// [`lagrange_1d_val`] on the GL nodes (same construction as [`QuadL2GL`]).
 pub struct HexL2GL {
     order: usize,
-    nodes: Vec<f64>, // Gauss-Legendre nodes on [-1,1], ascending (MFEM order)
+    nodes: Vec<f64>, // Gauss-Legendre nodes on [0,1], ascending (MFEM order)
 }
 
 impl HexL2GL {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        // Gauss-Legendre nodes on [-1,1].  `gauss_legendre_arbitrary` returns
-        // descending nodes for n > 4 (Newton from the largest root) and the
-        // hard-coded ascending table for n <= 4; MFEM's
-        // `QuadratureFunctions1D::GaussLegendre` is always ascending, so sort
-        // to make the lexicographic DOF numbering match MFEM's.
-        let (mut nodes, _w) = crate::quadrature::gauss_legendre_arbitrary(p + 1);
+        // MFEM `Poly_1D::OpenPoints` — Gauss-Legendre nodes on [0,1],
+        // always ascending (the arbiter for `n > 5` is MFEM's own Newton
+        // generator).
+        let (mut nodes, _w) = crate::quadrature::gauss_legendre_01(p + 1);
         if nodes.len() > 1 && nodes[0] > nodes[nodes.len() - 1] {
             nodes.reverse();
         }
@@ -2071,8 +2068,9 @@ impl ReferenceElement for HexL2GL {
         }
     }
     fn quadrature(&self, order: u8) -> QuadratureRule {
-        // [-1,1]³ tensor GL rule — same reference domain as the hex geometry
-        // element, so the assembler's `geom_quad_point` pass-through is exact.
+        // [0,1]³ tensor GL rule — the same reference domain as the hex
+        // geometry element (D721), so the assembler's `geom_quad_point`
+        // pass-through is exact.
         hex_rule(order)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
@@ -2348,10 +2346,25 @@ const HEX_FACE_VERTS: [[usize; 4]; 6] = [
     [4, 5, 6, 7],
 ];
 
-/// Arbitrary-order Lagrange element on the reference hex `[-1,1]³` — `(p+1)³` DOFs.
+/// Arbitrary-order Lagrange element on the reference hex `[0,1]³` — `(p+1)³` DOFs.
+///
+/// Gauss-Lobatto-Legendre (GLL) nodes matching MFEM's `H1_FECollection` with
+/// `BasisType::GaussLobatto`, evaluated exactly as MFEM's
+/// `H1_HexahedronElement` does: `CalcShape` through the **value-only**
+/// barycentric overload and `CalcDShape` through the **value+derivative**
+/// overload (both `Poly_1D::Basis::Eval`, `fem/fe/fe_base.cpp:1875/1936`),
+/// directly on `[0,1]` — bit-identical to the C++ values.  Before D721 the
+/// same polynomials were evaluated on `[-1,1]` via `ξ = 2x − 1` with a
+/// chain-rule factor, which differed from MFEM by ~1 ulp and propagated into
+/// matrix entries.
 pub struct HexQk {
     order: usize,
     lag1d: Lagrange1D,
+    /// GLL nodes on `[0,1]` (`0.5·(lag1d.nodes+1)`) — the frame MFEM's
+    /// `Poly_1D::ClosedPoints(p, GaussLobatto)` returns (it Newton-iterates
+    /// on `[-1,1]` and stores `z = (x+1)/2`), used by the MFEM barycentric
+    /// evaluation, `dof_coords` and `node_to_dof`.
+    gll01: Vec<f64>,
     /// DOF ordering: `false` = H1 *topological* order (vertices → edges →
     /// faces → interior) in **MFEM `H1_HexahedronElement` order** for every
     /// `p >= 1` (D31 closed the former p = 2 exception) — see
@@ -2372,9 +2385,12 @@ pub struct HexQk {
 impl HexQk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
+        let lag1d = Lagrange1D::new(p);
+        let gll01 = lag1d.nodes.iter().map(|&x| 0.5 * (x + 1.0)).collect();
         Self {
             order: p,
-            lag1d: Lagrange1D::new(p),
+            lag1d,
+            gll01,
             lex: false,
         }
     }
@@ -2502,14 +2518,20 @@ impl HexQk {
                 for ix in 0..=p {
                     let dof = self.dof_index(ix, iy, iz);
                     coords[dof] = [
-                        self.lag1d.nodes[ix],
-                        self.lag1d.nodes[iy],
-                        self.lag1d.nodes[iz],
+                        self.gll01[ix],
+                        self.gll01[iy],
+                        self.gll01[iz],
                     ];
                 }
             }
         }
         coords
+    }
+
+    /// Map a point `x` on `[0,1]` to `[-1,1]` (legacy path, kept for the
+    /// second-derivative evaluation which still uses `Lagrange1D`).
+    fn to_std(&self, x: f64) -> f64 {
+        2.0 * x - 1.0
     }
 }
 
@@ -2525,10 +2547,12 @@ impl ReferenceElement for HexQk {
         p * p * p
     }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        // MFEM `H1_HexahedronElement::CalcShape`: the *value-only*
+        // barycentric overload on `[0,1]` (`mfem_bary_val_01`).
         let (lx, ly, lz) = (
-            self.lag1d.val(xi[0]),
-            self.lag1d.val(xi[1]),
-            self.lag1d.val(xi[2]),
+            mfem_bary_val_01(&self.gll01, xi[0]),
+            mfem_bary_val_01(&self.gll01, xi[1]),
+            mfem_bary_val_01(&self.gll01, xi[2]),
         );
         let p = self.order;
         for iz in 0..=p {
@@ -2540,9 +2564,13 @@ impl ReferenceElement for HexQk {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (lx, dlx) = self.lag1d.val_d(xi[0]);
-        let (ly, dly) = self.lag1d.val_d(xi[1]);
-        let (lz, dlz) = self.lag1d.val_d(xi[2]);
+        // MFEM `H1_HexahedronElement::CalcDShape`: the value+derivative
+        // barycentric overload, whose values come from the
+        // reciprocal-multiplication form — gradients are exact on `[0,1]`
+        // (no chain-rule factor under D721).
+        let (lx, dlx) = mfem_bary_1d_01(&self.gll01, xi[0]);
+        let (ly, dly) = mfem_bary_1d_01(&self.gll01, xi[1]);
+        let (lz, dlz) = mfem_bary_1d_01(&self.gll01, xi[2]);
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {
@@ -2556,24 +2584,28 @@ impl ReferenceElement for HexQk {
         }
     }
     fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
-        let (lx, dlx, hlx) = self.lag1d.val_d_h(xi[0]);
-        let (ly, dly, hly) = self.lag1d.val_d_h(xi[1]);
-        let (lz, dlz, hlz) = self.lag1d.val_d_h(xi[2]);
+        // `lag1d` holds the 1-D nodes in the Gauss-Lobatto `[-1,1]` frame
+        // (the same construction `QuadQk` uses for its hessian path): map xi
+        // from `[0,1]` and apply the chain factor d²/dx² = 4·d²/dξ².
+        let (x, y, z) = (self.to_std(xi[0]), self.to_std(xi[1]), self.to_std(xi[2]));
+        let (lx, dlx, hlx) = self.lag1d.val_d_h(x);
+        let (ly, dly, hly) = self.lag1d.val_d_h(y);
+        let (lz, dlz, hlz) = self.lag1d.val_d_h(z);
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {
                 for ix in 0..=p {
                     let dof = self.dof_index(ix, iy, iz);
                     let b = dof * 9;
-                    hess[b] = hlx[ix] * ly[iy] * lz[iz];
-                    hess[b + 1] = dlx[ix] * dly[iy] * lz[iz];
-                    hess[b + 2] = dlx[ix] * ly[iy] * dlz[iz];
+                    hess[b] = 4.0 * hlx[ix] * ly[iy] * lz[iz];
+                    hess[b + 1] = 4.0 * dlx[ix] * dly[iy] * lz[iz];
+                    hess[b + 2] = 4.0 * dlx[ix] * ly[iy] * dlz[iz];
                     hess[b + 3] = hess[b + 1];
-                    hess[b + 4] = lx[ix] * hly[iy] * lz[iz];
-                    hess[b + 5] = lx[ix] * dly[iy] * dlz[iz];
+                    hess[b + 4] = 4.0 * lx[ix] * hly[iy] * lz[iz];
+                    hess[b + 5] = 4.0 * lx[ix] * dly[iy] * dlz[iz];
                     hess[b + 6] = hess[b + 2];
                     hess[b + 7] = hess[b + 5];
-                    hess[b + 8] = lx[ix] * ly[iy] * hlz[iz];
+                    hess[b + 8] = 4.0 * lx[ix] * ly[iy] * hlz[iz];
                 }
             }
         }
@@ -2815,17 +2847,14 @@ mod tests {
             }
 
             // `dof_coords()` carries the GLL tensor node of the slot's own
-            // tensor index (HexQk lives on [-1,1]³, MFEM on [0,1]³).
+            // tensor index — D721: HexQk now lives on MFEM's `[0,1]³`, i.e.
+            // the `gll01` image of the 1-D GLL nodes.
             let coords = hex.dof_coords();
             for (slot, &(i, j, k)) in mfem.iter().enumerate() {
-                let want = [
-                    hex.lag1d.nodes[i],
-                    hex.lag1d.nodes[j],
-                    hex.lag1d.nodes[k],
-                ];
+                let want = [hex.gll01[i], hex.gll01[j], hex.gll01[k]];
                 for d in 0..3 {
-                    assert!(
-                        (coords[slot][d] - want[d]).abs() < 1e-15,
+                    assert_eq!(
+                        coords[slot][d], want[d],
                         "p={p}: slot {slot} coord {d} = {} != GLL tensor node {want:?}",
                         coords[slot][d]
                     );
@@ -2948,19 +2977,18 @@ mod tests {
         let hex = HexQk::new(p);
         let coords = hex.dof_coords();
         assert_eq!(coords.len(), HEX_P3.len(), "p={p}: slot count");
-        let mut max_err = 0.0_f64;
         for (slot, want) in HEX_P3.iter().enumerate() {
             for d in 0..3 {
-                let got = 0.5 * (coords[slot][d] + 1.0); // [-1,1] → [0,1]
-                max_err = max_err.max((got - want[d]).abs());
-                assert!(
-                    (got - want[d]).abs() < 1e-15,
-                    "p={p} slot {slot} coord {d}: got {got} want {} (C++ dump)",
-                    want[d]
+                // D721: `dof_coords()` **is** the [0,1] dump now — the
+                // `0.5·(c+1)` mapping shim the pre-D721 test applied is gone
+                // with the [-1,1] frame, and the comparison is bit-exact.
+                assert_eq!(
+                    coords[slot][d], want[d],
+                    "p={p} slot {slot} coord {d}: got {} want {} (C++ dump)",
+                    coords[slot][d], want[d]
                 );
             }
         }
-        assert!(max_err <= 1e-16, "p={p}: dump match must be bit-exact");
 
         // D31: p = 2 asserts the same dump **directly** — legacy slot `s`
         // carries the tensor node MFEM puts in slot `PERM[s]` no longer; the
@@ -2972,10 +3000,10 @@ mod tests {
         assert_eq!(coords2.len(), HEX_P2.len());
         for (slot, want) in HEX_P2.iter().enumerate() {
             for d in 0..3 {
-                let got = 0.5 * (coords2[slot][d] + 1.0);
-                assert!(
-                    (got - want[d]).abs() < 1e-15,
-                    "p=2 slot {slot} coord {d}: got {got} want {want:?} (MFEM slot {slot})"
+                assert_eq!(
+                    coords2[slot][d], want[d],
+                    "p=2 slot {slot} coord {d}: got {} want {want:?} (MFEM slot {slot})",
+                    coords2[slot][d]
                 );
             }
         }
@@ -2996,13 +3024,14 @@ mod tests {
         let e = HexQk::new(2);
         let coords = e.dof_coords();
         assert_eq!(coords.len(), 27);
-        assert_eq!(coords[0], vec![-1.0, -1.0, -1.0], "slot 0 = reference corner");
+        assert_eq!(coords[0], vec![0.0, 0.0, 0.0], "slot 0 = reference corner");
         // The p=2 slot order (`HexQk::node_to_dof`, the MFEM
         // `H1_HexahedronElement(2)` layout since D31) must cover all 27
-        // tensor nodes exactly once.
-        let mut nodes: Vec<[i32; 3]> = coords
+        // tensor nodes exactly once.  (Coordinates are 0 / 0.5 / 1 now, so
+        // the dedup key is the bit pattern, not a cast.)
+        let mut nodes: Vec<[u64; 3]> = coords
             .iter()
-            .map(|c| [c[0] as i32, c[1] as i32, c[2] as i32])
+            .map(|c| [c[0].to_bits(), c[1].to_bits(), c[2].to_bits()])
             .collect();
         nodes.sort_unstable();
         nodes.dedup();
@@ -3291,16 +3320,17 @@ mod tests {
         let n = 8;
         let mut v1 = vec![0.0; n];
         let mut v2 = vec![0.0; n];
+        // D721: both elements live on [0,1]³.
         for &(x, y, z) in &[
-            (-1.0, -1.0, -1.0),
-            (1.0, -1.0, -1.0),
-            (1.0, 1.0, -1.0),
-            (-1.0, 1.0, -1.0),
-            (-1.0, -1.0, 1.0),
-            (1.0, -1.0, 1.0),
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 1.0),
             (1.0, 1.0, 1.0),
-            (-1.0, 1.0, 1.0),
-            (0.3, -0.5, 0.7),
+            (0.0, 1.0, 1.0),
+            (0.65, 0.25, 0.85),
         ] {
             qk.eval_basis(&[x, y, z], &mut v1);
             HexQ1.eval_basis(&[x, y, z], &mut v2);
@@ -3340,17 +3370,19 @@ mod tests {
         }
     }
 
-    /// The GL nodes must be ascending (MFEM `QuadratureFunctions1D::
-    /// GaussLegendre` order) so the lexicographic DOF numbering matches
-    /// MFEM's `L2_HexahedronElement` `L2_DOF_MAP`.
+    /// The GL nodes must be ascending and on `[0,1]` (MFEM
+    /// `QuadratureFunctions1D::GaussLegendre` order/domain, D721) so the
+    /// lexicographic DOF numbering matches MFEM's `L2_HexahedronElement`
+    /// `L2_DOF_MAP`.
     #[test]
     fn hex_l2gl_nodes_ascending() {
         for p in 1..=8 {
-            let (nodes, w) = crate::quadrature::gauss_legendre_arbitrary(p + 1);
+            let (nodes, w) = crate::quadrature::gauss_legendre_01(p + 1);
             let mut srt = nodes.clone();
             srt.sort_by(|a, b| a.partial_cmp(b).unwrap());
             assert_eq!(nodes, srt, "p={p}: HexL2GL node order must be ascending");
-            assert!((w.iter().sum::<f64>() - 2.0).abs() < 1e-12);
+            assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            assert!(nodes[0] > 0.0 && nodes[p] < 1.0, "p={p}: open points in [0,1]");
         }
     }
 
@@ -3387,10 +3419,10 @@ mod tests {
     #[test]
     fn hex_qk_lex_coords() {
         // p=1: GLL nodes are the corners; lex order must be
-        // (−,−,−),(+,−,−),(−,+,−),(+,+,−),(−,−,+),(+,−,+),(−,+,+),(+,+,+).
+        // (0,0,0),(1,0,0),(0,1,0),(1,1,0),(0,0,1),(1,0,1),(0,1,1),(1,1,1).
         let lex = HexQk::new_lex(1);
         let coords = lex.dof_coords();
-        let expected: Vec<Vec<f64>> = [(-1.0, -1.0, -1.0), (1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0), (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0), (-1.0, 1.0, 1.0), (1.0, 1.0, 1.0)]
+        let expected: Vec<Vec<f64>> = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 1.0), (0.0, 1.0, 1.0), (1.0, 1.0, 1.0)]
             .iter()
             .map(|&(x, y, z)| vec![x, y, z])
             .collect();

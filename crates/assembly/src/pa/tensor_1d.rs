@@ -117,7 +117,8 @@ mod tests {
 
         for p in 1..=6usize {
             let (nodes, slots) = hex_slots(&HexQk::new(p));
-            let (qpts, _) = fem_element::quadrature::gauss_legendre_arbitrary(p + 1);
+            // D721: the kernel's quadrature points are the `[0,1]` table.
+            let (qpts, _) = fem_element::quadrature::gauss_legendre_01(p + 1);
             // Slots whose tensor index is (ix, 0, 0): their basis value at a
             // point (x, nodes[0], nodes[0]) is exactly ℓ_ix(x).
             let probes: Vec<usize> = (0..=p)
@@ -138,13 +139,16 @@ mod tests {
                 elem.eval_basis(&[x, nodes[0], nodes[0]], &mut vals);
                 elem.eval_grad_basis(&[x, nodes[0], nodes[0]], &mut grads);
                 for (ix, &slot) in probes.iter().enumerate() {
+                    // Relative form: at p = 5 the `[0,1]` Gauss points sit far
+                    // outside the node range, so the basis values reach ~1e3 and
+                    // an absolute bound would test the magnitude, not the match.
                     assert!(
-                        (v[ix] - vals[slot]).abs() < 1e-13,
+                        (v[ix] - vals[slot]).abs() <= 1e-12 * (1.0 + v[ix].abs()),
                         "p={p} x={x}: ℓ_{ix} value {} vs element {}",
                         v[ix], vals[slot]
                     );
                     assert!(
-                        (d[ix] - grads[slot * 3]).abs() < 1e-12,
+                        (d[ix] - grads[slot * 3]).abs() <= 1e-11 * (1.0 + d[ix].abs()),
                         "p={p} x={x}: ℓ'_{ix} {} vs element {}",
                         d[ix], grads[slot * 3]
                     );
@@ -162,7 +166,8 @@ mod tests {
             use crate::pa::hex_layout::hex_slots;
             use fem_element::lagrange::factory::HexQk;
             let (nodes, _) = hex_slots(&HexQk::new(p));
-            let (qpts, _) = fem_element::quadrature::gauss_legendre_arbitrary(p + 1);
+            // D721: the kernel's quadrature points are the `[0,1]` table.
+            let (qpts, _) = fem_element::quadrature::gauss_legendre_01(p + 1);
             assert!(
                 qpts.iter().any(|q| nodes.iter().any(|n| (q - n).abs() < 1e-14)),
                 "p={p}: expected a quadrature point on a node ({qpts:?} vs {nodes:?})"

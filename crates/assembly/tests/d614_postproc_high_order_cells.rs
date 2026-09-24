@@ -294,7 +294,9 @@ fn d614_needs_iso_geometry_element_on_straight_high_order_cells() {
     let hex27 = hex27_mesh();
     let geo = geo_ref_elem_from_mesh(&hex27, 0).expect("Hex27 straight needs_iso");
     assert_eq!(geo.n_dofs(), 8, "Hex27 straight geometry = trilinear HexQk(1)");
-    assert_eq!(geo.dof_coords()[0], vec![-1.0, -1.0, -1.0], "hex frame origin");
+    // D721: the hex reference frame is MFEM's `[0,1]³`, so the origin corner
+    // is `(0,0,0)`.
+    assert_eq!(geo.dof_coords()[0], vec![0.0, 0.0, 0.0], "hex frame origin");
 
     let hex20 = hex20_mesh();
     let geo = geo_ref_elem_from_mesh(&hex20, 0).expect("Hex20 straight needs_iso");
@@ -361,11 +363,11 @@ fn d614_curved_hex27_geometry_volume_matches_mfem() {
     let mut mesh = hex27_mesh();
     let family = HexQk::new(2);
     assert_eq!(family.n_dofs(), 27);
-    let lattice: Vec<Vec<f64>> = family
-        .dof_coords()
-        .iter()
-        .map(|c| vec![(c[0] + 1.0) / 2.0, (c[1] + 1.0) / 2.0, (c[2] + 1.0) / 2.0])
-        .collect();
+    // D757 (D721 shim deletion): `HexQk::dof_coords()` is now `[0,1]³`-native,
+    // so it IS the geometry-node lattice — the old `(c+1)/2` `[-1,1] → [0,1]`
+    // translation is gone.  The warped volume below reproduces the C++ probe's
+    // `9.99999999999999889e-01` bit-for-bit, which is the evidence.
+    let lattice: Vec<Vec<f64>> = family.dof_coords();
     attach_curved_table(&mut mesh, &lattice, &|p| p, &warp_hex);
     assert_eq!(mesh.geom_order(), 2);
 
@@ -566,12 +568,13 @@ fn d614_straight_warped_hex_corner_volume_matches_mfem() {
     );
     assert!((v - cpp).abs() < 1e-13, "warped-corner hex: {v:.17e} vs MFEM {cpp:.17e}");
 
-    // The single-point analogue of MFEM's GetElementVolume (center rule,
-    // weight 8 on the [-1,1]³ frame).
+    // The single-point analogue of MFEM's GetElementVolume (center rule, unit
+    // weight on the `[0,1]³` frame — D757/D721: the center moved from
+    // `(0,0,0)` to `(0.5,0.5,0.5)` and the `[-1,1]³` weight 8 collapsed to 1).
     let geo = geo_ref_elem_from_mesh(&mesh, 0).expect("Hex20 straight needs_iso");
     let nodes = mesh.element_nodes(0).to_vec();
-    let (j, _det, _xp) = isoparametric_jacobian(&mesh, &nodes, geo.as_ref(), &[0.0, 0.0, 0.0], 3);
-    let single = 8.0 * det3(&j);
+    let (j, _det, _xp) = isoparametric_jacobian(&mesh, &nodes, geo.as_ref(), &[0.5, 0.5, 0.5], 3);
+    let single = det3(&j);
     eprintln!(
         "D614 warped-corner hex20 single-point: fem-rs {single:.17e} vs MFEM GetElementVolume {cpp_single:.17e}"
     );

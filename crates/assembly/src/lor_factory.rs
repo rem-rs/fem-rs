@@ -955,8 +955,12 @@ mod lor_vector_tests {
     /// basis variant: `div_div·(∇·u,∇·v) + mass·(u,v)` with the library's
     /// quadrature split (GradDiv on the assembler's default order-4 rule,
     /// `VectorMassIntegrator` on its own `2·order+3` rule) and the affine
-    /// `[-1,1]³` hex Jacobian — the same recipe the D63 ND diagnostic uses for
-    /// H(curl) ([`assemble_hex_nd_variant`]).
+    /// `[0,1]³` hex Jacobian — the same recipe the D63 ND diagnostic uses for
+    /// H(curl) ([`assemble_hex_nd_variant`]).  The Jacobian must live in the
+    /// same frame as the element basis and the quadrature rule (D721 moved all
+    /// three to MFEM's `[0,1]³`; the historical `0.5·(x_max − x_min)` factor
+    /// was the `[-1,1]` chain rule and silently rescaled the HO mass/div-div
+    /// split, which is what the LOR pencil is sensitive to).
     fn assemble_hex_rt_variant(
             ho: &HDivSpace<Mesh<3>>,
             mesh: &Mesh<3>,
@@ -977,9 +981,9 @@ mod lor_vector_tests {
                 let b2 = mesh.node_coords(verts[4]);
                 let mut jac = [[0.0_f64; 3]; 3];
                 for r in 0..3 {
-                    jac[r][0] = 0.5 * (b0[r] - p0[r]);
-                    jac[r][1] = 0.5 * (b1[r] - p0[r]);
-                    jac[r][2] = 0.5 * (b2[r] - p0[r]);
+                    jac[r][0] = b0[r] - p0[r];
+                    jac[r][1] = b1[r] - p0[r];
+                    jac[r][2] = b2[r] - p0[r];
                 }
                 let det = jac[0][0] * jac[1][1] * jac[2][2];
                 let signs = ho.element_signs(e);
@@ -1271,6 +1275,19 @@ mod lor_vector_tests {
     /// for a Jacobi-preconditioned FGMres on the same systems — the LOR
     /// transfer removes the mesh dependence; what is left is the auxiliary
     /// space solver, not the prolongation.
+    ///
+    /// D721 update: the test-local HO assembler now rides the `[0,1]³` frame
+    /// like the element basis and the quadrature rule (the historical
+    /// `0.5·(x_max − x_min)` Jacobian rescaled the HO mass/div-div split and
+    /// pushed the counts to **99 → 132**, over the `+25` growth bound).  With
+    /// the frame restored the measured counts are **43 → 67** (growth 24, gate
+    /// `+25`) against the pre-flip `[-1,1]` measurement 46 → 65 (growth 19):
+    /// the two recipes describe the same operator up to the exact factor 16 the
+    /// frame change contributes to the coefficients, so the residual ±3
+    /// iterations are the documented last-bit sensitivity of the ADS inner
+    /// solve (the same class of ulp-level path flipping as the AbsL1
+    /// hierarchy).  Meshdependence — the property this test exists for — is
+    /// unaffected.
     ///
     /// D245: the HO matrix is assembled through [`assemble_hex_rt_variant`]
     /// with the explicit `HexRTk::new` (IntegratedGLL) element — the library
@@ -1731,9 +1748,12 @@ mod lor_vector_tests {
 
     /// Test-local affine-hex H(curl) assembler for an *arbitrary* `HexNDk`
     /// basis variant: assembles `(∇×u,∇×v) + (u,v)` with curl-curl quadrature
-    /// `2k` and mass `2k+3` (the library orders for a `Qk` tensor element).
-    /// Its parity with the library assembler is asserted in
-    /// [`d63_igll_pencil_diagnostics`] on the nodal element (7.1e-15).
+    /// `2k` and mass `2k+3` (the library orders for a `Qk` tensor element) on
+    /// the affine `[0,1]³` Jacobian — the frame the element basis and the
+    /// quadrature rule use since D721 (the two must agree, or the HO
+    /// curl-curl/mass split is silently rescaled).  Its parity with the library
+    /// assembler is asserted in [`d63_igll_pencil_diagnostics`] on the nodal
+    /// element (7.1e-15).
     fn assemble_hex_nd_variant(
             ho: &HCurlSpace<Mesh<3>>,
             mesh: &Mesh<3>,
@@ -1755,9 +1775,9 @@ mod lor_vector_tests {
                 let b2 = mesh.node_coords(verts[4]);
                 let mut jac = [[0.0_f64; 3]; 3];
                 for d in 0..3 {
-                    jac[d][0] = 0.5 * (b0[d] - p0[d]);
-                    jac[d][1] = 0.5 * (b1[d] - p0[d]);
-                    jac[d][2] = 0.5 * (b2[d] - p0[d]);
+                    jac[d][0] = b0[d] - p0[d];
+                    jac[d][1] = b1[d] - p0[d];
+                    jac[d][2] = b2[d] - p0[d];
                 }
                 let det = jac[0][0] * jac[1][1] * jac[2][2];
                 let iphi: Vec<f64> = (0..3).map(|d| 1.0 / jac[d][d]).collect();

@@ -1,4 +1,4 @@
-//! Raviart-Thomas RT1 element on the reference hexahedron `[-1,1]^3`.
+//! Raviart-Thomas RT1 element on the reference hexahedron `[0,1]^3`.
 //!
 //! # Space: RT₁ = Q_{2,1,1} × Q_{1,2,1} × Q_{1,1,2}
 //! dim = 3×2×2 + 2×3×2 + 2×2×3 = 12 + 12 + 12 = 36 DOFs.
@@ -9,13 +9,14 @@
 //!
 //! Delegates to the generic `HexRTk::new(1)` implementation.
 
-use crate::quadrature::{gauss_legendre_arbitrary, gauss_lobatto_arbitrary, hex_rule};
+use crate::gll_basis::{gl_nodes_01, gll_nodes_01};
+use crate::quadrature::hex_rule;
 use crate::raviart_thomas::hex_rtk::{free_axes, HEX_RT_FACES};
 use crate::raviart_thomas::HexRTk;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 /// MFEM `RT_HexahedronElement(k)` nodal dof table — reference sample points
-/// and (unnormalised) reference normals on the `[-1,1]³` hex, in the slot
+/// and (unnormalised) reference normals on the `[0,1]³` hex, in the slot
 /// order the H(div) space uses (faces in `HEX_FACES` order with the
 /// `HEX_RT_FACES` frame reversals, `(k+1)²` Gauss points each, then the
 /// interior closed×open×open grid: x-normal, y-normal, z-normal blocks with
@@ -24,9 +25,11 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 /// Published (D494) as the order-generic counterpart of
 /// `tet_rt1::mfem_nodal_dofs` so the assembly crate's MFEM-exact
 /// prolongation can consume the order-1 rows without duplicating the
-/// enumeration rules.
+/// enumeration rules.  D721: the points are MFEM's `[0,1]³` node values (the
+/// open Gauss-Legendre / closed Gauss-Lobatto points of
+/// `Poly_1D::OpenPoints` / `Poly_1D::ClosedPoints`).
 pub fn mfem_hex_nodal_dofs(k: usize) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
-    let (gl, _) = gauss_legendre_arbitrary(k + 1);
+    let gl = gl_nodes_01(k + 1);
     let m = k + 1;
     let axis = |i: usize| match i {
         0 => [1.0, 0.0, 0.0],
@@ -36,10 +39,10 @@ pub fn mfem_hex_nodal_dofs(k: usize) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
     let mut pts = Vec::new();
     let mut nks = Vec::new();
     for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
-        let cnorm = if at_max { 1.0 } else { -1.0 };
+        let cnorm = if at_max { 1.0 } else { 0.0 };
         let (a1, a2) = free_axes(nc);
         let mut nk = [0.0_f64; 3];
-        nk[nc] = cnorm;
+        nk[nc] = if at_max { 1.0 } else { -1.0 };
         for j in 0..m {
             let q = if f2 { m - 1 - j } else { j };
             for i in 0..m {
@@ -54,7 +57,7 @@ pub fn mfem_hex_nodal_dofs(k: usize) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
         }
     }
     if k >= 1 {
-        let (cp, _) = gauss_lobatto_arbitrary(k + 2);
+        let cp = gll_nodes_01(k + 1);
         // `HexRTk` bakes MFEM's reference orientation flips into the interior
         // basis (closed index <= k/2 is negative), so the dual flux samples
         // flip their normal with them.

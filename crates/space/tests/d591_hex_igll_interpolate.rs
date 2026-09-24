@@ -150,11 +150,12 @@ fn d591_hex_igll_interpolate_matches_mfem_project_integrated() {
     assert!(checked > 1000);
 }
 
-/// 框架因子口径 (pinned, not tolerated away): DOF values carry no frame
-/// factor, field RECONSTRUCTION through the fem-rs IGLL basis is MFEM's
-/// physical field times 1/4 (the `V_mfem/16` reference frame debt).  On the
-/// unit cube the IGLL RT0 dofs are the whole-face fluxes `0 0 1 0 -1 0` (=
-/// MFEM's probe line) and the reconstruction ratio is exactly 0.25.
+/// 框架因子口径 (pinned, not tolerated away): D721 removed the last frame
+/// factor — DOF values carry none and the field RECONSTRUCTION through the
+/// fem-rs IGLL basis now **is** MFEM's physical field exactly (the historical
+/// `V_mfem/16` debt made it MFEM/4).  On the unit cube the IGLL RT0 dofs are
+/// the whole-face fluxes `0 0 1 0 -1 0` (= MFEM's probe line) and the
+/// reconstruction ratio is exactly 1.
 #[test]
 fn d591_hex_igll_frame_factor_pinned() {
     let mesh = probe_mesh(0);
@@ -175,12 +176,13 @@ fn d591_hex_igll_frame_factor_pinned() {
     // Reconstruct at the element centre with the fem-rs IGLL basis:
     // u_phys = (1/det J) · J · Σ dof_i · sign_i · phi_ref_i(centre).
     let rt = HexRTk::new(0);
-    let centre = [0.0, 0.0, 0.0];
+    let centre = [0.5, 0.5, 0.5];
     let mut phi = vec![0.0; rt.n_dofs() * 3];
     rt.eval_basis_vec(&centre, &mut phi);
-    // trilinear map of the unit cube at the centre: J = diag(1/2), det = 1/8
-    let jac = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]];
-    let det = 0.125;
+    // D721: the reference cube IS the physical unit cube at the centre:
+    // J = diag(1, 1, 1), det = 1.
+    let jac = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let det = 1.0;
     let mut u = [0.0f64; 3];
     for i in 0..6 {
         for r in 0..3 {
@@ -192,10 +194,10 @@ fn d591_hex_igll_frame_factor_pinned() {
                 / det;
         }
     }
-    // The reconstruction must be (1/4, 0, 0) = MFEM's field / 4 — the frame
-    // factor is asserted at full precision, never absorbed by a tolerance.
+    // The reconstruction must be (1, 0, 0) = MFEM's field — the frame factor
+    // is asserted at full precision, never absorbed by a tolerance.
     println!("d591: IGLL-frame reconstruction of the unit x-field = {}", u[0]);
-    assert_eq!(u[0], 0.25, "fem-rs IGLL field frame = MFEM/4 (V_mfem/16 debt)");
+    assert_eq!(u[0], 1.0, "fem-rs IGLL field frame must equal MFEM's (D721)");
     assert_eq!(u[1], 0.0);
     assert_eq!(u[2], 0.0);
 }

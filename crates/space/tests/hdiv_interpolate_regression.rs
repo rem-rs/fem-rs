@@ -116,16 +116,17 @@ struct HexMap {
     x: Vec<Vec<f64>>, // 8 corner coords
 }
 
-/// Reference-sign table per local vertex index (x, y, z components).
-const HEX_SIGNS: [[f64; 3]; 8] = [
-    [-1.0, -1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [1.0, 1.0, -1.0],
-    [-1.0, 1.0, -1.0],
-    [-1.0, -1.0, 1.0],
-    [1.0, -1.0, 1.0],
+/// Reference-corner coordinates per local vertex index, on MFEM's `[0,1]³`
+/// hex frame — the frame `HexQk`/`HexRTk` have used since the D721 flip.
+const HEX_CORNERS: [[f64; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
     [1.0, 1.0, 1.0],
-    [-1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
 ];
 
 impl HexMap {
@@ -134,15 +135,21 @@ impl HexMap {
             x: nodes.iter().map(|&n| mesh.node_coords(n).to_vec()).collect(),
         }
     }
+    /// The three 1-D Q1 factor values `(f, d/dξ)` of corner `i` at `xi`.
+    fn factors(i: usize, xi: &[f64]) -> [(f64, f64); 3] {
+        let r = HEX_CORNERS[i];
+        let mut f = [(0.0f64, 0.0f64); 3];
+        for d in 0..3 {
+            f[d] = if r[d] == 1.0 { (xi[d], 1.0) } else { (1.0 - xi[d], -1.0) };
+        }
+        f
+    }
     #[allow(clippy::needless_range_loop)]
     fn map(&self, xi: &[f64]) -> [f64; 3] {
         let mut out = [0.0; 3];
         for i in 0..8 {
-            let s = HEX_SIGNS[i];
-            let n = 0.125
-                * (1.0 + s[0] * xi[0])
-                * (1.0 + s[1] * xi[1])
-                * (1.0 + s[2] * xi[2]);
+            let f = Self::factors(i, xi);
+            let n = f[0].0 * f[1].0 * f[2].0;
             for r in 0..3 {
                 out[r] += n * self.x[i][r];
             }
@@ -152,13 +159,9 @@ impl HexMap {
     fn jac(&self, xi: &[f64]) -> [[f64; 3]; 3] {
         let mut j = [[0.0; 3]; 3];
         for i in 0..8 {
-            let s = HEX_SIGNS[i];
-            // dN/dcoord = (s/2) * prod of the other two linear factors
-            let d = [
-                0.5 * s[0] * 0.5 * (1.0 + s[1] * xi[1]) * 0.5 * (1.0 + s[2] * xi[2]),
-                0.5 * (1.0 + s[0] * xi[0]) * 0.5 * s[1] * 0.5 * (1.0 + s[2] * xi[2]),
-                0.5 * (1.0 + s[0] * xi[0]) * 0.5 * (1.0 + s[1] * xi[1]) * 0.5 * s[2],
-            ];
+            let f = Self::factors(i, xi);
+            // dN/dξ_c = (factor c derivative) × the other two factors
+            let d = [f[0].1 * f[1].0 * f[2].0, f[0].0 * f[1].1 * f[2].0, f[0].0 * f[1].0 * f[2].1];
             for r in 0..3 {
                 for c in 0..3 {
                     j[r][c] += d[c] * self.x[i][r];

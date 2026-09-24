@@ -165,7 +165,8 @@ fn parse_dump(path: &str) -> Dump {
 }
 
 /// fem-rs isoparametric geometry map for element `e` at reference point `xi`
-/// (in `HexQk`'s domain `[-1,1]³`), using the mesh's `geometry` table.
+/// (in `HexQk`'s domain `[0,1]³` — MFEM's frame since the D721 flip), using
+/// the mesh's `geometry` table.
 fn eval_geom(mesh: &Mesh<3>, e: u32, ref_elem: &HexQk, xi: &[f64]) -> [f64; 3] {
     let mut vals = vec![0.0f64; ref_elem.n_dofs()];
     ref_elem.eval_basis(xi, &mut vals);
@@ -224,9 +225,12 @@ fn curved_hex_nodes_match_mfem_slot_by_slot() {
             assert_eq!(got, want, "{}: element {e} dof multiset", case.label);
 
             // (b) slot-by-slot: the map at each FE node reproduces MFEM's point.
+            // The dump's `noderef` coordinates are already MFEM's `[0,1]³` FE
+            // nodes, which is `HexQk`'s own frame (D721), so they feed the
+            // evaluation directly — the pre-D721 `2·nr − 1` conversion is gone.
             for i in 0..d.npe {
                 let nr = d.node_ref[i];
-                let xi = [2.0 * nr[0] - 1.0, 2.0 * nr[1] - 1.0, 2.0 * nr[2] - 1.0];
+                let xi = [nr[0], nr[1], nr[2]];
                 let got = eval_geom(&mesh, e, &ref_elem, &xi);
                 for k in 0..3 {
                     let diff = (got[k] - d.pt[e as usize][i][k]).abs();

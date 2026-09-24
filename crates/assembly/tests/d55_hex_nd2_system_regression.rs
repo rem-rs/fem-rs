@@ -221,6 +221,17 @@ fn one_hex_per_integrator_invariants_match_mfem() {
 /// assembly against a silently wrong element curl, which would corrupt every
 /// hex curl-curl matrix while leaving the mass matrix — and any
 /// interpolation-only test — untouched).
+///
+/// D757 (frame re-anchor, D721): the probe points are the `[-1,1]³`-era list
+/// `(0.31,−0.22,0.17) / (−0.4,0.5,−0.6) / (0,0,0)` pushed through the
+/// reference-frame map `ξ_[0,1] = (ξ_[−1,1]+1)/2`, i.e. the SAME reference
+/// points on the unit cube — the hex element's natural domain since D721.  The
+/// unmapped list is not usable any more: it now lies outside the cube, where
+/// the forward-difference budget `1e-5` is exceeded by truncation alone.  The
+/// measured truncation law is linear in `h` on all three points
+/// (`tmp/d757/d55_diag.txt`: 7.530e-3/7.530e-4/7.530e-5/7.530e-6 …), i.e.
+/// `eval_curl` is the exact analytic curl and the residual is pure O(h·|φ''|)
+/// forward-difference error — no element defect.
 #[test]
 fn hex_ndk_curl_matches_finite_differences() {
     let r = HexNDk::new(2);
@@ -233,7 +244,7 @@ fn hex_ndk_curl_matches_finite_differences() {
         vec![0.0; n * 3],
     );
     let mut c = vec![0.0; n * 3];
-    for xi in [[0.31, -0.22, 0.17], [-0.4, 0.5, -0.6], [0.0, 0.0, 0.0]] {
+    for xi in [[0.655, 0.39, 0.585], [0.3, 0.75, 0.2], [0.5, 0.5, 0.5]] {
         r.eval_basis_vec(&xi, &mut p0);
         r.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut px);
         r.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut py);
@@ -378,7 +389,16 @@ fn beam_hex_eliminated_system_matches_mfem() {
     }
 }
 
-/// Trilinear hex Jacobian at `xi` (ex3 `jac_3d`'s hex branch).
+/// Q1 unit-cube Jacobian at `xi` (ex3 `jac_3d`'s hex branch).
+///
+/// D757: re-anchored onto the `[0,1]³` hex reference frame (D721) — the corner
+/// table is the unit-cube `0/1` table and the trilinear shapes are
+/// `∏_d (C_d·ξ_d + (1−C_d)(1−ξ_d))`, so `xi` (the `HexNDk`/`hex_rule` points,
+/// themselves `[0,1]³`) maps to the correct physical point.  The `[-1,1]³`
+/// form evaluated `1 + ξ·c` on `[0,1]` inputs and silently produced a
+/// half-cube-scaled map, which is what broke the dense-solution L2 line
+/// (1.5609 vs the C++ harness 0.114704645256019) while leaving the
+/// matrix/RHS norms — which never touch this helper — bit-intact.
 fn crate_common_jac(
     mesh: &Mesh<3>,
     e: u32,
@@ -386,22 +406,23 @@ fn crate_common_jac(
 ) -> (nalgebra::DMatrix<f64>, [f64; 3]) {
     let n = mesh.element_nodes(e);
     const C: [[f64; 3]; 8] = [
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
         [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
     ];
     let mut j = nalgebra::DMatrix::<f64>::zeros(3, 3);
     let mut xp = [0.0_f64; 3];
     for (i, c) in C.iter().enumerate() {
         let p = mesh.node_coords(n[i]);
-        let a = [1.0 + xi[0] * c[0], 1.0 + xi[1] * c[1], 1.0 + xi[2] * c[2]];
-        let dn = [c[0] * a[1] * a[2] / 8.0, a[0] * c[1] * a[2] / 8.0, a[0] * a[1] * c[2] / 8.0];
-        let ni = a[0] * a[1] * a[2] / 8.0;
+        let s: [f64; 3] = std::array::from_fn(|d| if c[d] > 0.5 { xi[d] } else { 1.0 - xi[d] });
+        let ds: [f64; 3] = std::array::from_fn(|d| if c[d] > 0.5 { 1.0 } else { -1.0 });
+        let dn = [ds[0] * s[1] * s[2], s[0] * ds[1] * s[2], s[0] * s[1] * ds[2]];
+        let ni = s[0] * s[1] * s[2];
         for d in 0..3 {
             for cc in 0..3 {
                 j[(d, cc)] += p[d] * dn[cc];

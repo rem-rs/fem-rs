@@ -700,12 +700,14 @@ fn vtk_half_coords(ct: i64) -> Vec<[i64; 3]> {
 /// factories place their dofs on the same closed Gauss-Lobatto lattices.
 fn vtk_slots_for(ct: i64) -> FemResult<Vec<usize>> {
     let vtk = vtk_half_coords(ct);
-    // Unit-frame VTK half-integers → the fem-rs reference frame of the family
-    // (`HexQk` lives on `[-1,1]³`: u ∈ {0,½,1} ↦ 2u−1, quantized 2U−2;
-    // `PrismPk` puts the triangle on the (y, z) axes with the layer on x; the
-    // tri/quad/tet frames are the unit frames).
+    // Unit-frame VTK half-integers → the fem-rs reference frame of the family.
+    // D757 (D721 follow-up): `HexQk` now lives on MFEM's own `[0,1]³` unit
+    // cube, so the quadratic hex (VTK type 29) uses the unit frame verbatim
+    // like tri/quad/tet — the former `u ∈ {0,½,1} ↦ 2u−1` map (quantized
+    // `2U−2`) sent every slot off the lattice (`VTK node 0 of cell type 29 at
+    // [-2,-2,-2] has no matching fem-rs geometry slot`, d675/d688).  The
+    // prism's `[c,b,a]` is the frame's axis permutation and stays.
     let to_fem: Box<dyn Fn([i64; 3]) -> [i64; 3]> = match ct {
-        29 => Box::new(|[a, b, c]| [2 * a - 2, 2 * b - 2, 2 * c - 2]),
         32 => Box::new(|[a, b, c]| [c, b, a]),
         _ => Box::new(|c| c),
     };

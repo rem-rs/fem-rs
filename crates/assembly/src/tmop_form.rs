@@ -4361,7 +4361,8 @@ mod tests {
             );
         }
         let hex = fem_element::lagrange::factory::HexQk::new(3);
-        assert!(!el_domain_is_unit(&hex), "HexQk lives on [-1,1]^3");
+        // D721: HexQk moved to MFEM's [0,1]^3, so it needs no wrapper either.
+        assert!(el_domain_is_unit(&hex), "HexQk lives on [0,1]^3 (D721)");
         let wrap = UnitDomainElem {
             inner: Box::new(fem_element::lagrange::factory::HexQk::new(3)),
             dim: 3,

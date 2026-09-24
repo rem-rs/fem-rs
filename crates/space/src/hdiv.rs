@@ -30,9 +30,7 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
-use fem_element::quadrature::{
-    gauss_legendre_01, gauss_legendre_arbitrary, gauss_lobatto_01, gauss_lobatto_arbitrary,
-};
+use fem_element::quadrature::{gauss_legendre_01, gauss_lobatto_01};
 use fem_element::raviart_thomas::{
     HexRTk, PrismRT0, PyraRTk, QuadRTk, TetRTk, TriRT1, TriRT2, TriRTk,
 };
@@ -2778,67 +2776,16 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
         // index runs backwards on the bottom/back/left faces — matching the
         // relabeling `HexRTk` applies to its basis functions and dof nodes.
         ElementType::Hex8 => {
-            use fem_element::raviart_thomas::{free_axes, HEX_RT_FACES};
-            let gl = gauss_legendre_arbitrary(k + 1).0;
-            let m = k + 1;
-            for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
-                let cnorm = if at_max { 1.0 } else { -1.0 };
-                let (a1, a2) = free_axes(nc);
-                let mut nk = [0.0_f64; 3];
-                nk[nc] = cnorm;
-                for j in 0..m {
-                    let q = if f2 { m - 1 - j } else { j };
-                    for i in 0..m {
-                        let p = if f1 { m - 1 - i } else { i };
-                        let mut xi = [0.0_f64; 3];
-                        xi[nc] = cnorm;
-                        xi[a1] = gl[p];
-                        xi[a2] = gl[q];
-                        rows.push(InterpRow { xi, nk });
-                    }
-                }
-            }
-            if k >= 1 {
-                // D225: `HexRTk` bakes MFEM's reference orientation flips into
-                // the interior basis (closed index <= k/2 is negative), so the
-                // dual flux samples flip their normal with them.
-                let cp = gauss_lobatto_arbitrary(k + 2).0;
-                for l in 0..m {
-                    for j in 0..m {
-                        for i in 1..=k {
-                            let s = if i <= k / 2 { -1.0 } else { 1.0 };
-                            let mut nk = axis(0);
-                            for d in 0..3 {
-                                nk[d] *= s;
-                            }
-                            rows.push(InterpRow { xi: [cp[i], gl[j], gl[l]], nk });
-                        }
-                    }
-                }
-                for l in 0..m {
-                    for j in 1..=k {
-                        let s = if j <= k / 2 { -1.0 } else { 1.0 };
-                        for i in 0..m {
-                            let mut nk = axis(1);
-                            for d in 0..3 {
-                                nk[d] *= s;
-                            }
-                            rows.push(InterpRow { xi: [gl[i], cp[j], gl[l]], nk });
-                        }
-                    }
-                }
-                for l in 1..=k {
-                    let s = if l <= k / 2 { -1.0 } else { 1.0 };
-                    for j in 0..m {
-                        for i in 0..m {
-                            let mut nk = axis(2);
-                            for d in 0..3 {
-                                nk[d] *= s;
-                            }
-                            rows.push(InterpRow { xi: [gl[i], gl[j], cp[l]], nk });
-                        }
-                    }
-                }
+            // D494/D721: the MFEM `RT_HexahedronElement` node/normal table is
+            // published by the element crate (`hex_rt1::mfem_hex_nodal_dofs`,
+            // on MFEM's `[0,1]³` frame since the D721 flip) — consume it
+            // instead of re-deriving the face-frame enumeration here.  The
+            // element's `HexRTk::new_gauss_legendre` basis is point-dual to
+            // these rows (`W = I`, D721), so the interpolation solve returns
+            // MFEM's `Project_RT` dof values verbatim.
+            let (pts, nks) = fem_element::raviart_thomas::hex_rt1::mfem_hex_nodal_dofs(k);
+            for (p, nk) in pts.iter().zip(nks.iter()) {
+                rows.push(InterpRow { xi: *p, nk: *nk });
             }
         }
         // PRISM_FACES slot order: xi=0 tri, xi=1 tri, zeta=0 quad, diagonal
@@ -2990,41 +2937,45 @@ fn quad_map(c: &[[f64; 2]], xi: &[f64]) -> ([f64; 2], [[f64; 2]; 2]) {
     (x, j)
 }
 
-/// Local-vertex reference signs of the hexahedron (bottom face CCW 0..3, then
-/// the vertices above them: local 2 = (+,+,−), local 3 = (−,+,−), ...).
-const HEX_VERT_SIGNS: [[f64; 3]; 8] = [
-    [-1.0, -1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [1.0, 1.0, -1.0],
-    [-1.0, 1.0, -1.0],
-    [-1.0, -1.0, 1.0],
-    [1.0, -1.0, 1.0],
+/// Hex8 reference corners on `[0,1]³` (D721: MFEM's hex frame — bottom face
+/// CCW 0..3, then the vertices above them; the historical `[-1,1]³` corners
+/// are gone, and the `0.5·(1+s·ξ)` pull-back with them).
+const HEX_VERT_CORNERS: [[f64; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
     [1.0, 1.0, 1.0],
-    [-1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
 ];
 
-/// Trilinear hex map on the reference `[-1,1]^3`.
+/// Trilinear hex map on the reference `[0,1]^3` — the `ox·oy·oz` formulas of
+/// MFEM `TriLinear3DFiniteElement` / `fem_element::lagrange::HexQ1` (D721).
 fn hex_map(c: &[[f64; 3]], xi: &[f64]) -> ([f64; 3], [[f64; 3]; 3]) {
     let mut x = [0.0_f64; 3];
     let mut j = [[0.0_f64; 3]; 3];
+    let (u, v, w) = (xi[0], xi[1], xi[2]);
+    let (ou, ov, ow) = (1.0 - u, 1.0 - v, 1.0 - w);
     for i in 0..8 {
-        let s = HEX_VERT_SIGNS[i];
-        let f = [
-            0.5 * (1.0 + s[0] * xi[0]),
-            0.5 * (1.0 + s[1] * xi[1]),
-            0.5 * (1.0 + s[2] * xi[2]),
-        ];
+        let r = HEX_VERT_CORNERS[i];
+        let (f0, d0) = if r[0] == 1.0 { (u, 1.0) } else { (ou, -1.0) };
+        let (f1, d1) = if r[1] == 1.0 { (v, 1.0) } else { (ov, -1.0) };
+        let (f2, d2) = if r[2] == 1.0 { (w, 1.0) } else { (ow, -1.0) };
+        let f = [f0, f1, f2];
+        let d = [d0, d1, d2];
         let n = f[0] * f[1] * f[2];
-        for r in 0..3 {
-            x[r] += n * c[i][r];
+        for r2 in 0..3 {
+            x[r2] += n * c[i][r2];
             for cc in 0..3 {
-                // dN/dxi_cc = (s_cc / 2) * product of the other two factors
+                // dN/dxi_cc = (sign of the cc factor) * product of the other two
                 let (a, b) = match cc {
                     0 => (f[1], f[2]),
                     1 => (f[0], f[2]),
                     _ => (f[0], f[1]),
                 };
-                j[r][cc] += 0.5 * s[cc] * a * b * c[i][r];
+                j[r2][cc] += d[cc] * a * b * c[i][r2];
             }
         }
     }

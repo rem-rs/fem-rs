@@ -4,14 +4,15 @@
 //! element the LOR stack pins), not silently fall through to the
 //! GaussLegendre default.
 //!
-//! 框架因子口径 (frame-factor convention, pinned — not tolerated away):
-//! through the `[-1,1]` pull-back each fem-rs IGLL basis function's PHYSICAL
-//! field is MFEM's physical field × **1/4** (D591: dof values need no factor,
-//! field reconstruction = MFEM/4 — the standing `V_mfem/16` reference-frame
-//! debt of the `hex_rtk` module docs).  The mass matrix is quadratic in the
-//! basis, so **fem-rs's unsigned element matrix = MFEM's × 1/16**: every
-//! entry below is compared as `M_mfem[i][j]` vs `16 · M_femrs[i][j]`, the 16
-//! asserted explicitly per entry.
+//! 框架因子口径 (frame-factor convention — **D757 re-anchor after D721**):
+//! the `[-1,1]³` pull-back the old 1/4 field factor came from is GONE — D721
+//! moved the whole hex family (bases, slot rows, quadrature, geometry) onto
+//! MFEM's `[0,1]³` unit cube, so a fem-rs IGLL basis function's physical field
+//! is now MFEM's physical field **verbatim** (factor 1, formerly 1/4 per D591)
+//! and the mass matrix is quadratic in the basis, so **fem-rs's unsigned
+//! element matrix = MFEM's × 1** — `FRAME = 1` below, formerly 16.  The
+//! collapse is pinned bit-exactly against the same MFEM probe dump (the old
+//! `16·M_femrs` equals `M_mfem` to the printed 17 digits), not tolerated.
 //!
 //! What is compared: MFEM's RAW `VectorFEMassIntegrator::AssembleElementMatrix`
 //! output (unsigned, reference slot order — exactly what `BilinearForm` sums
@@ -108,16 +109,17 @@ fn probe_mesh(variant: usize) -> Mesh<3> {
 }
 
 /// Core acceptance: for every (p, variant, element) block, the IGLL space's
-/// per-element mass accumulation reproduces MFEM's raw element matrix ×
-/// 1/16 (the frame factor asserted explicitly).  Pin: relative deviation
-/// ≤ 4e-13 (the entries span ~16 orders of magnitude down to 1e-18
-/// off-diagonal dust; measured max printed).
+/// per-element mass accumulation reproduces MFEM's raw element matrix × 1
+/// (the frame factor asserted explicitly; D757 collapsed it from 16 to 1 with
+/// the D721 `[0,1]³` flip).  Pin: relative deviation ≤ 4e-13 (the entries span
+/// ~16 orders of magnitude down to 1e-18 off-diagonal dust; measured max
+/// printed).
 #[test]
 fn d615_hex_igll_mass_matrix_matches_mfem() {
     let blocks = parse_fixture_matrices(include_str!("data/d615_hex_igll_mass_mfem.txt"));
     assert_eq!(blocks.len(), 2 * 3, "2 mesh variants x p = 0..2");
 
-    const FRAME: f64 = 16.0; // fem-rs IGLL basis = MFEM/4 physical ⇒ mass /16
+    const FRAME: f64 = 1.0; // D757/D721: fem-rs IGLL basis = MFEM physical, verbatim
     let mut checked = 0usize;
     let mut max_rel = 0.0f64;
 
@@ -168,10 +170,11 @@ fn d615_hex_igll_mass_matrix_matches_mfem() {
 }
 
 /// The frame factor is a property of the IGLL basis, not of the tolerance:
-/// on the unit cube at p = 0 the fem-rs unsigned (0,0) entry must equal
-/// MFEM's 1/3 divided by 16, and the GLOBAL assembly must agree with the
-/// local entries away from the shared face while the shared-face slot
-/// accumulates BOTH elements (the honest global-matrix semantics).
+/// `FRAME = 1` (D757, after D721's `[0,1]³` flip — formerly 16), i.e. on the
+/// unit cube at p = 0 the fem-rs unsigned (0,0) entry must equal MFEM's 1/3
+/// verbatim, and the GLOBAL assembly must agree with the local entries away
+/// from the shared face while the shared-face slot accumulates BOTH elements
+/// (the honest global-matrix semantics).
 #[test]
 fn d615_hex_igll_frame_factor_and_global_sanity() {
     let mesh = probe_mesh(0);
@@ -188,15 +191,13 @@ fn d615_hex_igll_frame_factor_and_global_sanity() {
     let mfem_00 = 0.3333333333333332_f64;
     let nosign_00 = signs[0] * signs[0] * m.get(dofs[0] as usize, dofs[0] as usize);
     println!(
-        "d615: fem-rs global (0,0) = {nosign_00:.17e}, MFEM/16 = {:.17e}",
-        mfem_00 / 16.0
+        "d615: fem-rs global (0,0) = {nosign_00:.17e}, MFEM = {mfem_00:.17e}"
     );
     // dof 0 = the z- boundary face — not shared, so the global entry IS the
     // element's own contribution.
     assert!(
-        (nosign_00 - mfem_00 / 16.0).abs() <= 4e-17,
-        "frame factor 16 not honoured: {nosign_00} vs {}",
-        mfem_00 / 16.0
+        (nosign_00 - mfem_00).abs() <= 4e-17,
+        "frame factor 1 not honoured: {nosign_00} vs {mfem_00}"
     );
 
     // The shared interior x-face slot (2): the global entry accumulates both
@@ -205,9 +206,14 @@ fn d615_hex_igll_frame_factor_and_global_sanity() {
     // a factor-2 defect.
     let shared = m.get(dofs[2] as usize, dofs[2] as usize);
     println!("d615: shared-face global (2,2) = {shared:.17e} (= 2 × 1/48)");
+    // D757: the absolute pin re-anchors with the frame factor.  Pre-flip the
+    // entry lived at 2·(1/3)/16 = 1/24 and the pin was 8e-17 ≈ 1.9e-15
+    // relative; after D721 the same entry is 16× larger (2/3), so the
+    // ulp-equivalent budget is 1.9e-15 · 2/3 = 1.3e-15.  The check still
+    // separates the factor-2 global semantics from a single-element (factor-1)
+    // read by ~15 orders of magnitude.
     assert!(
-        (shared - 2.0 * mfem_00 / 16.0).abs() <= 8e-17,
-        "shared-face accumulation broken: {shared} vs 2×{}",
-        mfem_00 / 16.0
+        (shared - 2.0 * mfem_00).abs() <= 1.3e-15,
+        "shared-face accumulation broken: {shared} vs 2×{mfem_00}"
     );
 }

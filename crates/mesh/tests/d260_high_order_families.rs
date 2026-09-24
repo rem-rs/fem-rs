@@ -401,14 +401,14 @@ fn d244_hex20_curved_locate_kronecker_at_nodes() {
     // from the Gmsh Hex20 spec (corners + edge mids) as a cross-check of the
     // locator's internal table.
     let corners: [[f64; 3]; 8] = [
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
         [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
     ];
     let gmsh_edges: [[usize; 2]; 12] = [
         [0, 1],
@@ -424,6 +424,7 @@ fn d244_hex20_curved_locate_kronecker_at_nodes() {
         [5, 6],
         [6, 7],
     ];
+    // D721: the reference corner table is MFEM's `[0,1]^3` (`corners` below).
     let mut refs: Vec<[f64; 3]> = corners.to_vec();
     for [a, b] in gmsh_edges {
         refs.push(std::array::from_fn(|d| 0.5 * (corners[a][d] + corners[b][d])));
@@ -449,8 +450,8 @@ fn d244_hex20_curved_locate_kronecker_at_nodes() {
             .locate(&c, 1e-12)
             .unwrap_or_else(|| panic!("node {k} not located"));
         assert_eq!(e, 0);
-        // `MeshTopology::locate` reports FACTORY coordinates: [−1,1]^3 for
-        // hexes, i.e. exactly the reference table values.
+        // D721: `MeshTopology::locate` reports MFEM's `[0,1]^3` factory frame
+        // for hexes, so the reference table is compared directly.
         let err: f64 = (0..3).map(|d| (xi[d] - r[d]).abs()).sum();
         assert!(err < 1e-9, "node {k}: xi {xi:?} != {r:?} (err {err:e})");
     }
@@ -614,11 +615,11 @@ fn d244_mixed_hex8_hex20_locates() {
     for z in [0.25_f64, 0.75, 1.25, 1.75] {
         let p = [0.5, 0.5, z];
         let (e, xi) = m.locate(&p, 1e-12).expect("mixed mesh point");
-        // Straight hexes: factory xi is exactly 2(z_local) - 1 in each cell
-        // (the top cell spans z ∈ [1, 2]).
+        // Straight hexes: D721 factory xi is exactly the local fraction in
+        // each cell (the top cell spans z ∈ [1, 2]).
         let z0 = if z < 1.0 { 0.0 } else { 1.0 };
         assert!(
-            (xi[2] - (2.0 * (z - z0) - 1.0)).abs() < 1e-10,
+            (xi[2] - (z - z0)).abs() < 1e-10,
             "z={z}: elem {e} xi {xi:?}"
         );
     }

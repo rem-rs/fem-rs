@@ -60,21 +60,22 @@ fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
     }
 }
 
-/// Reference-cube corner coordinates `[-1,1]³` of the 8 `Hex8` vertices, in the
-/// mesh/MFEM vertex order (`v0..v7` = bottom face CCW, then top face CCW).
+/// Reference-cube corner coordinates `[0,1]³` (D721; was `[-1,1]³`) of the 8
+/// `Hex8` vertices, in the mesh/MFEM vertex order (`v0..v7` = bottom face CCW,
+/// then top face CCW).
 ///
 /// This is the ordering of `Mesh::element_nodes` for `Hex8` (see also the
-/// `HEX_CORNERS` lattice table in `fem-space::lor`): `v2 = (1,1,-1)`,
-/// `v3 = (-1,1,-1)`, `v6 = (1,1,1)`, `v7 = (-1,1,1)`.
+/// `HEX_CORNERS` lattice table in `fem-space::lor`): `v2 = (1,1,0)`,
+/// `v3 = (0,1,0)`, `v6 = (1,1,1)`, `v7 = (0,1,1)`.
 const HEX8_REF_CORNERS: [[f64; 3]; 8] = [
-    [-1.0, -1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [1.0, 1.0, -1.0],
-    [-1.0, 1.0, -1.0],
-    [-1.0, -1.0, 1.0],
-    [1.0, -1.0, 1.0],
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
     [1.0, 1.0, 1.0],
-    [-1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
 ];
 
 /// High-order geometry data for curved meshes (set via [`Mesh::set_curvature`]).
@@ -704,11 +705,12 @@ impl<const D: usize> Mesh<D> {
 
             for d in 0..npe_new {
                 let rc = &dof_ref[d];
-                // Which reference axes are pinned to ±1 (i.e. to a face)?
+                // Which reference axes are pinned to 0 or 1 (i.e. to a face)?
+                // D721: the hex reference frame is `[0,1]³`.
                 let mut free_axis = None;
                 let mut n_pinned = 0usize;
                 for a in 0..3 {
-                    if (rc[a] + 1.0).abs() < 1e-12 || (rc[a] - 1.0).abs() < 1e-12 {
+                    if rc[a].abs() < 1e-12 || (rc[a] - 1.0).abs() < 1e-12 {
                         n_pinned += 1;
                     } else {
                         free_axis = Some(a);
@@ -729,24 +731,24 @@ impl<const D: usize> Mesh<D> {
                         .position(|&g| (g - rc[fa]).abs() < 1e-12)
                         .expect("hex edge DOF at a Lobatto node");
                     debug_assert!(rank >= 1 && rank < p);
-                    // The two end vertices of the edge: free axis at -1 and +1.
+                    // The two end vertices of the edge: free axis at 0 and 1.
                     let end = |sign: f64| -> usize {
                         let mut pos = [rc[0], rc[1], rc[2]];
                         pos[fa] = sign;
                         corner_at(&pos).expect("hex edge end vertex")
                     };
-                    let (va, vb) = (verts[end(-1.0)], verts[end(1.0)]);
+                    let (va, vb) = (verts[end(0.0)], verts[end(1.0)]);
                     let key = (va.min(vb), va.max(vb));
                     let ids = edge_map.entry(key).or_insert_with(|| {
                         // Order the nodes from the min vertex to the max vertex;
-                        // `gll[1..=p-1]` are the interior Lobatto coordinates,
-                        // i.e. `t = (gll[r]+1)/2` is the parameter from the end
-                        // at reference -1.
+                        // `gll[1..=p-1]` are the interior Lobatto coordinates on
+                        // `[0,1]` (D721), i.e. `t = gll[r]` is the parameter
+                        // from the end at reference 0.
                         let ca = self.coords_of(key.0);
                         let cb = self.coords_of(key.1);
                         let mut ids = Vec::with_capacity(p - 1);
                         for &g in &gll[1..p] {
-                            let t = 0.5 * (g + 1.0);
+                            let t = g;
                             let mut x = [0.0_f64; 3];
                             for dd in 0..3 {
                                 x[dd] = (1.0 - t) * ca[dd] + t * cb[dd];
@@ -779,9 +781,9 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
-    /// Evaluate the linear (trilinear) `Hex8` map at the reference point `rc`:
-    /// the multilinear interpolant of the 8 vertex coordinates in the mesh
-    /// `Hex8` vertex order (see [`HEX8_REF_CORNERS`]).
+    /// Evaluate the linear (trilinear) `Hex8` map at the reference point `rc`
+    /// (on `[0,1]³`, D721): the multilinear interpolant of the 8 vertex
+    /// coordinates in the mesh `Hex8` vertex order (see [`HEX8_REF_CORNERS`]).
     fn trilinear_interp_3d(verts: &[NodeId], mesh: &Self, rc: &[f64]) -> [f64; 3] {
         let mut x = [0.0_f64; 3];
         for (v, corner) in HEX8_REF_CORNERS.iter().enumerate() {
@@ -789,7 +791,7 @@ impl<const D: usize> Mesh<D> {
             // the others (product of the 1-D hats on each axis).
             let mut w = 1.0;
             for a in 0..3 {
-                w *= 0.5 * (1.0 + rc[a] * corner[a]);
+                w *= if corner[a] == 1.0 { rc[a] } else { 1.0 - rc[a] };
             }
             if w == 0.0 {
                 continue;
@@ -3844,12 +3846,13 @@ impl<const D: usize> MeshTopology for Mesh<D> {
                 if g.code == crate::findpts::CODE_NOT_FOUND {
                     return None;
                 }
-                // D224 convention: report the reference coordinates in the
-                // fem_element **factory domain** of the located element (the
-                // same domain the solution bases and `GridFunction::evaluate_*`
-                // consume): hex `[-1, 1]^3`, quad `[0, 1]^2`, prism axial-first,
-                // simplices barycentric.  `GslibFindPoints` works in the
-                // MFEM-canonical `[0, 1]^D`, so translate once at this boundary.
+                // D224/D721 convention: report the reference coordinates in
+                // the fem_element **factory domain** of the located element
+                // (the same domain the solution bases and
+                // `GridFunction::evaluate_*` consume): `[0, 1]^D` for every
+                // tensor/prism family (the hex joined them in D721), simplices
+                // barycentric.  `GslibFindPoints` already works in the
+                // MFEM-canonical `[0, 1]^D`, so this is the identity.
                 let et = self.element_type_at(g.elem);
                 let (fxi, _) = crate::findpts::to_factory_coords(et, &g.xi);
                 return Some((g.elem, fxi));
@@ -4333,14 +4336,15 @@ mod tests {
         }
     }
 
-    /// Reference points of the 6 hex faces (one free axis pinned to ±1) plus
-    /// face-interior samples, used to probe `det J` on the whole boundary.
+    /// Reference points of the 6 hex faces (one free axis pinned to 0 or 1)
+    /// plus face-interior samples, used to probe `det J` on the whole
+    /// boundary.  D721: the hex reference frame is `[0,1]³`.
     fn hex_boundary_probe_points() -> Vec<[f64; 3]> {
         let mut pts = Vec::new();
         for a in 0..3 {
-            for sign in [-1.0f64, 1.0] {
-                for &r in &[-2.0f64 / 3.0, 0.0, 2.0 / 3.0] {
-                    for &s in &[-2.0f64 / 3.0, 0.0, 2.0 / 3.0] {
+            for sign in [0.0f64, 1.0] {
+                for &r in &[1.0f64 / 3.0, 0.5, 2.0 / 3.0] {
+                    for &s in &[1.0f64 / 3.0, 0.5, 2.0 / 3.0] {
                         let mut xi = [0.0f64; 3];
                         xi[a] = sign;
                         xi[(a + 1) % 3] = r;
@@ -4385,7 +4389,8 @@ mod tests {
                             .map(|c| [c[0], c[1], c[2]]),
                     );
                 }
-                probes.push([0.1, -0.2, 0.35]);
+                // D721: probe points live on the `[0,1]^3` hex frame.
+                probes.push([0.55, 0.4, 0.675]);
 
                 let mut m_lin = m.clone();
                 m_lin.geometry = None;
@@ -4699,11 +4704,9 @@ mod tests {
             };
 
             for d in 0..npe {
-                let rc_mfem = [
-                    0.5 * (dof_ref[d][0] + 1.0),
-                    0.5 * (dof_ref[d][1] + 1.0),
-                    0.5 * (dof_ref[d][2] + 1.0),
-                ];
+                // D721: the element's dof coords are already MFEM's `[0,1]^3`
+                // reference positions (the `0.5·(c+1)` shim is gone).
+                let rc_mfem = dof_ref[d];
                 let (k, _) = table
                     .iter()
                     .enumerate()

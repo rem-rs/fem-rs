@@ -152,17 +152,18 @@ impl<'a> HexQkGeometry<'a> {
         }
 
         // The single source of truth for the positional layout: the element's
-        // own dof table (`HexQk` on `[-1,1]³`), mapped onto the `[0,1]³`
-        // reference cube the mesh kernels use.
+        // own dof table — `HexQk`, which lives on the `[0,1]³` reference cube
+        // the mesh kernels use since D721 (the historical `0.5·(c+1)`
+        // `[-1,1] → [0,1]` shim is gone with the frame flip).
         let fe = ElementType::Hex8.ref_elem(order as u8);
-        let dof_coords = fe.dof_coords();
-        if dof_coords.len() != dpe {
+        let ref01: Vec<[f64; 3]> = fe
+            .dof_coords()
+            .iter()
+            .map(|c| [c[0], c[1], c[2]])
+            .collect();
+        if ref01.len() != dpe {
             return None;
         }
-        let ref01: Vec<[f64; 3]> = dof_coords
-            .iter()
-            .map(|c| [0.5 * (c[0] + 1.0), 0.5 * (c[1] + 1.0), 0.5 * (c[2] + 1.0)])
-            .collect();
         let mut nodes: Vec<f64> = ref01.iter().map(|r| r[0]).collect();
         nodes.sort_by(|a, b| a.partial_cmp(b).expect("finite dof nodes"));
         nodes.dedup();

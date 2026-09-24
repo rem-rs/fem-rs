@@ -9,13 +9,13 @@
 //! for every constructor and every dispatched (cell, order) pair, **every dof
 //! coordinate and every quadrature point of the element's own rule must lie
 //! inside the declared reference domain**, and the standard rules must keep
-//! their exact reference measures (tri ½, tet ⅙, square 1, cube 8, prism ½,
+//! their exact reference measures (tri ½, tet ⅙, square 1, cube 1, prism ½,
 //! pyramid ⅓).
 //!
 //! Frames under contract (module doc of `fem_space::ref_elem`):
 //! unit simplex (Σξ ≤ 1, ξ ≥ 0), `[0,1]²`, legacy `[-1,1]²` (`QuadQ1`/`Q2`),
-//! `[-1,1]³`, unit prism (unit triangle × `[0,1]`), unit pyramid
-//! (`x,y ∈ [0, 1−z]`, `z ∈ [0,1]`).
+//! `[0,1]³` (D721 — was `[-1,1]³`), unit prism (unit triangle × `[0,1]`),
+//! unit pyramid (`x,y ∈ [0, 1−z]`, `z ∈ [0,1]`).
 
 use fem_element::lagrange::PyramidBasisType;
 use fem_element::{ReferenceElement, VectorReferenceElement};
@@ -66,7 +66,8 @@ impl Domain {
                 (0..2).all(|d| p[d] >= -eps && p[d] <= 1.0 + eps)
             }
             Domain::SquareLegacy => (0..2).all(|d| p[d] >= -1.0 - eps && p[d] <= 1.0 + eps),
-            Domain::Cube => (0..3).all(|d| p[d] >= -1.0 - eps && p[d] <= 1.0 + eps),
+            // D721: the hex cube frame is MFEM's `[0,1]³` (was `[-1,1]³`).
+            Domain::Cube => (0..3).all(|d| p[d] >= -eps && p[d] <= 1.0 + eps),
             Domain::Prism => {
                 p[0] >= -eps
                     && p[0] <= 1.0 + eps
@@ -150,7 +151,7 @@ fn family_constructors_keep_their_declared_domains() {
             &format!("gll_tensor(Hex,{o})"),
             &*gll_tensor(ElementType::Hex8, o),
             Domain::Cube,
-            8.0,
+            1.0,
         );
     }
     check(
@@ -169,7 +170,7 @@ fn family_constructors_keep_their_declared_domains() {
         "fixed_order_tensor(HexQ1)",
         &*fixed_order_tensor(ElementType::Hex8, 1),
         Domain::Cube,
-        8.0,
+        1.0, // D721: the hex reference cube is MFEM's [0,1]^3 (measure 1)
     );
     for o in 1..=3u8 {
         check(
@@ -209,7 +210,7 @@ fn purpose_dispatches_stay_in_domain_for_every_cell() {
         (ElementType::Tri3, Domain::Tri, 0.5),
         (ElementType::Quad4, Domain::Square01, 1.0),
         (ElementType::Tet4, Domain::Tet, 1.0 / 6.0),
-        (ElementType::Hex8, Domain::Cube, 8.0),
+        (ElementType::Hex8, Domain::Cube, 1.0),
         (ElementType::Prism6, Domain::Prism, 0.5),
         (ElementType::Pyramid5, Domain::Pyramid, 1.0 / 3.0),
     ];

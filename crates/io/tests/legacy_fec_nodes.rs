@@ -178,9 +178,9 @@ fn geo_elem(
         ),
         ElementType::Hex8 => (
             Box::new(HexQk::new(p)),
-            vec![0.0, 0.0, 0.0],
-            |x| x.iter().map(|&v| 0.5 * (v + 1.0)).collect(),
-            8.0,
+            vec![0.5, 0.5, 0.5],
+            |x| x.to_vec(),
+            1.0,
         ),
         ElementType::Tri3 => (
             Box::new(H1TriPk::new(p)),
@@ -386,10 +386,14 @@ fn min_det_on_the_miniapp_sample_matches_mfem() {
         if let Some(mesh) = file.mesh3d.as_ref() {
             assert_eq!(mesh.element_type_at(0), ElementType::Hex8);
             let (fe, _, _, scale) = geo_elem(ElementType::Hex8, 3);
+            // `HexQk` lives on `[0,1]³` (MFEM's `CUBE`) since the D721 flip,
+            // so the 6-point GLL sample maps to `0.5·(g+1)` — the same
+            // conversion the 2-D branch below applies to `QuadQk`.
+            let a3: Vec<f64> = g6.iter().map(|&x| 0.5 * (x + 1.0)).collect();
             for e in 0..mesh.n_elems() as u32 {
-                for &z in &g6 {
-                    for &y in &g6 {
-                        for &x in &g6 {
+                for &z in &a3 {
+                    for &y in &a3 {
+                        for &x in &a3 {
                             min_det = min_det.min(jac_det(mesh, e, &*fe, &[x, y, z]) * scale);
                         }
                     }

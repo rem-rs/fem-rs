@@ -293,14 +293,12 @@ fn verify_against_mfem(mesh_path: &str, dump_path: &str, label: &str) {
         let re = consumer_ref_elem(*et, d.p);
         let coords = re.dof_coords();
         assert_eq!(coords.len(), row.len(), "{label} element {e} row/family dof count");
-        // MFEM's H1 elements live on [0,1]^d; HexQk lives on [-1,1]^3, so its
-        // lattice points are the [0,1] points mapped by x -> 2x-1; PrismPk
-        // orders its axes (height, tri-x, tri-y) = MFEM's (z, x, y).
+        // MFEM's H1 elements live on [0,1]^d — and so does `HexQk` since the
+        // D721 hex flip (D757 re-anchor: the former `x -> 2x-1` map put every
+        // MFEM hex point off the lattice); PrismPk orders its axes
+        // (height, tri-x, tri-y) = MFEM's (z, x, y).
         let to_consumer = |pt: &[f64]| -> Vec<f64> {
             match *et {
-                ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
-                    (0..d.sdim).map(|k| 2.0 * pt[k] - 1.0).collect()
-                }
                 ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
                     vec![pt[2], pt[0], pt[1]]
                 }
@@ -406,10 +404,11 @@ fn verify_against_mfem(mesh_path: &str, dump_path: &str, label: &str) {
             }
             other => panic!("no center for {other:?}"),
         };
+        // D757 (D721 follow-up): `HexQk` is on MFEM's `[0,1]³` unit cube now, so
+        // the hex center is the MFEM center verbatim (the former `2v−1` map
+        // evaluated the basis outside its domain and inflated detJ by 2^dim);
+        // PrismPk still orders its axes (height, tri-x, tri-y) = MFEM (z, x, y).
         let xi: Vec<f64> = match *et {
-            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
-                center_mfem.iter().map(|&v| 2.0 * v - 1.0).collect()
-            }
             ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
                 vec![center_mfem[2], center_mfem[0], center_mfem[1]]
             }
@@ -475,12 +474,11 @@ fn det_of(jac: &[[f64; 3]; 3], sdim: usize) -> f64 {
 
 /// Physical/reference domain side factor per family (see the hex note in
 /// `verify_against_mfem`).
-fn center_scale(et: &ElementType, sdim: usize) -> f64 {
-    if matches!(*et, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
-        2f64.powi(sdim as i32)
-    } else {
-        1.0
-    }
+/// D757 (D721 follow-up): the hex consumer family shares MFEM's `[0,1]³` frame
+/// now, so no `2^dim` Jacobian rescale is due (the former `2^sdim` factor for
+/// Hex8/Hex20/Hex27 is gone).
+fn center_scale(_et: &ElementType, _sdim: usize) -> f64 {
+    1.0
 }
 
 /// `Σ w · detJ` over the family's own high-order quadrature rule, in MFEM's

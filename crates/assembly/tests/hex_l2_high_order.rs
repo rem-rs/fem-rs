@@ -5,9 +5,10 @@
 //! order, the assembler/GridFunction dispatch using the matching basis, and
 //! agreement with MFEM's `L2_HexahedronElement` (reference values dumped from
 //! MFEM 4.x `L2_FECollection(o, 3, BasisType::GaussLegendre)` on the
-//! unit-cube hex; the fem-rs hex basis lives on `[-1,1]³` — the affine image
-//! of MFEM's `[0,1]³` — so floating-point values agree to a few ulps, while
-//! `vsize`/`vdofs` match exactly).
+//! unit-cube hex).  **D757 re-anchor:** since D721 the fem-rs hex basis lives
+//! on MFEM's own `[0,1]³` unit cube (formerly the affine image `[-1,1]³`), so
+//! the dumps below are now reproduced verbatim — the previous "agree to a few
+//! ulps" caveat and every `2ξ−1` / `(ξ+1)/2` map in this file are gone.
 //!
 //! Run via:
 //!   cargo test -p fem-assembly --test hex_l2_high_order -- --nocapture
@@ -97,10 +98,12 @@ fn hex_l2_mass_row_sums_analytic() {
             "order {order}: unit-cube L2 mass {total} != 1"
         );
 
-        // Analytic row sums on the single unit-cube element: GL weights on
-        // [-1,1] sum to 2, so ∫φ_i over the unit cube = (w_ix/2)(w_iy/2)(w_iz/2).
+        // Analytic row sums on the single unit-cube element: the GL weights
+        // sum to 1 on `[0,1]` (D757 re-anchor; they summed to 2 on the old
+        // `[-1,1]³` frame, hence the former `/2` per axis), so
+        // ∫φ_i over the unit cube = w_ix·w_iy·w_iz.
         let p1 = order as usize + 1;
-        let (nodes, mut w) = fem_element::quadrature::gauss_legendre_arbitrary(p1);
+        let (nodes, mut w) = fem_element::quadrature::gauss_legendre_01(p1);
         if nodes.len() > 1 && nodes[0] > nodes[nodes.len() - 1] {
             w.reverse(); // match HexL2GL's ascending-node convention
         }
@@ -114,7 +117,7 @@ fn hex_l2_mass_row_sums_analytic() {
                 for ix in 0..p1 {
                     let dof = ix + iy * p1 + iz * p1 * p1;
                     let row: f64 = (0..n1).map(|j| m.get(dof, j)).sum();
-                    let want = (w[ix] / 2.0) * (w[iy] / 2.0) * (w[iz] / 2.0);
+                    let want = w[ix] * w[iy] * w[iz];
                     assert!(
                         (row - want).abs() < 1e-13,
                         "order {order} dof {dof}: row sum {row} != {want}"
@@ -155,12 +158,14 @@ fn hex_l2_projection_and_gridfunction_eval() {
         }
         for pt in pts {
             if pt.iter().enumerate().all(|(d, &v)| v >= lo[d] && v <= hi[d]) {
-                // Map the [0,1] physical box to [-1,1] reference coords.
+                // D757: the hex reference frame IS the physical box map's
+                // `[0,1]³` (D721) — the `[0,1] → [-1,1]` map `2(v−l)/(h−l)−1`
+                // is gone.
                 let xi: Vec<f64> = pt
                     .iter()
                     .zip(lo)
                     .zip(hi)
-                    .map(|((&v, l), h)| 2.0 * (v - l) / (h - l) - 1.0)
+                    .map(|((&v, l), h)| (v - l) / (h - l))
                     .collect();
                 let got = gf.evaluate_at_element(e, &xi);
                 let want = f(&pt);
@@ -190,8 +195,8 @@ fn hex_l2_coexists_with_h1_assembly() {
     assert_ne!(n_h1, n_l2);
 
     // Both interpolations reproduce f (per-axis degree ≤ 3 ⊂ Q3) — check via
-    // GridFunction evaluation inside element 0's physical box, mapped back to
-    // the [-1,1]³ reference coords shared by both hex bases.
+    // GridFunction evaluation inside element 0's physical box, in the `[0,1]³`
+    // hex reference frame both bases now share (D757/D721).
     let u_h1 = h1.interpolate(&f);
     let u_l2 = l2.interpolate(&f);
     let gf_h1 = GridFunction::new(&h1, u_h1.as_slice().to_vec());
@@ -206,12 +211,12 @@ fn hex_l2_coexists_with_h1_assembly() {
             hi[d] = hi[d].max(c[d]);
         }
     }
-    for xi in [[-0.3, 0.5, 0.1], [0.7, -0.2, -0.6]] {
+    for xi in [[0.35, 0.75, 0.55], [0.85, 0.4, 0.2]] {
         let phys: Vec<f64> = xi
             .iter()
             .zip(lo)
             .zip(hi)
-            .map(|((&t, l), h)| 0.5 * (t + 1.0) * (h - l) + l)
+            .map(|((&t, l), h)| t * (h - l) + l)
             .collect();
         let want = f(&phys);
         let got_h1 = gf_h1.evaluate_at_element(0, &xi);
@@ -241,16 +246,17 @@ fn hex_l2_coexists_with_h1_assembly() {
 
 /// Reference values dumped from MFEM's `L2_HexahedronElement(2,
 /// GaussLegendre)` on the unit-cube hex (shape vector at ip = (0.37, 0.41,
-/// 0.53), mass-matrix row 0).  fem-rs agrees to a few ulps.
+/// 0.53), mass-matrix row 0).  D757 re-anchor: the sample point is MFEM's
+/// `[0,1]³` point verbatim and the fem-rs value now matches it (D721).
 #[test]
 fn hex_l2_p2_matches_mfem_reference() {
     let fe = ref_elem_vol_l2(ElementType::Hex8, 2);
     assert_eq!(fe.n_dofs(), 27);
 
-    // dof 0 sits at the (min,min,min) GL point on the [-1,1]³ reference hex
-    // (MFEM's [0,1]³ image is (1−√(3/5))/2).
+    // dof 0 sits at the (min,min,min) GL point of the `[0,1]³` reference hex
+    // (MFEM's `OpenPoints(GL, 3)[0]` = (1−√(3/5))/2).
     let c0 = fe.dof_coords();
-    let want = -(3.0_f64 / 5.0).sqrt();
+    let want = (1.0 - (3.0_f64 / 5.0).sqrt()) / 2.0;
     assert!((c0[0][0] - want).abs() < 1e-14, "dof0 x = {} != {want}", c0[0][0]);
 
     // MFEM `fe.CalcShape(ip=(0.37,0.41,0.53))`, dofs 0..6 (dumped verbatim).
@@ -262,7 +268,7 @@ fn hex_l2_p2_matches_mfem_reference() {
         -2.99922415251784140e-02,
         3.76861004311153163e-03,
     ];
-    let xi = [2.0 * 0.37 - 1.0, 2.0 * 0.41 - 1.0, 2.0 * 0.53 - 1.0];
+    let xi = [0.37, 0.41, 0.53];
     let mut shape = vec![0.0; 27];
     fe.eval_basis(&xi, &mut shape);
     for (i, &want) in mfem_shape.iter().enumerate() {
@@ -286,8 +292,9 @@ fn hex_l2_p2_matches_mfem_reference() {
 }
 
 /// The assembly basis matches MFEM's DOF ordering: evaluating the element at
-/// its own dof coords yields the identity, and the quadrature lives on
-/// `[-1,1]³` (same domain as the hex geometry map).
+/// its own dof coords yields the identity, and the quadrature lives on the
+/// shared `[0,1]³` unit cube (D757 re-anchor; D721 flipped the hex geometry
+/// map onto the same domain).
 #[test]
 fn hex_l2gl_lex_dof_correspondence() {
     for order in 1..=4u8 {
@@ -303,6 +310,6 @@ fn hex_l2gl_lex_dof_correspondence() {
             }
         }
         let q = fe.quadrature(2 * order);
-        assert!(q.points.iter().all(|p| p.iter().all(|&x| x >= -1.0 && x <= 1.0)));
+        assert!(q.points.iter().all(|p| p.iter().all(|&x| x >= 0.0 && x <= 1.0)));
     }
 }

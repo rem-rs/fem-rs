@@ -54,35 +54,45 @@ const UNIT_HEX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/d680_uni
 const FIXTURES: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/d680_vector_mass_mfem.txt"));
 
-/// The ex24 `-p 1` RT/ND hex rule is the 27-point Gauss–Legendre tensor on the
-/// fem-rs reference cube `[-1,1]³`, not MFEM's `[0,1]³` image — the root cause
-/// of the M/C entry-level (non-mathematical) divergence documented above.
-/// Deliberate flip target when the D721 convention-alignment debt lands.
+/// **D721 FLIP TARGET — flipped.**  The ex24 `-p 1` RT/ND hex rule *was* the
+/// 27-point Gauss–Legendre tensor on the fem-rs reference cube `[-1,1]³`
+/// (`±√0.6`, weights `(5/9)³`); it is now MFEM's `[0,1]³` rule — points
+/// `(1±√0.6)/2` / `0.5`, weights `(5/18)³` (with MFEM's 1-ulp face split
+/// `…af8`/`…af9`) and x-fastest enumeration — so every intermediate double of
+/// the M/C assembly is MFEM's.  This test is the deliberate fingerprint of
+/// that flip (it asserted the `[-1,1]` values before D721).
 #[test]
 fn d712_hex_vector_quadrature_is_unit_cube_gauss() {
     let rt0 = vec_ref_elem(VecFamily::RaviartThomas, fem_mesh::ElementType::Hex8.to_elem_type(), 0);
     let quad = rt0.quadrature(4);
     assert_eq!(quad.points.len(), 27);
 
-    let s = 0.6_f64.sqrt(); // 3-point GL abscissa magnitude on [-1,1]
-    let w5 = 5.0_f64 / 9.0;
-    let w8 = 8.0_f64 / 9.0;
+    let s = 0.6_f64.sqrt();
+    let x0 = (1.0 - s) / 2.0; // outer [0,1] abscissa
+    let w5 = 5.0_f64 / 18.0;
+    let w8 = 8.0_f64 / 18.0;
 
-    // Corner point and weight, bitwise.
-    assert_eq!(quad.points[0][0], -s);
-    assert_eq!(quad.points[0][1], -s);
-    assert_eq!(quad.points[0][2], -s);
-    assert_eq!(quad.weights[0], w5 * w5 * w5);
+    // Corner point and weight, bitwise (MFEM's IntRules CUBE order-4 dump).
+    assert_eq!(quad.points[0][0], 0.11270166537925831174);
+    assert_eq!(quad.points[0][1], 0.11270166537925831174);
+    assert_eq!(quad.points[0][2], 0.11270166537925831174);
+    assert_eq!(quad.weights[0].to_bits(), 0x3f95f2a7db7a8e94);
     // Face-centre point and weight.
-    assert_eq!(quad.points[13][0], 0.0);
-    assert_eq!(quad.points[13][1], 0.0);
-    assert_eq!(quad.points[13][2], 0.0);
-    assert_eq!(quad.weights[13], w8 * w8 * w8);
+    assert_eq!(quad.points[13][0], 0.5);
+    assert_eq!(quad.points[13][1], 0.5);
+    assert_eq!(quad.points[13][2], 0.5);
+    assert_eq!(quad.weights[13].to_bits(), 0x3fb67980e0bf08c7);
+    // The outer abscissa is the [0,1] table value, NOT `(1−√0.6)/2` by hand
+    // (the two differ by 1 ulp — the D339 mapping fact).
+    assert_ne!(quad.points[0][0], x0);
+    assert_eq!(quad.points[0][0], 0.11270166537925831174);
+    // The 1-ulp face-weight split MFEM's dump carries.
+    assert_ne!(quad.weights[4].to_bits(), quad.weights[12].to_bits());
 
-    // Total weight = reference volume 2³ ([-1,1]³ convention); the affine-map
-    // 1/8 lands the physical volume at 1 on the unit hex.
+    // Total weight = reference volume 1 ([0,1]³ convention) — the physical
+    // unit-hex volume with no affine-map factor.
     let total: f64 = quad.weights.iter().sum();
-    assert!((total - 8.0).abs() < 1e-12, "total weight {total}");
+    assert!((total - 1.0).abs() < 1e-12, "total weight {total}");
 }
 
 /// Mathematical parity anchor (D680 fixtures, MFEM 4.10 truth): the unit-hex

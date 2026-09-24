@@ -15,13 +15,11 @@
 //! q)` rules live on `[0,1]`, so `cp[j] + h·ip.x` in `ProjectIntegrated`
 //! samples exactly the GLL sub-cell `[cp[j], cp[j+1]]` — MFEM's integrated
 //! DOF *is* the sub-cell face-flux integral `∫ f·(adj(J)·n̂) dA` with weight
-//! `(w_u·h_1)·(w_v·h_2)`.  The fem-rs hex table mirrors that in the `[-1,1]`
-//! frame (sub-cells of `gll_nodes(k+1)`, `gauss_legendre_01` rule, weights
-//! `w_u·h_1·w_v·h_2` in ξ units); through the unit-cube map
-//! `J_ξ = J_t·diag(1/2)`, `adj(J_ξ) = adj(J_t)/4` pointwise, so the fem-rs
-//! consumption contract `Σ w·f(x(ξ))·(adj(J_ξ)·t)` reproduces MFEM's DOF
-//! value exactly — pinned below at machine precision (probe-vs-table worst
-//! relative deviation ≤ 1.2e-16 over all 1536 DOF rows, 4 fields, k = 1..3).
+//! `(w_u·h_1)·(w_v·h_2)`.  D721: the fem-rs hex table now mirrors that on
+//! the **same `[0,1]³` frame** (sub-cells of `gll_nodes_01(k+1)`, the
+//! `gauss_legendre_01` rule, weights `w_u·h_1·w_v·h_2`), so the fem-rs
+//! consumption contract `Σ w·f(x(ξ))·(adj(J)·t)` reproduces MFEM's DOF value
+//! with the *identity* Piola factor — pinned below at machine precision.
 //!
 //! The layout probe data also pins the fem-rs local DOF order as MFEM's
 //! `dof_map` enumeration (face blocks in `HEX_RT_FACES` order, interiors
@@ -485,9 +483,11 @@ fn recover(f: &fem_element::raviart_thomas::hex_rtk::IntegratedDofFunctional3D,
             mx = mx.max(pt[a]);
         }
         let h = (mx - mn) / (u1 - u0);
-        idx01(cp, (mn - h * u0 + 1.0) / 2.0)
+        // D721: samples live on `[0,1]`, so the sub-cell start is `mn - h·u0`
+        // directly (the `(x+1)/2` frame map is gone).
+        idx01(cp, mn - h * u0)
     };
-    let ic = idx01(cp, (f.samples[0].0[c] + 1.0) / 2.0);
+    let ic = idx01(cp, f.samples[0].0[c]);
     (c, ic, axis(a1), axis(a2), flip)
 }
 
@@ -526,19 +526,12 @@ fn hex_igll_functional_values_match_mfem_project() {
         let truth = hex_truth(k, f);
         assert_eq!(funs.len(), truth.len(), "k={k} field={f}: dof count");
         for (n, fun) in funs.iter().enumerate() {
-            // unit-cube physical map: x = (xi+1)/2 per axis,
-            // J_xi = J_t·diag(1/2) => adj(J_xi) = adj(J_t)/4 (adj(J_t) = I).
+            // D721: the samples are already unit-cube coordinates
+            // (`J = adj(J) = I`, no `(x+1)/2` map, no `/4`).
             let mut val = 0.0_f64;
             for (pt, w) in &fun.samples {
-                let xp = [
-                    (pt[0] + 1.0) / 2.0,
-                    (pt[1] + 1.0) / 2.0,
-                    (pt[2] + 1.0) / 2.0,
-                ];
-                let fv = field_h(f, xp);
-                val += w
-                    * (fv[0] * fun.t[0] + fv[1] * fun.t[1] + fv[2] * fun.t[2])
-                    / 4.0;
+                let fv = field_h(f, *pt);
+                val += w * (fv[0] * fun.t[0] + fv[1] * fun.t[1] + fv[2] * fun.t[2]);
             }
             assert!(
                 (val - truth[n]).abs() <= 5e-13 * (1.0 + truth[n].abs()),
@@ -549,15 +542,14 @@ fn hex_igll_functional_values_match_mfem_project() {
     }
 }
 
-/// The functionals are dual to the element's own IGLL basis up to the
-/// standing D227-era frame debt: the fem-rs IntegratedGLL open modes carry
-/// the `V_mfem/16` normalization (two `×¼` open factors, `hex_rtk::partial_open`),
-/// so each open factor integrates to `1/2` over its GLL sub-cell of the
-/// `[-1,1]` frame and the dual matrix is `(1/4)·I` — uniform over face and
-/// interior DOFs, exactly δ/4.  (The quad IGLL twin, which lives on `[0,1]`
-/// without the pull-back, is δ-exact: see `d368_quad_nd_rt_igll_mfem_parity`.)
+/// The functionals are dual to the element's own IGLL basis: the fem-rs
+/// IntegratedGLL modes are MFEM's `[0,1]` `EvalIntegrated` functions with no
+/// normalization (D721 dropped the `[-1,1]` pull-back), and each open factor
+/// integrates to 1 over its GLL sub-cell, so the dual matrix is `I` —
+/// uniform over face and interior DOFs.  (The quad IGLL twin is δ-exact the
+/// same way: see `d368_quad_nd_rt_igll_mfem_parity`.)
 #[test]
-fn hex_igll_functionals_are_dual_up_to_frame() {
+fn hex_igll_functionals_are_dual_to_basis() {
     for k in 0..=3usize {
         let el = HexRTk::new(k);
         let funs = el.integrated_functionals();
@@ -576,7 +568,7 @@ fn hex_igll_functionals_are_dual_up_to_frame() {
                 }
             }
             for (j, &s) in sigma.iter().enumerate() {
-                let want = if i == j { 0.25 } else { 0.0 };
+                let want = if i == j { 1.0 } else { 0.0 };
                 assert!(
                     (s - want).abs() < 1e-12,
                     "k={k}: sigma_{i}(phi_{j}) = {s} (want {want})"

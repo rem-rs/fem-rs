@@ -3124,7 +3124,7 @@ fn find_edge_dof(elem_nodes: &[u32], elem_dofs: &[DofId], pos_a: usize, pos_b: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::Mesh;
+    use fem_mesh::{ElementType, Mesh};
     use fem_space::{H1Space, fe_space::FESpace};
     use crate::standard::MassIntegrator;
     // Only the boundary-face tests need this: `SegP3` is the equispaced
@@ -4230,5 +4230,82 @@ mod tests {
             "equispaced-to-Gauss-Lobatto distance {d:.3e}, expected ~5.694e-2 (D138)"
         );
     }
+
+    /// **D721 J op-order dump-pin** — the affine unit-hex Jacobian built by the
+    /// geometry kernel (`geo_ref_elem` -> `HexQ1`, `isoparametric_jacobian`)
+    /// must equal MFEM 4.10's `IsoparametricTransformation` (`TriLinear3DFiniteElement`
+    /// `CalcDShape` + `kernels::Mult`) **bit for bit at all 27 qps** of the
+    /// `IntRules.Get(CUBE, 4)` rule, including the `2^-60`-scale cancellation
+    /// debris (`J = I + junk`, `detJ ≡ 1`) the MFEM probe
+    /// `tmp/d721/probe_d721.cpp` dumped (`$HOME/work/d721/d721_out.txt`).
+    ///
+    /// The bits below are the fixture; `detJ`/`Weight` are pinned as `1.0`
+    /// (MFEM's `dFdx.Det()` is exactly 1 at every qp on this element).
+    /// This is the *geometry* half of the D680 bit-level gate: it isolates the
+    /// Jacobian from the element/quadrature layers, so a regression there
+    /// cannot be mistaken for a basis regression.
+    #[test]
+    fn d721_affine_unit_hex_jacobian_matches_mfem_dump_bitwise() {
+        // `(qp, row, col, value)` — every non-identity J entry across the 27
+        // qps (MFEM probe dump; all are exact small multiples of 2^-60).
+        const J_JUNK: &[(usize, usize, usize, u64)] = &[
+            // 6·2^-60
+            (0, 0, 2, 0x3c58000000000000),
+            (9, 0, 2, 0x3c58000000000000),
+            (18, 0, 2, 0x3c58000000000000),
+            // 8·2^-60
+            (1, 0, 2, 0x3c60000000000000),
+            (10, 0, 2, 0x3c60000000000000),
+            (19, 0, 2, 0x3c60000000000000),
+            // 32·2^-60
+            (2, 0, 2, 0x3c80000000000000),
+            (11, 0, 2, 0x3c80000000000000),
+            (20, 0, 2, 0x3c80000000000000),
+            // 4·2^-60
+            (2, 1, 2, 0x3c50000000000000),
+            (2, 2, 1, 0x3c50000000000000),
+            (5, 2, 1, 0x3c50000000000000),
+            (8, 2, 1, 0x3c50000000000000),
+            (11, 1, 2, 0x3c50000000000000),
+            (20, 1, 2, 0x3c50000000000000),
+            // 16·2^-60
+            (8, 1, 2, 0x3c70000000000000),
+            (17, 1, 2, 0x3c70000000000000),
+            (20, 2, 1, 0x3c70000000000000),
+            (23, 2, 1, 0x3c70000000000000),
+            (26, 1, 2, 0x3c70000000000000),
+            (26, 2, 1, 0x3c70000000000000),
+        ];
+        let mesh = Mesh::<3>::unit_cube_hex(1);
+        let geo = crate::vector_assembler::geo_ref_elem_from_mesh(&mesh, 0)
+            .expect("hex geometry element");
+        let nodes = mesh.geometry_nodes(0);
+        let quad = geo.quadrature(4);
+        assert_eq!(quad.points.len(), 27);
+        for (qp, xi) in quad.points.iter().enumerate() {
+            let (j, det, _xp) =
+                crate::vector_assembler::isoparametric_jacobian(&mesh, nodes, geo.as_ref(), xi, 3);
+            for r in 0..3 {
+                for c in 0..3 {
+                    let want = if r == c { 1.0_f64 } else { 0.0 };
+                    let want_bits = J_JUNK
+                        .iter()
+                        .find(|&&(q, rr, cc, _)| q == qp && rr == r && cc == c)
+                        .map(|&(_, _, _, b)| b)
+                        .unwrap_or(want.to_bits());
+                            assert_eq!(
+                        j[(r, c)].to_bits(),
+                        want_bits,
+                        "qp {qp} J({r},{c}) = {:.17e} vs MFEM {:016x}",
+                        j[(r, c)],
+                        want_bits
+                    );
+                }
+            }
+            assert_eq!(det, 1.0, "qp {qp}: detJ must be exactly 1 (MFEM dump)");
+        }
+    }
+
+
 
 }

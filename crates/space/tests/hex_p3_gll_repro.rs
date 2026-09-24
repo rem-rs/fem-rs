@@ -11,14 +11,18 @@ use fem_mesh::{Mesh, MeshTopology};
 use fem_space::h1::H1Space;
 use fem_space::fe_space::FESpace;
 
-/// Map HexQk reference coords on [-1,1]^3 to the unit cube [0,1]^3.
+/// `HexQk`'s reference coordinates are MFEM's `[0,1]³` node lattice since the
+/// D721 flip, and `DofManager::dof_coord` returns the *physical* coordinate —
+/// on the unit-cube fixtures the two frames coincide, so this is the identity
+/// (the historical `0.5·(c+1)` stitched the old `[-1,1]³` basis to the unit
+/// cube and must not be applied any more).
 fn to_unit(c: &[f64]) -> [f64; 3] {
-    [0.5 * (c[0] + 1.0), 0.5 * (c[1] + 1.0), 0.5 * (c[2] + 1.0)]
+    [c[0], c[1], c[2]]
 }
 
 /// Diagnostic: for every element-local slot i of the single-hex mesh, the
 /// dof attached to slot i must carry the GLL nodal coordinates of HexQk
-/// slot i (mapped from [-1,1]^3 to the physical unit cube).
+/// slot i (which are the physical cube coordinates on this fixture).
 #[test]
 fn hex_p3_dof_coords_match_hexqk_gll_nodes() {
     let mesh = Mesh::<3>::unit_cube_hex(1);
@@ -69,7 +73,7 @@ fn hex_p3_interpolate_exact_for_cubic_polynomial() {
     ];
     let mut max_err = 0.0_f64;
     for x in &sample {
-        let xi = [2.0 * x[0] - 1.0, 2.0 * x[1] - 1.0, 2.0 * x[2] - 1.0];
+        let xi = [x[0], x[1], x[2]]; // HexQk lives on [0,1]^3 (D721)
         hex.eval_basis(&xi, &mut phi);
         let mut uh = 0.0_f64;
         for (i, &d) in dofs.iter().enumerate() {
@@ -118,12 +122,13 @@ fn hex_p3_multielement_interpolate_exact() {
         let q1 = [0.25 * (3.0 * lo[0] + hi[0]), 0.25 * (3.0 * lo[1] + hi[1]), 0.25 * (3.0 * lo[2] + hi[2])];
         let q2 = [0.25 * (lo[0] + 3.0 * hi[0]), 0.25 * (lo[1] + 3.0 * hi[1]), 0.25 * (lo[2] + 3.0 * hi[2])];
         for x in [ctr, q1, q2] {
-            // Map the physical sample point to the reference [-1,1]^3 of
-            // this element (structured mesh: axis-aligned boxes).
+            // Map the physical sample point to the reference `[0,1]³` of this
+            // element (structured mesh: axis-aligned boxes — the D721 flip set
+            // the hex reference frame to MFEM's `[0,1]³`).
             let xi = [
-                2.0 * (x[0] - lo[0]) / (hi[0] - lo[0]) - 1.0,
-                2.0 * (x[1] - lo[1]) / (hi[1] - lo[1]) - 1.0,
-                2.0 * (x[2] - lo[2]) / (hi[2] - lo[2]) - 1.0,
+                (x[0] - lo[0]) / (hi[0] - lo[0]),
+                (x[1] - lo[1]) / (hi[1] - lo[1]),
+                (x[2] - lo[2]) / (hi[2] - lo[2]),
             ];
             hex.eval_basis(&xi, &mut phi);
             let mut uh = 0.0_f64;

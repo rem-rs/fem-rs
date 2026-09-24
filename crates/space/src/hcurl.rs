@@ -156,20 +156,24 @@ const PYRAMID_TRI_FACES: [(usize, usize, usize); 4] = [
 
 // ─── Hex ND face-interior DOF geometry ──────────────────────────────────────
 
-/// Hex8 reference vertices (`fem-element` `HexQ1` order) on `[-1,1]³`.
+/// Hex8 reference vertices (`fem-element` `HexQ1` order) on `[0,1]³`
+/// (D721: the hex reference frame is MFEM's; the historical `[-1,1]³`
+/// corners are gone).
 const HEX8_REF: [[f64; 3]; 8] = [
-    [-1.0, -1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [1.0, 1.0, -1.0],
-    [-1.0, 1.0, -1.0],
-    [-1.0, -1.0, 1.0],
-    [1.0, -1.0, 1.0],
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
     [1.0, 1.0, 1.0],
-    [-1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
 ];
 
-/// Physical point and Jacobian of the trilinear hexahedron map at `xi`
-/// (Jacobian columns as `jac[component][derivative]`).
+/// Physical point and Jacobian of the trilinear hexahedron map at `xi` on
+/// `[0,1]³` (Jacobian columns as `jac[component][derivative]`) — the same
+/// `ox·oy·oz` formulas as MFEM `TriLinear3DFiniteElement` and
+/// `fem_element::lagrange::HexQ1` (D721).
 ///
 /// D121: published (`pub`) so the assembly crate's postprocessing and the
 /// joule miniapp can map reference points through the same Q1 hex geometry
@@ -177,22 +181,25 @@ const HEX8_REF: [[f64; 3]; 8] = [
 /// semantics), instead of each consumer re-deriving the trilinear map.
 pub fn hex_trilinear_map(verts: &[[f64; 3]; 8], xi: &[f64]) -> ([f64; 3], [[f64; 3]; 3]) {
     let (x, y, z) = (xi[0], xi[1], xi[2]);
+    let (ox, oy, oz) = (1.0 - x, 1.0 - y, 1.0 - z);
     let mut p = [0.0_f64; 3];
     let mut jac = [[0.0_f64; 3]; 3];
     for (i, v) in verts.iter().enumerate() {
         let r = HEX8_REF[i];
-        let fx = 1.0 + r[0] * x;
-        let fy = 1.0 + r[1] * y;
-        let fz = 1.0 + r[2] * z;
-        let n = 0.125 * fx * fy * fz;
-        let dx = 0.125 * r[0] * fy * fz;
-        let dy = 0.125 * r[1] * fx * fz;
-        let dz = 0.125 * r[2] * fx * fy;
+        // Nodal factor and its derivative per axis (r ∈ {0,1} selects the
+        // low/high 1-D Lagrange function).
+        let (fx, dx) = if r[0] == 1.0 { (x, 1.0) } else { (ox, -1.0) };
+        let (fy, dy) = if r[1] == 1.0 { (y, 1.0) } else { (oy, -1.0) };
+        let (fz, dz) = if r[2] == 1.0 { (z, 1.0) } else { (oz, -1.0) };
+        let n = fx * fy * fz;
+        let gx = dx * fy * fz;
+        let gy = fx * dy * fz;
+        let gz = fx * fy * dz;
         for d in 0..3 {
             p[d] += n * v[d];
-            jac[d][0] += dx * v[d];
-            jac[d][1] += dy * v[d];
-            jac[d][2] += dz * v[d];
+            jac[d][0] += gx * v[d];
+            jac[d][1] += gy * v[d];
+            jac[d][2] += gz * v[d];
         }
     }
     (p, jac)

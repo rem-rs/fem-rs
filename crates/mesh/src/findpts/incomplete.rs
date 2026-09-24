@@ -60,16 +60,18 @@ pub(crate) struct IncompleteFamily {
 const QUAD8_CORNERS: [[f64; 3]; 4] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
 const QUAD8_EDGES: [[f64; 3]; 4] = [[0.5, 0.0, 0.0], [1.0, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.5, 0.0]];
 
-/// Hexahedron corners on `[-1,1]^3` (MFEM corner order 0..7).
+/// Hexahedron corners on **`[0,1]^3`** (D721; was `[-1,1]^3`) in MFEM corner
+/// order 0..7 — the frame the locator's canonical／factory coordinates live
+/// in now.
 const HEX_CORNERS: [[f64; 3]; 8] = [
-    [-1.0, -1.0, -1.0],
-    [1.0, -1.0, -1.0],
-    [1.0, 1.0, -1.0],
-    [-1.0, 1.0, -1.0],
-    [-1.0, -1.0, 1.0],
-    [1.0, -1.0, 1.0],
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
     [1.0, 1.0, 1.0],
-    [-1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
 ];
 
 /// Edge endpoint pairs of the hexahedron in Gmsh Hex20 order.
@@ -633,21 +635,14 @@ mod tests {
         for i in 0..=4 {
             for j in 0..=4 {
                 for k in 0..=4 {
-                    let xi = [
-                        -1.0 + 0.5 * i as f64,
-                        -1.0 + 0.5 * j as f64,
-                        -1.0 + 0.5 * k as f64,
-                    ];
+                    // D721: the incomplete-family tables live on [0, 1]^3.
+                    let xi = [0.25 * i as f64, 0.25 * j as f64, 0.25 * k as f64];
                     let (_jac, _det, x) = eval_map::<3>(&HEX20, &nodes, &xi);
                     let trilin: Vec<f64> = (0..3)
                         .map(|d| {
                             let c: Vec<f64> = corners.iter().map(|p| p[d]).collect();
                             // trilinear interpolation of corner values
-                            let (s, t, u) = (
-                                (xi[0] + 1.0) * 0.5,
-                                (xi[1] + 1.0) * 0.5,
-                                (xi[2] + 1.0) * 0.5,
-                            );
+                            let (s, t, u) = (xi[0], xi[1], xi[2]);
                             (1.0 - s)
                                 * (1.0 - t)
                                 * (1.0 - u)

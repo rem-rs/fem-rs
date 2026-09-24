@@ -2518,26 +2518,42 @@ pub fn quad_rule_01(order: u8) -> QuadratureRule {
 /// Tensor-product Gauss-Legendre rule on `[0,1]²` for arbitrary order.
 
 
-// ─── Hexahedron [-1,1]³ ───────────────────────────────────────────────────────
+// ─── Hexahedron [0,1]³ ────────────────────────────────────────────────────────
 
-/// Tensor-product Gauss-Legendre rule on the reference hex `[-1,1]³`.
+/// Tensor-product Gauss-Legendre rule on the reference hex `[0,1]³`.
 ///
 /// Uses `n×n×n` Gauss points; exact for polynomials of degree ≤ `2n-1` in each variable.
-/// Weights sum to 8 (volume of reference hex).
+/// Weights sum to 1 (volume of reference hex).
+///
+/// **D721** — the hex family moved from `[-1,1]³` to MFEM's natural `[0,1]³`
+/// (the quad's D364 migration, done for hexes).  Three details make the rule
+/// bit-identical to `IntRules.Get(Geometry::CUBE, order)`:
+///
+/// * 1-D nodes/weights come from the `[0,1]` Gauss-Legendre table
+///   ([`gauss_legendre_01`], hard-coded == MFEM for `n ≤ 5`;
+///   [`gauss_legendre_01_arbitrary`] → `gauss_legendre_01_newton_mfem` ==
+///   MFEM's Newton generator above that);
+/// * the point enumeration is **x fastest** — MFEM's 3-tensor
+///   `IntegrationRule(irx, iry, irz)` ctor stores `ip(iz·n² + iy·n + ix)`
+///   (`fem/intrules.cpp:68`), i.e. `x` varies fastest, `z` slowest (the
+///   historical fem-rs loop had the *third* coordinate fastest, which
+///   reorders the quadrature summation and shows up in the last bits of
+///   every element matrix);
+/// * the weight is the C++ left-associative product `(wx·wy)·wz`.
 pub fn hex_rule(order: u8) -> QuadratureRule {
     let n = ((order as usize + 2) / 2).max(1);
-    let (xs, ws) = if n <= 4 {
-        gauss_legendre_1d(n)
+    let (xs, ws) = if n <= 5 {
+        gauss_legendre_01(n)
     } else {
-        gauss_legendre_arbitrary(n)
+        gauss_legendre_01_arbitrary(n)
     };
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);
-    for (xi, wi) in xs.iter().zip(ws.iter()) {
-        for (xj, wj) in xs.iter().zip(ws.iter()) {
-            for (xk, wk) in xs.iter().zip(ws.iter()) {
-                pts.push(vec![*xi, *xj, *xk]);
-                wts.push(wi * wj * wk);
+    for (zk, wk) in xs.iter().zip(ws.iter()) {
+        for (yj, wj) in xs.iter().zip(ws.iter()) {
+            for (xi, wi) in xs.iter().zip(ws.iter()) {
+                pts.push(vec![*xi, *yj, *zk]);
+                wts.push((*wi * *wj) * *wk);
             }
         }
     }
@@ -3350,10 +3366,43 @@ mod tests {
     }
 
     #[test]
-    fn hex_weights_sum_to_eight() {
+    fn hex_weights_sum_to_one() {
+        // D721: the hex reference domain is MFEM's [0,1]³ (weight sum 1),
+        // not the historical [-1,1]³ (weight sum 8).
         for order in [1u8, 2, 3] {
             let r = hex_rule(order);
-            assert!((weight_sum(&r) - 8.0).abs() < 1e-12, "order={order}");
+            assert!((weight_sum(&r) - 1.0).abs() < 1e-12, "order={order}");
+        }
+    }
+
+    /// D721 pin: the hex rule is MFEM's CUBE rule bit-for-bit — `[0,1]` 1-D
+    /// nodes, **x fastest** enumeration, weight `(wx·wy)·wz`.  The bits are
+    /// the ones the round-69 pilot probe (`tmp/d721/probe_d721.cpp`,
+    /// `$HOME/work/d721/d721_out.txt`) dumped from MFEM 4.10.
+    #[test]
+    fn hex_rule_is_mfem_bitwise() {
+        for (order, npts) in [(3u8, 8usize), (4, 27)] {
+            let r = hex_rule(order);
+            assert_eq!(r.points.len(), npts);
+            let (xs, ws) = if order == 4 {
+                gauss_legendre_01(3)
+            } else {
+                gauss_legendre_01(2)
+            };
+            // qp1 = (x1, x0, x0) — x fastest.
+            assert_eq!(r.points[1][0].to_bits(), xs[1].to_bits());
+            assert_eq!(r.points[1][1].to_bits(), xs[0].to_bits());
+            assert_eq!(r.points[1][2].to_bits(), xs[0].to_bits());
+            assert_eq!(r.weights[1].to_bits(), ((ws[1] * ws[0]) * ws[0]).to_bits());
+            if order == 4 {
+                // 27-pt order-4 weight bits (probe: includes the 1-ulp split
+                // …af8/…af9 of 0.05486968449931412 at the face points).
+                assert_eq!(r.weights[0].to_bits(), 0x3f95f2a7db7a8e94);
+                assert_eq!(r.weights[4].to_bits(), 0x3fac17e118eecaf9);
+                assert_eq!(r.weights[12].to_bits(), 0x3fac17e118eecaf8);
+                assert_eq!(r.weights[13].to_bits(), 0x3fb67980e0bf08c7);
+                assert_eq!(r.points[13][1].to_bits(), 0x3fe0000000000000);
+            }
         }
     }
 

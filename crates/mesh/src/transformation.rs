@@ -631,10 +631,10 @@ pub fn jacobian_determinant_dofs<const D: usize>(
     let det_order = D * mesh.geom_order().max(1) as usize - 1;
     let nb = det_order + 1; // GLL points per direction
     let (nodes1d, _w) = fem_element::quadrature::gauss_lobatto_01_arbitrary(nb);
-    // Hex samples run through `2·ξ − 1` (the `[-1,1]^3` HexQk domain) and the
-    // fem-rs Jacobian is `J_mfem/2` per axis there, so the determinant gains
-    // the `2^D` factor back; quads evaluate as-is.
-    let (hex, scale) = if D == 3 { (true, (1u64 << D) as f64) } else { (false, 1.0) };
+    // D721: the hex reference frame is MFEM's `[0,1]^3`, so the GLL samples
+    // are used as-is and `det J` is already MFEM's (the historical
+    // `2·ξ − 1` map plus a `2^D` scale is gone).
+    let scale = 1.0;
     let npe = nb.pow(D as u32);
     let nb2 = nb * nb;
     let mut vals = vec![0.0_f64; nelem * npe];
@@ -646,11 +646,6 @@ pub fn jacobian_determinant_dofs<const D: usize>(
             xi[1] = nodes1d[iy];
             if D == 3 {
                 xi[2] = nodes1d[iz];
-            }
-            if hex {
-                for c in xi.iter_mut() {
-                    *c = 2.0 * *c - 1.0;
-                }
             }
             let (_jac, det, _x) = mesh.element_jacobian(e, &xi);
             vals[e as usize * npe + i] = det.abs() * scale;
@@ -693,10 +688,9 @@ mod tests {
 /// `GridFunction::evaluate_*_at_element` consume:
 /// - Tri/Tet: barycentric unit simplex,
 /// - Quad4: `[0, 1]^2`,
-/// - Hex8: `[-1, 1]^3` (the Newton inversion runs in the MFEM-canonical
-///   `[0, 1]^3` — MFEM's `FindPointsGSLIB::MapRefPosAndElemIndices` maps the
-///   raw gslib `[-1, 1]` output to `[0, 1]` — and the coordinates are
-///   translated once at this exit).
+/// - Hex8: `[0, 1]^3` (D721 — MFEM's canonical frame, the same one
+///   MFEM's `FindPointsGSLIB::MapRefPosAndElemIndices` reports; the historical
+///   `2·ξ − 1` translation at this exit is gone).
 ///
 /// Note: MFEM uses a BVH-accelerated search with the same semantics for
 /// straight meshes; the found elements and reference coordinates agree.
@@ -919,16 +913,9 @@ pub fn find_points<M: MeshTopology + ?Sized>(
         }
         match found {
             Some((e, xi)) => {
-                // D224: translate the Newton result from the MFEM-canonical
-                // `[0, 1]^dim` to the factory domain of the element's bases
-                // (hex: `[-1, 1]^3`); quad/simplex coordinates are already in
-                // their factory domain.
-                let et = mesh.element_type(e);
-                let xi = if matches!(et, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
-                    xi.iter().map(|&t| 2.0 * t - 1.0).collect()
-                } else {
-                    xi
-                };
+                // D721: the Newton result is the MFEM-canonical `[0, 1]^dim`,
+                // which is *also* the factory domain of every element family
+                // now (the hex `[-1, 1]^3` translation of D224 is gone).
                 elem_ids.push(e as i64);
                 ref_coords.push(xi);
             }
@@ -1024,14 +1011,12 @@ mod find_points_tests {
         assert_eq!(ids[0], 0);
         assert_eq!(ids[1], 0);
         assert_eq!(ids[2], -1);
-        // D224: hex reference coordinates come back in the factory domain
-        // [-1, 1]^3 (physical 0.3 → factory 2*0.3-1 = -0.4, etc.).
-        assert!((xis[0][0] - (2.0 * 0.3 - 1.0)).abs() < 1e-10);
-        assert!((xis[0][1] - (2.0 * 0.2 - 1.0)).abs() < 1e-10);
-        assert!((xis[0][2] - (2.0 * 0.9 - 1.0)).abs() < 1e-10);
-        assert!((xis[1][0] - 0.0).abs() < 1e-10);
-        assert!((xis[1][1] - 0.0).abs() < 1e-10);
-        assert!((xis[1][2] - 0.0).abs() < 1e-10);
+        // D721: hex reference coordinates come back in MFEM's `[0, 1]^3`
+        // frame, i.e. the physical coordinates on the unit cube.
+        for d in 0..3 {
+            assert!((xis[0][d] - pts[d]).abs() < 1e-10);
+            assert!((xis[1][d] - 0.5).abs() < 1e-10);
+        }
     }
 
     #[test]
@@ -1046,8 +1031,7 @@ mod find_points_tests {
     #[test]
     fn jacobian_determinant_dofs_straight_meshes() {
         // Unit quad (straight, geometry order 1): det_order = 2*1-1 = 1, GLL
-        // 2 points/direction, and |det J| = 1 everywhere (the `[-1,1]` →
-        // `[0,1]` HexQk-style domain factor does not exist in 2-D quads).
+        // 2 points/direction, and |det J| = 1 everywhere.
         let m = Mesh::<2>::unit_square_quad(1);
         let (order, vals) = super::jacobian_determinant_dofs(&m).unwrap();
         assert_eq!(order, 1);
@@ -1055,9 +1039,8 @@ mod find_points_tests {
         assert!(vals.iter().all(|&v| v == 1.0), "quad det values {vals:?}");
 
         // Unit hex (straight, geometry order 1): det_order = 3*1-1 = 2, 3
-        // GLL points/direction; the raw `[-1,1]^3` parametrization gives
-        // det = 1/8 per axis factor, and the `2^3` scale restores MFEM's
-        // unit `[0,1]^3` determinant.
+        // GLL points/direction; D721: the `[0,1]^3` hex parametrization gives
+        // MFEM's unit determinant directly.
         let h = Mesh::<3>::unit_cube_hex(1);
         let (order, vals) = super::jacobian_determinant_dofs(&h).unwrap();
         assert_eq!(order, 2);
@@ -1093,7 +1076,7 @@ mod find_points_tests {
         let geo = m.geometry.as_mut().unwrap();
         // Bump an interior node of the 27-node table: pick the slot whose
         // reference position is the lattice center (order-2 HexQk coords live
-        // on [-1,1]^3), independent of the table's slot ordering.
+        // on [0,1]^3, D721), independent of the table's slot ordering.
         let high = fem_element::lagrange::factory::ref_elem(
             fem_element::lagrange::factory::ElemType::Hex,
             2,
@@ -1101,7 +1084,7 @@ mod find_points_tests {
         let center = high
             .dof_coords()
             .iter()
-            .position(|c| c.iter().all(|&t| t.abs() < 1e-12))
+            .position(|c| c.iter().all(|&t| (t - 0.5).abs() < 1e-12))
             .expect("order-2 hex lattice has a center node");
         geo.coords[center * 3] += 0.05;
         let (order2, vals2) = super::jacobian_determinant_dofs(&m).unwrap();
