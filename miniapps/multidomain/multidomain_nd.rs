@@ -546,6 +546,11 @@ fn main() {
         ConvectionDiffusionTDO::new(&fes_cylinder, ess_tdofs, 1.0, 1.0e-1, order, qp);
 
     let mut magnetic_field_cylinder = vec![0.0_f64; fes_cylinder.n_dofs()];
+    // D708/D716: shadow of C++ `magnetic_field_cylinder_gf` — same data flow
+    // as multidomain_rt (see the D708 note there): MFEM's Transfer reads and
+    // overwrites the destination, and the upstream loop never feeds the RK3
+    // result back, so each step's transfer discards the cylinder evolution.
+    let mut gf_state = vec![0.0_f64; fes_cylinder.n_dofs()];
 
     // Block submesh (domain attribute 2), diffusion-only (alpha=0, sigma=1).
     let block_submesh = extract_submesh_3d(&parent_mesh, &[2]);
@@ -605,8 +610,12 @@ fn main() {
         // Advance the diffusion equation on the outer block.
         rk3ssp_step(&mut d_tdo, &mut magnetic_field_block, &mut t, dt);
 
-        // Transfer the block solution onto the cylinder interface.
-        field_block_to_cylinder_map.transfer(&magnetic_field_block, &mut magnetic_field_cylinder);
+        // Transfer the block solution onto the cylinder interface — into the
+        // gf shadow (D708/D716); the RK3 state is copied FROM the shadow.
+        let mut transferred = gf_state.clone();
+        field_block_to_cylinder_map.transfer(&magnetic_field_block, &mut transferred);
+        gf_state = transferred;
+        magnetic_field_cylinder.copy_from_slice(&gf_state);
 
         // Advance the convection-diffusion equation inside the cylinder.
         rk3ssp_step(&mut cd_tdo, &mut magnetic_field_cylinder, &mut t, dt);

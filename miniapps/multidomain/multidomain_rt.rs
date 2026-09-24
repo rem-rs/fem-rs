@@ -536,6 +536,16 @@ fn main() {
     );
 
     let mut field_cylinder = vec![0.0_f64; fes_cylinder.n_dofs()];
+    // D708: shadow of C++ `pressure_cylinder_gf`.  MFEM's `Transfer` READS and
+    // OVERWRITES the destination GridFunction (SubMeshToSubMesh uploads the
+    // dst's current values into the parent before the interface slots are
+    // overwritten by the source), and the upstream loop never feeds the RK3
+    // result back into `pressure_cylinder_gf` — so every step the transfer
+    // DISCARDS the cylinder's evolution and restarts from "last transfer
+    // output (interior = 0) + this step's interface values".  `field_cylinder`
+    // is the RK3 state; `gf_state` is the transfer destination whose contents
+    // are what C++ actually carries across steps.
+    let mut gf_state = vec![0.0_f64; fes_cylinder.n_dofs()];
 
     // Block submesh (domain attribute 2), diffusion-only (alpha=0, kappa=1).
     let block_submesh = extract_submesh_3d(&parent_mesh, &[2]);
@@ -599,8 +609,13 @@ fn main() {
         // Advance the diffusion equation on the outer block.
         rk3ssp_step(&mut d_tdo, &mut field_block, &mut t, dt);
 
-        // Transfer the block solution onto the cylinder interface.
-        field_block_to_cylinder_map.transfer(&field_block, &mut field_cylinder);
+        // Transfer the block solution onto the cylinder interface — into the
+        // gf shadow (D708): the RK3-evolved `field_cylinder` is copied FROM
+        // the shadow, never fed back into it.
+        let mut transferred = gf_state.clone();
+        field_block_to_cylinder_map.transfer(&field_block, &mut transferred);
+        gf_state = transferred;
+        field_cylinder.copy_from_slice(&gf_state);
 
         // Advance the convection-diffusion equation inside the cylinder.
         rk3ssp_step(&mut cd_tdo, &mut field_cylinder, &mut t, dt);

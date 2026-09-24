@@ -727,13 +727,23 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 
     let mut rhs = vec![0.0; 2 * n];
     if exact_sol_known {
+        // D718: BOTH components of the essential BC come from the nodal
+        // projection of the exact solution (C++ `ProjectBdrCoefficient(u0_r,
+        // u0_i, ess_bdr)` evaluates re AND im at the boundary nodes).  The
+        // imaginary half was silently zeroed here, homogenizing it — the
+        // 2-D path carried both components since D693, 3-D was the straggler.
         let u_proj: Vec<f64> = (0..n).map(|d| {
             let c = dm.dof_coord(d as u32);
             let (re, _im) = u0_exact(&c[..dim], mu, epsilon, sigma, omega);
             re
         }).collect();
+        let u_proj_im: Vec<f64> = (0..n).map(|d| {
+            let c = dm.dof_coord(d as u32);
+            let (_re, im) = u0_exact(&c[..dim], mu, epsilon, sigma, omega);
+            im
+        }).collect();
         let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|_| 0.0).collect();
+        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_im[d]).collect();
         sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
     } else {
         let bc_re = vec![0.0; ess_bdr.len()];
