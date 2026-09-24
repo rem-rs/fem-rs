@@ -1378,9 +1378,22 @@ impl DofPartition {
             }
         }
 
-        // Deterministic ordering by sorted global node pair.
-        owned_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b));
-        ghost_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b));
+        // Deterministic ordering by sorted global node pair, then in-edge
+        // position.  D746: the `dof_key` tie-breaker is REQUIRED — the loop
+        // above pushes from `dof_to_edge`, a `HashMap`, whose iteration order
+        // is process-random (Rust `RandomState` is seeded per process), and
+        // every DOF of one edge shares the same `(global_node_a,
+        // global_node_b)` sort key.  With only the node pair as key the sort
+        // ties for the `dofs_per_edge > 1` case (ND2+, RT1+, i.e. every
+        // high-order H(curl)/H(div) space) and `sort_by_key` is *stable*, so
+        // the leftover order — and therefore `global_dof_ids` (assigned
+        // consecutively below) and `dm_to_partition` — changed from run to
+        // run.  Order 1 escaped because `dofs_per_edge == 1` makes the node
+        // pair unique (`pex3 -o 1` stable, `-o 2` jittering).  `dof_key` is
+        // geometry-derived (Step 0b) and rank-consistent, so this key is a
+        // total order that matches `from_dof_manager`'s convention.
+        owned_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b, e.dof_key));
+        ghost_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b, e.dof_key));
 
         // ── Step 2b: Process interior DOFs ───────────────────────────────────
         // Interior DOFs are classified by their element ownership.

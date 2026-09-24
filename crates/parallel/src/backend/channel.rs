@@ -26,8 +26,16 @@ type MsgQueue = Arc<(Mutex<VecDeque<(i32, Vec<u8>)>>, Condvar)>;
 
 // ── collective state helpers ──────────────────────────────────────────────────
 
+/// AllReduce state for `f64`.
+///
+/// `parts` holds one contribution **per rank**, indexed by rank, and the
+/// result is reduced in rank order once every rank has arrived (D746).
+/// Accumulating into a single `sum` in *arrival* order — the previous shape —
+/// made the result depend on the thread schedule: floating-point addition is
+/// not associative, so two runs of the same program could differ in the last
+/// bits of every global dot product, norm and residual.
 struct AllReduceF64 {
-    sum:     f64,
+    parts:   Vec<f64>,
     result:  f64,   // cache for late threads
     arrived: usize,
     gen:     usize,
@@ -103,7 +111,7 @@ impl ChannelShared {
             a2av_recv_cv:  Condvar::new(),
             barrier:       Mutex::new((0, 0)),
             barrier_cv:    Condvar::new(),
-            reduce_f64:    Mutex::new(AllReduceF64 { sum: 0.0, result: 0.0, arrived: 0, gen: 0 }),
+            reduce_f64:    Mutex::new(AllReduceF64 { parts: vec![0.0; n], result: 0.0, arrived: 0, gen: 0 }),
             reduce_f64_cv: Condvar::new(),
             reduce_i64:    Mutex::new(AllReduceI64 { sum: 0, result: 0, arrived: 0, gen: 0 }),
             reduce_i64_cv: Condvar::new(),
@@ -162,13 +170,15 @@ impl CommBackend for ChannelBackend {
         let n = self.shared.n;
         let mut st = self.shared.reduce_f64.lock().unwrap();
         let my_gen = st.gen;
-        st.sum     += local;
+        // Store per rank, not in arrival order: the reduction below walks
+        // `parts` in rank order, so the rounding is schedule-independent.
+        st.parts[self.rank as usize] = local;
         st.arrived += 1;
         if st.arrived == n {
             // Compute and cache the result, then reset the accumulator.
-            let result = st.sum;
+            let result: f64 = st.parts.iter().sum();
             st.result  = result;
-            st.sum     = 0.0;
+            for p in st.parts.iter_mut() { *p = 0.0; }
             st.arrived = 0;
             st.gen     = my_gen.wrapping_add(1);
             self.shared.reduce_f64_cv.notify_all();

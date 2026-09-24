@@ -192,7 +192,8 @@ pub use integrator::{
     LinearIntegrator, QpData,
 };
 pub use vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
-pub use vector_assembler::{VectorAssembler, TRI_ND2_RT2_MIXED_QUAD_ORDER, geo_ref_elem_from_mesh, isoparametric_jacobian};
+pub use vector_assembler::{VectorAssembler, TRI_ND2_RT2_MIXED_QUAD_ORDER, geo_ref_elem_from_mesh, isoparametric_jacobian,
+    paired_vector_reference_element};
 pub use boundary::vector_boundary::{
     VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator, VectorBoundaryLinearIntegrator,
     VectorBdQpData, TangentialMassIntegrator, HdivNormalFluxIntegrator,

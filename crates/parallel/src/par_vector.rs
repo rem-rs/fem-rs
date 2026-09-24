@@ -14,6 +14,54 @@ use crate::comm::Comm;
 use crate::ghost::GhostExchange;
 use crate::par_space::ParallelFESpace;
 
+/// Fixed block length (in owned DOFs) of the parallel portion of
+/// [`deterministic_dot`].
+///
+/// The block boundaries depend only on the vector length, never on the Rayon
+/// thread count or on the work-stealing schedule.
+#[cfg(not(target_arch = "wasm32"))]
+const DOT_REDUCTION_BLOCK: usize = 4096;
+
+/// `sum(a[i] * b[i])` with a **bitwise reproducible** result.
+///
+/// Rayon's `par_iter().sum()` splits the range by the number of threads and by
+/// whatever the work-stealing splitter decides at run time, then combines the
+/// partial sums in that (thread-count- and schedule-dependent) tree shape.
+/// Floating-point addition is not associative, so the same input produced
+/// different last bits on every run (D746: `pex3 -o 2`'s L² line took 5
+/// distinct values in 5 runs, and `-o 1` flipped between two neighbours).
+///
+/// This helper keeps the parallelism but makes the *association* a pure
+/// function of `len`: the range is cut into fixed `DOT_REDUCTION_BLOCK`-sized
+/// chunks whose boundaries depend only on `len`, each chunk is summed serially
+/// in index order on whichever worker picks it up, and the chunk partials are
+/// combined serially in chunk-index order.  The result is therefore identical
+/// for any thread count, any schedule, and any run.
+///
+/// Below [`crate::env::local_rayon_min`] owned DOFs the plain serial sum is
+/// used, which is the same left-to-right association as a single chunk.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn deterministic_dot(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    if a.len() < crate::env::local_rayon_min() {
+        return a.iter().zip(b).map(|(x, y)| x * y).sum();
+    }
+    let partials: Vec<f64> = a
+        .par_chunks(DOT_REDUCTION_BLOCK)
+        .zip(b.par_chunks(DOT_REDUCTION_BLOCK))
+        .map(|(xa, xb)| xa.iter().zip(xb).map(|(x, y)| x * y).sum())
+        .collect();
+    partials.iter().sum()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn deterministic_dot(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
 /// A distributed vector partitioned across MPI ranks.
 ///
 /// Local layout: `[owned DOFs 0..n_owned) [ghost DOFs n_owned..n_owned+n_ghost)`.
@@ -183,32 +231,24 @@ impl ParVector {
     ///
     /// On native targets, the local owned segment may use Rayon before the MPI
     /// `allreduce` (see [`crate::env::local_rayon_min`] / `FEM_PARALLEL_LOCAL_RAYON_MIN`).
+    ///
+    /// The local sum is **bitwise reproducible** — see [`deterministic_dot`].
     pub fn global_dot(&self, other: &ParVector) -> f64 {
         let a = &self.data[..self.n_owned];
         let b = &other.data[..self.n_owned];
-        #[cfg(not(target_arch = "wasm32"))]
-        let local: f64 = if a.len() >= crate::env::local_rayon_min() {
-            a.par_iter().zip(b).map(|(x, y)| x * y).sum()
-        } else {
-            a.iter().zip(b).map(|(x, y)| x * y).sum()
-        };
-        #[cfg(target_arch = "wasm32")]
-        let local: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let local = deterministic_dot(a, b);
         self.comm.allreduce_sum_f64(local)
     }
 
     /// Local owned dot product (no MPI allreduce).
     ///
     /// Used together with [`Comm::allreduce_sum_f64_slice`] to batch multiple
-    /// dot products into a single allreduce.
+    /// dot products into a single allreduce.  Bitwise reproducible (see
+    /// [`deterministic_dot`]).
     pub fn owned_dot(&self, other: &ParVector) -> f64 {
         let a = &self.data[..self.n_owned];
         let b = &other.data[..self.n_owned];
-        #[cfg(not(target_arch = "wasm32"))]
-        if a.len() >= crate::env::local_rayon_min() {
-            return a.par_iter().zip(b).map(|(x, y)| x * y).sum();
-        }
-        a.iter().zip(b).map(|(x, y)| x * y).sum()
+        deterministic_dot(a, b)
     }
 
     /// Global L2 norm: `sqrt(global_dot(self, self))`.

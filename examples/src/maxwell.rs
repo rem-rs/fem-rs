@@ -1869,6 +1869,70 @@ mod tests {
         assert!(solved.boundary_report.essential_dofs > 0);
     }
 
+    /// D748 regression: every post-processing consumer must reconstruct a field
+    /// with the reference element **paired with the space's DOF/slot tables**
+    /// (`fem_assembly::paired_vector_reference_element`, the assembler's own
+    /// dispatch) — never a hand-picked `...NDk(k)`/`...RTk(k)`.  This pins the
+    /// DOF-count invariant of that pairing for every `(space, cell, order)`
+    /// combination the ex22 evaluators handle: the space's per-element slot
+    /// table must have exactly as many entries as the paired element has DOFs.
+    /// A mismatch is the D674/D738/D748 defect class (an evaluator that quietly
+    /// consumes only the first `n` slots and prints a 5×–38× wrong L² row).
+    #[test]
+    fn paired_vector_reference_element_matches_space_slot_tables() {
+        use fem_assembly::paired_vector_reference_element;
+        use fem_mesh::topology::MeshTopology;
+
+        fn check<M: MeshTopology, S: FESpace>(mesh: &M, space: &S, dim: usize, label: &str) {
+            for e in 0..mesh.n_elements() as u32 {
+                let et = mesh.element_type(e);
+                let re = paired_vector_reference_element(
+                    space.space_type(), et, dim, space.order());
+                assert_eq!(
+                    space.element_dofs(e).len(), re.n_dofs(),
+                    "{label}: {et:?} slot table vs paired element DOF count",
+                );
+            }
+        }
+
+        // 2-D H(curl): Triangle and Quadrilateral, orders 1..=3.
+        for (mesh, label) in [
+            (Mesh::<2>::unit_square_tri(3), "tri2d"),
+            (Mesh::<2>::unit_square_quad(3), "quad2d"),
+        ] {
+            for order in 1u8..=3 {
+                let space = HCurlSpace::new(mesh.clone(), order);
+                check(&mesh, &space, 2, &format!("{label} ND{order}"));
+            }
+        }
+
+        // 2-D H(div): `HDivSpace::new` takes the space's RT index (0-based),
+        // Tri supports 0..=2 and Quad 0..=3.
+        for order in 0u8..=2 {
+            let space = HDivSpace::new(Mesh::<2>::unit_square_tri(3), order);
+            check(space.mesh(), &space, 2, &format!("tri2d RT{order}"));
+        }
+        for order in 0u8..=3 {
+            let space = HDivSpace::new(Mesh::<2>::unit_square_quad(3), order);
+            check(space.mesh(), &space, 2, &format!("quad2d RT{order}"));
+        }
+
+        // 3-D H(curl) / H(div): tet and hex, orders 1..=2 (order 3 hex ND is
+        // 54+ DOFs per element — the invariant is the same, the runtime here is
+        // dominated by the ref-counted mesh clone, so 1..=2 keeps it cheap).
+        for order in 1u8..=2 {
+            for (mesh, label) in [
+                (Mesh::<3>::unit_cube_tet(2), "tet3d"),
+                (Mesh::<3>::unit_cube_hex(2), "hex3d"),
+            ] {
+                let nd = HCurlSpace::new(mesh.clone(), order);
+                check(&mesh, &nd, 3, &format!("{label} ND{order}"));
+                let rt = HDivSpace::new(mesh.clone(), order);
+                check(&mesh, &rt, 3, &format!("{label} RT{order}"));
+            }
+        }
+    }
+
     #[test]
     fn builder_matches_legacy_assembly_path() {
         const GAMMA: f64 = 2.0;

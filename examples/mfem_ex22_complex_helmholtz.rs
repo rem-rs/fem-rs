@@ -549,39 +549,49 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
 // ─── L² error helpers ─────────────────────────────────────────────────────
 
-/// L² error for H(Div) vector fields in 2-D (Tri3/Quad4, RT0 basis only).
+/// L² error for H(Div) vector fields in 2-D (Tri3/Quad4).
 ///
-/// D674-family limitation (documented, not parameterized this round): the
-/// reference element is hard-wired to `TriRTk::new(0)` / `QuadRTk::new(0)`, so
-/// an HDiv space of order ≥ 1 (`-p 2 -o 2` → RT1) is silently evaluated with
-/// the RT0 basis (only the first slot per element is consumed) and any
-/// non-Tri3/Quad4 element type panics.  The quadrature order argument is the
-/// MFEM `ComputeL2Error` convention (`2*order + 3`).
+/// D748: the reference element is the one **paired with the space's own
+/// DOF/slot tables** (`fem_assembly::paired_vector_reference_element`, i.e.
+/// the assembler's dispatch).  The former hard-wired `TriRTk::new(0)` /
+/// `QuadRTk::new(0)` evaluated every order ≥ 1 H(div) space with the RT0
+/// basis (4 slots consumed, the rest of the element's DOFs ignored), so
+/// `-p 2 -o 2` (RT1) printed 3.497500e-1 against MFEM's 1.595990e-2 (22×).
+/// The element's DOF count is asserted against the space's slot table so a
+/// future pairing drift fails loudly instead of printing a wrong row.
+/// The quadrature order argument is the MFEM `ComputeL2Error` convention
+/// (`2*order + 3`), the same convention the ND evaluator uses.
 fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                   u_re: &[f64], u_im: &[f64],
                   mu: f64, epsilon: f64, sigma: f64, omega: f64,
                   quad_order: u8) -> (f64, f64) {
-    use fem_element::VectorReferenceElement;
-    use fem_element::raviart_thomas::{QuadRTk, TriRTk};
     use fem_mesh::element_type::ElementType;
 
     // H(Div) Piola (contravariant, 2-D): φ_phys = J·φ_ref / det J.
-    // Reference domain: TriRT0 on [0,1]² triangle (affine map),
-    // QuadRT0 on [0,1]² quad (bilinear map — NOTE element_jacobian_at uses
-    // the [-1,1]^2 QuadQ1 basis and cannot be paired with these [0,1]
-    // quadrature points; we build the [0,1]^2 map here instead).
+    // Reference domain: TriRTk on [0,1]² triangle (affine map), QuadRTk on
+    // [0,1]² quad (bilinear map — NOTE element_jacobian_at uses the [-1,1]^2
+    // QuadQ1 basis and cannot be paired with these [0,1] quadrature points;
+    // we build the [0,1]^2 map here instead).
+    let rt_order = space.order();
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
         let nodes = mesh.element_nodes(e);
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
+        let re = fem_assembly::paired_vector_reference_element(
+            space.space_type(), et, 2, rt_order);
+        let nld = re.n_dofs();
+        assert_eq!(
+            ed.len(), nld,
+            "l2_error_hdiv: {et:?} slot table has {} dofs, the paired RT{rt_order} element \
+             needs {nld} — the space and the evaluator disagree",
+            ed.len(),
+        );
+        let q = re.quadrature(quad_order);
+        let mut phi = vec![0.0; nld * 2];
         match et {
             ElementType::Tri3 => {
-                let re = TriRTk::new(0);
-                let nld = re.n_dofs();
-                let q = re.quadrature(quad_order);
-                let mut phi = vec![0.0; nld * 2];
                 let x0 = mesh.node_coords(nodes[0]);
                 let x1 = mesh.node_coords(nodes[1]);
                 let x2 = mesh.node_coords(nodes[2]);
@@ -610,14 +620,10 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                 }
             }
             ElementType::Quad4 => {
-                let re = QuadRTk::new(0);
-                let nld = re.n_dofs();
-                let q = re.quadrature(quad_order);
-                let mut phi = vec![0.0; nld * 2];
                 let xc: Vec<Vec<f64>> = (0..4)
                     .map(|k| mesh.node_coords(nodes[k]).to_vec())
                     .collect();
-                // [0,1]^2 bilinear map (must match QuadRT0's [0,1] domain)
+                // [0,1]^2 bilinear map (must match QuadRTk's [0,1] domain)
                 #[allow(non_snake_case)]
                 let n = |k: usize, xi: f64, eta: f64| -> f64 {
                     match k {
@@ -936,34 +942,47 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
 
 // ─── 3D L² error helpers ──────────────────────────────────────────────────
 
-/// L² error for H(Curl) vector fields in 3-D (Hex8/Tet4, ND1 basis only).
+/// L² error for H(Curl) vector fields in 3-D.
 ///
-/// D674-family limitation (documented, not parameterized this round): the
-/// reference element is hard-wired to `HexNDk::new(1)` for Hex8 and — via the
-/// `_` catch-all — `TetNDk::new(1)` for EVERYTHING else, so non-Hex8/Tet4
-/// cells (prisms, pyramids) are silently evaluated with the wrong tet basis
-/// and an order ≥ 2 space (`-o 2`) is silently evaluated with the ND1 basis
-/// (only the first 4/6 slots per element are consumed).  There is no panic on
-/// either path today; only the printed error row is wrong.  The quadrature
-/// order argument is the MFEM `ComputeL2Error` convention (`2*order + 3`).
+/// D748 (D674 family): the reference element is the one **paired with the
+/// space's own DOF/slot tables** (`fem_assembly::paired_vector_reference_element`
+/// — the assembler's dispatch).  The former hard-wired `HexNDk::new(1)` /
+/// `TetNDk::new(1)` evaluated every order ≥ 2 space with the ND1 basis (4/6
+/// slots consumed, the rest ignored) and every non-Hex8/Tet4 cell with a tet
+/// basis, so `-p 1 -o 2` printed 4.177593e-1 (hex) / 2.674999e-1 (tet) against
+/// MFEM's 1.563990e-2 / 5.189320e-2 (27× / 5.2×).  The element's DOF count is
+/// asserted against the space's slot table so a future pairing drift fails
+/// loudly instead of printing a wrong row.  The quadrature order argument is
+/// the MFEM `ComputeL2Error` convention (`2*order + 3`).
 fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
                       u_re: &[f64], u_im: &[f64],
                       mu: f64, epsilon: f64, sigma: f64, omega: f64,
                       quad_order: u8) -> (f64, f64) {
-    use fem_element::VectorReferenceElement;
-    use fem_element::nedelec::{TetNDk, HexNDk};
+    let nd_order = space.order();
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
-        let re: &dyn VectorReferenceElement = match et {
-            fem_mesh::element_type::ElementType::Hex8 => &HexNDk::new(1),
-            _ => &TetNDk::new(1),
-        };
+        let re = fem_assembly::paired_vector_reference_element(
+            space.space_type(), et, 3, nd_order);
         let nld = re.n_dofs();
         let q = re.quadrature(quad_order);
         let mut phi = vec![0.0; nld * 3];
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let signs = space.element_signs(e);
+        assert_eq!(
+            ed.len(), nld,
+            "l2_error_hcurl_3d: {et:?} slot table has {} dofs, the paired ND{nd_order} element \
+             needs {nld} — the space and the evaluator disagree",
+            ed.len(),
+        );
+        // Canonical → element-local DOF values: the signed gather plus the
+        // per-face 2×2 rotation (`u_local = T·u_canon`, D37).  Tet NDk face
+        // DOFs are stored as the shared face's canonical functionals, so
+        // summing `signs·u` against the element's own basis is wrong on every
+        // element whose face order differs from the face-creating one — the
+        // tet row stayed 2.7× off after the basis fix until this rotation was
+        // applied (hex faces reduce to the identity).
+        let ur = fem_assembly::vector_assembler::element_local_dofs_canonical(space, e, u_re);
+        let ui = fem_assembly::vector_assembler::element_local_dofs_canonical(space, e, u_im);
         for (qi, xi) in q.points.iter().enumerate() {
             re.eval_basis_vec(xi, &mut phi);
             let (J, xp) = element_jacobian_3d(mesh, e, xi);
@@ -975,16 +994,15 @@ fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
             let jit = J.try_inverse().unwrap_or_default().transpose();
             let mut uh_re = [0.0; 3]; let mut uh_im = [0.0; 3];
             for a in 0..nld {
-                let s = signs[a];
                 let vx = jit[(0, 0)] * phi[a * 3] + jit[(0, 1)] * phi[a * 3 + 1] + jit[(0, 2)] * phi[a * 3 + 2];
                 let vy = jit[(1, 0)] * phi[a * 3] + jit[(1, 1)] * phi[a * 3 + 1] + jit[(1, 2)] * phi[a * 3 + 2];
                 let vz = jit[(2, 0)] * phi[a * 3] + jit[(2, 1)] * phi[a * 3 + 1] + jit[(2, 2)] * phi[a * 3 + 2];
-                uh_re[0] += s * u_re[ed[a]] * vx;
-                uh_re[1] += s * u_re[ed[a]] * vy;
-                uh_re[2] += s * u_re[ed[a]] * vz;
-                uh_im[0] += s * u_im[ed[a]] * vx;
-                uh_im[1] += s * u_im[ed[a]] * vy;
-                uh_im[2] += s * u_im[ed[a]] * vz;
+                uh_re[0] += ur[a] * vx;
+                uh_re[1] += ur[a] * vy;
+                uh_re[2] += ur[a] * vz;
+                uh_im[0] += ui[a] * vx;
+                uh_im[1] += ui[a] * vy;
+                uh_im[2] += ui[a] * vz;
             }
             let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
             er2 += w * ((uh_re[0] - er).powi(2) + uh_re[1].powi(2) + uh_re[2].powi(2));
@@ -994,37 +1012,37 @@ fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
     (er2.sqrt(), ei2.sqrt())
 }
 
-/// L² error for H(Div) vector fields in 3-D (Hex8/Tet4, RT0 basis only).
+/// L² error for H(Div) vector fields in 3-D.
 ///
-/// D674-family limitation (documented, not parameterized this round): the
-/// reference element is hard-wired to `HexRTk::new_gauss_legendre(0)` for Hex8
-/// (D330's Gauss-Legendre nodal pair) and — via the `_` catch-all —
-/// `TetRTk::new(0)` for EVERYTHING else, so non-Hex8/Tet4 cells are silently
-/// evaluated with the wrong tet basis and an order ≥ 1 HDiv space is silently
-/// evaluated with the RT0 basis.  There is no panic on either path today.
+/// D748 (D674 family): same fix as the H(Curl) 3-D and H(Div) 2-D evaluators —
+/// the reference element comes from
+/// `fem_assembly::paired_vector_reference_element` (the assembler's dispatch,
+/// which keeps D330's Gauss-Legendre nodal pair for Hex8 via
+/// `HexRTk::new_gauss_legendre`) instead of the hard-wired `...RTk(0)` /
+/// `TetRTk::new(0)`, which silently evaluated every order ≥ 1 space with the
+/// RT0 basis (`-p 2 -o 2` hex: 4.568788e-1 vs MFEM 1.595990e-2).  The
+/// element's DOF count is asserted against the space's slot table.
 fn l2_error_hdiv_3d(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>,
                      u_re: &[f64], u_im: &[f64],
                      mu: f64, epsilon: f64, sigma: f64, omega: f64,
                      quad_order: u8) -> (f64, f64) {
-    use fem_element::VectorReferenceElement;
-    use fem_element::raviart_thomas::{HexRTk, TetRTk};
+    let rt_order = space.order();
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
-        let re: &dyn VectorReferenceElement = match et {
-            // D330 (main-session arbitration): the H(div) dofs are the
-            // MFEM-default nodal-GL ones (D245/D289) — reconstructing them
-            // with the IGLL pair gave an L2 error of 0.75 instead of 6e-16.
-            fem_mesh::element_type::ElementType::Hex8 => {
-                &HexRTk::new_gauss_legendre(0)
-            }
-            _ => &TetRTk::new(0),
-        };
+        let re = fem_assembly::paired_vector_reference_element(
+            space.space_type(), et, 3, rt_order);
         let nld = re.n_dofs();
         let q = re.quadrature(quad_order);
         let mut phi = vec![0.0; nld * 3];
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
+        assert_eq!(
+            ed.len(), nld,
+            "l2_error_hdiv_3d: {et:?} slot table has {} dofs, the paired RT{rt_order} element \
+             needs {nld} — the space and the evaluator disagree",
+            ed.len(),
+        );
         for (qi, xi) in q.points.iter().enumerate() {
             re.eval_basis_vec(xi, &mut phi);
             let (J, xp) = element_jacobian_3d(mesh, e, xi);

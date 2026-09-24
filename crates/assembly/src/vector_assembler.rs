@@ -101,6 +101,33 @@ pub(crate) fn vec_ref_elem_with_basis(
     vec_ref_elem_choice(space_type, elem_type, dim, order)
 }
 
+/// The vector reference element **paired with a space's DOF/slot tables** —
+/// the public form of the assembler's own dispatch
+/// ([`vec_ref_elem_with_basis`] with `quad_igll = false`).
+///
+/// Post-processing code that reconstructs a field from a `ParVector`/
+/// `GridFunction` (L² errors, flux recovery, VTK/GLVis export, …) must use
+/// *this* element, never a hand-picked `...NDk::new(k)` / `...RTk::new(k)`:
+/// the space's per-element slot and sign tables are built for one specific
+/// element per `(space type, cell type, order)`, and a mismatched basis is
+/// silently wrong (wrong field values, no panic).  The D674/D738/D748 family
+/// of evaluator defects is exactly this drift — `ex22`'s L² helpers were
+/// hard-wired to ND1/RT0, so every order ≥ 2 row was 5×–38× too large.
+///
+/// `order` is `space.order()` (for H(div) that is the space's RT index `k`,
+/// i.e. MFEM `RT_FECollection(p)` has `k = p` and `GetOrder() = p + 1`);
+/// `dim` is the mesh dimension.  Unsupported combinations panic with the same
+/// message the assembler uses — the mesh and space could not have been
+/// assembled either.
+pub fn paired_vector_reference_element(
+    space_type: SpaceType,
+    elem_type: ElementType,
+    dim: usize,
+    order: u8,
+) -> Box<dyn VectorReferenceElement> {
+    vec_ref_elem_choice(space_type, elem_type, dim, order)
+}
+
 fn vec_ref_elem_choice(
     space_type: SpaceType,
     elem_type: ElementType,
