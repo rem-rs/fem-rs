@@ -4470,6 +4470,65 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十一轮（round 71）：D749 数据流落地上游（头号，红线四值重钉）+ **D746 不确定根治（三处真缺陷）** + D743/D729（两处真缺陷）+ D748 评估器族 + D760/761/D753
+
+开局 HEAD = round 70 末笔 `91a4d0bb`（已推送，ls-remote 实证）；磁盘 37G → 清 target/debug → 87G；树净。
+
+### 派单（四路并行，号段 D762–D771；D 路失联由主会话接力收尾）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| A | **D749 rt/nd 数据流按上游修正 + 红线四值重钉**（头号） | D762-764 | miniapps/multidomain rt/nd |
+| B | **D746 pex3 不确定根治 + D748 ex22 评估器族** | D765-767 | crates/parallel、examples ex22/maxwell |
+| C | **D743 serendipity/nurbs hex 臂 + D729 余量** | D768-770 | crates/element ser/nurbs、pa/prism_pk、solver/geometric_mg |
+| D | **D760 zz 采样点 + D761 Hex20/27 + D753 ex27** | D771+ | assembly/postproc、ex27 |
+
+**流程事件**：D 路代理失联——其代码（error_estimate/d760/d761 测试/ex27 D753 实现）已留树且**近乎完成**，主会话接力验证并补齐（Tet10 dispatch——见 D761 节）；流程注记：**失联代理的"未报告完成度"必须由留树证据+测试判定**（本轮 D 的 D753 实现其实完整且正确）。
+
+### 四路交付与关门（round 71 主会话收尾）
+
+#### A —— D749 **关闭**（对照物审计 + 数据流落地上游 + 四值重钉）
+- **对照物审计**（round-70 纪律⑯）：上游主循环 vs 刷新变体 harness 做规范化逐行对齐 + **全文 `_gf` 触碰点普查**——刷新变体**忠实**（无漏行/多行；`for(ti=1; !last_step; ti++)`、两个条件、Step→[块同步→Transfer→GetTrueDofs]→打印块顺序全部逐字符同）；与上游的 6 处差异逐条定性（纯输出汇/socket 分支、打印块内先后[数值中性]、诊断行、作用域括号、循环前初始化与未被使用的 `cylinder_surface_submesh` 死代码、串行镜像让步）。
+- **端口修正**：打印块首行 `gf_state.copy_from_slice(&field_cylinder)`（= `SetFromTrueDofs`，conforming 下为整体拷贝）；Transfer 仍读/写 gf_state 并回写 RK3 态 ⇒ 下一步读到"上次打印步的 RK3 态 + 期间接口写入" = **上游模型 ③**。块侧等价于上游每步刷新（幂等）。
+- **验收**：三档（t005/t05/alt）stdout vs 刷新 harness **diff = 仅 IC 尘行**（nonzero/顺序全同）；**alt 档有判别力**（step 4 在 ②/③ 下不同）；t005 的 26 个 step 行中 25 行在 ②/③ 下不同 ⇒ 逐字节一致非空检。
+- **红线四值重钉（step 250，默认加密）**：**rt cyl sum = −2.137667e-4 / ssq 1.439350e-6**（旧 ② 模型 −6.420799e-6/1.430509e-6，**33.3×**）；**nd cyl sum = 6.932270e-5 / ssq 1.594225e-4**（旧 5.18×）。t05 末行 rt `6.288435e-4/3.197051e-4`、nd `1.025167e-1/1.543678e0`；alt 末行 rt `−1.654377e-5/9.019331e-7`、nd `−5.234577e-5/1.485274e-4`。dof/ess 四组计数不变。
+- **D736 复验**：rt `-tf 0.5`（50001 step/2513 行）逐字节（末行 cyl sum **2.546904e-2**——round-70 的 7.995288e-6 系 ② 模型值，作废）；nd 收窄至 `-tf 0.2`（20001 step，超预算声明，末行 cyl sum 1.200152e0）。
+- 新债：**D762**（rt IC 尘行"零元素计数"512→448 漂移——非本轮改动所致、需隔离 worktree 二分）、**D763**（**`-vs` 打印步长现在参与求解轨迹**——三档对比与回归必须钉死 `-vs`）、**D764**（round-64/69 旧 print-ref 夹具承载已被证伪的 never-refresh 模型，建议打 SUPERSEDED 标记）。
+
+#### B —— D746 **关闭（三处真缺陷根治）** + D748 **关闭**
+- **D746 根因（三个真实缺陷，按影响排序）**：①**`DofPartition::from_edge_space_ordered` 排序键缺 tie-breaker**（主因）——`dof_to_edge` 是 **HashMap**（`RandomState` 每进程随机种子 ⇒ 迭代序随机），随后仅按 `(global_node_a, global_node_b)` 排序，**同边 k 个 DOF 平局+稳定排序保留 HashMap 序** ⇒ `global_dof_ids` 每次运行不同；`dofs_per_edge==1`（ND1/RT0）无平局 ⇒ **`-o1` 稳定、`-o2` 抖动**（与现象逐条吻合）；②`ParVector::global_dot/owned_dot` 的 rayon `.sum()` 树形归约（1 ulp 摆动）；③`ChannelBackend::allreduce_sum_f64` 按到达次序累加。
+- **证据链**：dump 发现对角线/RHS 是**同一多重集的置换**（41279/41280 行不同=自由度重编号而非舍入差）→ 空间表定位 `g 4 4 10572 / g 5 5 10573` 互换 = 纯 `permute_dof` 表差异；修复后 space/in dump 三次运行 **diff=0**。
+- **修复**：`(ga,gb,dof_key)` 三键排序；新增确定性 dot（固定 4096 分块 + 块序串行合并）；f64 allreduce 按 rank 槽位归约。**5 次连跑逐位证明**：`-o1 --ranks1` = 87 it/2.70053050699196e-2、`-o2 --ranks1` = 3.05558571614408e-4（**round-69 的 …562224e-4 是随机编号的一次抽样，永久作废**；台账"新公式"锚复活）。
+- **D754 根因定位**（不在 B 车道 → **D766**）：`fem_linalg::Vector::dot`（`linalg/src/vector.rs:196`，门限 4096）rayon `.sum()`——**串行 Krylov 循环里的抖动源**；ex26 不走 ParVector 故与 D746 修复无关。
+- **D748 关闭**：新增公开 API **`fem_assembly::paired_vector_reference_element`**（装配器自身分派的公开形式）；四个 3-D/2-D ND/HDiv 评估器改"空间自带配对参考元 + `space.order()` + DOF 数断言"，杜绝"D674/D738/D748 反复手挑基"；**额外真发现**：tet NDk 面 DOF 存共享面规范泛函，评估必须做 **canonical→element-local 面块旋转**（`element_local_dofs_canonical`；hex 面块退化为恒等故此前"看起来对"）。红→绿：3-D hex `-p1 -o2` 27×→**1.563985e-2 = C++**、tet 5.2×→**5.189324e-2**、2-D `-p2 -o2` 22×→**1.595989e-2**、`-p1 -o3` 7×→（quad 见 D765）hex **9.465592e-3**。红线（`-p0` 两档、`-p1` 各档）逐字节保持 + 新回归牙 108/108。
+- 新债：**D765**（2-D quad NDk k≥3 空间/装配器配对不一致——两候选元实测各失败、`interpolate_vector` 缺 quad k≥3 支；待裁决）、**D766**、**D767**（HDiv 求解不收敛：2-D tri RT1/3-D tet RT1/RT2，评估器无关，属预处理器/求解器侧）。
+
+#### C —— D743 + D729 **关闭**（又两处真缺陷 + 一处审计更正）
+- **D743**：`HexSerendipityPk` 才是"未迁臂"（建基在 [-1,1]³ 却消费已 [0,1]³ 的 `hex_rule`；**红证据量化：p=1 质量阵条目 1/64**）——整体 [0,1]³ 化，**p=1 走 MFEM `TriLinear3DFiniteElement` 因式分解路径（位级=MFEM）**；p≥2 无 MFEM 对应物（`fe_ser.hpp` 只有 2-D 类）已文档化。**审计更正**：`nurbs.rs`/`nurbs_vector.rs` 的 **hex 臂本来就在新帧**（登记文字有误），真正漏的是它们的 **quad 兄弟臂**（`quad_rule` 仍 [-1,1]²）——已改 `quad_rule_01`。消费方影响面：唯一 src 消费方 `mixed::ref_elem_vol`（Hex20/Quad8/9）**无生产调用者** ⇒ 本轮不触动任何示例数字（mini_nurbs_ex1 0.588878 保持）。
+- **D729 ①`pa/prism_pk` 轴向 shim = 真缺陷**：本地 `gauss_legendre_1d` 是 15 位截断表 + **n≥8 落梯形法 `1/n`**，而 `2p+1` 规则在 **p≥4 时 n≥9** ⇒ p≥4 的 S₁/M₁ 整个用非 Gauss 规则（红：p=4 PA 绝对误差 **7.689e-1 = 44%**）；修复=委托共享 MFEM 表（n≤5 `gauss_legendre_01`、n≥6 `arbitrary`）+ `gauss_lobatto_01_arbitrary`；红→绿：轴向规则 n=2..12 位级、GLL n=2..8 位级、PA vs 装配 p=2..5 残量 1e-10 级。
+- **D729 ②`geometric_mg` SumFact 8.6e-6 = 真缺陷**：`[-1,1]²` 规则点喂 `[0,1]²` 导数公式（仿射 J 恒定完全隐藏，非平行四边形全错）；修复=整个算子 [0,1]² 化；红→绿：微斜网格 p=1..4 **5.15e-2→5.4e-16**（登记值 8.6e-6 是同缺陷在温和网格上的表现）；仿射网格 ≤1.2e-15。
+- 新债：**D768**（2-D serendipity `QuadSerendipityPk` 仍 [-1,1]²+`quad_rule`，潜伏无消费方）、**D769**（SumFact `mult_raw/mult_constrained` p≥5 scratch 越界 panic）、**D770**（prism PA 用有限差分 Jacobian 且只取首个 QP 的 |detJ|/κ，潜伏）。
+
+#### D —— D760/D761 **关闭** + D753 **关闭（数值完全闭合）**（主会话接力收尾）
+- **D760**：`zz_estimator` 三维采样点 = 参考质心（hex `[0.25;3]` → 质心语义修正），新测 3/3（含"参考重标签不变性"判据）。
+- **D761**：Hex20/27 `geom_rule` + `vertex_shapes`/`ref_vertex_coords` 空臂补齐（5 测：Hex20/27 仿射精确、gmsh Hex20 端到端、曲线 Hex27 几何表、aniso 估计器）——**测试顺带暴露系统性缺口：Tet10 是五个 simplex dispatch 的漏网**（Tri6/Hex20/27/Prism15-18/Pyramid13 都已按 D581 覆盖，唯 Tet10 缺）⇒ 主会话按 D581 先例在 `crates/space/src/ref_elem.rs` 五处补齐（`h1_field_element`/`equispaced_simplex`/`ref_elem_vol_l2`/`geometry_node_element`/`legacy_equispaced_element`）；d761 6/6、d760 3/3。
+- **D753**：ex27 初值改 `X = R·x`（`eliminate_ess_tdofs` 返回值即 MFEM `copy_interior=1` 语义）+ 停机规则对齐 legacy `PCG()` 包装的 `SetRelTol(sqrt(1e-12)) = 1e-6`（round-32 两套 API 教训直接用）——**验收：default 档 29 行迭代历史与 C++ 零差异（28 it / ARF 0.607549）、`-dbc 2.5` 档 30 行零差异（29 it、解平均 2.5/rel 3e-15）**；`-dg` 档逐字节不变。剩余 = 纯格式（Options 块 13 行、"Solved in N iterations." 多行、平均值 %g6）→ **D771**。
+- 新债：**D771**（ex27 canonical stdout 格式对齐——照 ex1/ex24 的 `print_options_block`/`cxx_ostream_f64` 定式）。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2634 / 0**（round 70 基线 2631 + 3）；门 2 `--tests` **286 targets / 4104 / 0** /
+24 ignored（+4 targets/+22；四新套件 d760[3]/d761[6]/d743[8]/d729[2]，账目闭合、零 flake）；
+门 3 examples **0 错误、非 vendor 警告 0**（B 路三条未用导入由主会话清理）；门 4 pro **rc=0**；
+门 5 fem-py **rc=0**。磁盘 62G。主会话抽查：**multidomain_rt step-250 = −2.137667e-4/
+1.439350e-6**（D749 新值命中）、**ex27 default/dbc25 迭代历史与 C++ 各 29/30 行零差异**、
+d760 3/3 + d761 6/6（Tet10 dispatch 补齐后）、ex22 `-p1 -o1` 3.514695e-2 红线保持、
+`cargo test --release --no-fail-fast` 全绿复证。
+
+### round 72 待办（建议）
+
+**① D771**（ex27 格式对齐——数值已全对，小时级）；**② D765**（quad NDk k≥3 配对裁决——两条候选元各有实测，需 MFEM `ND_QuadrilateralElement(3)` 逐槽裁决）；**③ D766/D754**（`fem_linalg::Vector::dot` 确定性——D746 同款修复模式移植）；**④ D762**（rt IC 尘行计数漂移的 worktree 二分）；**⑤ D767**（HDiv 求解不收敛：tri RT1/tet RT1-2 的预处理器侧）；**⑥ D768/D769/D770**（serendipity 2-D/prism PA 潜伏族）；**⑦ D763 纪律落地**（ledger/README 显式钉 `-vs`）；**⑧ D764**（旧夹具 SUPERSEDED 标记）；⑨ D750/D751/D756/D758/D759 + D586 upstream（待用户）。
+
 ## 第七十轮（round 70）：**D721 hex [0,1]³ 原子翻转落地**（头号，A→A2→A3 三轮收尾）+ D738 关闭 + D739 迁移 + D737/D736 + **三个重大发现**
 
 开局 HEAD = round 69 末笔 `9f391513`（已推送，ls-remote 实证）；磁盘 50G；树净。
