@@ -1552,11 +1552,16 @@ where
     // wrong basis (ex22 -p 1 -o 2 -r 1: Re error 2.010e-1 vs C++ 5.623e-3,
     // 36x too large, and non-converging under refinement).
     let order = space.order() as usize;
-    // MFEM `GridFunction::ComputeL2Error` (gridfunc.cpp) integrates the error
-    // with `IntRules.Get(geom, 2*fe->GetOrder() + 3)`; the order-1 path keeps
-    // its historical quadrature(6) so existing order-1 outputs stay
-    // byte-identical (quad_rule_01(6) and (7) are the same 4x4 Gauss rule).
-    let quad_order: u8 = if order == 1 { 6 } else { 2 * order as u8 + 3 };
+    // MFEM `GridFunction::ComputeL2Error` (gridfunc.cpp:3450) integrates the
+    // error with `IntRules.Get(fe->GetGeomType(), 2*fe->GetOrder() + 3)`.
+    // That argument is a rule ORDER, not a point count: `quad_rule_01(n)`
+    // (like MFEM's SQUARE rule) uses `(n+2)/2` points per direction, so
+    // ND1 -> 5 -> 3x3 and ND2 -> 7 -> 4x4.  The former `order == 1 -> 6`
+    // special case silently used the 4x4 (order-7) rule for ND1 — that was
+    // the whole D738 deviation (ex22 -p 1 -o 1 -r 0: 1.347927e-1 vs the
+    // C++ 1.37755e-1; MFEM probe d738/probe1.cpp confirms
+    // `2*fe->GetOrder()+3 == 5` with 9 points for ND1 on a quad).
+    let quad_order: u8 = 2 * order as u8 + 3;
     let mut err2 = 0.0_f64;
 
     for e in mesh.elem_iter() {
