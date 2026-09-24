@@ -150,9 +150,9 @@ multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变�
 ### multidomain/（3）
 | 文件 | 档位 | 分类 | 备注 |
 |---|---|---|---|
-| multidomain.rs | **RUN-LONG** | 默认档 300s 推进至 step 8550 / t=0.171（目标 0.25），sum/min/max 正常演化 —— 非挂死 | |
-| multidomain_nd.rs | **BIT\***【round 64 D657 崩溃修复 → round 68 D708 gf-shadow → round 69 升 BIT\*】 | 实体化配对（几何因子定号）+ gf-shadow 数据流（D708：MFEM Transfer 读并覆写目的 gf、上游从不用 RK3 结果更新它——**圆柱动力学曾只存在于打印里**）；dof/ess 7708/5664、1168/800 = MFEM 全等；**round 69 对齐 11 处格式差后三档（t005/t05/alt）stdout vs print-ref 各仅剩 1 行豁免**（IC 投影尘 = D735：MFEM ProjectBdrCoefficient 留 ±1e-18 尘 vs fem-rs 精确 0.0）、**7 位有效数字全轨迹对齐**；cyl sum/ssq = 1.337180e-5/1.594132e-4 = C++ 全吻合 | |
-| multidomain_rt.rs | **BIT\***【round 64 D657 → round 68 D708 → round 69 升 BIT\*】 | 同上数据流修复链；**rt cyl sum/ssq = −6.420799e-6/1.430509e-6 = C++ 全吻合**；三档各仅 IC 行豁免（D735）；官方 multidomain_rt.cpp PAR-only（串树现编失败实证）→ 对照物 = print-ref harness（round-64 先例口径） | |
+| multidomain.rs | **BIT\***（round 70 D737；straight 口径） | 官方 `multidomain.cpp` 也 **PAR-only**（rc=2 实证）→ print-ref harness（`tmp/d737/multidomain_h1_printref.cpp`）；7 处格式差对齐（Options 4 行 / bdr_attrs 探针剥离 / 新增 `Block interface tdofs: 416` / IC sum / 步进行改 sum+ssq 家族）；**规则修正为 MFEM 逐积分器默认**（曲 mass9/conv9/diff6 = 125/125/64 pt，直 6/6/6，harness `-rules` 探针实证）；**数据流补上游打印块 GF 刷新**（`cyl_gf_state`；norefresh 模型 step250 差 5.4e-4）；验收：alt 档 6 行全字节、t005 block 全一致 + cyl 10/26 行第 7 位（≤9.8e-7 = D750）、IC 行无豁免；曲边档待复跑 | |
+| multidomain_nd.rs | **BIT\***【round 64 D657 → round 68 D708 → round 69 BIT\* → round 70 D749 修正】 | 实体化配对（几何因子定号）+ gf-shadow 数据流（D708）；dof/ess 7708/5664、1168/800 = MFEM 全等；round 69 对齐 11 处格式差后三档仅 IC 行豁免；cyl sum/ssq = 1.337180e-5/1.594132e-4；**⚠️ D749（P1）：本行对照 harness（tmp/dbit）漏上游打印块 `SetFromTrueDofs`（nd.cpp:391-392）——上游口径 cyl sum 6.932270e-5（5.2×），上述四值为 harness 模型值；端口+harness 补刷新后重钉**；**D736 收窄**：t≤0.5（50001 step/2513 行）逐字节全对齐（末行 cyl sum=5.622607e-3），t>0.5 HYPOTHESIS | |
+| multidomain_rt.rs | **BIT\***【round 64 D657 → round 68 D708 → round 69 BIT\* → round 70 D749 修正】 | 同上链；rt cyl sum/ssq = −6.420799e-6/1.430509e-6；官方 rt.cpp PAR-only → print-ref harness；**⚠️ D749（P1）：harness 漏上游 rt.cpp:386-387 刷新——上游口径 cyl sum −2.137667e-4（33×）；重钉路径同 nd**；**D736 收窄**：t≤0.5 逐字节全对齐（末行 cyl sum=7.995288e-6） | |
 
 ### shifted/（3）——均需 `-no-vis`（默认档 rc=3 vis 注记，声明兑现）
 | 文件 | 档位 | 分类 | 备注 |

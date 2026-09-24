@@ -4470,6 +4470,58 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十轮（round 70）：**D721 hex [0,1]³ 原子翻转落地**（头号，A→A2→A3 三轮收尾）+ D738 关闭 + D739 迁移 + D737/D736 + **三个重大发现**
+
+开局 HEAD = round 69 末笔 `9f391513`（已推送，ls-remote 实证）；磁盘 50G；树净。
+
+### 派单（四路并行，号段 D742–D761；A 路三轮接力、债务重编号见 §末尾）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| A | **D721 原子翻转**（三阶段：求积→形函数→PA 核；终态必须绿） | D742-745 | crates/** |
+| B | **D738 ex22 2-D ND 评估器 + D735 IC 尘裁决** | D746-748 | examples/src/maxwell.rs、ex22、multidomain rt/nd（仅 D735） |
+| C | **D739 D706 入口消费方迁移** | D752-755（原报 D742-745，与 A 撞号后重编号） | 7 个示例文件 |
+| D | **D737 multidomain.rs H1 canonical + D736 长窗口** | D749-751 | miniapps/multidomain/{multidomain.rs,README.md} |
+
+### 四路交付与关门（round 70 主会话收尾）
+
+#### A —— D721 **翻转落地**（三轮接力：A 主体 → A2 四红灯 → A3 集成残留清剿）
+- **主体（A 路，56 文件）**：`hex_rule` → MFEM `[0,1]³` 表（`gauss_legendre_01` 位级 + **x-fastest 枚举** + 左结合权重 `(wx·wy)·wz`）；`HexQ1` = MFEM `TriLinear3DFiniteElement` 逐字；`HexQk` 复用 D364 barycentric 机器（`gll01` + CalcShape/CalcDShape 双载）；RT/ND hex **pull-back 因子全删**（native [0,1]）；**J op-order 内核解决** = `geo_ref_elem_from_mesh` 对直 hex 返回 `HexQ1`（单一 dispatch 改动），新常驻测试 `d721_affine_unit_hex_jacobian_matches_mfem_dump_bitwise`（27/27 qp × 9 J 项位级）；PA 核六文件 [0,1] 化；shim 删除（curved_hex/gslib/transformation/geometric_mg/dof_manager/io hex_slot_map）。
+- **A2 收尾（四红灯，根因两类）**：**库内真缺陷 2 处**（io `MixedFamily::hex` 漏 shim → panic；`hex_rtk.rs` 面块乘积写成通用序而 MFEM 把闭因子写在自己轴位[z 末] → RT1 参考值 168/6912 项 1 ulp 失配）；**测试帧残留 2 类**（lor_factory 测试局部组装器/`prolong.rs`+`geometric_mg` Newton 定位器/hdiv 回归测试局部 HexMap 仍是 [-1,1]）。**红→绿**：LOR rt 腿 **99→132 红 → 43→67 绿**（门 `it4 ≤ it2+25`；翻转前口径 46→65）；d386 order1 7e0→≤1e-13；io panic 消除 3/3；hdiv 回归 10/10；**D742 关闭**（d680 RT1 0/0 位级 + 47413 项 bit-dump 零失配）。
+- **A3 清剿（D757：51 失败/18 套件 → 0）**：15 站逐站裁决（14 文件 42 处 `D757` 标记），**又挖出 5 处库内真缺陷**——`error_estimate.rs::vertex_shapes` hex 角权（[-1,1] 公式作用在 [0,1] ξ）、`transfer.rs::hdiv_elem_frame` Hex 臂（**d468 hex RT0 48/48 位级、d493 hex RT1 1728/1728 1.1e-16**）、**`dpg_basis.rs::ref_node_coords(Hex8)` 帧不同步（Stokes 残差 1.821e1 → 6.661e-16，15 个量级）**、`legacy.rs::LegacyHexQ3` 节点 `-1+2i/3 → i/3`（fichera-q3 min det 与 MFEM 6e-15）、`vtk_legacy_reader.rs` type 29 槽位（18 输入 × 2 组合与 golden 字节同）。A 的"全套绿"claim 不成立（未跑集成层）——纪律：**全量门必须 `--no-fail-fast`**。
+- **验收（终态）**：**ex24 四口径全部逐字节 = C++**（含 `-p 1` iter1 `1.47776e-22`、ARF `9.13511e-13` → **D712 关闭**）；d680 RT0/RT1/ND1 **位级**；multidomain rt/nd step-250 逐位保持；ex22 hex o1/o2 = C++ 括号值；ex26/ex29/ex31(0.181455)/pex5/pex40 逐字；ex34/pex34 ranks1 不劣化（**ranks2 发散 = D756 新债**）；七 crate `--no-fail-fast` **292 targets / 4092 / 0**。
+- 新债：**D743**（serendipity/nurbs hex 臂未迁——仍消费已变的 hex_rule，被激活前必须先翻）、**D756**（pex34 ranks2）、**D758**（ex34 -hex submesh 规模/ex29 停判据/LOR 门限）、**D759/D760/D761**（mms_verification 帧残留非 gate / zz_estimator 三维采样点 0.25 是 tet 质心复用于 hex / geom_rule Hex20/27 panic + vertex_shapes 空臂）。D744（geometric_mg+d386）/D745（LOR rt）/D747 号段重编号见末尾。
+
+#### B —— D738 **关闭** + 两发现
+- **D738**：根因 = **求积阶不是点数**——`quad_rule_01(n)` 用 `(n+2)/2` 点/维，MFEM `ComputeL2Error` 传 intorder `2·GetOrder+3`：ND1 的 GetOrder=1 ⇒ intorder 5 ⇒ **3×3**，而 fem-rs 用 order 6 ⇒ **4×4** 欠/过积不对。一行修复后：2×2 oracle `0.302847805/0.157766105` **8 位吻合**、quad `-p1 -o1` `1.377548e-1/1.407903e-1` = C++、tri 同。红线全保持（-p0 两档逐字节、-p1 -o2 5.622973e-3 逐字节）。
+- **D735 前提被驳**：MFEM `ProjectBdrCoefficient{Normal,Tangent}` **不是 L2 投影**（逐边界元 `fe->Project` 在 dof 节点求值 + `ComputeMeans(ARITHMETIC)` 除触数；唯一求积在 integrated tensor 元内部）——即 fem-rs 的 `interpolate_vector` 就是其 1:1；尘值恒 `2^-54`、不可位级复刻（需整形 `dof_map/dof2tk/tk` 全链）；且**计数随几何舍入不稳**（A 翻转期间 640→448→448）。裁定 = **不建 parity API**，豁免行收窄为 `|v|≥1e-12` 计数 + IC sum 容差 → **D747**。
+- **D746（新，重要）**：pex3 的 L² 行**运行间不确定**（~1e-10 相对，5/5 不同值）——round-69 的 14 位锚点 `3.05558571562224e-4` 不可复现；台账 OLD 公式锚 `2.70053055689122e-2` 亦过期（新公式 `2.70053050699196e-2`）。门口径须降到 ~9 位或根治不确定。**D748（新）**：ex22 3-D `-p1 -o2` 误差 27×（`l2_error_hcurl_3d` ND1 硬编码）+ 2-D `-p2 -o2` 22×（`l2_error_hdiv` RT0 硬编码）+ `-p1 -o3` 7×——同 D672/D693 族。
+
+#### C —— D739 **关闭**（7 站点迁移；ex27 附带 1:1 修正）
+- 6 站语义等价（含 ex31 `0.181455` 与 9 个 dump 文件 sha256 四次运行全同、C++ 复核 833/833 坐标置换匹配）；ex26/ex29/ex39/ex10/ex31_aniso 全逐字节（ex26 `sol.gf` 默认线程 1e-14 抖动 = **D754**）。
+- **ex27 `-dbc ≠ 0` 档旧管线是错的**（把先前已消元 dof 的反应累加进 ess 行 ⇒ Dirichlet 值违反 40%：平均 3.37 vs C++ 2.5）；迁移后 = C++（2.5 / 3.1e-15）。**主会话裁决：保留**（AGENTS.md 1:1 前提条款；默认档逐字节不变）。残余口径项（初值 X=R·x、停机 sqrt 语义、nbc0）→ **D753**。
+- 新债（重编号）：**D752**（遗留值列表消元入口族收敛）、**D753**（ex27 -dbc≠0 残余）、**D754**（ex26 线程不确定）、**D755**（D706 入口覆盖缺口：row-zeroing/复数侧/miniapps 站点）。
+
+#### D —— D737 **关闭（straight 口径）** + D736 **收窄** + **D749 重大发现**
+- **D737**：官方 `multidomain.cpp` 也 PAR-only（rc=2 实证）→ print-ref harness（`tmp/d737/multidomain_h1_printref.cpp`）；7 处格式差对齐（Options 块/探针剥离/`Block interface tdofs: 416`/IC sum/步进行改 sum+ssq 家族）；**规则修 MFEM 逐积分器默认**（曲 mass9/conv9/diff6 = 125/125/64 pt，直 6/6/6，harness `-rules` 探针实证）；**数据流**：上游 `multidomain.cpp:381-382` 打印块 `SetFromTrueDofs` 刷新 GF ⇒ 实现 `cyl_gf_state`（转移目标 + 打印步回写）。验收：alt 档 6 行全字节、t005 block 全一致 + cyl 10/26 行第 7 位（≤9.8e-7 = D750）、IC 行无豁免。
+- **D736 收窄**：rt/nd `-tf 0.5`（50001 step/2513 行）**逐字节全对齐**（仅 D735 IC 行；末行 rt `block sum=-1.558563e0 cyl sum=7.995288e-6`、nd `-1.158073e1/5.622607e-3`）——t ≤ 0.5 通过；**t > 0.5（含全默认 t=5，外推 rt≈2.6h/nd≈7.6h）仍 HYPOTHESIS**。
+- **D749（P1，round 71 头号）**：round-64/69 的 rt/nd **print-ref harness 漏了上游打印块的两行 `SetFromTrueDofs`**（rt.cpp:386-387 / nd.cpp:391-392）——上游口径 step-250 rt cyl sum `−2.137667e-4`（**vs harness 模型 −6.420799e-6，33×**）、nd `6.932270e-5`（5.2×）。⇒ **round-69 的"红线四值"是 harness 模型值、非上游 MFEM 值**；rt/nd 端口需按 H1 的 `cyl_gf_state` 模式补 GF 刷新 + harness 补两行后重跑三档重钉。**D750**（H1 第 7 位抖动 ≤9.8e-7，候选 = libm/CG 终止/矩阵相加序）。**D751**（H1 标量 hex 默认规则公式抽成 `mfem_h1_*_quad_order_hex`）。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2631 / 0**（round 69 基线 2626 + 5 = 翻转新增位级 pin：`hex_rule_is_mfem_bitwise`/
+`hex_q1_is_mfem_trilinear_on_unit_cube`/`gll_nodes_01_is_the_central_image`/`integrated_modes_01_have_unit_integral`/
+J dump-pin）；门 2 `--tests` **282 targets / 4082 / 0** / 24 ignored（+5；A3 的 292/4092
+口径含 10 个 doc tests）；门 3 examples **0 错误、非 vendor 警告 0**（D 路一条未用导入由主会话
+清理）；门 4 pro **rc=0**；门 5 fem-py **rc=0**。磁盘 37G（门后，**紧张——下轮开工前清
+target/debug**）。主会话抽查：**ex24 `-p 1` 与 C++ ref diff=0 逐字节**（iter1 1.47776e-22 /
+ARF 9.13511e-13 = D712 关闭）、d680 套件 3/3（位级门）、multidomain_rt step-250 = print-ref
+逐位（仅 IC 尘行）、七 crate `--no-fail-fast` 全绿复证。
+
+### round 71 待办（建议）
+
+**① D749（头号）rt/nd 数据流按上游修正**（端口 + harness 补 `SetFromTrueDofs` 打印块刷新 → 重跑三档 → **重钉红线四值**）；**② D746**（pex3 不确定根治或门口径降档——**优先根治**：查并行装配/归约的迭代序不确定性）；**③ D743**（serendipity/nurbs hex 臂翻转到 [0,1]——被激活前的行为不可信）；**④ D748**（ex22 3-D/HDiv/ND3 评估器族）；**⑤ D752/D755**（值列表消元入口族收敛 + D706 覆盖缺口）；**⑥ D756**（pex34 ranks2）、**D760**（zz_estimator hex 采样点）、**D761**（Hex20/27 geom_rule panic）、**D758/D753/D754/D759/D750/D751** 裁决族；⑦ D586 upstream（待用户）。
+
 ## 第六十九轮（round 69）：D721 立项论证（有条件 go）+ D715/D724 关闭 + multidomain 升 BIT* + D706 串行/裁决族
 
 开局 HEAD = round 68 末笔 `ab2c9573`（已推送，ls-remote 实证）；磁盘 62G；树净。
