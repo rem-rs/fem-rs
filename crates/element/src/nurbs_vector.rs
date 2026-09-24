@@ -256,9 +256,11 @@ impl VectorReferenceElement for NurbsHDiv2D {
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
-        // Tensor-product Gauss-Legendre rule.
+        // Tensor-product Gauss-Legendre rule on `[0,1]^2` — the knot domain of a
+        // clamped patch (D768: this arm consumed the `[-1,1]^2` rule before,
+        // sampling three quarters of its points outside the patch).
         let p = order.max(2);
-        crate::quadrature::quad_rule(p)
+        crate::quadrature::quad_rule_01(p)
     }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
@@ -668,6 +670,9 @@ impl VectorReferenceElement for NurbsHDiv3D {
         curl_vals.fill(0.0);
     }
 
+    /// MFEM's `IntRules.Get(Geometry::CUBE, order)` on `[0,1]³` — the knot
+    /// domain of a clamped patch, and the hex family's frame since D721
+    /// (D743 pinned the arm here).
     fn quadrature(&self, order: u8) -> QuadratureRule {
         let p = order.max(2);
         crate::quadrature::hex_rule(p)
@@ -917,6 +922,9 @@ impl VectorReferenceElement for NurbsHCurl3D {
         div_vals.fill(0.0);
     }
 
+    /// MFEM's `IntRules.Get(Geometry::CUBE, order)` on `[0,1]³` — the knot
+    /// domain of a clamped patch, and the hex family's frame since D721
+    /// (D743 pinned the arm here).
     fn quadrature(&self, order: u8) -> QuadratureRule {
         let p = order.max(2);
         crate::quadrature::hex_rule(p)

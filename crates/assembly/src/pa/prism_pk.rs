@@ -19,10 +19,15 @@ use fem_mesh::topology::MeshTopology;
 // ─── 1D Lagrange matrices (Gauss-Lobatto nodes on [0,1]) ──────────────────
 
 /// The closed Gauss-Lobatto points on `[0,1]` — the 1-D factor of
-/// `PrismPk`/MFEM `H1_WedgeElement` (D164).
+/// `PrismPk`/MFEM `H1_WedgeElement` (D164), taken from the shared `[0,1]` table
+/// (`MFEM`'s `poly1d.ClosedPoints`).
+///
+/// D729: this used to map the `[-1,1]` table through `0.5·(x+1)`; above
+/// `p = 4` that double rounding (MFEM stores the `[0,1]` node, this crate's
+/// `gauss_lobatto_arbitrary` maps it back to `[-1,1]`, then the map re-applies
+/// the affine transform) differs from MFEM's stored node by 1–2 ulp.
 fn gll_closed_points(p: usize) -> Vec<f64> {
-    let (g, _w) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
-    g.iter().map(|&x| 0.5 * (x + 1.0)).collect()
+    fem_element::quadrature::gauss_lobatto_01_arbitrary(p + 1).0
 }
 
 /// All 1-D Lagrange basis values on `nodes` at `x` (nodes are distinct).
@@ -143,33 +148,20 @@ fn build_tri_mass(p: usize) -> Vec<Vec<f64>> {
     m
 }
 
-/// Gauss-Legendre quadrature on [0,1] supported for typical orders.
+/// Gauss-Legendre quadrature on `[0,1]`; delegates to the crate's shared MFEM
+/// tables ([`fem_element::quadrature::gauss_legendre_01`] for `n <= 5`, MFEM's
+/// Newton generator above).
+///
+/// D729: the previous private table was 15-digit literals for `n <= 6` (1–4 ulp
+/// from MFEM), a `[-1,1]`-remap for `n = 7`, and a **trapezoidal** `1/n`-weight
+/// fallback for every `n >= 8` — which is the `2p+1` rule of `p >= 4`, i.e. the
+/// whole `S₁`/`M₁` Kronecker factor pair was built from a non-Gauss rule there
+/// (PA vs assembled: 7.7e-1 absolute at `p = 4`).
 fn gauss_legendre_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
-    match n {
-        2 => (vec![0.211324865405187, 0.788675134594813], vec![0.5, 0.5]),
-        3 => (vec![0.112701665379258, 0.5, 0.887298334620742],
-              vec![5.0/18.0, 8.0/18.0, 5.0/18.0]),
-        4 => (vec![0.069431844202974, 0.330009478207572, 0.669990521792428, 0.930568155797026],
-              vec![0.173927422568727, 0.326072577431273, 0.326072577431273, 0.173927422568727]),
-        5 => (vec![0.046910077030668, 0.230765344947158, 0.5, 0.769234655052842, 0.953089922969332],
-              vec![0.118463442528095, 0.239314335249683, 64.0/225.0, 0.239314335249683, 0.118463442528095]),
-        6 => (vec![0.033765242898424, 0.169395306766868, 0.380690406958402, 0.619309593041598, 0.830604693233132, 0.966234757101576],
-              vec![0.085662246189585, 0.180380786524069, 0.233956967286346, 0.233956967286346, 0.180380786524069, 0.085662246189585]),
-        7 => {
-            // Points on [0,1] from [-1,1] Gauss-Legendre
-            let gl_pts = [-0.9491079123427585, -0.7415311855993945, -0.4058451513773972, 0.0, 0.4058451513773972, 0.7415311855993945, 0.9491079123427585];
-            let gl_wts = [0.1294849661688697, 0.2797053914892767, 0.3818300505051189, 0.4179591836734694, 0.3818300505051189, 0.2797053914892767, 0.1294849661688697];
-            let pts: Vec<f64> = gl_pts.iter().map(|&p| 0.5 * p + 0.5).collect();
-            let wts: Vec<f64> = gl_wts.iter().map(|&w| 0.5 * w).collect();
-            (pts, wts)
-        }
-        _ => {
-            // Default: use equispaced + weights = 1/n (trapezoidal — low accuracy for high orders)
-            let h = 1.0 / (n as f64 - 1.0);
-            let pts: Vec<f64> = (0..n).map(|i| i as f64 * h).collect();
-            let w = 1.0 / n as f64;
-            (pts, vec![w; n])
-        }
+    if n <= 5 {
+        fem_element::quadrature::gauss_legendre_01(n)
+    } else {
+        fem_element::quadrature::gauss_legendre_01_arbitrary(n)
     }
 }
 
@@ -482,5 +474,106 @@ mod tests {
             max_err < 1e-10,
             "Prism P{p} PA vs assembled max abs err = {max_err:.3e} (pa_nrm={pa_nrm:.3e})"
         );
+    }
+
+    /// D729 — the axial 1-D rule must be the shared MFEM `[0,1]` table the rest
+    /// of the library uses (`gauss_legendre_01` for `n <= 5`, MFEM's Newton
+    /// generator above), not a private table.
+    ///
+    /// The old local `gauss_legendre_1d` was a 15-digit literal table for
+    /// `n <= 6`, `0.5·(x+1)`-remapped `[-1,1]` nodes for `n = 7`, and — for
+    /// every `n >= 8`, i.e. the `2p+1` rule of `p >= 4` — a **trapezoidal**
+    /// fallback with weights `1/n`, which is not a Gauss rule at all.
+    #[test]
+    fn prism_axial_rules_are_the_mfem_unit_interval_tables() {
+        for n in 2..=12usize {
+            let (p, w) = gauss_legendre_1d(n);
+            let (mp, mw) = if n <= 5 {
+                fem_element::quadrature::gauss_legendre_01(n)
+            } else {
+                fem_element::quadrature::gauss_legendre_01_arbitrary(n)
+            };
+            assert_eq!(p.len(), mp.len(), "n={n}: node count");
+            for i in 0..n {
+                assert_eq!(
+                    p[i].to_bits(),
+                    mp[i].to_bits(),
+                    "n={n} node {i}: {:.17e} vs MFEM {:.17e}",
+                    p[i],
+                    mp[i]
+                );
+                assert_eq!(
+                    w[i].to_bits(),
+                    mw[i].to_bits(),
+                    "n={n} weight {i}: {:.17e} vs MFEM {:.17e}",
+                    w[i],
+                    mw[i]
+                );
+            }
+            // The rule integrates on [0,1]: Σw = 1 and every node is inside.
+            let sum: f64 = w.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-14, "n={n}: Σw = {sum}");
+            assert!(p.iter().all(|&x| (0.0..=1.0).contains(&x)), "n={n}: node outside [0,1]");
+        }
+    }
+
+    /// D729 — the axial nodes of the Kronecker factors are MFEM's `[0,1]`
+    /// Gauss-Lobatto nodes (`poly1d.ClosedPoints`), not `0.5·(x+1)` images of
+    /// the `[-1,1]` table (the double rounding is a 1-ulp shim for `p >= 5`).
+    #[test]
+    fn prism_axial_gll_nodes_are_the_unit_interval_table() {
+        for n in 2..=8usize {
+            let got = gll_closed_points(n - 1);
+            let want = fem_element::quadrature::gauss_lobatto_01_arbitrary(n).0;
+            assert_eq!(got.len(), want.len(), "n={n}");
+            for i in 0..n {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "n={n} node {i}: {:.17e} vs MFEM {:.17e}",
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    /// D729 — the PA Kronecker apply must reproduce the assembled diffusion at
+    /// every order, including `p >= 4` (whose `2p+1 = 9+` point axial rule fell
+    /// into the old trapezoidal fallback).
+    #[test]
+    fn prism_pa_all_orders_match_assembled() {
+        let mesh = make_prism_mesh();
+        for p in [2usize, 3, 4, 5] {
+            let space = H1Space::new(mesh.clone(), p as u8);
+            let n = space.n_dofs();
+            let a_assembled = crate::Assembler::assemble_bilinear(
+                &space,
+                &[&crate::standard::DiffusionIntegrator { kappa: 1.0 }],
+                2 * p as u8 + 1,
+            );
+            let pd = build_prism_pk_pa_data(&mesh, &|_| 1.0, p);
+            let mut elem_dofs: Vec<Vec<u32>> = Vec::new();
+            for e in 0..mesh.n_elems() as u32 {
+                elem_dofs.push(space.element_dofs(e as u32).to_vec());
+            }
+            let x: Vec<f64> = (0..n).map(|i| 1.0 + 0.125 * (i % 7) as f64).collect();
+            let mut y_pa = vec![0.0_f64; n];
+            pa_apply_prism_pk(&pd, &elem_dofs, p, &x, &mut y_pa);
+            let mut y_asm = vec![0.0_f64; n];
+            a_assembled.spmv(&x, &mut y_asm);
+            let max_err: f64 = y_pa
+                .iter()
+                .zip(y_asm.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            let pa_nrm: f64 = y_pa.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            // Residual ~1e-10 absolute is the finite-difference Jacobian of
+            // `build_prism_pk_pa_data` (eps = 1e-6), not a quadrature defect.
+            assert!(
+                max_err < 1e-9,
+                "Prism P{p} PA vs assembled max abs err = {max_err:.3e} (pa_nrm={pa_nrm:.3e})"
+            );
+        }
     }
 }

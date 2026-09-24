@@ -22,16 +22,21 @@ use nalgebra::DMatrix;
 
 /// Sum-factorization diffusion operator matching MFEM's `AddMultPA`.
 ///
-/// Uses a 3-phase sum-factorization algorithm for Quad4 elements:
+/// Uses a 3-phase sum-factorization algorithm for Quad4 elements, entirely on
+/// MFEM's **`[0,1]²`** reference square (D729): the 1-D nodes are the `[0,1]`
+/// Gauss-Lobatto points of the `QuadQk` basis, the rule is `quad_rule_01`'s
+/// 1-D factor, and the geometry Jacobian is MFEM's `BiLinear2DFiniteElement`
+/// `[0,1]²` Jacobian evaluated at the same points — so this operator shares the
+/// frame of the CSR assembly it approximates.
 ///
 /// **Phase 1** — For each 1D ξ-quad-point, contract along η (s_x, s_y).
 /// **Phase 2** — At each full 2D qp (ξ_q, η_r), compute du/dξ, du/dη and
 ///               apply pa_data (J⁻¹·J⁻ᵀ · |detJ| · w · κ) to get physical flux.
 /// **Phase 3** — Assemble back using the same 1D basis factorisation.
 ///
-/// This produces bitwise-identical floating-point results to MFEM's
-/// `ApplyPAKernels::Run` for tensor-product Quad4 elements, enabling
-/// MG convergence matching C++ (28→4 iters for star.mesh with -or 2).
+/// The operator reproduces the CSR diffusion matrix to round-off (pinned in
+/// `crates/solver/tests/d729_geometric_mg_sumfact.rs`, including skewed,
+/// non-parallelogram cells).
 #[allow(non_snake_case)]
 pub struct SumFactDiffusionOp {
     /// Element DOF indices (QuadQk ordering per element).
@@ -49,7 +54,7 @@ pub struct SumFactDiffusionOp {
     pub B: Vec<f64>,
     /// 1D basis gradients: G[q * p1 + i] = dl_i/dξ(ξ_q).
     pub G: Vec<f64>,
-    /// 1D quadrature weights on [-1, 1].
+    /// 1D quadrature weights on `[0,1]`.
     pub W: Vec<f64>,
 
     /// PA data per (element, ξ_q, η_r), 3 symmetric components:
@@ -87,25 +92,29 @@ impl SumFactDiffusionOp {
         let dim = mesh.dim() as usize;
         assert_eq!(dim, 2, "SumFactDiffusionOp requires 2D");
 
-        // 1D Gauss-Legendre points on [-1, 1].  For Q_p diffusion the integrand
-        // is degree 2p in one tensor-product direction (∂_x φ has degree p in
-        // η), so P4 needs 5-point Gauss (exact to degree 9) — matching the CSR
-        // assembly after the same fix in `quad_rule_01`.
+        // 1D Gauss-Legendre points on **[0, 1]** — the 1-D factor of
+        // `quad_rule_01`, i.e. exactly the rule the CSR assembly integrates
+        // with.  For Q_p diffusion the integrand is degree 2p in one
+        // tensor-product direction (∂_x φ has degree p in η), so P4 needs
+        // 5-point Gauss (exact to degree 9).
+        //
+        // D729: this table used to be the `[-1,1]` one, paired with `[0,1]²`
+        // geometry formulas — see the Jacobian comment below.
         let q1d = ((quad_order as usize + 2) / 2).max(1);
-        let (xi_1d, w_1d) = if q1d <= 4 {
-            Self::gauss_legendre_1d(q1d)
+        let (xi_1d, w_1d) = if q1d <= 5 {
+            fem_element::quadrature::gauss_legendre_01(q1d)
         } else {
-            fem_element::quadrature::gauss_legendre_arbitrary(q1d)
+            fem_element::quadrature::gauss_legendre_01_arbitrary(q1d)
         };
 
-        // 1D Lagrange nodes on [-1, 1] — Gauss-Lobatto-Legendre, matching the
-        // QuadQk basis used by the CSR assembly (H1_FECollection BasisType::
-        // GaussLobatto).  For p = 1, 2 the GLL points coincide with the
-        // equispaced points; for p >= 3 they differ, so the old equispaced
-        // choice produced a different operator than the CSR matrix.
+        // 1D Lagrange nodes on **[0, 1]** — the Gauss-Lobatto-Legendre lattice
+        // of the `QuadQk` basis the CSR assembly uses (H1_FECollection
+        // BasisType::GaussLobatto).  For p = 1, 2 the GLL points coincide with
+        // the equispaced points; for p >= 3 they differ, so an equispaced
+        // choice would produce a different operator than the CSR matrix.
         let p = order as usize;
         let p1 = p + 1;
-        let (nodes_1d, _w) = fem_element::quadrature::gauss_lobatto_arbitrary(p1);
+        let (nodes_1d, _w) = fem_element::quadrature::gauss_lobatto_01_arbitrary(p1);
 
         // Precompute 1D basis: B[q][i] and G[q][i]
         let mut b_1d = vec![0.0; q1d * p1];
@@ -158,8 +167,16 @@ impl SumFactDiffusionOp {
                 let xi = xi_1d[q];
                 for r in 0..q1d {
                     let eta = xi_1d[r];
-                    // Bilinear Quad4 Jacobian (same convention as PADiffusionOp,
-                    // i.e. WITHOUT the 1/4 factor — see long comment there)
+                    // Bilinear Quad4 Jacobian — MFEM `BiLinear2DFiniteElement`'s
+                    // `[0,1]²`-frame derivatives (`dN/dξ = -(1-η), (1-η), η, -η`),
+                    // the same convention as `PADiffusionOp` and the CSR
+                    // assembly.  D729: with the `[0,1]²` rule above the point is
+                    // already in this frame; the previous `[-1,1]` rule fed its
+                    // raw nodes (`η = -0.577…` instead of `0.211…`) into these
+                    // formulas, extrapolating the geometry map and producing a
+                    // wrong Jacobian on every non-parallelogram cell (a single
+                    // skewed quad was off by up to 100% of its own norm, while
+                    // affine cells — constant J — were unaffected).
                     let dndxi = [-(1.0 - eta), (1.0 - eta), eta, -eta];
                     let dndeta = [-(1.0 - xi), -xi, xi, (1.0 - xi)];
                     let mut jac = [[0.0f64; 2]; 2]; // [d][col]
@@ -208,29 +225,6 @@ impl SumFactDiffusionOp {
             pa_data,
             tp_to_dof,
             dof_to_tp,
-        }
-    }
-
-    /// 1D Gauss-Legendre points and weights on [-1, 1].
-    fn gauss_legendre_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
-        match n {
-            1 => (vec![0.0], vec![2.0]),
-            2 => {
-                let x = 1.0_f64 / 3.0_f64.sqrt();
-                (vec![-x, x], vec![1.0, 1.0])
-            }
-            3 => {
-                let x = (3.0_f64 / 5.0_f64).sqrt();
-                (vec![-x, 0.0, x], vec![5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0])
-            }
-            4 => {
-                let a = (3.0 / 7.0 - 2.0 / 7.0 * (6.0_f64 / 5.0).sqrt()).sqrt();
-                let b = (3.0 / 7.0 + 2.0 / 7.0 * (6.0_f64 / 5.0).sqrt()).sqrt();
-                let wa = (18.0 + 30.0_f64.sqrt()) / 36.0;
-                let wb = (18.0 - 30.0_f64.sqrt()) / 36.0;
-                (vec![-b, -a, a, b], vec![wb, wa, wa, wb])
-            }
-            _ => panic!("gauss_legendre_1d: only n=1..4 supported, got {n}"),
         }
     }
 
@@ -431,13 +425,18 @@ fn barycentric_weight_ratio(nodes: &[f64], i: usize, k: usize) -> f64 {
 }
 
 /// QuadQk node-to-DOF mapping: (ix, iy) in [0, p] → QuadQk DOF index.
+///
+/// The lattice indices are the equispaced `i/p` positions of `QuadQk` on the
+/// `[0,1]²` reference square (D364/D721 frame); only the *position class*
+/// (vertex / edge / interior) is used here, so the mapping is frame-agnostic —
+/// the [-1,1] lattice that used to be spelled out was pure historical noise.
 fn quadqk_node_to_dof(ix: usize, iy: usize, p: usize) -> usize {
-    let x = -1.0 + 2.0 * ix as f64 / p as f64;
-    let y = -1.0 + 2.0 * iy as f64 / p as f64;
+    let x = ix as f64 / p as f64;
+    let y = iy as f64 / p as f64;
     let tol = 1e-12;
-    let on_xmin = (x + 1.0).abs() < tol;
+    let on_xmin = x.abs() < tol;
     let on_xmax = (x - 1.0).abs() < tol;
-    let on_ymin = (y + 1.0).abs() < tol;
+    let on_ymin = y.abs() < tol;
     let on_ymax = (y - 1.0).abs() < tol;
 
     // Corners
@@ -766,12 +765,20 @@ pub struct GeometricMgLevel {
     /// Inverse of raw diagonal (1/diag[i] for non-zero, 1.0 for zero/BC DOFs).
     pub raw_dinv: Vec<f64>,
     /// Optional on-the-fly partial assembly operator (matches MFEM AddMultPA).
-    /// When present, `mat_vec()` uses this first for the most accurate
-    /// floating-point order match to MFEM's `AssemblyLevel::PARTIAL`.
+    /// When present, `mat_vec()` uses this first: it is the operator whose
+    /// floating-point op order was validated against C++ ex26's ARF, and it
+    /// covers Tri3 as well as Quad4.
     pub pa_op: Option<PADiffusionOp>,
-    /// Optional sum-factorization diffusion operator (bitwise match to MFEM).
-    /// Highest priority in `mat_vec()`: matches MFEM's sum-factorization
-    /// kernel, producing identical floating-point results for MG convergence.
+    /// Optional sum-factorization diffusion operator (Quad4 only).
+    ///
+    /// D729: this used to be documented as deviating "~8.6e-6 from the CSR (a
+    /// precision bug under investigation)"; the deviation was the geometry
+    /// Jacobian being evaluated in the `[-1,1]²` frame from `[0,1]²` formulas
+    /// (affine cells were exact, so only skewed meshes showed it).  The operator
+    /// is now round-off-exact against the CSR assembly
+    /// (`crates/solver/tests/d729_geometric_mg_sumfact.rs`, orders 1–4,
+    /// distorted and undistorted meshes), so `mat_vec()` may use it whenever
+    /// `pa_op` is absent.
     pub sf_op: Option<SumFactDiffusionOp>,
 }
 
@@ -787,14 +794,11 @@ pub struct GeometricMgHierarchy {
 impl GeometricMgLevel {
     /// Perform mat-vec with ConstrainedOperator-style BC enforcement.
     ///
-    /// Priority: `sf_op` (sum-factorization PA) > `pa_op` (on-the-fly PA) >
-    /// `elem_op` (stored elem mats) > CSR spmv.
+    /// Priority: `pa_op` (on-the-fly PA) > `sf_op` (sum-factorization PA) >
+    /// `elem_op` (stored elem mats) > CSR spmv.  Both PA operators are exact to
+    /// round-off against the CSR assembly (D729 closed the `sf_op` geometry
+    /// defect that used to justify preferring `pa_op`).
     pub fn mat_vec(&self, x: &[f64], y: &mut [f64]) {
-        // MFEM's DiffusionIntegrator PA (PADiffusionApply2D) is exact to
-        // ~1e-14 vs its CSR; SumFactDiffusionOp currently deviates ~8.6e-6
-        // from the CSR (a precision bug under investigation), which shifts
-        // every Chebyshev sweep and the whole PCG trace.  Prefer the exact
-        // element-by-element pa_op over the approximate sf_op.
         if let Some(ref pa) = self.pa_op {
             pa.mult_constrained(x, y, &self.bc_dofs);
         } else if let Some(ref sf) = self.sf_op {

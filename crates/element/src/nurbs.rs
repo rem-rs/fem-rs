@@ -30,7 +30,7 @@
 //! - Hughes, Cottrell & Bazilevs, *Isogeometric Analysis: CAD, Finite Elements,
 //!   NURBS, Exact Geometry and Mesh Refinement*, CMAME 2005.
 
-use crate::quadrature::{hex_rule, quad_rule};
+use crate::quadrature::{hex_rule, quad_rule_01};
 use crate::reference::{QuadratureRule, ReferenceElement};
 
 // ─── KnotVector ───────────────────────────────────────────────────────────────
@@ -767,9 +767,12 @@ impl ReferenceElement for NurbsPatch2D {
         }
     }
 
-    /// Gauss-Legendre tensor-product quadrature rule on $[0,1]^2$.
+    /// Gauss-Legendre tensor-product quadrature rule on $[0,1]^2$ — the knot
+    /// domain of a clamped patch (D743/D768: the arm used the `[-1,1]²`
+    /// `quad_rule` before, which sampled three quarters of its points outside
+    /// the patch).
     fn quadrature(&self, order: u8) -> QuadratureRule {
-        quad_rule(order)
+        quad_rule_01(order)
     }
 
     /// Reference-domain DOF coordinates.
@@ -947,6 +950,9 @@ impl ReferenceElement for NurbsPatch3D {
         }
     }
 
+    /// MFEM's `IntRules.Get(Geometry::CUBE, order)` rule on $[0,1]^3$ — the
+    /// knot domain of a clamped patch, which is also the frame the hex family
+    /// was re-based on in D721 (D743 pinned it here).
     fn quadrature(&self, order: u8) -> QuadratureRule {
         hex_rule(order)
     }

@@ -5,6 +5,20 @@ fn nd(p: usize) -> Vec<f64> {
     (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect()
 }
 
+/// Equispaced nodal lattice on `[0,1]` — the **hex** arm's frame (D743).
+///
+/// The hexahedral family of this crate lives on MFEM's `[0,1]³` reference cube
+/// (D721 flipped `hex_rule`, `HexQ1` and `HexQk`; the straight-geometry mesh
+/// frame is the unit cube), so a hex reference element has to interpolate on
+/// the `i/p` lattice of the unit cube — the historical `[-1,1]` lattice of
+/// [`nd`] would place every quadrature point of the (already `[0,1]³`-based)
+/// `hex_rule` outside the element.  The 2-D serendipity arm keeps `nd`: the
+/// `[-1,1]²` fixed-order quad family (`QuadQ1`/`QuadQ2`/`QuadQ3`, `quad_rule`)
+/// has not been migrated (D768).
+fn nd_01(p: usize) -> Vec<f64> {
+    (0..=p).map(|i| i as f64 / p as f64).collect()
+}
+
 // Quad serendipity: monomials {x^i y^j : i=0 or i=p or j=0 or j=p}
 fn mono_ij(p: usize) -> Vec<(usize, usize)> {
     let mut v = Vec::new();
@@ -175,7 +189,7 @@ impl ReferenceElement for QuadSerendipityPk {
     }
 }
 
-// Hex serendipity
+// Hex serendipity on MFEM's `[0,1]³` (D743)
 fn mi3(p: usize) -> Vec<(usize, usize, usize)> {
     let mut v = Vec::new();
     for k in 0..=p {
@@ -208,13 +222,13 @@ fn build_hex(p: usize) -> Vec<f64> {
         let e = p.saturating_sub(1);
         8 + 12 * e + 6 * e * e
     };
-    let xv = nd(p);
+    let xv = nd_01(p);
     let m = mi3(p);
     let d = nd3(p);
     let mut v = vec![0.; n * n];
     for r in 0..n {
         let (ni, nj, nk) = d[r];
-        let (xi, et, zt) = (xv[ni] + 1., xv[nj] + 1., xv[nk] + 1.);
+        let (xi, et, zt) = (xv[ni], xv[nj], xv[nk]);
         for c in 0..n {
             let (mi, mj, mk) = m[c];
             v[r * n + c] = pow(xi, mi) * pow(et, mj) * pow(zt, mk);
@@ -268,6 +282,15 @@ fn build_hex(p: usize) -> Vec<f64> {
     cc
 }
 
+/// Serendipity hexahedron of order `p` on **MFEM's `[0,1]³` unit cube**
+/// (D743; the round-70 D721 flip re-based `hex_rule`/`HexQ1`/`HexQk` on that
+/// frame, and this arm follows them): `8 + 12(p-1) + 6(p-1)²` DOFs on the
+/// equispaced `i/p` lattice, interpolating the truncated tensor space
+/// `{x^i y^j z^k : i ∈ {0,p} ∨ j ∈ {0,p} ∨ k ∈ {0,p}}`.  `p = 1` is MFEM's
+/// `TriLinear3DFiniteElement` (bit-for-bit, via the same factorised formulas as
+/// `HexQ1`); `p ≥ 2` has no MFEM counterpart (MFEM's `fe_ser.hpp` carries only
+/// the 2-D `H1Ser_QuadrilateralElement`, and its `H1_FECollection` maps every
+/// hexahedral cell type to `H1_HexahedronElement(p)`).
 pub struct HexSerendipityPk {
     p: usize,
     co: Vec<f64>,
@@ -302,9 +325,30 @@ impl ReferenceElement for HexSerendipityPk {
     }
     fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) {
         let n = self.n();
-        let u = xi[0] + 1.;
-        let v = xi[1] + 1.;
-        let w = xi[2] + 1.;
+        // p = 1 *is* MFEM's `TriLinear3DFiniteElement` (`fe_fixed_order.cpp`),
+        // which the hex family already carries verbatim as `HexQ1` (D721): the
+        // eight factorised products are used directly so the p = 1 member is
+        // bit-for-bit the MFEM element instead of the LU-solved monomial
+        // interpolant of it.  The monomial machinery below is only needed from
+        // p = 2 on, where the truncated tensor space has no MFEM counterpart.
+        if self.p == 1 {
+            let (x, y, z) = (xi[0], xi[1], xi[2]);
+            let (ox, oy, oz) = (1.0 - x, 1.0 - y, 1.0 - z);
+            // Slot `s` is the lattice corner `(s & 1, (s >> 1) & 1, (s >> 2) & 1)`;
+            // each value is the same left-associative product of the three
+            // 1-D factors MFEM's `CalcShape` forms.
+            let fx = [ox, x];
+            let fy = [oy, y];
+            let fz = [oz, z];
+            for s in 0..8 {
+                let (i, j, k) = (s & 1, (s >> 1) & 1, (s >> 2) & 1);
+                vals[s] = fx[i] * fy[j] * fz[k];
+            }
+            return;
+        }
+        let u = xi[0];
+        let v = xi[1];
+        let w = xi[2];
         for i in 0..n {
             let mut s = 0.;
             for j in 0..n {
@@ -316,9 +360,30 @@ impl ReferenceElement for HexSerendipityPk {
     }
     fn eval_grad_basis(&self, xi: &[f64], g: &mut [f64]) {
         let n = self.n();
-        let u = xi[0] + 1.;
-        let v = xi[1] + 1.;
-        let w = xi[2] + 1.;
+        // Same p = 1 specialisation as `eval_basis`: MFEM
+        // `TriLinear3DFiniteElement::CalcDShape`, verbatim (D721's `HexQ1`),
+        // permuted into the serendipity lattice slot order.
+        if self.p == 1 {
+            let (x, y, z) = (xi[0], xi[1], xi[2]);
+            let (ox, oy, oz) = (1.0 - x, 1.0 - y, 1.0 - z);
+            let fx = [ox, x];
+            let fy = [oy, y];
+            let fz = [oz, z];
+            let dfx = [-1.0_f64, 1.0];
+            let dfy = [-1.0_f64, 1.0];
+            let dfz = [-1.0_f64, 1.0];
+            for s in 0..8 {
+                let (i, j, k) = (s & 1, (s >> 1) & 1, (s >> 2) & 1);
+                let (px, py, pz) = (fx[i], fy[j], fz[k]);
+                g[3 * s] = dfx[i] * py * pz;
+                g[3 * s + 1] = px * dfy[j] * pz;
+                g[3 * s + 2] = px * py * dfz[k];
+            }
+            return;
+        }
+        let u = xi[0];
+        let v = xi[1];
+        let w = xi[2];
         for i in 0..n {
             let mut sx = 0.;
             let mut sy = 0.;
@@ -349,11 +414,13 @@ impl ReferenceElement for HexSerendipityPk {
             g[i * 3 + 2] = sz;
         }
     }
+    /// MFEM's `IntRules.Get(Geometry::CUBE, order)` — the `[0,1]³` rule the
+    /// whole hex family consumes since D721, on the element's own frame.
     fn quadrature(&self, o: u8) -> QuadratureRule {
         hex_rule(o)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        let xv = nd(self.p);
+        let xv = nd_01(self.p);
         let mut c = Vec::new();
         for &(i, j, k) in &self.nds {
             c.push(vec![xv[i], xv[j], xv[k]]);
