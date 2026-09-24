@@ -271,7 +271,14 @@ impl<'a, S: FESpace, C: ScalarCoeff> DGMassInverse<'a, S, C> {
 
             for (qi, xi) in quad.points.iter().enumerate() {
                 let (jac, xp) = element_jacobian_at(mesh, e, xi, dim);
-                let det = jac.determinant().abs();
+                // D727 verdict: **signed** — MFEM `DGMassInverse` assembles the
+                // per-element mass through `BilinearForm` + `MassIntegrator`
+                // (dgmassinv.cpp:67-68, `Update` at :114), whose weight is
+                // `ip.weight * Ttr.Weight()` — the signed `DenseMatrix::Weight()`
+                // (D667 probe: inverted tet `GetElementVolume` = −1/6).  `abs()`
+                // equals signed bitwise on positively oriented elements and
+                // differs only on inverted ones (d696 batch-5 pin).
+                let det = jac.determinant();
                 let w = quad.weights[qi] * det;
                 re.eval_basis(xi, &mut phi);
 

@@ -759,6 +759,19 @@ impl ComplexGridFunction {
             for (qi, xi) in quad.points.iter().enumerate() {
                 re.eval_basis(xi, &mut phi);
                 let (jac, xp) = element_jacobian_at(mesh, e, xi, dim);
+                // D727/D728 verdict: **retain abs** — MFEM's L2-error
+                // accumulation weights each quadrature point with the signed
+                // `Ttr->Weight()` but then takes `fabs` of every ELEMENT sum
+                // before accumulating ("negative quadrature weights may cause
+                // the error to be negative", gridfunc.cpp:3449-3453 and the
+                // twin at complex_fem.cpp:296-298).  On affine elements the
+                // per-element sign is constant, so `fabs(elem_error)` is
+                // exactly (negation is exact in IEEE) the abs() weights used
+                // here for ANY element orientation; the forms diverge only on
+                // curved inverted elements (det sign changes within one
+                // element).  A plain signed weight (no element fabs) would
+                // cancel the inverted element instead — the d696 batch-5
+                // retention pin holds both behaviors apart.
                 let w = quad.weights[qi] * jac.determinant().abs();
                 let mut uh_re = 0.0_f64;
                 let mut uh_im = 0.0_f64;
@@ -1070,7 +1083,17 @@ impl NativeComplexAssembler {
 
             for (q_idx, xi) in quad.points.iter().enumerate() {
                 let w_ref = quad.weights[q_idx];
-                let w_phys = w_ref * tr.det_j().abs();
+                // D728 verdict: **signed** — the native complex assembler
+                // mirrors MFEM's re/im `BilinearForm` integrators
+                // (`ip.weight * Ttr.Weight()`, e.g. `diffusioninteg.cpp`
+                // `P *= ip.weight * Ttr.Weight()`; signed
+                // `DenseMatrix::Weight()`, D667 probe).  Form assembly has NO
+                // element-level fabs (unlike the error estimators), so an
+                // inverted element must flip its contributions exactly as
+                // MFEM does — abs() would silently re-positive them (d696
+                // batch-5 pin: inverted vs positive tri blocks are exact
+                // negations).
+                let w_phys = w_ref * tr.det_j();
 
                 ref_elem.eval_basis(xi, &mut phi);
                 ref_elem.eval_grad_basis(xi, &mut grad_ref);

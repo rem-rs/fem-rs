@@ -16,6 +16,7 @@
 //!     .assemble(3);
 //! ```
 
+use fem_core::types::DofId;
 use fem_linalg::CsrMatrix;
 use fem_space::fe_space::FESpace;
 
@@ -23,6 +24,79 @@ use crate::assembler::Assembler;
 use crate::integrator::{BilinearIntegrator, LinearIntegrator};
 use crate::vector_assembler::VectorAssembler;
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator};
+
+// ─── MFEM FormLinearSystem (D706 serial shape core) ───────────────────────────
+
+/// MFEM `DiagonalPolicy` (the subset used by `FormLinearSystem` callers) —
+/// the strategy parameter of [`eliminate_ess_tdofs`] and
+/// [`BilinearForm::form_linear_system`].
+///
+/// Serial mirror of `fem_parallel::ElimPolicy` (the round-68 parallel D706
+/// pair), so serial and parallel call sites name the same two elimination
+/// shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElimPolicy {
+    /// `DIAG_KEEP`: symmetric row/col elimination, **diagonal preserved** —
+    /// keeps the operator's scaling (CG-friendly).  MFEM 4.10's
+    /// `BilinearForm` default (`bilinearform.hpp:153`, `diag_policy =
+    /// DIAG_KEEP`).
+    DiagKeep,
+    /// `DIAG_ONE`: row and column zeroed, diagonal set to 1.
+    DiagOne,
+}
+
+/// **MFEM `BilinearForm::FormLinearSystem(ess_tdof_list, x, b, A, X, B)`**
+/// shape core on a bare assembled matrix (D706 serial analog of the round-68
+/// `ParVectorAssembler::form_linear_system` /
+/// `ParCsrMatrix::eliminate_ess_tdofs`).
+///
+/// One-stop essential-BC elimination with the **projected solution values**:
+/// `ess_tdof_list` (true-dof order, as produced by
+/// `fem_space::constraints::boundary_dofs` and friends) selects the essential
+/// true dofs; their values are read from `x` — the projection of the
+/// solution / initial guess (MFEM's `x.ProjectCoefficient(…)` restricted to
+/// the true dofs) — so the values can no longer be decoupled from the
+/// indices (the D697 accident surface: hardcoded 0.0 silently homogenized a
+/// non-homogeneous PEC boundary).  On return
+///   - `a` is the eliminated operator (policy [`ElimPolicy`]),
+///   - `b` is the eliminated RHS `B`: interior rows carry the
+///     `b − Ae·x` reactions (`EliminateVDofsInRHS`, bilinearform.cpp:1239 —
+///     `b -= mat_e·x` over the pre-elimination column entries), ess rows
+///     `B(r) = A(r,r)·x(r)` under [`ElimPolicy::DiagKeep`] (via
+///     `PartMult`: only the diagonal survives the row) and `B(r) = x(r)`
+///     under [`ElimPolicy::DiagOne`],
+///   - the returned vector is the true-dof solution vector `X`: a **bitwise
+///     copy** of `x` (conforming space: `R = I`, i.e. MFEM's
+///     `copy_interior = 1` default), ready as the iterative initial guess.
+///
+/// The per-dof kernels are the pinned 1:1 ports already used by the
+/// hand-rolled call sites — `CsrMatrix::apply_dirichlet_keep_diag` (MFEM
+/// `SparseMatrix::EliminateRowCol(rc, sol, rhs, DIAG_KEEP)`,
+/// linalg/sparsemat.cpp:1914, true-column reactions per D409/D432) and
+/// `CsrMatrix::apply_dirichlet_symmetric` (the `DIAG_ONE` twin) — applied in
+/// ess-list order, which is exactly the former two-step hand pattern
+/// (`values` pulled from `x`, then a per-dof kernel loop); the eliminated
+/// system is therefore reproduced **bitwise** by construction (pinned by
+/// `tests/d706_form_linear_system.rs`).
+pub fn eliminate_ess_tdofs(
+    a: &mut CsrMatrix<f64>,
+    ess_tdof_list: &[DofId],
+    x: &[f64],
+    b: &mut [f64],
+    policy: ElimPolicy,
+) -> Vec<f64> {
+    let vals: Vec<f64> = ess_tdof_list.iter().map(|&d| x[d as usize]).collect();
+    match policy {
+        ElimPolicy::DiagKeep => {
+            fem_space::constraints::apply_dirichlet(a, b, ess_tdof_list, &vals)
+        }
+        ElimPolicy::DiagOne => {
+            fem_space::constraints::apply_dirichlet_diag_one(a, b, ess_tdof_list, &vals)
+        }
+    }
+    // X = R·x; conforming space: R = I → X = x (copy_interior = 1).
+    x.to_vec()
+}
 
 // ─── BilinearForm (scalar-valued) ─────────────────────────────────────────────
 
@@ -56,6 +130,28 @@ impl<S: FESpace> BilinearForm<S> {
     pub fn add_mult(&self, x: &[f64], y: &mut [f64]) {
         let a = self.cached.as_ref().expect("assemble() must be called first");
         a.spmv_add(1.0, x, 1.0, y);
+    }
+
+    /// **MFEM `BilinearForm::FormLinearSystem(ess_tdof_list, x, b, A, X, B)`**
+    /// (fem/bilinearform.cpp:826, conforming + full-matrix branch) — the
+    /// one-stop shape entry on the assembled form: `FormSystemMatrix`
+    /// eliminates the ess rows/cols of the cached operator under `policy`,
+    /// `EliminateVDofsInRHS` gives the interior rows the `b − Ae·x` reactions
+    /// and the ess rows `A(r,r)·x(r)` (DiagKeep) / `x(r)` (DiagOne), and `X`
+    /// (returned) is the bitwise copy of the projected `x` — see
+    /// [`eliminate_ess_tdofs`] for the full contract.
+    ///
+    /// # Panics
+    /// Panics if `assemble()` has not been called first.
+    pub fn form_linear_system(
+        &mut self,
+        ess_tdof_list: &[DofId],
+        x: &[f64],
+        b: &mut [f64],
+        policy: ElimPolicy,
+    ) -> Vec<f64> {
+        let a = self.cached.as_mut().expect("assemble() must be called first");
+        eliminate_ess_tdofs(a, ess_tdof_list, x, b, policy)
     }
 
     /// Eliminate essential (Dirichlet) BCs symmetrically.

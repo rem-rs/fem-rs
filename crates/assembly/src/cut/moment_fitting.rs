@@ -358,6 +358,16 @@ impl CutGeom {
     }
 
     /// |det J| (dim == sdim) or `sqrt(|det(JᵀJ)|)` (dim < sdim).
+    ///
+    /// D727 verdict: **retain abs** — cut-cell (unfitted) moment-fitting
+    /// metric with **no MFEM 4.10 core counterpart** (no shifted-boundary /
+    /// cut-cell moment fitting anywhere under `fem/`): the fitted measures
+    /// must stay positive mass regardless of the cut mapping's orientation,
+    /// and the `dim < sdim` branch is the first fundamental form
+    /// `sqrt(EG − F²) = sqrt(det(JᵀJ))`, a Gram determinant that is
+    /// non-negative by construction.  A signed det here would flip the
+    /// weight of a partially inverted cut mapping and corrupt the
+    /// moment-fitting quadrature.
     pub fn det_j(&self, e: u32) -> f64 {
         let j = self.jacobian(e);
         if self.dim == self.sdim {
