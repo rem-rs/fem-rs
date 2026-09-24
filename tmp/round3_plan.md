@@ -4470,6 +4470,60 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十九轮（round 69）：D721 立项论证（有条件 go）+ D715/D724 关闭 + multidomain 升 BIT* + D706 串行/裁决族
+
+开局 HEAD = round 68 末笔 `ab2c9573`（已推送，ls-remote 实证）；磁盘 62G；树净。
+
+### 派单（四路并行，号段 D729–D742）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| A | **D721 [0,1]³ 重约定立项论证**（设计任务，src 零改动） | D729-731 | tmp/d721、element 测试试点 |
+| B | **D715 曲面 hex Jacobian + D724 inline-segment** | D732-734 | crates/mesh、crates/io |
+| C | **multidomain rt/nd 升 BIT**（格式对齐） | D735-737 | miniapps/multidomain |
+| D | **D706 串行 + D727/D728/D719/D720 裁决** | D738-742 | assembly form/complex/dgmassinv/cut、ex18 |
+
+### 四路交付与关门（round 69 主会话收尾）
+
+#### A —— D721 **裁决 = 有条件 go**（立项论证交付）
+- **爆炸半径**：求积改动极小（`hex_rule` 改接**已存在且位级=MFEM** 的 `gauss_legendre_01`）；形函数为主工作量（~13 src + ~145 内嵌测试；RT/ND open 模式 pull-back 因子**删除**）；**mesh 顶点=物理坐标零改动**；PA 硬编码核 ~6 文件（**唯一位级风险内核 = 仿射 hex J op-order**）；dof 坐标/槽位表纯组合不变；**tri/tet/prism/pyramid 本就 [0,1]——hex 是最后一个非 MFEM 域现役族，D721 是给 D364 分裂画句号**。
+- **试点实证**（src 零改动，纯测试）：[0,1]³ RT0 基 + [0,1]³ 规则 + MFEM dump J → RT0 单元质量阵 = MFEM 夹具 **36/36 条目逐位相等**（两种求和序均成立）；J:=精确 I 时余差 1.19e-18 ⇒ 剩余位级差全部归因几何核 op-order（单一内核）。MFEM 新钉：仿射单位 hex `J=I+21×junk、detJ≡1`。
+- **条件**：① hex 作**原子单元**整体翻转（按族渐进不可行——RT/ND 位级到位依赖 J 与 basis 同时 [0,1]；可行轴按 cell 类型，分三阶段提交）；② d680 夹具 1e-11 升**位级断言**为验收门；③ solver CG/SpMV op-order 裁出 = **D730**；④ hex gauge 同轮复跑。
+- **收益**：D712 两行到位、d680 升位级、~90+ 处域 shim 删除、未来 hex 跨实现位级门全开。**代价**：~40 文件一个高强度轮次（同构先例 D364）；回滚 = 纯 revert。文档 `tmp/d721/D721_proposal.md`；试点 `d721_unit_cube_pilot` 4/4。
+- 新债：**D729**（hex 外 [-1,1] 表接 [0,1] shim 清单）、**D730**（solver op-order）、**D731**（legacy [-1,1] 帧处置）。
+
+#### B —— D715 + D724 **关闭**
+- **D715**：`transformation.rs::element_jacobian_at` 几何表非 P1 时回退 P1"直化"曲面 hex——新增 `curved_hex_geometry`（Hex8/20/27 且 geom_order≥2 → order-g isoparametric，xi 域 [-1,1]³ 与 12 处调用方逐一核对）；**g≤1 分支零改动**。红→绿：dyn vs isoparametric 两路径 **to_bits 相等**（修前 max|ΔJ|=8.791e-3）；**直面 bit-dump 160 行 diff=0**；`d709` 共轭 3/3；fem-mesh 481/0（lib 324/0 基线）。
+- **D724**：MFEM 无 inlinemesh.cpp——`ReadInlineMesh` 在 mesh_readers.cpp:1355，segment = `Make1D(nx,sx)`；`MfemFile` 增 `mesh1d`（8 构造点补 None）+ segment 分支（nx/sx 校验同 MFEM VERIFY）；**三档（nx4/sx1、nx1/sx2.5、nx8/sx3）NE/NV/NBE/conn/attr/顶点与 MFEM 探针 f64 逐位**；d602 旧拒绝 pin 翻正。ex31 segment 档读取解锁后按其声明缺口诚实 exit(3)（1-D ND_R1D 未移植 = **D733**，C++ 金标已留档：ARF 0.124887、‖E−E‖=0.226983）；ex31 inline-quad stdout 逐字节（0.181455 保持）；fem-io 306/0。
+- 新债：**D732**（`geometry_jacobian` 曲面 hex 仍直化，唯一消费方 mixed_hyperelasticity）、**D733**（1-D ND_R1D 分支）、**D734**（曲面 quad/tet/tri/prism 的 dyn 路径不对称）。
+
+#### C —— multidomain rt/nd 升 **BIT\***
+- **对照物裁决**：官方 multidomain_{rt,nd}.cpp **PAR-only（串树现编失败实证，rc=1 错误清单存档）**→ 按 round-64 先例裁定对照物 = **print-ref harness**（打印面与 Rust 1:1、d657 数值核逐字复制），BIT 口径 = print-ref 全行逐字节 + 官方格式结构对齐。
+- **11 处格式差对齐**：Options 块（`cxx_ostream_f64` = printf %g6 语义，19 值交叉验证逐字节）、`Block interface tdofs:` 行（纯计数，map 语义零改动）；**step 行一字未动、gf-shadow 一字未动**。
+- **验收**：rt/nd 三档（t005/t05/alt 251/2501/20 iter）**各仅剩 1 行豁免** = IC 投影尘行（MFEM `ProjectBdrCoefficient` 在精确零迹 dof 留 ±1e-18 尘值 vs fem-rs 精确 0.0 → **D735**，低场范数 22 个量级）；**7 位有效数字全轨迹逐字节对齐**（round-68 的 6 位升级）；step-250 四值逐字节不回潮。台账建议：**RUN\* → BIT\***。
+- 新债：**D735**（IC 投影尘，crates 层）、**D736**（全默认档 5×10⁵ 行 HYPOTHESIS，外推待长窗口）、**D737**（multidomain.rs H1 变体待上 canonical 面）。
+
+#### D —— D706 串行 **关闭** + D727/D728 **关闭** + D719 定位 + D720 **关闭**
+- **D706 串行**：`form.rs` 增 `ElimPolicy` + `eliminate_ess_tdofs` + `BilinearForm::form_linear_system`（值从投影 x 读——D697 事故面根治的串行半边；DiagKeep 走 `apply_dirichlet_keep_diag`[sparsemat.cpp:1914 真列反应]、DiagOne 走 symmetric）；单测 3/3 含**新旧两路位级一致**；消费方迁移积压 = **D739**（ex31_dump/ex31 系读投影站点 + ex10/26/27/29/39 均质化站点）。
+- **D727/D728**：dgmassinv:274 带符号、complex.rs:1073 带符号（原本就是符号 det 去 abs）、**complex.rs:762 保留 abs = MFEM 自己的逐元 `fabs(elem_error)`**（gridfunc.cpp:3449 注释原文"negative quadrature weights may cause the error to be negative"）、cut/moment_fitting 保 abs（Gram 度量 sqrt(EG−F²)）、hdiv_error:299 已有注释；batch5 pin 3/3。
+- **D719 定位（根因在示例 → D738）**：管线证明 = MFEM——ND1 quad 单元阵 = **D·A_MFEM·D**（D=diag(1,1,−1,−1) 槽位轴取向 pin）、全局组装逐项同、BC 值位级同、**2×2 管线稠密解与 C++ 逐系数一致**（4×4 sol_r.gf 11-12 位）⇒ 偏差全在 `maxwell.rs::l2_error_hcurl_exact` vs MFEM `ComputeL2Error`（+9.5%/−12.9%）→ **D738**（parity oracle `~/work/d719b.cpp` 已备）。
+- **D720 关闭**：C++ 4.10 同档**同样 1000 its 不收敛**（打印 No convergence!），误差 Im 六位逐字同 ⇒ parity 达成；可选双侧预条件子升级 = **D741**。另 **D740**（ND1-quad IMAG 块 ~1e-16 幽灵存储项，零求解影响）。
+- 红线：fem-assembly **91 targets 1182/0**、ex22 -o1 3.574095e-2、ex4/ex5/ex8 全绿。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2626 / 0**（本轮新测试全在集成层）；门 2 `--tests` **282 targets / 4077 / 0**
+/ 24 ignored（round 68 基线 277/4061 + 五新套件 d706[3]/d696批5[3]/d719[2]/d715[4]/d721[4]，
+账目闭合、零 flake）；门 3 examples **0 错误、非 vendor 警告 0**；门 4 pro **rc=0**；门 5
+fem-py **rc=0**。磁盘 50G。主会话抽查：multidomain_rt 三档 vs print-ref **diff=2 行（唯一
+IC 尘豁免对）**、d721 试点 4/4、step-250 四值逐字节（rt cyl −6.420799e-6/nd 1.337180e-5）、
+ex8 29 it + 0.0183277、ex24 四口径、exported API（ElimPolicy/eliminate_ess_tdofs）编译入
+lib.rs。
+
+### round 70 待办（建议）
+
+**① D721 实施（有条件 go 已裁决）**：hex 原子翻转三阶段（求积 → 形函数 → PA 核），验收门 = d680 升位级 + hex gauge 同轮复跑；**② D738**（ex22 2-D ND 评估器对齐 ComputeL2Error，oracle 已备）；**③ D735**（IC 投影尘 crates 层）+ **D739**（串行入口消费方迁移）；**④ D732/D733/D734/D737** 裁决族；⑤ D736 长窗口实跑；⑥ D729/D730/D731 配套；⑦ D586 upstream（待用户）。
+
 ## 第六十八轮（round 68）：D708 根因二段反转（数据流而非槽位！）+ D702 反转（虚部 BC 清零）+ D712 边界裁决 + D706/D696 批 3/4
 
 开局 HEAD = round 67 末笔 `e93f1509`（已推送，ls-remote 实证）；磁盘 60G；树净。

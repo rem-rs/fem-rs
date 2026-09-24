@@ -151,8 +151,8 @@ multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变�
 | 文件 | 档位 | 分类 | 备注 |
 |---|---|---|---|
 | multidomain.rs | **RUN-LONG** | 默认档 300s 推进至 step 8550 / t=0.171（目标 0.25），sum/min/max 正常演化 —— 非挂死 | |
-| multidomain_nd.rs | **RUN\***【round 64 D657 崩溃修复】 | 实体化配对（几何因子定号）替换坐标匹配；dof/ess 7708/5664、1168/800 = MFEM **全等**；IC 求和 −4.000000 = C++ 精确；轨迹 block 偏差 0.10→0.26%、cyl 0.5–2.8%（数值未逐位 → **D667 同族**） | |
-| multidomain_rt.rs | **RUN\***【round 64 D657 崩溃修复】 | dof/ess 7296/5120、576/640 = MFEM 全等；IC −3.8e-17 vs −4.8e-17；block 轨迹 t=4e-5 偏差 3e-6 → t=0.002 偏差 2%；**cyl 首个 RK3 步后自由接口 Σv² ≈ 2.2× MFEM（发散）→ D667** | |
+| multidomain_nd.rs | **BIT\***【round 64 D657 崩溃修复 → round 68 D708 gf-shadow → round 69 升 BIT\*】 | 实体化配对（几何因子定号）+ gf-shadow 数据流（D708：MFEM Transfer 读并覆写目的 gf、上游从不用 RK3 结果更新它——**圆柱动力学曾只存在于打印里**）；dof/ess 7708/5664、1168/800 = MFEM 全等；**round 69 对齐 11 处格式差后三档（t005/t05/alt）stdout vs print-ref 各仅剩 1 行豁免**（IC 投影尘 = D735：MFEM ProjectBdrCoefficient 留 ±1e-18 尘 vs fem-rs 精确 0.0）、**7 位有效数字全轨迹对齐**；cyl sum/ssq = 1.337180e-5/1.594132e-4 = C++ 全吻合 | |
+| multidomain_rt.rs | **BIT\***【round 64 D657 → round 68 D708 → round 69 升 BIT\*】 | 同上数据流修复链；**rt cyl sum/ssq = −6.420799e-6/1.430509e-6 = C++ 全吻合**；三档各仅 IC 行豁免（D735）；官方 multidomain_rt.cpp PAR-only（串树现编失败实证）→ 对照物 = print-ref harness（round-64 先例口径） | |
 
 ### shifted/（3）——均需 `-no-vis`（默认档 rc=3 vis 注记，声明兑现）
 | 文件 | 档位 | 分类 | 备注 |

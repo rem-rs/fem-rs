@@ -249,3 +249,16 @@
   GetOrder=p+1 → 默认阶 5，Rust 误用 3）；余 2 行（iter1/ARF）经 splice 实验证明 =
   1-3 ulp 求和噪声（D712）。**口径新增**：ex24 -p1 beam-hex 全管线 ND 107168/RT 102656 dofs。
 - **警告**：ex40 余 2 条清（D701 全关闭）。
+
+## round 69 增量（主会话收尾注记）
+
+- **ex31**：D724 修复后 `-m data/inline-segment.mesh` 读取解锁，但按其声明缺口诚实
+  exit(3)（1-D ND_R1D 未移植 = D733）——C++ 金标已留档（`-r 2`：50 unknowns、11 it、
+  ARF 0.124887、‖E−E‖ 0.226983）。inline-quad 档 stdout 逐字节保持（0.181455）。
+- **ex22**：D719 定位——2-D ND 管线**证明 = MFEM**（单元阵 = D·A_MFEM·D、全局组装逐项同、
+  BC 位级同、2×2 稠密解逐系数一致），偏差全在示例评估器 `maxwell.rs::l2_error_hcurl_exact`
+  vs MFEM `ComputeL2Error`（+9.5%/−12.9%）→ **D738**（parity oracle `~/work/d719b.cpp` 已备）。
+  **D720 关闭**：`-p 2` inline-tet 双侧同样 1000 it 不收敛（C++ 亦打印 No convergence!），
+  Im 分量六位逐字同 = parity 达成；可选双侧预条件子升级 = D741。
+- **D739**：D706 串行入口消费方迁移积压（ex31_dump:467-468、ex31:427 读投影站点 →
+  `eliminate_ess_tdofs`；ex10/26/27/29/39 均质化站点 → `ElimPolicy::DiagOne`）。
