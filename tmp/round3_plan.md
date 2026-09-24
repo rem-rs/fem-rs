@@ -4470,6 +4470,63 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十七轮（round 67）：D693-695（头号，ex22 示例侧收口逐位）+ D697 根因反转（crates 无罪）+ D690/D680 合流 + D696 批 1/2 + D705 主会话落地
+
+开局 HEAD = round 66 末笔 `1f3ec6c`（已推送，ls-remote 实证）；磁盘 109G（round 66 清理红利）；树净。
+
+### 派单（四路并行，号段 D702–D714）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| A | **D693/D694/D695 ex22 示例侧收口**（配方锚点全备）+ pex3 -o2 顺带 | D702-704 | ex22、pex3 |
+| B | **D697 pex3 回归二分**（探针已备） | D705-707 | crates/parallel |
+| C | **D690 cyl 残差 + D696 批 1/2** | D708-711 | multidomain、assembly det.abs 批次（跳 parallel） |
+| D | **D700/D680/D701-ex40** | D712-714 | misc_integrators/vector_integrator、weak-curl 路径、ex40 |
+
+### 四路交付与关门（round 67 主会话收尾）
+
+#### A —— D693/D694/D695 **关闭**（逐位收官）+ D701 pex3 部分
+- **D693**：quad `-p 0 -o 2 -r 1` **5.643641e-3 = C++ 5.64364e-3 逐位**（旧 5.055557e-1）；3-D 同病灶同修；`-o 1` 三几何逐字节不变。
+- **D694 关键裁决**：`main:205 loss_coef = sigma` **不能全局改**——`ComplexAssembler::assemble` 内部 `k_im = scale_csr(&c, omega)` 已乘 ω（complex.rs:271），系统侧本就对；缺 ω 的只有 **pc 直配路径**（VectorAssembler 不乘）。修 = pc 的 `VectorMassIntegrator{alpha}` 改 `omega·loss_coef`（2D/3D）+ **D695** pc 装配后对 ess dof `apply_dirichlet_symmetric`（= DIAG_ONE+FormSystemMatrix 语义）再 GSSmoother。
+- **结果**：quad p1 o1 r1 1000 停 → **44 it**（C++ 42）、o2 → **119 it，误差行 5.622973e-3/6.420253e-3 = C++ 逐位**；hex p1 o1 → 46 it，**1.422826e-1/1.422741e-1 = C++ 逐位**。锚点核正：round-66 B 路的 43/116 是 **-r1 口径**（C++ 实测 42/116；r0=36）。
+- **pex3 -o2**：D694/D695 条件不成立（ex3p 无 pcOp/无 ω/DIAG_KEEP 已对齐）→ 改 order 门控 AMG 配方（Chebyshev{3,ratio:10}+coarse_cg，default 分支逐字保留）：**10000 it 停 → 404-481 it 收敛**；误差行被 D697 族阻塞 → **D703** 余 (a) 误差行同源 default（B 路）(b) 481 vs AMS 22 it = 标量 AMG vs HypreAMS 家族差。pex3 3 条警告清（**D701 pex3 部分关闭**）。
+- 新债：**D702**（ex22 -p0 **3-D 解层偏差**：hex o1 0.2128 vs C++ 0.1459[2-D 逐位]——3-D H1 装配/BC 投影/几何，crates 域）、**D704**（LOW：GMRES 恒比 C++ 多 1-3 it、终残差 1e-11 vs 1e-13——停止判据细节）。
+
+#### B —— D697 **根因反转：crates/parallel 无罪**
+- **二分锁定** `25c4c99`（np1/np2 双翻转；先修了 round-66 探针的 build-in-main-tree bug，重写 `tmp/d697/probe.sh`）：好端 `6ad3e94`/`a5307e0` ranks2 = **2.70053055689122e-2 = round-30 台账值逐位**；`25c4c99` 起 = 1.62。
+- **根因**：该提交把 pex3 从旧旁路改接 `essential_true_dofs` 时**把每个 essential 值写死 0.0**（注释仍写 "Non-homogeneous"，代码已齐次化）。MFEM 语义：ess 集只给索引，**值**来自 `x.ProjectCoefficient(E)` 进 FormLinearSystem。crates 三件套实证无罪：ess 集合 np1/2/4 与旧手工 gid 并集全等、`apply_dirichlet_par_keep_diag`/ghost 列值语义完整。
+- **落地**：pin 测试 `d697_pex3_ess_semantics_par`（ess 集 np1/2/4 全等 + 值链签名，cos 族制造解——sin 族在轴对齐边界迹恒零 pin 不可见）；**2 行修复 = D705（PROVEN）**，配方 = 惰性闭包（`then_some` 急切求值 np2 越界——B 路踩过）→ **主会话落地并验证：ranks1 = 87 it/2.70053048394657e-2、ranks2 = 102 it/2.70053055702279e-2 = B 路探针逐位**，D697 完整闭环。**D706**（API 缺口：缺 MFEM FormLinearSystem 形状的核心入口——ess 索引+投影值一站式，手搓值管线正是 D697 事故面）。
+- 红线：fem-parallel lib 245/0 + 全靶绿、pex5/pex40 锚。
+
+#### C —— D690 根因二段（一段已修一段越界 **D708**）+ D696 批 1/2
+- **根因一（已修）**：`VectorMassIntegrator::integration_order_for_space` 钩子从**连接性**取 OrderW（Hex8→2），refined cyl 的 hex 携带 **P2 曲面映射（Trans.OrderW=3g−1=5）**，MFEM 真默认 = 5+2·GetOrder = **9**；旧钩子返回 Some(6) **静默覆盖** miniapp 传入的 9 阶。修复 = 新增 geom 感知钩子 + 三处 dispatch 传 `mesh.geom_order()`（geom≤1 bitwise 不变保 D680/ex24）。修后 **1ᵀM1 13 位、traceM 16 位两侧吻合，block sum = −6.480330e-1 = C++ 6 位**。
+- **根因二（越界 → D708）**：消零实验（α=0 两侧不变 → MixedWeakGradDot 无辜）+ 不变量对拍（1ᵀM1 差 1.4e-4 锁定质量阵）+ 逐步 DECOMP（step2 差 0.17%、dt→0 时 K·u bitwise 同 → 差异全在 **K_ff·u_f 反馈 = M_ff 自由块物理作用**）+ M/K 显著值多重集 bitwise 同、双侧 CG 收敛、传输逐点 1e-13 同 ⇒ 缺陷指向 **`fem_space::hdiv` RT1-hex 内部 dof 槽位/符号 ↔ HexRTk 基在曲面 hex 上的对应**（多重集/不变量类检查对此盲）。crates/space 禁区 → **D708**（证据链 `tmp/d690/`）。**D709**（HDiv parity pin 需升级 P-共轭性测试）。
+- **D696 批 1/2 完成**：vector_assembler:1588/1667（D667 漏网）、partial.rs 4 站、mixed/mod.rs 6 站[奇异守卫保 abs]、dpg framework 六文件——全部带符号 + 12 新 pin（批 1 10/10、批 2 2/2）。批 3/4（postproc、iga/wg/reed/ad/dg/physics）裁剪，D696 维持开放。
+- 红线：fem-assembly 1162/0（85 二进制）、fem-solver 439/0、fem-io 306/0、ex8/ex4/ex5/ex31/ex26 全绿。
+
+#### D —— D700 **关闭**（求积阶翻译错）+ D680 **关闭** + D701 全清
+- **D700**：两处求积阶翻译偏差——①误差行：C++ `ComputeL2Error` 不传 irs 走默认 `2·GetOrder+3`，RT hex `GetOrder=p+1=1` ⇒ **阶 5（27 点）**，Rust 误用 `2·order+1=3`（8 点）欠积（MFEM 双口径探针铁证：两种规则给出 Rust 原值与 ex24 参考值）；②iter1/ARF：MFEM 默认阶 4（27 点）vs Rust 显式 3（8 点）——对 RT0 质量多项式都精确，纯舍入差。修复后**三条误差行逐字节清零**；余 2 行（iter1/ARF）经 **splice 实验**（fem-rs 的 M/C/v 喂 MFEM CG → 复现 Rust iter1 逐位）证明 = 1-3 ulp 求和噪声 → **D712**（crates/element+assembly 位级复刻 CalcVShape/CalcCurlShape）。
+- **D680**：`VectorBilinearIntegrator` 新增 `integration_order_for_space(_geom)` 钩子（与 C 路合流，三处 dispatch 统一走 `_geom`）；`VectorMassIntegrator` 实现 MFEM 全表（**RT 全族 GetOrder=p+1**、ND=p、OrderW 按几何：单纯形 (g−1)dim、张量 g·dim−1）。不变式：hex ND/quad RT 位不动、hex RT 2k+4（主题）、曲面读真实 OrderW。pin：18 行策略表 + 单位 hex RT0/RT1/ND1 质量阵 vs MFEM 夹具**逐项 ≤1e-11**。消费方 ~40 文件逐核（parallel 分叉无 dispatch 不受影响等）。
+- **⚠️ C 路红线按令触发**：D680 使 multidomain 轨迹移动（改前 miniapp 的 D678 修正一直被 blind 2k+3 静默覆盖、实际跑 order 5；改后落到 MFEM 真默认 = 曲面 9 = miniapp 自传值 = C++ 实跑规则）→ **D713**（D690 按新轨迹重验收）。主会话合流复跑：**block sum/ssq = −6.480330e-1/2.636584e-1 = C++（−0.648033/0.263658）6-7 位**，cyl ssq +17%（D708 余量）。
+- **D701-ex40**：2 条警告清，`0.026921483748254076` 逐字节保持。**D701 全关闭**（pex3 部分 = A 路）。
+- 新债：**D712**（位级复刻）、**D713**（重验收已完成于主会话合流跑，余 D708 主导）、**D714**（**跨 libm sin 1 ulp 平台事实**：glibc 0.7071067811865475 vs UCRT …76——Linux 参考 vs Windows Rust 的任何位级门都受此约束，非 bug）。
+
+### 全量回归（五道门）
+
+门 1 lib **十 crate 2626 / 0**（新测试全在集成层，基数不变）；门 2 `--tests` **270 targets /
+4037 / 0** / 24 ignored（round 66 基线 266/4020 + 四新套件 d680[3]/d696批1[10]/d696批2[2]/
+d697 pin，账目闭合、零 flake）；门 3 examples **0 错误且非 vendor 警告 5 → 0**（D701 全清的
+最后一笔）；门 4 pro **rc=0**；门 5 fem-py **rc=0**。磁盘 61G。主会话合流抽查：**D705 落地
+pex3 ranks1/2 = 87/102 it、2.70053048394657e-2 / 2.70053055702279e-2**（= B 路探针逐位、
+C++ 0.0270053 六位）、ex22 双锚逐位（5.643641e-3 / 5.622973e-3）、ex24 四口径（p0 两口径
+diff=0、p1 余 2 行 = D712）、ex1 diff=0、multidomain 合流态 block = **−6.480330e-1/
+2.636584e-1 = C++ 6-7 位**（cyl ssq +17% = D708 余量）、ex8 29 it + 0.0183277、ex40
+0.026921483748254076。
+
+### round 68 待办（建议）
+
+**① D708（头号）`fem_space::hdiv` RT1-hex 曲面槽位/符号 ↔ HexRTk 基对应**（multidomain cyl 最后一公里；证据链 tmp/d690/ 齐备，space 域）；② **D702**（ex22 -p0 3-D 解层偏差，3-D H1 装配/BC）；③ **D712**（位级复刻 CalcVShape/CalcCurlShape——ex24 -p1 收官 last-2-lines，需跨 element/assembly）；④ **D696 批 3/4**（postproc + iga/wg/reed/ad/dg/physics）；⑤ **D706**（FormLinearSystem 形状核心入口——D697 事故面根治）；⑥ D703/D704/D714 小件；⑦ D586 upstream（待用户）。
+
 ## 第六十六轮（round 66）：D677+D678（头号，A 路失联主会话接力）+ D681/D682/D679（core 裁决大丰收）+ D688/D683 + ex24/ex1/警告专项
 
 开局 HEAD = round 65 末笔 `73db059`（已推送，ls-remote 实证）；磁盘 61G；树净。
