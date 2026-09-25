@@ -162,8 +162,9 @@ fn iso_jacobian_geom<M: MeshTopology>(
     (j, det, xp)
 }
 
-/// Element Jacobian: uses affine (simplex) Jacobian for triangles/tets,
-/// and isoparametric Jacobian for quads/hexes (evaluated at `xi`).
+/// Element Jacobian: uses the mesh crate's geometry map for every H1 cell
+/// family (evaluated at `xi`), and the affine cross-product arm only for
+/// surface (embedded) cells.
 ///
 /// Returns `(jacobian_matrix, determinant, physical_coords)`.
 /// For surface meshes, the determinant is the area element.
@@ -179,6 +180,20 @@ fn iso_jacobian_geom<M: MeshTopology>(
 /// the pyramid's `PYR_P1_SLOT_VERTEX` slot permutation, and evaluates a curved
 /// pyramid with its own order-`g` element — the P1 basis over corner vertices
 /// is not its geometry.
+///
+/// D793-3: the gate below used to enumerate only the families
+/// `element_jacobian_at` special-cased back then, so `Tri3/Tri6/Tet4/Tet10`
+/// kept a *straight* affine map on a curved cell (inconsistent with the
+/// D787-fixed `compute_l2_error_l2` next door, which falls through to the same
+/// helper) and `Prism18/Hex27/Pyramid13` kept a map that is **singular**
+/// (`det J ≡ 0`: their vertex tables list the base diagonal in slots 1..3) —
+/// `compute_coeff_l2_norm` returned `0.0` on a valid straight hex27/pyramid13
+/// mesh.  The helper is family-aware for every H1 cell family since D787, so
+/// the gate is now the full family set; the one arm that must stay on
+/// `simplex_jacobian` is the surface (embedded) case, where
+/// `element_jacobian_at`'s `dim × dim` square Jacobian cannot represent a 2-D
+/// cell in 3-D and the cross-product measure of `simplex_jacobian` is the
+/// historical contract (`surface_phys_coords` pairs with it).
 fn element_jacobian<M: MeshTopology>(
     mesh: &M,
     elem: u32,
@@ -187,11 +202,21 @@ fn element_jacobian<M: MeshTopology>(
     dim: usize,
 ) -> (DMatrix<f64>, f64, Vec<f64>) {
     let elem_type = mesh.element_type(elem);
-    let needs_iso = matches!(elem_type,
+    let is_surface = mesh.dim() as usize != dim;
+    // The pre-D793 list, kept verbatim for the surface arm (see above).
+    let surface_iso = matches!(elem_type,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
         | ElementType::Hex8 | ElementType::Hex20
         | ElementType::Prism6 | ElementType::Prism15
         | ElementType::Pyramid5);
+    let all_families = matches!(elem_type,
+        ElementType::Tri3 | ElementType::Tri6
+        | ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+        | ElementType::Tet4 | ElementType::Tet10
+        | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+        | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
+        | ElementType::Pyramid5 | ElementType::Pyramid13);
+    let needs_iso = if is_surface { surface_iso } else { all_families };
 
     if needs_iso {
         let (jac, xp) = fem_mesh::transformation::element_jacobian_at(mesh, elem, xi, dim);
@@ -2269,6 +2294,18 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
         };
         let mut ref_bv = vec![0.0; n_ldofs * dim];
         let nodes = mesh.element_nodes(e);
+        // D793-4: `Prism18`/`Pyramid13` are deliberately NOT in this list even
+        // though their families (`Prism6/Prism15`, `Pyramid5`) are: the arm
+        // hands `isoparametric_jacobian` the element's *node* row
+        // (`mesh.element_nodes`, the P1 vertex table on a curved mesh) while
+        // the geometry element walks its own `n_dofs()` of the *geometry*
+        // table, so it is only valid for straight cells — a curved `Quad4`
+        // already panics here (index out of bounds, `vector_assembler.rs`;
+        // verified in round 73).  Adding the two labels would replace the
+        // correct `element_jacobian_at` fall-through of a curved
+        // Prism18/Pyramid13 with that panic, so the list stays as it is and
+        // the family-consistent route waits for the `geometry_nodes` fix (see
+        // the round-73 D800 sub-debt).
         let use_iso = matches!(et,
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
             | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
@@ -2351,6 +2388,18 @@ pub fn compute_l2_error_hdiv<M: MeshTopology>(
         let signs = rt_space.element_signs(e);
         let mut ref_bv = vec![0.0; n_ldofs * dim];
         let nodes = mesh.element_nodes(e);
+        // D793-4: `Prism18`/`Pyramid13` are deliberately NOT in this list even
+        // though their families (`Prism6/Prism15`, `Pyramid5`) are: the arm
+        // hands `isoparametric_jacobian` the element's *node* row
+        // (`mesh.element_nodes`, the P1 vertex table on a curved mesh) while
+        // the geometry element walks its own `n_dofs()` of the *geometry*
+        // table, so it is only valid for straight cells — a curved `Quad4`
+        // already panics here (index out of bounds, `vector_assembler.rs`;
+        // verified in round 73).  Adding the two labels would replace the
+        // correct `element_jacobian_at` fall-through of a curved
+        // Prism18/Pyramid13 with that panic, so the list stays as it is and
+        // the family-consistent route waits for the `geometry_nodes` fix (see
+        // the round-73 D800 sub-debt).
         let use_iso = matches!(et,
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
             | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
@@ -2428,6 +2477,12 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
         }
         let et = mesh.element_type(e);
         let nodes = mesh.element_nodes(e);
+        // D793-4: `Prism18`/`Pyramid13` are deliberately NOT in this list — see
+        // the note in `compute_l2_error_hcurl`: the arm walks the geometry
+        // element's `n_dofs()` over the *node* row, so it is only valid for
+        // straight cells (a curved Quad4 panics), and adding the labels would
+        // replace the correct `element_jacobian_at` fall-through of a curved
+        // Prism18/Pyramid13 with that panic.
         let use_iso = matches!(et,
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
             | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27

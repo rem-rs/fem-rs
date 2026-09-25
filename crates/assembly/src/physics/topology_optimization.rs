@@ -182,7 +182,26 @@ impl HelmholtzFilter {
             let rho_e = rho_design[e as usize];
             for (q, xi) in quad.points.iter().enumerate() {
                 let (jac, _xp) = element_jacobian_at(mesh, e, xi, dim);
-                let det_j = jac[(0, 0)] * jac[(1, 1)] - jac[(0, 1)] * jac[(1, 0)];
+                // D793-2: `element_jacobian_at` hands back the `dim × dim`
+                // geometry Jacobian, so the measure is its `dim`-dimensional
+                // determinant.  The historical 2×2 expression silently dropped
+                // the third row/column on a 3-D cell (`h²` instead of `h³` for
+                // a hexahedron of side `h`; for a tetrahedron whose Jacobian
+                // has no x/y rows it is exactly 0) — the filter RHS then had
+                // the wrong per-element weight.  MFEM evaluates `Weight()`
+                // with the analytic cofactor expansion (`CalcDet`,
+                // linalg/densemat.cpp) for dim 2/3; the 2-D arm keeps the old
+                // expression bit-for-bit, the 3-D arm spells out the same
+                // cofactor sum.
+                let det_j = match dim {
+                    2 => jac[(0, 0)] * jac[(1, 1)] - jac[(0, 1)] * jac[(1, 0)],
+                    3 => {
+                        jac[(0, 0)] * (jac[(1, 1)] * jac[(2, 2)] - jac[(1, 2)] * jac[(2, 1)])
+                            - jac[(0, 1)] * (jac[(1, 0)] * jac[(2, 2)] - jac[(1, 2)] * jac[(2, 0)])
+                            + jac[(0, 2)] * (jac[(1, 0)] * jac[(2, 1)] - jac[(1, 1)] * jac[(2, 0)])
+                    }
+                    _ => jac.determinant(),
+                };
                 // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
                 // (nonlininteg.cpp class); bitwise |det| on valid meshes.
                 let w = quad.weights[q] * det_j;

@@ -112,8 +112,10 @@ fn is_simplex(elem_type: ElementType) -> bool {
 
 /// Geometric-mapping Jacobian at reference point `xi` on `element`.
 ///
-/// - **Simplex** (Tri3/Tri6/Tet4/Tet10): the P1 mapping, i.e. the constant
-///   Jacobian built from `nodes[0..dim]`.
+/// - **Simplex** (Tri3/Tri6/Tet4/Tet10): delegated to
+///   [`fem_mesh::transformation::element_jacobian_at`] (D793-1) — the affine
+///   P1 corner map on a straight cell, the order-`g` GLL isoparametric map on
+///   a curved one.
 /// - **Quad4** (`dim == 2`): the analytic bilinear map on `[-1,1]²` — the frame
 ///   the `QuadQ1` basis in [`ref_elem_vol`] is evaluated in.
 /// - **Hex8/Hex20**: the isoparametric `HexQk` geometry, i.e. the *same*
@@ -152,13 +154,17 @@ fn geom_jacobian<M: MeshTopology>(
 ) -> (nalgebra::DMatrix<f64>, f64) {
     use nalgebra::DMatrix;
     if is_simplex(elem_type) {
-        let x0 = mesh.node_coords(nodes[0]);
-        let mut j = DMatrix::<f64>::zeros(dim, dim);
-        for col in 0..dim {
-            let xc = mesh.node_coords(nodes[col + 1]);
-            for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
-        }
-        (j.clone(), j.determinant())
+        // D793-1: the corner-difference map built here is the *straight*
+        // simplex's P1 geometry, so on a curved cell (`geom_order > 1`) both
+        // consumers differentiated and weighed against a geometry the field
+        // was never placed with.  Delegate to the mesh crate's single source
+        // of truth — exactly the delegation the hex/prism/pyramid arms below
+        // already make: since D787 `element_jacobian_at` carries the order-`g`
+        // `H1TetPk`/`H1TriPk` geometry table of a curved simplex, and reduces
+        // bit-for-bit to the affine vertex map on a straight one.
+        let (jac, _xp) = fem_mesh::transformation::element_jacobian_at(mesh, element, xi, dim);
+        let det = jac.determinant();
+        (jac, det)
     } else if dim == 2 && nodes.len() >= 4 {
         let (e, n) = (xi[0], xi[1]);
         let c = |i: usize| mesh.node_coords(nodes[i]);
