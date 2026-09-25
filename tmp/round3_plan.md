@@ -4473,7 +4473,21 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 ## 第七十四轮（round 74）：D797-1 弱散度 c⁻³（头号）+ D800-1 use_iso 几何节点 + D790-1a/D785/D786 并行收尾 + D799-1 DG 缝耦合
 
 **开局 HEAD = round 73 末笔 `0df353ce`（已推送）；树上有 L1/L2 的在飞改动（见下）。**
-**本节是中断现场记录（主会话被要求写交接）——L1（D797-1）与 L2（D800-1）的代理在飞中被并发上限打断，半成品在工作树，L3（D790-1a/D785/D786）与 L4（D799-1）因并发上限未启动。**
+
+### 收尾完成记录（2026-09-25/26 续作 session；提交链 `a433fef9`→docs，6 笔代码 + 1 笔 docs）
+
+**环境要点（如实）**：本 session 的三个后台代理先后死于环境墙（L3 首发"并发上限"、L4 跑 37 min 后同因、L3 重派 16 min 后 captcha 超时）；**中断 session 的 L1 代理实际仍在树上活动到 23:34**（补写了 `d797_weakdiv_tet.cpp` tet 探针 + 三份门日志——主会话逐项复核：tet 探针亲跑 48 条目 diff=0，二进制版本差一度造成"3 测只见 2"的假象）。L3 任务 2/3 与 L4 由主会话亲自完成。
+
+- **L1 · D797-1 关闭**：`mixed::HCurlH1WeakDiv` 删去对已是物理梯度的第二次 `J⁻ᵀ` 与 `1/detJ`（数学上 = MFEM `-ip.w·(Q/detJ)·ûᵀ adj(J) adj(J)ᵀ ∇̂v` 任意维恒等；装配器 `w` 已含带符号 detJ，`grad_phys` 已是 `J⁻ᵀ∇̂v`，HCurl 试探基保留 `J⁻ᵀ`）。并行路 `ParMixedAssembler::assemble_hcurl_h1_weak_div` 全委托串行实现、`DivergenceFreeProjector` 拿预装配算子不直接消费 ⇒ 无第二份积分被积函数。验收：`d797_weak_div_scaling` 3 测（5 档仿射三角形 24 条目 + **tet** unit/2I 金标）主会话亲跑 MFEM 探针复现 2-D 5 档 + 3-D 48 条目 **diff=0**；fem-assembly/parallel/solver 三门绿。提交 `a433fef9`。
+- **L2 · D800-1 关闭**：三条 `use_iso` 名单统一为 `l2_error_iso_geometry` 单门控——直网格保持历史路径**逐位**、曲面传 `mesh.geometry_nodes(e)`、与族元不匹配的行（serendipity）与完整 Prism18/Pyramid13 落 `element_jacobian_at`（D787）。`d800_use_iso_curved_geometry` 6 测绿（曲面 quad `l2err_p0` = MFEM `2.0561779152222255`；tet/tri 沿用 D787 真值，主会话亲跑 d787 探针复现三档）；五门全绿。提交 `dac4af30`。
+- **L3-1 · D790-1a 关闭**（代理完成、主会话复核）：删 `use_global_aggregation` 字段 + 6 个 pex 示例调用点 + 3 个测试构造点，全仓 grep 零命中；fem-parallel 327/0/14；**pex3 双锚亲验逐位不动**（`--ranks 1` 2.70053050699196e-2/87 it、`--ranks 2` 2.70053057745987e-2/95 it）。提交 `6e8dfbc7`。
+- **L3-2 · D785 关闭**：joule `n_bdr` 改取**全局** `mesh0` 边界面最大 tag（C++ `bdr_attributes.Max()` 语义）。有牙探针：cylinder-hex 4 分区下 rank 0/1 本地最大 tag=2 < 全局 3（旧代码会建 `ess_bdr=[1,1]`）；修后 np1/np2 均印 `ess_bdr=[1,1,1]`。提交 `456243df`。
+- **L3-3 · D786 关闭**：`HCurlSpace::build` 删 `n_elements>0` 断言、`HDivSpace::new/…_gll` 守卫 `element_type(0)`——空本地网格（np > 单元数）构造合法空空间（占位 cell type，实体循环零次）。`d803_empty_rank`：2 单元 hex × 4 rank，rank2/3 为空分区，四族空间 + `ParallelFESpace` 包装全构造成功、全局 dof 计数一致（12/20）、四 rank 全到达集合点。提交 `d816dc85`。
+- **L4 · D799-1 关闭（双根因，超越登记）**：登记的"网格表示差"只是其一。① `gen_mesh` 末尾 `make_periodic((5,6,[2,0]))`——C++ 折回的语义（v2v + RemoveUnusedVertices）由 D62 周期快照机制承接：**几何先建、快照保 pre-merge 角点**（C++ `SetCurvature(3,true)` 不连续 nodes 的等价物，探针实证环绕单元几何留在 x∈[0.64,1] 侧），`is_periodic_merged` 自动触发 `build_periodic` 周期商；H1 路删手工 DOF 级缝合（unknowns = MFEM 的 302）。② **登记未发现的第二根因**：ex27 DG 的边界项走 MFEM `AddBdrFaceIntegrator`（FaceElementTransformations + Loc1 组合 + 全 dof 散布），而 fem-rs 的 `assemble_l2_linear`/`assemble_l2_mass` 是 `AddBoundaryIntegrator` 风格（1-D SegP1 形状 + 仅面局部 dof）——H1 分支恰恰用的是后者所以从未露馅。两个 helper 重写为 `face_point_geom` 组合（与 D795-1 的 DGDirichletLF 同机制）。**验收**：ref=0 DG 双线性形式逐条目 = MFEM（896/896 nnz，worst 3.0e-14）；ex27 `-dg -rs 0/1/2/3`、`H1 -rs 0/1/2/3`、`-dbc 2.5`、`-dg` RHS 隔离档 **9/9 IDENTICAL**；ex14 311 行迭代史逐字节；`d804_ex27_dg_seam_coupling` 4 测（折回缝面 + 跨缝 O(1) 耦合，未折网格红）。提交 `f9a006d0`。
+- **门（主会话亲跑）**：十 crate lib **2644/0/5**；十 crate 全靶 **4228/0/122**（324 靶；基线 4213 + 本轮 d797×3+d800×6+d804×4+d803×1）；examples 构建 0 错误 0 非 vendor 警告；pro 层 check rc=0；fem-py 未触碰；pex3 双锚逐位。
+- **勘误入档**：round-74 中断记录里的测试名 `d797_red_dump.rs` 实为 `d797_weak_div_scaling.rs`；"L1 半成品未验证"的 tet 金标经亲跑成立；**D799-1 的"缝上零耦合"只是次要项**——首残比 ~0.6 的主导项是 BdrFace 组合路径缺失（缝耦合本身只贡献 ~1%）。
+
+### 中断现场记录（原文保留）
 
 ### 派单（round 74，四路）
 
