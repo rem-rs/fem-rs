@@ -18,7 +18,7 @@
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
-use fem_element::nedelec::{QuadND, QuadND2, QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
+use fem_element::nedelec::{QuadND, QuadND2, QuadNDk, HexNDk, PrismND1, PrismNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use crate::vector_assembler::{
@@ -1480,7 +1480,29 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         (SpaceType::HDiv, ElementType::Hex8, o) if o >= 2 => {
             Box::new(HexRTk::new_gauss_legendre(o as usize))
         }
-        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriNDk::new(1)),
+        // D772: the tri H(curl) arm selects the element the *space's* tri slot
+        // tables describe, through the same chooser `vector_assembler` and the
+        // postprocessor use — one source of truth.  Before D772 the arm only
+        // had order 1, so every mixed tri form at order >= 2 returned `Err`
+        // while the space happily built those spaces (`hcurl.rs`: tri orders
+        // >= 2 use `TRI_EDGES_MFEM`, the MFEM `Geometry::Constants<TRIANGLE>`
+        // edge pairs).
+        //
+        // Adjudication (`tmp/d777/tri_slot_adjudication.md`): the two tri
+        // Nédélec elements in this tree are *not* two families — `TriND2` is
+        // the explicit order-2 specialization of the same MFEM
+        // `ND_TriangleElement(2)` functionals that `TriNDk::new(2)` implements
+        // (nodes/`FE::Nodes` equal to 1 ulp, basis equal to 3.6e-15), and both
+        // are pinned against `ND_TriangleElement(p)`'s own `Nodes` and `tk`
+        // table.  The chooser names `TriND2` at order 2, so this arm does too.
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, o) if o >= 1 => {
+            crate::vector_assembler::paired_vector_reference_element(
+                SpaceType::HCurl,
+                elem_type,
+                2,
+                o,
+            )
+        }
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetNDk::new(1)),
         // D765: the 2-D quad H(curl) arms must select the elements the
         // *space's* slot/sign tables describe (`var_ref_elem_choice`), because

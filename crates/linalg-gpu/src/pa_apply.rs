@@ -196,6 +196,18 @@ pub fn gpu_pa_apply_quad_q1_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &
 /// D82 this emitted lexicographic slot indices over *equispaced* nodes — the
 /// pre-D77 CPU layout, which does not match the assembled matrix.
 ///
+/// **D777**: the quadrature constants are the *element layer's* 1-D rule on
+/// `[0,1]` ([`fem_element::quadrature::gauss_legendre_01`], the same call
+/// `hex_rule`/`quad_rule_01` make), not this file's own `[-1,1]`
+/// Gauss–Legendre table: the shader evaluates `bary(GP[qx], i)` with no frame
+/// map and consumes the `pd` buffer the CPU PA kernels build, whose Jacobian,
+/// `|detJ|` and weights are all `[0,1]`-framed (D721).  The pre-D777 `[-1,1]`
+/// `GP`/`GW` pair was a different quadrature on a different reference domain —
+/// red for `q3`/`q4` (whose node arrays D721 had already moved to `[0,1]`) and
+/// an overall factor `2^dim`-type mismatch for the self-consistent `[-1,1]`
+/// `q1`/`q2`.  `tests/d777_pa_frame.rs` pins this numerically, with and
+/// without a GPU.
+///
 /// The 1-D basis (`bary`/`dary`) uses the exact product form of the Lagrange
 /// derivative, which stays correct when a quadrature point lands on a node
 /// (for even p, ξ = 0 is both a Gauss point and a GLL node).
@@ -203,20 +215,26 @@ pub fn gpu_pa_apply_quad_q1_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &
 /// When `use_f64` is true, the generated shader uses `array<f64>` and `f64`
 /// types (requires `gpu.features.native_f64`).
 ///
-/// The shipped `wgsl/hex_q3.wgsl` / `wgsl/hex_q4.wgsl` are this generator's
-/// output for p = 3 / p = 4 (footer comment aside), pinned by
-/// `tests::hex_q3_q4_wgsl_tables_match_element`.
+/// The shipped `wgsl/hex_q{1,2,3,4}.wgsl` are this generator's output for
+/// p = 1..4, pinned by `tests::hex_qk_wgsl_is_generator_output`; their
+/// `GP`/`GW`/node/slot tables are additionally pinned against the element
+/// layer by `tests::hex_qk_wgsl_tables_match_element`.  **The generated text
+/// must compile as WGSL** — `tests/d777_pa_frame.rs` runs it on the device
+/// (the pre-D777 template dropped the closing brace of `cs_main`, so neither
+/// the shipped `q3`/`q4` nor any dynamic degree compiled at all).
 pub fn generate_hex_qk_wgsl(p: usize, use_f64: bool) -> String {
     let fp = if use_f64 { "f64" } else { "f32" };
     let nq = p + 1;
     let nloc = nq * nq * nq;
-    let (qpts, qwts) = gauss_legendre_f64(nq);
+    // D777: the element layer's `[0,1]` Gauss–Legendre rule (`hex_rule`'s
+    // 1-D factors), not a local `[-1,1]` table.
+    let (qpts, qwts) = fem_element::quadrature::gauss_legendre_01(nq);
     let (nodes, slots) = hex_layout(p);
     assert_eq!(slots.len(), nloc, "HexQk({p}) slot count");
 
-    let qpts_str: String = qpts.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
-    let qwts_str: String = qwts.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
-    let nodes_str: String = nodes.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
+    let qpts_str = fmt_numbers(&qpts);
+    let qwts_str = fmt_numbers(&qwts);
+    let nodes_str = fmt_numbers(&nodes);
     let bxs: String = (0..nq).map(|i| format!("bx{i}")).collect::<Vec<_>>().join(",");
     let dxs: String = (0..nq).map(|i| format!("dx{i}")).collect::<Vec<_>>().join(",");
     let bys: String = (0..nq).map(|i| format!("by{i}")).collect::<Vec<_>>().join(",");
@@ -240,7 +258,7 @@ fn bary(t:{fp},i:u32)->{fp}{{let n=array<{fp},{nq}>({nodes_str});var r=1.0;for(v
 fn dary(t:{fp},i:u32)->{fp}{{let n=array<{fp},{nq}>({nodes_str});var r=0.0;for(var m=0u;m<{nq}u;m++){{if(m==i){{continue;}}var term=1.0/(n[i]-n[m]);for(var j=0u;j<{nq}u;j++){{if(j!=i&&j!=m){{term*=(t-n[j])/(n[i]-n[j]);}}}}r+=term;}}return r;}}
 // Slot -> tensor index in the element layer's own HexQk({p}) order
 // (`hex_tensor_layout`), i.e. the order `DofManager` numbers H1 element DOFs
-// in.  Pinned by `tests::hex_q3_q4_wgsl_tables_match_element`.
+// in.  Pinned by `tests::hex_qk_wgsl_tables_match_element`.
 const QA:array<u32,{nloc}>=array({qa});
 const QB:array<u32,{nloc}>=array({qb});
 const QC:array<u32,{nloc}>=array({qc});
@@ -270,7 +288,7 @@ let g0=dx[a]*by[b]*bz[c];let g1=bx[a]*dy[b]*bz[c];let g2=bx[a]*by[b]*dz[c];
 let pg0=j00*g0+j01*g1+j02*g2;let pg1=j10*g0+j11*g1+j12*g2;let pg2=j20*g0+j21*g1+j22*g2;
 ye[i]+=sc*(pg0*fl[0]+pg1*fl[1]+pg2*fl[2]);}}
 }}}}
-for(var i=0u;i<{nloc}u;i++){{er.vals[e*{nloc}u+i]=ye[i];}}}}
+for(var i=0u;i<{nloc}u;i++){{er.vals[e*{nloc}u+i]=ye[i];}}}}}}
 "#,
         nq = nq, nloc = nloc, nqp = nqp, fp = fp,
         qpts_str = qpts_str, qwts_str = qwts_str, nodes_str = nodes_str,
@@ -291,6 +309,13 @@ fn hex_layout(p: usize) -> (Vec<f64>, Vec<[usize; 3]>) {
     fem_element::lagrange::hex::hex_tensor_layout(&fem_element::lagrange::HexQk::new(p))
 }
 
+/// The generator's number formatting for every emitted table (`{:.16}`,
+/// comma-joined) — shared with the pins, which compare the *shipped text* to
+/// the element layer's values through it.
+fn fmt_numbers(values: &[f64]) -> String {
+    values.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",")
+}
+
 /// Run a dynamically generated Qk PA shader (f32).
 pub fn gpu_pa_apply_hex_qk(gpu: &GpuContext, p: usize, pa: &[f32], dofs: &[u32], x: &[f32], y: &mut [f32]) {
     let nloc = (p + 1) * (p + 1) * (p + 1);
@@ -305,52 +330,6 @@ pub fn gpu_pa_apply_hex_qk_f64(gpu: &GpuContext, p: usize, pa: &[f64], dofs: &[u
     run_pa_shader_f64(gpu, &wgsl, pa, dofs, x, y, nloc, nloc);
 }
 
-/// Compute Gauss–Legendre points and weights on [-1, 1] (inline, no dep).
-fn gauss_legendre_f64(n: usize) -> (Vec<f64>, Vec<f64>) {
-    match n {
-        1 => (vec![0.0], vec![2.0]),
-        2 => { let x = 1.0/3.0_f64.sqrt(); (vec![-x, x], vec![1.0, 1.0]) }
-        3 => { let x = (3.0/5.0_f64).sqrt(); (vec![-x, 0.0, x], vec![5.0/9.0, 8.0/9.0, 5.0/9.0]) }
-        4 => {
-            let a = (3.0/7.0 - 2.0/7.0*(6.0/5.0_f64).sqrt()).sqrt();
-            let b = (3.0/7.0 + 2.0/7.0*(6.0/5.0_f64).sqrt()).sqrt();
-            let wa = (18.0 + 30.0_f64.sqrt())/36.0;
-            let wb = (18.0 - 30.0_f64.sqrt())/36.0;
-            (vec![-b, -a, a, b], vec![wb, wa, wa, wb])
-        }
-        5 => {
-            let pts = vec![-0.906_179_845_938_664, -0.5384693101056831, 0.0, 0.5384693101056831, 0.906_179_845_938_664];
-            let wts = vec![0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891];
-            (pts, wts)
-        }
-        6 => {
-            let pts = vec![-0.932_469_514_203_152, -0.6612093864662645, -0.2386191860831969, 0.2386191860831969, 0.6612093864662645, 0.932_469_514_203_152];
-            let wts = vec![0.1713244923791704, 0.3607615730481386, 0.467_913_934_572_691, 0.467_913_934_572_691, 0.3607615730481386, 0.1713244923791704];
-            (pts, wts)
-        }
-        7 => {
-            let pts = vec![-0.9491079123427585, -0.7415311855993945, -0.4058451513773972, 0.0, 0.4058451513773972, 0.7415311855993945, 0.9491079123427585];
-            let wts = vec![0.1294849661688697, 0.2797053914892766, 0.3818300505051189, 0.4179591836734694, 0.3818300505051189, 0.2797053914892766, 0.1294849661688697];
-            (pts, wts)
-        }
-        8 => {
-            let pts = vec![-0.9602898564975363, -0.7966664774136267, -0.525_532_409_916_329, -0.1834346424956498, 0.1834346424956498, 0.525_532_409_916_329, 0.7966664774136267, 0.9602898564975363];
-            let wts = vec![0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.362_683_783_378_362, 0.362_683_783_378_362, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763];
-            (pts, wts)
-        }
-        9 => {
-            let pts = vec![-0.9681602395076261, -0.8360311073266358, -0.6133714327005904, -0.3242534234038089, 0.0, 0.3242534234038089, 0.6133714327005904, 0.8360311073266358, 0.9681602395076261];
-            let wts = vec![0.0812743883615744, 0.1806481606948574, 0.2606106964029354, 0.3123470770400029, 0.3302393550012598, 0.3123470770400029, 0.2606106964029354, 0.1806481606948574, 0.0812743883615744];
-            (pts, wts)
-        }
-        10 => {
-            let pts = vec![-0.9739065285171717, -0.8650633666889845, -0.6794095682990244, -0.4333953941292472, -0.1488743389816312, 0.1488743389816312, 0.4333953941292472, 0.6794095682990244, 0.8650633666889845, 0.9739065285171717];
-            let wts = vec![0.0666713443086881, 0.1494513491505806, 0.219_086_362_515_982, 0.2692667193099963, 0.2955242247147529, 0.2955242247147529, 0.2692667193099963, 0.219_086_362_515_982, 0.1494513491505806, 0.0666713443086881];
-            (pts, wts)
-        }
-        _ => panic!("gauss_legendre_f64: unsupported n={n} (max 10)"),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -385,75 +364,97 @@ mod tests {
         fem_element::lagrange::hex::hex_tensor_layout(elem).1
     }
 
-    /// D77 pin (table updated D31): `hex_q2.wgsl`'s hard-coded slot table is
-    /// the element layer's Q2 order — slot by slot, bit-exact.  Since D31 that
-    /// order is MFEM's `H1_HexahedronElement(2)` (`tmp/d31/probe_h1_hex.cpp`),
-    /// identical to the pre-D77 table's block scheme; the old guard against
-    /// "MFEM's order" is obsolete and replaced by a positive pin.
+    /// D77 pin (table updated D31, text shape updated D777): the shipped
+    /// `hex_q2.wgsl`'s `QA/QB/QC` slot table is the element layer's Q2 order —
+    /// slot by slot, bit-exact.  Since D31 that order is MFEM's
+    /// `H1_HexahedronElement(2)` (`tmp/d31/probe_h1_hex.cpp`), identical to the
+    /// pre-D77 table's block scheme; the old guard against "MFEM's order" is
+    /// obsolete and replaced by a positive pin.  D777 moved the file itself to
+    /// the generator's shape (see [`hex_qk_wgsl_is_generator_output`]), so the
+    /// vertex block that used to be the bespoke `q2map` bit trick is now the
+    /// head of the same table.
     #[test]
     fn hex_q2_wgsl_slots_match_element() {
-        let arrays = u32_arrays(HEX_Q2_WGSL, "array<u32,19>(");
-        assert_eq!(arrays.len(), 3, "q2map carries three index arrays");
-        for a in &arrays {
-            assert_eq!(a.len(), 19, "q2map off-vertex arrays hold slots 8..27");
-        }
+        let arrays = u32_arrays(HEX_Q2_WGSL, "array<u32,27>=array(");
+        assert_eq!(arrays.len(), 3, "QA/QB/QC carry three index arrays");
         let want = element_slots(&HexQ2);
         assert_eq!(want.len(), 27);
         for n in 0..27usize {
-            let got = if n < 8 {
-                // Vertex arm of `q2map`, transcribed bit-for-bit (the 0/1
-                // corner bit is the *node index* in the 0/2 slots of the
-                // 3-node quadratic basis).
-                let n = n as u32;
-                [
-                    (2 * (((n & 1) ^ ((n >> 1) & 1)) as usize)),
-                    (2 * ((n >> 1) & 1) as usize),
-                    (2 * (n >> 2) as usize),
-                ]
-            } else {
-                let i = n - 8;
-                [
-                    arrays[0][i] as usize,
-                    arrays[1][i] as usize,
-                    arrays[2][i] as usize,
-                ]
-            };
+            let got = [
+                arrays[0][n] as usize,
+                arrays[1][n] as usize,
+                arrays[2][n] as usize,
+            ];
             assert_eq!(got, want[n], "slot {n}: wgsl vs HexQ2::dof_coords");
         }
         // MFEM `H1_HexahedronElement(2)` positive pins: slot 8 is the first
-        // `CUBE::Edges[0]` (0→1) mid, tensor (1,0,0) = array index 0; slot 16
-        // is the first vertical edge (`CUBE::Edges[8]` = 0→4) mid, tensor
-        // (0,0,1) = array index 8.
+        // `CUBE::Edges[0]` (0→1) mid, tensor (1,0,0); slot 16 is the first
+        // vertical edge (`CUBE::Edges[8]` = 0→4) mid, tensor (0,0,1).
         assert_eq!(
-            [arrays[0][0], arrays[1][0], arrays[2][0]],
-            [1u32, 0, 0],
+            want[8],
+            [1usize, 0, 0],
             "slot 8 must be the (1,0,0) z-low edge mid (MFEM H1 order, D31)"
         );
         assert_eq!(
-            [arrays[0][8], arrays[1][8], arrays[2][8]],
-            [0u32, 0, 1],
+            want[16],
+            [0usize, 0, 1],
             "slot 16 must be the (0,0,1) vertical-edge mid (MFEM H1 order, D31)"
         );
     }
 
-    /// D82 pin: `hex_q3.wgsl` / `hex_q4.wgsl` carry the element layer's slot
-    /// order slot-by-slot, and their `QA/QB/QC` tables are **exactly** the
-    /// shader this crate generates for p = 3 / p = 4.
+    /// D777: the shader's `GP`/`GW` are the 1-D Gauss–Legendre rule on `[0,1]`
+    /// that the element layer puts on each tensor axis —
+    /// [`fem_element::quadrature::gauss_legendre_01`] itself, the call
+    /// `hex_rule`/`quad_rule_01` make — cross-checked against `hex_rule(2*p)`'s
+    /// own tensor factors.
+    fn assert_rule_matches_element_layer(wgsl: &str, p: usize) {
+        let nq = p + 1;
+        let (xs, ws) = fem_element::quadrature::gauss_legendre_01(nq);
+        assert!(
+            wgsl.contains(&format!("const GP:array<f32,{nq}>=array({})", fmt_numbers(&xs))),
+            "p={p}: shader GP is not the element layer's [0,1] rule {xs:?}"
+        );
+        assert!(
+            wgsl.contains(&format!("const GW:array<f32,{nq}>=array({})", fmt_numbers(&ws))),
+            "p={p}: shader GW is not the element layer's [0,1] weights {ws:?}"
+        );
+        // The element layer's tensor rule is built from the same 1-D values and
+        // enumerates its points x fastest (`hex_rule`: `n = (order + 2) / 2`
+        // Gauss points per direction), so `points[ix][0] == xs[ix]`.
+        let tensor = fem_element::quadrature::hex_rule((2 * p) as u8);
+        assert_eq!(tensor.points.len(), nq * nq * nq);
+        for ix in 0..nq {
+            assert_eq!(
+                tensor.points[ix][0], xs[ix],
+                "p={p}: hex_rule(2p) x coordinate {ix}"
+            );
+        }
+    }
+
+    /// D82 pin, extended D777: every shipped hex Qk source carries the element
+    /// layer's numbers — `QA/QB/QC` slot by slot, the `bary`/`dary` node array,
+    /// and the `GP`/`GW` quadrature constants on the element's `[0,1]` frame.
     ///
-    /// Before D82 both shaders were lexicographic (`q3a/q3b/q3c` index
-    /// arithmetic) over **equispaced** nodes — the pre-D77 CPU layout, which
-    /// disagrees with the assembled matrix and with the `H1Space` element DOF
-    /// numbering.  The GLL node arrays are pinned too (they are written with 16
-    /// decimals, so the check is on the text the generator produces).
+    /// Before D82 the `q3`/`q4` tables were lexicographic over **equispaced**
+    /// nodes (the pre-D77 CPU layout, which disagrees with the assembled matrix
+    /// and with the `H1Space` element DOF numbering).  D721 moved the element
+    /// layer to `[0,1]`/GLL and round 72 regenerated the node arrays, but
+    /// `GP`/`GW` were still the generator's own `[-1,1]` Gauss–Legendre table:
+    /// a different quadrature on a different reference domain, while the `pd`
+    /// buffer the shader consumes is `[0,1]`-framed.  `tests/d777_pa_frame.rs`
+    /// pins the numerical consequence, on the CPU and on the device.
     #[test]
-    fn hex_q3_q4_wgsl_tables_match_element() {
+    fn hex_qk_wgsl_tables_match_element() {
+        use fem_element::lagrange::hex::HexQ1;
         for (wgsl, elem, p) in [
-            (HEX_Q3_WGSL, &HexQ3 as &dyn ReferenceElement, 3usize),
+            (HEX_Q1_WGSL, &HexQ1 as &dyn ReferenceElement, 1usize),
+            (HEX_Q2_WGSL, &HexQ2 as &dyn ReferenceElement, 2),
+            (HEX_Q3_WGSL, &HexQ3 as &dyn ReferenceElement, 3),
             (HEX_Q4_WGSL, &HexQk::new(4) as &dyn ReferenceElement, 4),
         ] {
-            let nloc = (p + 1) * (p + 1) * (p + 1);
-            let marker = format!("array<u32,{nloc}>=array(");
-            let arrays = u32_arrays(wgsl, &marker);
+            let nq = p + 1;
+            let nloc = nq * nq * nq;
+            let arrays = u32_arrays(wgsl, &format!("array<u32,{nloc}>=array("));
             assert_eq!(arrays.len(), 3, "p={p}: QA/QB/QC");
             for a in &arrays {
                 assert_eq!(a.len(), nloc, "p={p}: full slot-length table");
@@ -468,14 +469,29 @@ mod tests {
                 );
             }
             // The 1-D nodes in the shader are the element's GLL nodes.
-            let nodes_str: String =
-                nodes.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
             assert!(
-                wgsl.contains(&format!("array<f32,{}>({nodes_str})", p + 1)),
+                wgsl.contains(&format!("array<f32,{nq}>({})", fmt_numbers(&nodes))),
                 "p={p}: shader node array is not the element layer's GLL nodes"
             );
-            // …and the shipped text *is* the generator's output for this degree
-            // (the files are CRLF in the working tree, the generator emits LF).
+            assert_rule_matches_element_layer(wgsl, p);
+        }
+    }
+
+    /// D777: the shipped sources are the generator's output — so the numbers
+    /// their pins check are the numbers the dynamic (`gpu_pa_apply_hex_qk`)
+    /// path emits, and a generator change cannot silently leave the files
+    /// behind (the round-70/71 gate miss this replaces: the node arrays had
+    /// drifted from the element layer while both text pins were "green" in a
+    /// stale log).  The files are CRLF in some checkouts, the generator emits
+    /// LF, hence the normalisation.
+    #[test]
+    fn hex_qk_wgsl_is_generator_output() {
+        for (wgsl, p) in [
+            (HEX_Q1_WGSL, 1usize),
+            (HEX_Q2_WGSL, 2),
+            (HEX_Q3_WGSL, 3),
+            (HEX_Q4_WGSL, 4),
+        ] {
             assert_eq!(
                 lf(wgsl),
                 lf(&generate_hex_qk_wgsl(p, false)),
@@ -495,23 +511,26 @@ mod tests {
     /// substitution, which must agree with `generate_hex_qk_wgsl(p, true)`
     /// (only `fp` differs between the two).
     #[test]
-    fn hex_q3_q4_wgsl_f64_matches_generator() {
-        assert_eq!(
-            lf(HEX_Q3_F64_WGSL),
-            lf(&generate_hex_qk_wgsl(3, true)),
-            "f64 Q3 shader (build.rs substitution) vs generator"
-        );
-        assert_eq!(
-            lf(HEX_Q4_F64_WGSL),
-            lf(&generate_hex_qk_wgsl(4, true)),
-            "f64 Q4 shader (build.rs substitution) vs generator"
-        );
+    fn hex_qk_wgsl_f64_matches_generator() {
+        for (wgsl, p) in [
+            (HEX_Q1_F64_WGSL, 1usize),
+            (HEX_Q2_F64_WGSL, 2),
+            (HEX_Q3_F64_WGSL, 3),
+            (HEX_Q4_F64_WGSL, 4),
+        ] {
+            assert_eq!(
+                lf(wgsl),
+                lf(&generate_hex_qk_wgsl(p, true)),
+                "f64 Q{p} shader (build.rs substitution) vs generator"
+            );
+        }
     }
 
-    /// The generated `qk` shader keeps the element layer's layout for every
-    /// degree, and its node array is the element's GLL 1-D node set — not the
-    /// equispaced one the pre-D82 generator emitted (they coincide only up to
-    /// p = 2, where GLL *is* equispaced).
+    /// The generated `qk` shader keeps the element layer's layout and rule for
+    /// every degree (beyond the four shipped ones), and its node array is the
+    /// element's GLL 1-D node set — not the equispaced one the pre-D82
+    /// generator emitted (they coincide only up to p = 2, where GLL *is*
+    /// equispaced).
     #[test]
     fn generated_qk_wgsl_follows_element_layer() {
         for p in 1..=5usize {
@@ -525,6 +544,11 @@ mod tests {
             if p >= 3 {
                 assert_ne!(nodes, equispaced, "p={p}: still equispaced for p >= 3");
             }
+            assert!(
+                wgsl.contains(&format!("array<f32,{}>({})", p + 1, fmt_numbers(&nodes))),
+                "p={p}: node array"
+            );
+            assert_rule_matches_element_layer(&wgsl, p);
             for n in 0..nloc {
                 assert_eq!(
                     [arrays[0][n] as usize, arrays[1][n] as usize, arrays[2][n] as usize],

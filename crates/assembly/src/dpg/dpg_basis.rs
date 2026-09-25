@@ -48,7 +48,7 @@ use fem_element::{
     lagrange::{factory::{TetPk, TriPk}, HexL2GL, QuadL2GL},
     quadrature::{gauss_legendre_01, hex_rule, quad_rule_01, tet_rule, tri_rule},
     raviart_thomas::{HexRTk, QuadRTk, TetRTk, TriRTk},
-    nedelec::{HexNDk, QuadND, QuadND2, QuadNDk, TetNDk, TriNDk},
+    nedelec::{HexNDk, QuadND, QuadND2, QuadNDk, TetNDk, TriND2, TriNDk},
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
@@ -153,10 +153,20 @@ pub fn vector_ref_elem(et: ElementType, order: u8) -> Box<dyn VectorReferenceEle
 /// the MFEM-faithful `QuadND` — the legacy `QuadNDk` has equispaced open nodes
 /// and reverses the top/left edge slot order, so it is a different element
 /// (`tmp/d765/slot_adjudication.md`).
+///
+/// D773 (round 73): the tri arm does the same.  `TriNDk::new(2)` and `TriND2`
+/// are one element (same MFEM `ND_TriangleElement(2)` functionals, basis equal
+/// to 3.6e-15 — `tmp/d777/tri_slot_adjudication.md`), but the assembler's
+/// chooser and the space's tri tables name the explicit `TriND2`, and the DPG
+/// evaluator must name the same element the assembler does, not merely an
+/// equivalent one.
 pub fn hcurl_ref_elem(et: ElementType, order: u8) -> Box<dyn VectorReferenceElement> {
     let p = order as usize;
     match et {
-        ElementType::Tri3 | ElementType::Tri6 => Box::new(TriNDk::new(p)),
+        ElementType::Tri3 | ElementType::Tri6 => match p {
+            2 => Box::new(TriND2),
+            _ => Box::new(TriNDk::new(p)),
+        },
         ElementType::Quad4 => match p {
             1 => Box::new(QuadNDk::new(1)),
             2 => Box::new(QuadND2),
