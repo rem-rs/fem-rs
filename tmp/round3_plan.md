@@ -4470,6 +4470,146 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十五轮（round 75）：D782 二维 serendipity 语义端口 + D799-2/3 DG 面几何 + D800-2 embedded 曲面通量 + D808-1 非法 WGSL + 并行/D808-3
+
+**开局 HEAD = round 74 末笔 `a3520623`（已推送）；树净。** 五路并行（四路后台代理 + L5 主会话亲自），
+提交链 `b3e609e0`（L5）→ `4a16a34a`（L1）→ `ca439492`（L2）→ `b5463cea`（L3）→ `eee61fe4`（L4）→ docs。
+**本轮四条路各自独立发现"几何求值没有单一真源"这一**同一工程缺口的不同表现**（DG 面 / embedded 面 /
+曲面棱柱 PA / 曲面棱柱空间），是 round 73-74 那条线的自然延伸。**
+
+### L5（主会话亲办）· D782 关闭：2-D serendipity = MFEM `H1Ser_QuadrilateralElement`
+- **实现**：`QuadSerendipityPk` 从"等距格点 / `4p` 节点 dof / 截断张量空间"改为 MFEM `fe_ser.cpp:25` 的
+  逐行语义：GLL 闭点（p=2 恰与等距重合、p≥3 分叉 0.2764/0.7236）、`(p²+3p+6)/2` dof（5/8/12/17/23）、
+  真 serendipity 空间 `S_p`（`xy ∈ S_2`、`x²y² ∉` —— 旧 span 恰好反了）、MFEM 的 slot 序
+  （顶点 → south/east/north/west → 内部 `Sr_DOF_MAP`）、MFEM 的显式形函数/导数公式（含 p≥4 的
+  Legendre 乘积气泡）。
+- **p=1 不按公式照抄**：MFEM 的 `H1Ser(1)` **退化**——公式给 5 dof，但构造器边循环 `for i < p-1` 为空，
+  第 5 个形函数**恒等于零**且连节点性都不成立（实测 `shape 1 4 ≡ 0`、`kron p=1 = 1.0`）。MFEM 给
+  `Quad4/Quad8` 实际配的是 `H1_FECollection(1)` 的双线性 ⇒ p=1 保持 4 dof 双线性（D768 已逐位钉死），
+  退化证据写进测试。
+- **真值/验收**：`crates/element/tests/data/d809_mfem_h1ser_truth.txt`（1061 行，`tmp/d809/d809_ser_probe.cpp`
+  对 MFEM 4.10 串行）；`d809_mfem_h1ser_port.rs` 9 测——节点表 ≤1e-15、形函数 <1e-14、导数 <1e-13
+  **逐条**，dof 公式、p≤3 节点性 + p≥4 非节点性如实钉住、`∫φ`（p=2 的顶点 `−1/12`、边 `1/3`）。
+- **新发现 D809-1（MFEM 上游缺陷，忠实继承）**：**MFEM 自己的 `H1Ser` 从 p=4 起不满足常数再现**。
+  元件层 `Σ∫φ = 1.0278`、POU 残差 6.25e-2；**独立加固**：绕开本仓代码、用 MFEM 自己的
+  `FiniteElementSpace` + `MassIntegrator` 在单位正方形上算 `1ᵀM1`（面积应为 1）得 **p=4: 1.05667、
+  p=5: 1.05698**（`tmp/d809/d809_ser_constants.cpp` → `constants_check.txt`）。端口如实复刻，测试
+  双向断言该偏差存在 ⇒ 两边都不能静默漂移。**同探针另一发现 D809-3**：MFEM 的 `H1Ser` **没重载
+  `Project`**，`ProjectCoefficient` 在它上面直接 abort。
+- **D809-2（登记，未改）**：`mixed::ref_elem_vol` 把 `Quad8 | Quad9` 合并分派到 serendipity 臂，
+  而 Quad9（9 节点）在 MFEM 里应对应 `QuadQk`。实测两边 dof 数在 Quad8/Quad9 上**每阶都不一致**，
+  但**夹具是人工构造的**（仓内无真实 Quad8/Quad9 网格）⇒ 结论待真网格复核；可达性已核：混合形式的
+  生产消费方全在 Quad4/hex/tri 上，该臂**无生产用户**。
+- 死代码：删 `mono_ij`/`nodes_2d`/`build_coef2d`。d768 三条钉旧行为的断言改写，`d768_mfem_h1ser_is_a_different_element`
+  与其金标常量**删除**（命题已被 D809 反转）。门：element **652/0/3**；fem-assembly 无 serendipity 相关红。
+
+### L1 · D799-3 关闭（三个 DG 模块切等参面几何）+ D799-2 关闭（ex27 helper 去 Quad4 硬编码）
+- **根因**：`dg_advection`/`dg_elasticity`/`dg_hyperbolic` 仍用**面角点**自建法向（`(dy/h,−dx/h)`、3-D 取面节点叉积）、
+  弦长缩放 QP 权重、并用 `phys_to_ref` 反解参考点；MFEM 走 `Elem1` 等参映射**复合**（`Loc1`/`CalcOrtho`/
+  `Elem1->Transform`）。
+- **改动**：`dg_base::FacePointGeom` 增 `xp`；**修正 `face_point_geom` 法向定向**（改取单元自身 CCW 边方向，
+  不再随面表 a→b 翻转——旧实现经 `local_faces(3,2)` 注册的三角面会给**向内**法向）；新增 `FacePointGeom3`/
+  `face_point_geom_3d`（Tet4）；删旧路线 `face_geom_2d/3d`+`orient_normal_outward`。三模块的面项/体项全部切换；
+  `dg_hyperbolic` 的 `nor_qp`/逐 QP 测度、`dg_elasticity` 体项改逐 QP `element_jacobian_at`。
+- **红→绿**：曲面 fixture 16 条边界面几何 vs MFEM `[FQP]`——等参 **2.802e-14（0/16 > 1e-12）**、旧弦路线
+  **5.774e-1（4/16）**；**12 条直边两路线一致 ≤1e-15**（"直网格代数恒等"的数值证明，故既有直网格示例不可能被移动）。
+  `DgAssembler::assemble_dg` vs 17 位 MFEM gold `1.5e-13，0/256`。主会话亲跑探针复现 16 行 `[FQP]`
+  与测试内嵌 `MFEM_FQP` **逐位相同**。
+- **D799-2**：ex27 的 4 处硬编码 `Quad4` 改按单元族取（三角网格上会给 L² 路径 4-dof 的 `QuadL2GL` 而空间只有 3 dof/单元 ⇒ 静默错装配）。
+- **反回归（主会话亲验）**：ex27 **10/10 逐字节**（dg rs0-3、H1 rs0-3、`-dbc 2.5`、`-dg` RHS 隔离档）、
+  ex14 **311 行迭代史逐字节**、`d795_dg_curved_geometry` 3/3、`d804_ex27_dg_seam_coupling` 4/4。
+- **新债**：**D805-1**（`DgElasticityAssembler` 罚项 `kappa·ipw·(λ+2μ)` vs MFEM `kappa·(nor·nor)·(ipw/2)·Σ(λ+2μ)/Weight`：
+  曲面 41%、非正方形直单元因子 `h²/(2W)`；k=0 时残差只剩 2.1e-12 求和噪声 ⇒ 几何已对、差全在罚项）、
+  **D805-2**（fem-rs 的 DG 对流面项是**守恒型**迎风 `−∫[[v]]F̂`，缺 MFEM `DGTrace`/`NonconservativeDGTrace` 的
+  LL/RR 自块 ⇒ 与任何 MFEM 积分器都非逐条目等价，而注释声称等价）、**D805-3**（ex27 的 `write_mfem_file("refined.mesh")`
+  静默失败：`let _ =` 吞 Err ⇒ `refined.mesh` 无 Rust 对照物）、**D805-4**（3-D DG 面只支持 Tet4，
+  `build_face_elem_map` 的 `(8,3)` 分支为空 ⇒ hex 面在整条 DG 链路无支持）、**D805-5**（上述法向定向，已修）。
+
+### L2 · D800-2 关闭：embedded 曲面通量恢复（切向梯度）
+- **裁决 = 臂 A**（MFEM 的矩形契约有明确定义并已实现）。**根因比登记更准**：`compute_element_flux`/
+  `compute_flux_energy` 用 `mesh.dim()` 同时充当 MFEM 的 `spaceDim` 与 `el.GetDim()`（`bilininteg.cpp:1181-1182`），
+  于是在 `Mesh<3>` 持 `Tri3`（Dim=2/sdim=3）上建 3×3 矩阵、第三列恒空、`det ≡ 0`，求逆与重采样两支都奇异
+  （round-73 登记的 `nodes[3]` OOB 是 D793-1 之前的同一缺陷形态）。
+- **MFEM 契约（主会话逐条核实）**：`invdfdx` 是 `dim × spaceDim`（`:1203`）→ 经 `CalcInverse` 左逆分支
+  （`densemat.cpp:2675-2686` → `CalcLeftInverse<3,2>`，`kernels.hpp:1217`）得 `(JᵀJ)⁻¹Jᵀ` ⇒
+  通量 = `J(JᵀJ)⁻¹∇_ξu_h`（**切向**梯度，3 分量）；测度 = `Trans.Weight() = √(EG−F²)`（`densemat.cpp:568-575`）。
+- **实现**：复用 `crate::assembler::surface_jacobian`（装配器曲面刚度路径的同一 3×2 几何**单一真源**，该文件零改动）；
+  体网格路径逐字未动（`let dim = edim;`）。**D806-1**：只接 2-D 单纯形嵌 3-D，Quad4 曲面与 1-D 曲线**响亮拒绝**
+  （帧不一致 + 左逆未接）——这个拒绝本身就是修复：修前平面 Quad4 曲面走 P1 角点回退是**静默错**。
+- **真值/验收**：MFEM 4.10 自身 `ZZErrorEstimator` dump（逐 dof 通量 + 能量 + η + total，1e-13/1e-12）；
+  主会话重编译重跑探针，`zz_total_u1_linear 1.813339118685295` 与测试内嵌 `MFEM_WARPED_U1_TOTAL` **逐位相同**。
+  红：HEAD 版 `flux_recovery.rs` 下 **6/7 红**（含"拒绝"测试报 did-not-panic ⇒ 证明修前是静默错）；绿 7/7。
+  体网格零回归：`d793_flux_recovery_curved_simplex` 2/2、`d793_coeff_l2_norm_curved_simplex` 4/4（主会话亲跑）。
+
+### L3 · D808-3 关闭（曲面棱柱空间误判）+ D122-2 前提被驳 + D790-2 验证 / D790-3 裁定
+- **D808-3 关闭**（L4 发现、L3 落地）：`DofManager::is_periodic_merged` 原按**槽位**比较
+  `geometry_nodes(e)[k] != element_nodes(e)[k]`，而几何行写在单元族自己的 `Pk` slot 帧里、棱柱族是
+  **layer-major**（角点不是前缀）⇒ **每个曲面棱柱网格**都被判为周期、走 D61 unfolded 编号 ⇒ **非协调空间**
+  （2 棱柱 p=2：**31 dof vs 直网格 27**，共享四边形面 9 个 dof 未合并、4 条共享边 dof 复制；主会话亲跑复现）。
+  修法：改**集合隶属**（`element_nodes(e)` 每个顶点 ∈ `geometry_nodes(e)`）——曲面非周期网格仍返回 false
+  （其几何行引用网格自身顶点 id）、真合并网格仍返回 true（被合并单元的折叠代表不在自己的 pre-merge 行里）。
+  验收 `d808_prism_pa_multi.rs::d808_curved_prism_h1_space_is_geometry_independent` **摘 ignore 转正**。
+- **D122-2 登记前提被驳（行为改动已 revert，只留 16 行审计注释）**：登记称"面闭包 fixpoint 过度迭代成传递闭包"。
+  实测：**照字面实现单层**后 np=2 复现登记的 180/204 单元，但 **np=4 直接 panic**
+  （`exchange_ghost_edge_ids: rank 3 requested edge (64,113) ... does not own it`）——边 (64,113) 由
+  单元 62(rank0) 与 64(rank1) 持有 ⇒ 全局 min-owner 是 rank0，但 1 层 ghost 的 rank3 只见 rank1 便声称 owner=rank1，
+  而 rank1 见两者、答不出。空 dof 分区从局部元素遍历导出**两样**东西——实体 owner（min over holders，D122-1）
+  与面 dof 的规范位置/符号（取最小全局 id 相邻单元，D412/D122-3）——两者都需要**每个实体的每个持有者**。
+  新静态闭包测试算出该集合 == **全 252 单元（每 rank，np=2/4）** ⇒ fixpoint 是**最小可行层**而非浪费。
+  ⇒ 重登记 **D807-1**（需 traversal-independent 通道：提取侧发布全局 实体→owner 映射 + 规范面锚，或
+  `exchange_ghost_*` 里加 holder→owner 解析轮），层才可能砍到 MFEM 的 `GetNE` + 1 层（np=2 的 54/78）。
+- **D790-2 验证通过**：九空间 per-rank owned split 在 np=2/4 仍**逐位 = MFEM `GetTrueVSize()`**
+  （H1o1 205/159、H1o2 1303/1140、ND1 525/444、ND2 3594/3288、ND3 11475/10800、RT0 447/411、
+  RT1 3300/3156、RT2 10827/10503、L2o1 1008/1008）。**构造性引理**：rank 通过 **owned** 单元持有实体时
+  必然看到其全部持有者（持有者共享该实体顶点 ⇒ 点邻居）⇒ owned 计数不需闭包；1 层只破坏 **ghost 侧**
+  （一致的 (owner, global id)）。
+- **D790-3 裁定（登记位置错）**：元件侧的变换**存在且正确**——非创建单元的 `FaceDofBlock.s` 恰是切向对
+  **交换** `[[0,1],[1,0]]`（det = −1），而这些槽的 `element_signs = +1.0`，且关系恰是
+  `A_ba = Rᵀ·A_ab·R`（≤1e-10；交换单元序使共享面质量块动 1.714e-1@k=2）⇒ 缺口在 **DP 的标量
+  `sign_correction` 通道**（对它盲）。重登记 **D807-2**（属 `crates/parallel`）。
+- 门：fem-parallel **334/0/14**、fem-space **592/0/3**、fem-io **306/0/3**、fem-mesh 497/0/9、
+  21 个周期夹具测试绿；**pex3 锚点逐位不动**（主会话亲跑：`--ranks 1` 2.70053050699196e-2/87 it、
+  `--ranks 2` 2.70053057745987e-2/95 it）。
+
+### L4 · D808-1 关闭（**非法 WGSL**）+ D783 关闭（曲面棱柱 PA）+ D797-2 / D781 / D784 关闭
+- **D808-1（本轮最硬发现）**：`wgsl/quad_q1.wgsl` 是**非法 WGSL**——8 处 `let x=if(c){a}else{b};`
+  （WGSL 无 `if` 表达式）⇒ `gpu_pa_apply_quad_q1`/`_f64`（含 build.rs f64 变体）**从未在任何设备上编译成功**。
+  **主会话独立证实**：取 HEAD 版喂 **naga**（wgpu 27 同一前端）得
+  `error: expected ';', found "{"`（第 21 行）⇒ 该 GPU 路径确实是死的。修法 `select()`；加 **naga 解析 pin**
+  （dev-dep，lock 仅 +1 行）。**这是 D777 缺陷类的第二次实例**——shipped 着色器文本自身的结构错，
+  纯文本 pin 永远看不见；两次都是被解析/设备 pin 抓到的。
+- **D783 关闭**：`pa/prism_pk.rs` 对 `geom_order ≥ 2` 改逐 QP `element_jacobian_at`（order-g `PrismPk(g)`
+  同族同表，按行=参考轴口径转置），`≤1` 走 `PrismGeom` 解析三线性**逐位不变**。红→绿
+  **1.612e-1/9.280e-2/1.073e-1 → 8.408e-16/4.060e-16/9.821e-16**；模块 doc 自带红见证（同顶点直网格复现修前路径）。
+- **D797-2 裁定 (b) 自洽**：`[-1,1]²` 与全树 `[0,1]²` 只差 nq=2 Gauss 规则的精确仿射像
+  （`ξ=2t−1`、`w_ξ=2w_t`），该因子在"参考梯度 × J⁻ᵀ × detJ × 权重"里整体抵消 ⇒ 口径不同非数值错。
+  warped（J 非对称）夹具上 vs CPU PA = **8.743e-16**；顺带排除 J 非对称下 `jit` 取向之忧。帧 pin 三重判据：
+  帧判据（element 层 `gauss_legendre_01(2)` 的像、Σw=2）+ shipped 文本复算 vs CPU PA **rel = 0.0** +
+  `[0,1]` 换帧**负对照 1.309e0** + WGSL 解析 + 真设备 1.94e-7。
+- **D781 阴性（成文审计）**：`vector_assembler.rs` 8 处逐行审 + 构造性论证（单元核是 `(space,e)` 纯函数、
+  元素内序固定、无跨元素状态；唯一调度自由度是并行 fold/reduce 的结合序）+ 实验（ND1、512 单元、
+  1/2/4/8 线程 × 4 次 = 16 次**逐位 == 串行**，digest 恒 `0xb25a867a19219cf1`）。pin 用公开 canonical 串行入口
+  对照（避免"并行 vs 并行"空判据）。
+- **D784 阴性**：补**多元素共享 dof** 夹具（2 棱柱共享四边形面；4 棱柱共享面 + 中心竖边，一个 dof 被 3-4 单元贡献），
+  p=1..4 逐条目 **1.5e-15…3.5e-16**。
+- **新债**：**D808-4**（其余 PA 核 `hex_qk`/`quad_qk`/`quad_q1`/`q2..q4`/`tet4` 在 `geom_order ≥ 2` 时仍用 P1 顶点几何，
+  与装配侧 order-g 等参不一致，与 D783 同类同量级）。
+- 门：fem-linalg-gpu **36/0/1**（31+5）、fem-assembly 1245/0/72。
+
+### 主会话普查新增
+- **D810-1（登记，潜在）**：`crates/assembly/src/wg/` 族（`wg_maxwell`/`wg_poisson`/`wg_stokes`）各自私有
+  `face_geom_2d`/`face_geom_3d`，用的是**正是本轮在 dg 模块里消灭的同一套弦长路线**（`|c1−c0|` / 面节点叉积范数），
+  三份复制粘贴。经 `pub use wg::*` 导出但**无任何外部消费方**、无曲面测试 ⇒ 潜在缺陷（配方 = D799-3 同一改法）。
+
+### 门（主会话亲跑，release）
+| 门 | 结果 |
+|---|---|
+| 十 crate `--lib` | **2644 / 0 / 5 ign**（与 round-74 相同） |
+| 十 crate 全靶（含 doc-tests） | **333 targets / 4266 / 0 / 122 ign**（round-74：324/4228/0/122） |
+| examples 全构建 | **0 错误、0 非 vendor 警告** |
+| pro 层 `cargo check` | rc=0 |
+| 锚点 | pex3 `--ranks 1` 2.70053050699196e-2/87 it、`--ranks 2` 2.70053057745987e-2/95 it（**逐位**）；ex27 **10/10 逐字节**；ex14 **311 行逐字节**；fem-linalg-gpu 36/0/1 |
+
 ## 第七十四轮（round 74）：D797-1 弱散度 c⁻³（头号）+ D800-1 use_iso 几何节点 + D790-1a/D785/D786 并行收尾 + D799-1 DG 缝耦合
 
 **开局 HEAD = round 73 末笔 `0df353ce`（已推送）；树上有 L1/L2 的在飞改动（见下）。**
