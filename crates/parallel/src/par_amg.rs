@@ -111,16 +111,6 @@ pub struct ParAmgConfig {
     /// byNODES block layout (`vd * n_nodes + node`), which is what
     /// `DofPartition::from_vector_space` produces.
     pub block_size: usize,
-    /// Retained for API compatibility — **the coarsening is ghost-aware in
-    /// every mode** (D790-1): the config used to select between a block-local
-    /// coarsening and the ghost-aware one, but the block-local hierarchy is
-    /// block-diagonal at the coarse levels and therefore has no coarse
-    /// representation of the interface error.  That was survivable only while
-    /// the ownership rule left a ring of the neighbour's interior DOFs in each
-    /// rank's owned set; with proper subdomains the pex3 2-rank ND1 system
-    /// stalled (102 → 10000 iterations, 8.7e-8).  Callers may keep setting the
-    /// field; it no longer changes the hierarchy.
-    pub use_global_aggregation: bool,
 }
 
 impl Default for ParAmgConfig {
@@ -135,7 +125,6 @@ impl Default for ParAmgConfig {
             smoothed_prolongation: false,
             coarse_cg: true,
             block_size: 1,
-            use_global_aggregation: false,
         }
     }
 }
@@ -1995,8 +1984,7 @@ pub fn par_solve_pcg_amg(
 ) -> Result<fem_solver::SolveResult, fem_solver::SolverError> {
     let comm = x.comm().clone();
     // D790-1: one coarsening for every mode — the block-local variant stalled
-    // on 2+ ranks (see the module doc); `use_global_aggregation` is retained as
-    // a compatibility field with no effect.
+    // on 2+ ranks (see the module doc), so the mode switch was removed.
     let hierarchy = ParAmgHierarchy::build(a, &comm, amg_cfg.clone());
 
     if comm.is_root() {

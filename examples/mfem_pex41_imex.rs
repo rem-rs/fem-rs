@@ -444,14 +444,13 @@ fn main() {
             .map(|&x| if x.abs() > 1e-300 { 1.0 / x } else { 0.0 })
             .collect();
 
-        // Implicit (M + γ·dt·S) solver: AMG with local aggregation + PCG.
+        // Implicit (M + γ·dt·S) solver: AMG + PCG.
         let amg_cfg = ParAmgConfig {
             smoother: SmootherType::SymmetricGaussSeidel,
             n_pre_smooth: 2,
             n_post_smooth: 2,
             smoothed_prolongation: true,
             block_size: 1,
-            use_global_aggregation: false,
             ..ParAmgConfig::default()
         };
         let solve_cfg = SolverConfig {

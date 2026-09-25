@@ -228,7 +228,6 @@ fn solve_h1(a: &Args, pm: &fem_parallel::ParallelMesh<Mesh<2>>, comm: &fem_paral
         n_post_smooth: 2,
         smoothed_prolongation: true,
         block_size: 1,
-        use_global_aggregation: false,
         ..ParAmgConfig::default()
     };
     let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg).expect("PCG+AMG failed");

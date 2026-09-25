@@ -185,7 +185,6 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
             n_post_smooth: 2,
             smoothed_prolongation: true,
             block_size: 1,
-            use_global_aggregation: false,
             ..ParAmgConfig::default()
         };
         let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg).unwrap();

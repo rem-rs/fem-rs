@@ -196,7 +196,6 @@ fn main() {
                 n_post_smooth: 2,
                 smoothed_prolongation: true,
                 block_size: 1,
-                use_global_aggregation: false,
                 ..ParAmgConfig::default()
             }
         };

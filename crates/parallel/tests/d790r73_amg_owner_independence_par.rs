@@ -80,7 +80,6 @@ fn pex3_amg_cfg() -> ParAmgConfig {
         n_post_smooth: 2,
         smoothed_prolongation: true,
         block_size: 1,
-        use_global_aggregation: false,
         ..ParAmgConfig::default()
     }
 }

@@ -156,11 +156,6 @@ fn main() {
             smoothed_prolongation: true,
             // Scalar DG system (1 unknown per element-dof): scalar AMG.
             block_size: 1,
-            // DG penalty faces couple DOFs across rank boundaries strongly;
-            // ghost-aware (cross-rank) aggregation keeps the coarse
-            // hierarchy consistent near partition interfaces (default local
-            // aggregation stagnates at ~6e-11 after 500 PCG iterations).
-            use_global_aggregation: true,
             ..ParAmgConfig::default()
         };
         let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg)

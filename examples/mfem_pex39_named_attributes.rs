@@ -287,10 +287,6 @@ fn main() {
             n_post_smooth: 2,
             smoothed_prolongation: true,
             block_size: 1,
-            // κ jumps by 1e6 between the rose/Base regions and the background;
-            // the default local aggregation converges fine here (the
-            // high-contrast regions stay inside one rank's partition).
-            use_global_aggregation: false,
             ..ParAmgConfig::default()
         };
         let res = par_solve_pcg_amg(&a, &rhs, &mut u, &amg_cfg, &cfg).expect("PCG+AMG failed");
