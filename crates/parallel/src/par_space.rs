@@ -497,6 +497,12 @@ mod tests {
     /// comparable across partitions — the entity key is.  This exercises the
     /// P2 vertex+edge ownership rule, the `dm_to_partition` permutation and the
     /// ghost edge global-id exchange end to end.
+    ///
+    /// D122-1 (round 73) moved the edge owner from the min *endpoint* owner to
+    /// the min **element** owner (MFEM `GroupTopology` share-set minimum), which
+    /// changes the np ≥ 2 id layout; `x` is therefore valued by entity here
+    /// rather than by `global_dof` (see the note at the fill site) — the
+    /// operator itself is unchanged.
     #[test]
     fn par_space_p2_matrix_consistent_across_partitions() {
         use fem_assembly::standard::DiffusionIntegrator;
@@ -538,9 +544,22 @@ mod tests {
                 let diff = DiffusionIntegrator { kappa: 1.0 };
                 let a_mat = ParAssembler::assemble_bilinear(&ps, &[&diff], 4);
                 let dp = ps.dof_partition();
+                // D122-1 (round 73): `x` is keyed by the **entity**, not by the
+                // global DOF id.  The ids (`global_dof_ids`) are assigned
+                // owner-block by owner-block, so they differ across rank counts
+                // for the same entity; the pre-D122-1 numbering only made
+                // `A·gid` agree because rank 0's owned set was then a prefix of
+                // the canonical id order (verified by replaying that numbering:
+                // it reproduces the np = 1 result bit for bit).  The *operator*
+                // by entity is the partition-independent object, and it is
+                // pinned per entry in
+                // `crates/parallel/tests/d122r73_q2_diag.rs`.
                 let mut x = ParVector::zeros(&ps);
                 for pid in 0..dp.n_owned_dofs {
-                    x.as_slice_mut()[pid] = dp.global_dof(pid as u32) as f64;
+                    let dm_id = dp.unpermute_dof(pid as u32);
+                    let (k, a, b) = entity_of[&dm_id];
+                    x.as_slice_mut()[pid] =
+                        k as f64 + a as f64 / 3.0 + b as f64 / 9.0;
                 }
                 let mut y = ParVector::zeros(&ps);
                 a_mat.spmv(&mut x, &mut y);

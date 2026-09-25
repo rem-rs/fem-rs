@@ -301,9 +301,34 @@ fn h1_q2_hex_operator_consistent_across_rank_counts() {
             let diff = DiffusionIntegrator { kappa: 1.0 };
             let a_mat = ParAssembler::assemble_bilinear(&ps, &[&diff], 4);
             let dp = ps.dof_partition();
+            // `x` must be a function of the **entity** key, not of the global
+            // DOF id: `global_dof_ids` are assigned owner-block by owner-block,
+            // so the same entity carries a different id at each rank count and
+            // `A·gid` would compare two different vectors.
+            //
+            // D122-1 (round 73): before the element-owner rule landed, rank 0's
+            // owned set *happened* to be a prefix of the canonical id order, so
+            // the two partitions' ids coincided (`gid_np2 = gid_np1`) and this
+            // pin passed as a numbering coincidence.  Replaying the pre-D122-1
+            // numbering through the same entity matrix reproduces the np = 1
+            // result bit for bit, while the current numbering moves 1765 of the
+            // 2443 entities — so the entity-valued `x` is the honest form.  The
+            // operator itself (`A` by entity) is partition-independent, pinned
+            // entry by entry in
+            // `crates/parallel/tests/d122r73_q2_diag.rs::d122r73_h1_q2_operator_matches_by_entity_across_rank_counts`.
             let mut x = ParVector::zeros(&ps);
             for pid in 0..dp.n_owned_dofs {
-                x.as_slice_mut()[pid] = dp.global_dof(pid as u32) as f64;
+                let dm_id = dp.unpermute_dof(pid as u32);
+                let e = *ent
+                    .get(&dm_id)
+                    .unwrap_or_else(|| panic!(
+                        "Q2 hex consistency: owned DOF {dm_id} has no entity key"
+                    ));
+                x.as_slice_mut()[pid] = e
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &w)| w as f64 / 3.0_f64.powi(i as i32 + 1))
+                    .sum();
             }
             let mut y = ParVector::zeros(&ps);
             a_mat.spmv(&mut x, &mut y);

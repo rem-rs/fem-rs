@@ -66,30 +66,34 @@
 //! `GetTrueVSize()` is the rank's owned DOF count — the exact counterpart of
 //! fem-rs's `DofPartition::n_owned_dofs`.
 //!
-//! ## D122-1 (registered, still open): edge-DOF owners that do not hold the edge
+//! ## D122-1 (closed, round 73): edge-DOF owners must hold the edge
 //!
-//! The global true sizes above are met by fem-rs at every rank count, but the
-//! **per-rank split** is not: for `H1`/`ND` spaces fem-rs still assigns the
-//! owner of a shared **edge** DOF with `owner(edge) = min(owner(u), owner(v))`
-//! over the edge's endpoints.  That names a rank owning one *vertex* of the
-//! edge, which can carry no element containing the edge at all: with the
-//! contiguous partition at np = 2 exactly 71 edges have endpoint-min owner 0
-//! while only rank 1 holds them, so rank 0 reports 596 owned ND1 DOFs although
-//! its 126 elements touch only 525 (`tmp/d122/femrs_cyl_np2.txt`).  MFEM's
-//! `GroupTopology` group for an entity is its *share* set, so the owner is the
-//! minimum over the ranks **holding the entity** = the minimum element owner
-//! (`from_face_space` already uses that rule for RT faces and its split matches
-//! MFEM exactly).  Replacing the endpoint rule by the element-minimum rule in
-//! `from_edge_space` / `from_dof_manager` makes fem-rs reproduce MFEM's split
-//! for **all eight spaces** (measured: `tmp/d122/femrs_fixed_cyl_np{2,4}.txt` —
-//! ND2 3594/3288, ND3 11475/10800, ND1 525/444, H1o2 1303/1140,
-//! RT2 10827/10503, plus the already-matching RT0/RT1/L2).  It is nonetheless
-//! *latent*: the ghost layer currently carries the whole mesh (D122-2 below),
-//! so the bogus owner can still answer the ghost lookup and nothing panics.
-//! Landing it is blocked on a deliberate np >= 2 re-baseline (the
-//! `d122_mfem_exact_owned_split_for_edge_owned_spaces` test below is
-//! `#[ignore]`d with the target numbers inlined — the same workflow D412 used
-//! to un-ignore `d110`'s multi-rank case).
+//! fem-rs used to assign the owner of a shared **edge** DOF with
+//! `owner(edge) = min(owner(u), owner(v))` over the edge's endpoints — a rank
+//! owning one *vertex* of the edge, which can carry no element containing it:
+//! with the contiguous partition at np = 2 exactly 71 edges had endpoint-min
+//! owner 0 while only rank 1 holds them, so rank 0 reported 596 owned ND1 DOFs
+//! although its 126 elements touch only 525.  MFEM's `GroupTopology` group of an
+//! entity is its *share* set, so the owner is the minimum over the ranks
+//! **holding the entity** = the minimum element owner.  `from_edge_space` /
+//! `from_dof_manager` (edges **and** H¹ faces) now use that rule and reproduce
+//! MFEM's `GetTrueVSize()` split for **all nine spaces** at np = 1/2/4
+//! (`d122r73_d1_owner_rule_par.rs`, oracle `tmp/d122r73/mfem_probe_np*.txt`:
+//! ND2 3594/3288, ND3 11475/10800, ND1 525/444, H1o2 1303/1140, RT2 10827/10503
+//! plus the already-matching RT0/RT1/L2/H1o1).  np = 1 is untouched by
+//! construction (one rank owns every element, so both rules return 0).
+//!
+//! ## D122-3 (closed, round 73): the NDk (k ≥ 2) face-DOF sign corrections
+//!
+//! The same round found the *numerical* counterpart: `Σ_ij M_ij` of the H(curl)
+//! mass matrix moved with the rank count (ND2 6.0e-3, ND3 1.6e-4 at np = 2)
+//! because `from_edge_space_ordered` wrote sign corrections for edge DOFs only —
+//! the k ≥ 2 face DOFs stayed at `+1.0` although their canonical basis is
+//! anchored by the *rank-dependent* face-creating element (`HCurlSpace`) while
+//! the DP's global basis is the minimum-global-element one (D412).  With the
+//! face signs read off the minimum-global-element block the operator agrees
+//! across ranks (<1e-13 relative) — see
+//! `d122_assembled_entry_sums_match_the_serial_assembly` below (now live).
 //!
 //! ## D122-2 (registered, still open): the ghost layer is the whole mesh
 //!
@@ -449,8 +453,9 @@ fn d122_global_true_sizes_match_mfem_oracle() {
 /// MFEM MPI oracle, face-owned spaces: for `RT0`/`RT1`/`RT2`/`L2o1` the
 /// *per-rank* owned split already equals MFEM's `GetTrueVSize()` at np = 2 and
 /// np = 4 — these are the spaces whose DOF owners are faces / the elements
-/// themselves, so no vertex-endpoint rule can diverge.  The pin stays valid when
-/// D122-1 lands.
+/// themselves (`from_face_space` already used the element-minimum rule), so no
+/// vertex-endpoint rule could diverge.  Unchanged by D122-1 (round 73) and kept
+/// as the control group for it.
 #[test]
 fn d122_per_rank_owned_split_matches_mfem_for_face_owned_spaces() {
     let np2: [(Fam, [usize; 2]); 4] = [
@@ -639,24 +644,28 @@ fn d122_assembled_matrix_entry_sum_matches_the_serial_assembly() {
     }
 }
 
-/// D122-3 (registered, open): the serial-vs-parallel identity of the assembled
+/// D122-3 (fixed in round 73): the serial-vs-parallel identity of the assembled
 /// mass matrix, for every family — `Σ_ij M_ij` is a rank-count-independent
 /// number (it equals `∫|Σ_i φ_i|²`), and each rank's `ParCsrMatrix` stores the
 /// entries of its owned rows exactly once, so an allreduce over `diag` + `offd`
-/// must reproduce the serial assembly at every np.  Measured on
-/// `cylinder-hex.mesh`: `RT0`/`RT1`/`RT2`/`L2o1` match exactly at np = 1/2/4,
-/// while the `H(curl)` families are off by ~0.6 % at np >= 2 (ND2:
-/// serial `163.57209725979823` vs np2 `164.55482928379837`).  NOTE: the natural
-/// first guess — "the per-DOF `sign_correction` must be rank-invariant" — is
-/// **wrong** for every family (it is the local→global map, so it *must* differ
-/// when the rank-local entity orientation differs; RT carries more such
-/// conflicts than ND yet assembles exactly).  The culprit is therefore not yet
-/// localized: the leading candidate is the 71 D122-1 disputed edges, whose
-/// contributions a rank can only assemble through ghost elements.
-/// Un-ignore together with the D122-1/D122-3 fix.
-#[ignore = "D122-3: the H(curl) mass matrix's global entry sum is ~0.6% off the \
-            serial value at np>=2 (RT/L2 match exactly; root cause not yet \
-            localized, leading candidate = the D122-1 disputed edges)"]
+/// must reproduce the serial assembly at every np.
+///
+/// Root cause (measured, `tmp/d122r73/README.md`): `HCurlSpace` fixes a shared
+/// face's canonical DOF functions from the element that *creates* the face in
+/// the local traversal, and the local sub-mesh is ordered owned-then-ghost
+/// (`par_partition`), so that anchor is rank-dependent; the DP's global basis
+/// is the minimum-global-element one (D412).  `from_edge_space_ordered` wrote
+/// sign corrections for **edge** DOFs only and left the k ≥ 2 face DOFs at
+/// `+1.0`, so the two ranks expressed the same physical matrix in two different
+/// face bases (measured: 24012 sign-flipped entry pairs at np = 2, all of them
+/// face-DOF rows/columns).  With the face sign corrections in place the
+/// cross-rank entry maps agree exactly and `Σ_ij M_ij` is np-invariant:
+/// ND2 np2 4.0e-14 / np4 2.9e-14, ND3 1.4e-13 / 9.5e-14 relative (RT0/RT1/RT2/
+/// L2/ND1 were already exact).  NOTE: the natural first guess — "the per-DOF
+/// `sign_correction` must be rank-invariant" — is **wrong** for every family
+/// (it is the local→global map, so it *must* differ when the rank-local entity
+/// orientation differs; RT carries more such conflicts than ND yet assembles
+/// exactly).  The usable criterion is the assembled operator's np-invariance.
 #[test]
 fn d122_assembled_entry_sums_match_the_serial_assembly() {
     use fem_assembly::standard::VectorMassIntegrator;
@@ -759,15 +768,13 @@ fn d122_assembled_entry_sums_match_the_serial_assembly() {
 // criterion is the assembled operator's np-invariance, pinned by
 // `d122_assembled_entry_sums_match_the_serial_assembly` below.)
 
-/// D122-1 (registered, blocked): the `H1`/`ND` per-rank owned split after the
-/// edge-owner rule becomes "minimum owner over the elements holding the edge".
-/// The numbers are MFEM's `GetTrueVSize()` split
-/// (`tmp/d122/mfem_probe_np{2,4}.txt`); measured on the patched tree in
-/// `tmp/d122/femrs_fixed_cyl_np{2,4}.txt`.  Un-ignore when D122-1 lands.
-#[ignore = "D122-1: H1/ND edge DOFs are still owned by the endpoint-minimum rule, \
-            which can name an owner holding no element with the edge; the fix \
-            re-baselines the np >= 2 DOF numbering and must land with an \
-            explicit baseline update (see the file header)"]
+/// D122-1 (fixed in round 73): the `H1`/`ND` per-rank owned split under the
+/// element-owner rule — the owner of a shared entity's DOFs is the minimum over
+/// the ranks owning an element that carries it (MFEM `GroupTopology` share-set
+/// minimum).  The numbers are MFEM's `GetTrueVSize()` split
+/// (`tmp/d122r73/mfem_probe_np{2,4}.txt`, probe
+/// `tmp/d122r73/mfem_ghost_probe.cpp`); the nine-space table (np = 1/2/4) and
+/// the structural owner test live in `d122r73_d1_owner_rule_par.rs`.
 #[test]
 fn d122_mfem_exact_owned_split_for_edge_owned_spaces() {
     let np2: [(Fam, [usize; 2]); 3] = [

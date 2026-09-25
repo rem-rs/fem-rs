@@ -40,31 +40,24 @@ impl ParDiscreteLinearOperator {
         let h1_part = h1_par.dof_partition();
         let hcurl_part = hcurl_par.dof_partition();
 
-        // Permute rows (HCur) and columns (H¹) to parallel ordering.
-        let n_row_total = hcurl_part.n_total_dofs();
-        let n_col_total = h1_part.n_total_dofs();
-        let needs_perm = hcurl_part.needs_permutation() || h1_part.needs_permutation();
-
-        let permuted = if needs_perm {
-            let mut coo = CooMatrix::<f64>::new(n_row_total, n_col_total);
-            for row in 0..local_grad.nrows {
-                let new_row = hcurl_part.permute_dof(row as u32) as usize;
-                for k in local_grad.row_ptr[row]..local_grad.row_ptr[row + 1] {
-                    let col = local_grad.col_idx[k] as usize;
-                    let new_col = h1_part.permute_dof(col as u32) as usize;
-                    let val = local_grad.values[k];
-                    if val != 0.0 {
-                        coo.add(new_row, new_col, val);
-                    }
-                }
-            }
-            coo.into_csr()
+        // Permute rows (HCur) and columns (H¹) to parallel ordering, applying
+        // each space's by-DOF sign corrections — the same `permute_rect_csr`
+        // the curl paths use.  The gradient's rows come from the H(curl)
+        // space's *canonical* basis, so the row sign is the local→global
+        // orientation map of that DOF; omitting it left those rows in the
+        // element-local orientation.  The omission was invisible while every
+        // H(curl) sign correction was `+1` and became live with the face-DOF
+        // sign corrections of D122-3 (round 73): the D110 pin
+        // `par_p2_nd2_gradient_hex3d_matches_the_serial_gradient_multi_rank`
+        // caught it (rank 1 of `unit_cube_hex(4)`, max dev 4.6).
+        let permuted = if hcurl_part.needs_permutation() || h1_part.needs_permutation() {
+            permute_rect_csr(&local_grad, hcurl_part, h1_part)
         } else {
             local_grad
         };
 
         // Keep only owned rows (discard ghost rows).
-        keep_owned_rows(&permuted, hcurl_part.n_owned_dofs, n_col_total)
+        keep_owned_rows(&permuted, hcurl_part.n_owned_dofs, h1_part.n_total_dofs())
     }
 
     /// Build the discrete curl `curl: H(Curl) → H(div)` in parallel (3-D).

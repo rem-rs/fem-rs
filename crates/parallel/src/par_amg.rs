@@ -1,15 +1,26 @@
 //! Parallel Algebraic Multigrid (AMG) preconditioner.
 //!
-//! Implements a distributed AMG V-cycle using **local smoothed aggregation**:
+//! Implements a distributed AMG V-cycle using **ghost-aware smoothed
+//! aggregation**:
 //!
-//! 1. Each rank coarsens its owned rows independently (aggregates don't cross
-//!    partition boundaries).
+//! 1. Each rank aggregates its owned DOFs, but strength-of-connection is read
+//!    off the **full row** (owned + ghost columns) and the aggregate
+//!    assignments are exchanged across ranks, so an aggregate may span a
+//!    partition interface.
 //! 2. Prolongation/restriction operators are distributed sparse matrices.
-//! 3. Coarse-level matrices are formed via the Galerkin product `R A P`.
+//! 3. Coarse-level matrices are formed via the Galerkin product `R A P` and
+//!    keep their own ghost layer, so the coarse problems stay coupled across
+//!    ranks.
 //! 4. The coarsest level is solved with Jacobi-preconditioned CG.
 //!
-//! This is simpler than full boundary-crossing aggregation but produces good
-//! convergence for typical elliptic problems.
+//! The coarsening used to be *block-local* (owned points only, coarse levels
+//! block-diagonal).  That approximation breaks down as soon as the owned sets
+//! are proper subdomains: pex3's 2-rank ND1 system went from 102 converged
+//! iterations to a 10000-iteration stall (8.7e-8) once D122-1 gave every rank
+//! exactly the DOFs it holds — the old owned sets carried a ring of the
+//! neighbour's interior DOFs, which had accidentally coupled the coarse blocks
+//! (`tmp/d122r73/README.md`, D790-1).  On one rank both coarsenings are
+//! bit-identical (no ghosts), so single-rank red lines do not move.
 
 use std::sync::Arc;
 
@@ -100,16 +111,15 @@ pub struct ParAmgConfig {
     /// byNODES block layout (`vd * n_nodes + node`), which is what
     /// `DofPartition::from_vector_space` produces.
     pub block_size: usize,
-    /// Use ghost-aware (cross-rank) aggregation when building the hierarchy.
-    ///
-    /// When `true`, strength-of-connection is computed over the full row
-    /// (owned + ghost columns) and aggregate assignments are exchanged
-    /// across ranks, so aggregates may span partition interfaces.  This
-    /// improves coarsening quality near interfaces and can be the difference
-    /// between convergence and stagnation on problems whose strong coupling
-    /// crosses rank boundaries (e.g. DG penalty faces in pex14: the default
-    /// local aggregation left PCG stuck at ~6e-11 after 500 iterations,
-    /// while the global aggregation converges in ~330).
+    /// Retained for API compatibility — **the coarsening is ghost-aware in
+    /// every mode** (D790-1): the config used to select between a block-local
+    /// coarsening and the ghost-aware one, but the block-local hierarchy is
+    /// block-diagonal at the coarse levels and therefore has no coarse
+    /// representation of the interface error.  That was survivable only while
+    /// the ownership rule left a ring of the neighbour's interior DOFs in each
+    /// rank's owned set; with proper subdomains the pex3 2-rank ND1 system
+    /// stalled (102 → 10000 iterations, 8.7e-8).  Callers may keep setting the
+    /// field; it no longer changes the hierarchy.
     pub use_global_aggregation: bool,
 }
 
@@ -187,30 +197,26 @@ pub struct ParAmgHierarchy {
 impl ParAmgHierarchy {
     /// Build the AMG hierarchy from a distributed SPD matrix.
     ///
-    /// When `use_global_aggregation` is `true` (WP2 mode), the coarsening uses
-    /// ghost-aware aggregation so that aggregates can span rank boundaries.
-    /// This generally improves coarsening quality near partition interfaces and
-    /// leads to faster convergence, at the cost of one extra ghost exchange per
-    /// coarsening level.
+    /// The coarsening is ghost-aware: strength-of-connection is read over the
+    /// full row (owned + ghost columns) and aggregate assignments are exchanged
+    /// across ranks, so aggregates may span partition interfaces and the coarse
+    /// levels stay coupled (D790-1).  On one rank this is bit-identical to a
+    /// block-local coarsening.
     pub fn build(a: &ParCsrMatrix, comm: &Comm, config: ParAmgConfig) -> Self {
-        Self::build_impl(a, comm, config, false)
+        Self::build_impl(a, comm, config)
     }
 
-    /// Like [`build`], but with cross-rank (ghost-aware) aggregation enabled.
-    ///
-    /// This is the **WP2** distributed AMG mode: strength-of-connection is
-    /// computed over the full row (owned + ghost columns) and aggregate
-    /// assignments for boundary DOFs are exchanged across ranks so that
-    /// coarsening is globally consistent near partition interfaces.
+    /// Explicit **ghost-aware** entry point — identical to [`Self::build`]
+    /// since D790-1 (kept because it names the mode and is the entry point the
+    /// WP2 tests exercise).
     pub fn build_global(a: &ParCsrMatrix, comm: &Comm, config: ParAmgConfig) -> Self {
-        Self::build_impl(a, comm, config, true)
+        Self::build_impl(a, comm, config)
     }
 
     fn build_impl(
         a: &ParCsrMatrix,
         comm: &Comm,
         config: ParAmgConfig,
-        global_agg: bool,
     ) -> Self {
         let mut levels = Vec::new();
         let mut current_a = Some(clone_par_csr(a));
@@ -241,10 +247,19 @@ impl ParAmgHierarchy {
                 build_nodal_coarse_level_global(
                     &ca, comm, config.strength_threshold, config.block_size,
                 )
-            } else if global_agg {
-                build_coarse_level_global(&ca, comm, config.strength_threshold)
             } else {
-                build_coarse_level(&ca, comm, config.strength_threshold)
+                // D790-1: the coarsening is always **ghost-aware**.  The
+                // block-local variant (`build_coarse_level`, removed) aggregated
+                // on owned points only, so its coarse levels were block-diagonal
+                // and the interface error component had no coarse representation
+                // at all: once the D122-1 ownership rule made every rank's owned
+                // set a *proper* subdomain (it used to include a ring of the
+                // neighbour's interior DOFs, which accidentally coupled the
+                // coarse blocks), pex3's 2-rank ND1 system went from 102 to 10000
+                // iterations (stalled at 8.7e-8).  On one rank the two paths are
+                // bit-identical (no ghosts), which is why the np = 1 red lines do
+                // not move.
+                build_coarse_level_global(&ca, comm, config.strength_threshold)
             };
 
             // Optionally smooth the prolongation: P_smooth = (I - ω D⁻¹ A) P_tent.
@@ -477,122 +492,13 @@ fn sgs_smooth(
 
 // ── Aggregation & coarsening ────────────────────────────────────────────────
 
-/// Build the prolongation, restriction, and coarse-level matrix.
-///
-/// Uses local (non-overlapping) aggregation on owned DOFs.
-fn build_coarse_level(
-    a: &ParCsrMatrix,
-    comm: &Comm,
-    strength_threshold: f64,
-) -> (ParCsrMatrix, ParCsrMatrix, ParCsrMatrix) {
-    let n_owned = a.n_owned;
 
-    // 1. Build strength-of-connection: strong(i,j) iff |a_ij| >= θ * max_k |a_ik|
-    let diag = &a.diag;
-    let mut aggregate = vec![-1i32; n_owned]; // aggregate[i] = aggregate ID
-    let mut n_agg = 0i32;
-
-    // Phase 1: seed aggregates (unaggregated nodes that have no strong neighbours yet).
-    for i in 0..n_owned {
-        if aggregate[i] >= 0 { continue; }
-
-        // Find max off-diagonal magnitude in this row.
-        let mut max_off_diag = 0.0_f64;
-        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
-            let j = diag.col_idx[k] as usize;
-            if j != i {
-                max_off_diag = max_off_diag.max(diag.values[k].abs());
-            }
-        }
-        let threshold = strength_threshold * max_off_diag;
-
-        // Try to form a new aggregate: this node + its strong unassigned neighbours.
-        aggregate[i] = n_agg;
-        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
-            let j = diag.col_idx[k] as usize;
-            if j != i && j < n_owned && aggregate[j] < 0 && diag.values[k].abs() >= threshold {
-                aggregate[j] = n_agg;
-            }
-        }
-        n_agg += 1;
-    }
-
-    // Phase 2: assign remaining unaggregated nodes to nearest aggregate.
-    for i in 0..n_owned {
-        if aggregate[i] >= 0 { continue; }
-        // Assign to the aggregate of the strongest connected neighbour.
-        let mut best_agg = -1i32;
-        let mut best_val = 0.0_f64;
-        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
-            let j = diag.col_idx[k] as usize;
-            if j != i && j < n_owned && aggregate[j] >= 0 && diag.values[k].abs() > best_val {
-                best_val = diag.values[k].abs();
-                best_agg = aggregate[j];
-            }
-        }
-        if best_agg >= 0 {
-            aggregate[i] = best_agg;
-        } else {
-            // Isolated node: make its own aggregate.
-            aggregate[i] = n_agg;
-            n_agg += 1;
-        }
-    }
-
-    let n_coarse_owned = n_agg as usize;
-
-    // 2. Build prolongation P (n_owned × n_coarse_owned): P[i, agg[i]] = 1.
-    // This is "tentative prolongation" (unsmoothed).
-    let mut p_coo = CooMatrix::<f64>::new(n_owned, n_coarse_owned.max(1));
-    for i in 0..n_owned {
-        let agg = aggregate[i] as usize;
-        p_coo.add(i, agg, 1.0);
-    }
-    let p_local = p_coo.into_csr();
-
-    // 3. Build restriction R = P^T (n_coarse_owned × n_owned).
-    let r_local = transpose_csr(&p_local);
-
-    // 4. Build coarse matrix: A_c = R * A_diag * P (Galerkin triple product).
-    // We use only the diag block for the local part. For true parallel,
-    // off-diag contributions would require communication, but local aggregation
-    // keeps everything within the rank.
-    let ap_local = csr_multiply(&a.diag, &p_local);
-    let ac_local = csr_multiply(&r_local, &ap_local);
-
-    // 5. Wrap in ParCsrMatrix (no ghost DOFs at coarse level for local aggregation).
-    let ghost_ex = Arc::new(GhostExchange::from_trivial());
-    let p_par = ParCsrMatrix::from_blocks(
-        p_local,
-        CsrMatrix::new_empty(n_owned, 0),
-        n_owned, 0,
-        Arc::clone(&ghost_ex),
-        comm.clone(),
-    );
-    let r_par = ParCsrMatrix::from_blocks(
-        r_local,
-        CsrMatrix::new_empty(n_coarse_owned, 0),
-        n_coarse_owned, 0,
-        Arc::clone(&ghost_ex),
-        comm.clone(),
-    );
-    let ac_par = ParCsrMatrix::from_blocks(
-        ac_local,
-        CsrMatrix::new_empty(n_coarse_owned, 0),
-        n_coarse_owned, 0,
-        Arc::clone(&ghost_ex),
-        comm.clone(),
-    );
-
-    (p_par, r_par, ac_par)
-}
-
-// ── WP2: Ghost-aware (global) coarsening ─────────────────────────────────────
+// ── Ghost-aware coarsening (the only coarsening since D790-1) ────────────────
 
 /// Build prolongation, restriction, and coarse matrix using **cross-rank**
-/// (ghost-aware) aggregation.
+/// (ghost-aware) aggregation — the coarsening of [`ParAmgHierarchy`].
 ///
-/// # Differences from [`build_coarse_level`]
+/// # Properties
 ///
 /// 1. **Full-row strength**: max_off_diag for DOF `i` includes entries from
 ///    the off-diagonal block (`a.offd`), which correspond to ghost DOFs.
@@ -2088,11 +1994,10 @@ pub fn par_solve_pcg_amg(
     solver_cfg: &fem_solver::SolverConfig,
 ) -> Result<fem_solver::SolveResult, fem_solver::SolverError> {
     let comm = x.comm().clone();
-    let hierarchy = if amg_cfg.use_global_aggregation {
-        ParAmgHierarchy::build_global(a, &comm, amg_cfg.clone())
-    } else {
-        ParAmgHierarchy::build(a, &comm, amg_cfg.clone())
-    };
+    // D790-1: one coarsening for every mode — the block-local variant stalled
+    // on 2+ ranks (see the module doc); `use_global_aggregation` is retained as
+    // a compatibility field with no effect.
+    let hierarchy = ParAmgHierarchy::build(a, &comm, amg_cfg.clone());
 
     if comm.is_root() {
         log::info!("par_amg: {} levels built", hierarchy.n_levels());

@@ -562,13 +562,61 @@ impl DofPartition {
                 .map(|(k, v)| (*k, v.clone()))
                 .collect()
         };
+
+        // D122-1: the owning rank of a shared edge's DOFs must be a rank that
+        // **holds the edge**, i.e. one of the ranks owning an element that
+        // contains it.  MFEM's `GroupTopology` group of an entity is its
+        // *share* set (the ranks that own an element containing the entity) and
+        // the group master — the owner — is the smallest rank in that set
+        // (general/communication.cpp: `GroupTopology::Create` +
+        // `PickElementInSet`).  The min-endpoint-owner rule instead names a
+        // rank that owns one vertex of the edge and may carry no element with
+        // the edge at all: with the contiguous partition of `cylinder-hex.mesh`
+        // at np = 2, 71 edges have endpoint-min-owner 0 while only rank 1 holds
+        // them, so rank 0 owned 596 ND1 DOFs although its 126 elements carry
+        // only 525 (MFEM's `GetTrueVSize` split is 525 / 444,
+        // `tmp/d122r73/mfem_probe_np2.txt`).  Built from the local element
+        // traversal: the DOF → edge-key map comes from whichever `DofManager`
+        // map was populated, so no per-element-type edge table is needed here.
+        let mut dof_to_edge_key: HashMap<u32, EdgeKey> = HashMap::new();
+        for (k, ds) in &edge_dofs_of {
+            let key = EdgeKey::new(k.0, k.1);
+            for &d in ds {
+                dof_to_edge_key.insert(d, key);
+            }
+        }
+        let mut edge_min_elem_owner: HashMap<EdgeKey, Rank> = HashMap::new();
+        let n_local_elems_all = partition.n_owned_elems + partition.n_ghost_elems;
+        for e in 0..n_local_elems_all {
+            let owner = if e < partition.n_owned_elems {
+                local_rank
+            } else {
+                partition.elem_owner[e]
+            };
+            for &d in dof_manager.element_dofs(e as u32) {
+                if let Some(&k) = dof_to_edge_key.get(&d) {
+                    edge_min_elem_owner
+                        .entry(k)
+                        .and_modify(|o| *o = (*o).min(owner))
+                        .or_insert(owner);
+                }
+            }
+        }
+
         for (EdgeKey(local_a, local_b), dofs) in &edge_dofs_of {
             let (local_a, local_b) = (*local_a, *local_b);
             let ga = partition.global_node(local_a);
             let gb = partition.global_node(local_b);
             let owner_a = partition.node_owner(local_a);
             let owner_b = partition.node_owner(local_b);
-            let edge_owner = owner_a.min(owner_b);
+            // D122-1: min *element* owner over the local elements holding the
+            // edge; the endpoint rule is the fallback for an edge no local
+            // element carries (unreachable for a DofManager edge DOF, which
+            // exists only because some element has it).
+            let edge_owner = edge_min_elem_owner
+                .get(&EdgeKey::new(local_a, local_b))
+                .copied()
+                .unwrap_or_else(|| owner_a.min(owner_b));
             let (gna, gnb) = (ga.min(gb), ga.max(gb));
 
             // The DofManager's edge-DOF order is "near the first *local*
@@ -652,11 +700,16 @@ impl DofPartition {
         // 6 per element = 1764, giving 364 + 969 + 1764 = 3097 ≠ 2443 = the
         // `DofManager`/MFEM DOF count.
         //
-        // Ownership rule (MFEM `GroupTopology`): the owning rank of a shared
-        // entity is the smallest rank in its vertex group, i.e.
-        // `owner(face) = min(owner(v) for v in face)` — the same rule the edge
-        // DOFs above use, and by construction the owner rank holds the face
-        // (its local mesh carries every element touching an owned vertex).
+        // Ownership rule: MFEM `GroupTopology` gives each shared entity the
+        // **smallest rank in its share set** — the set of ranks owning an
+        // element that carries the entity.  Taking the minimum over the
+        // entity's *vertices* instead (the pre-D122-1 rule) names a rank that
+        // owns a vertex but may carry no element with the face, so it can
+        // "own" a DOF it cannot resolve: with the contiguous partition of
+        // `cylinder-hex.mesh` at np = 2 the vertex-min rule put the H¹ Q2 split
+        // at 1499 / 944 where MFEM's `GetTrueVSize` gives 1303 / 1140
+        // (`tmp/d122r73/mfem_probe_np2.txt`); the element-minimum rule below
+        // reproduces MFEM's split exactly.
         let mut owned_faces: Vec<H1FaceDofInfo> = Vec::new();
         let mut ghost_faces: Vec<H1FaceDofInfo> = Vec::new();
         // (face local vertices, face DOFs) — kept for the interior filter below.
@@ -668,18 +721,50 @@ impl DofPartition {
             for (k, ds) in &dof_manager.face_pk_map {
                 face_entries.push((vec![k.0, k.1, k.2], ds.clone()));
             }
+            // D122-1: per-face minimum element owner, built from the local
+            // element traversal (the DOF → face-index map comes from the two
+            // maps above, so no per-element-type face table is needed).
+            let mut dof_to_face_idx: HashMap<u32, usize> = HashMap::new();
+            for (fi, (_, ds)) in face_entries.iter().enumerate() {
+                for &d in ds {
+                    dof_to_face_idx.insert(d, fi);
+                }
+            }
+            let mut face_min_elem_owner: HashMap<usize, Rank> = HashMap::new();
+            let n_local_elems_all = partition.n_owned_elems + partition.n_ghost_elems;
+            for e in 0..n_local_elems_all {
+                let owner = if e < partition.n_owned_elems {
+                    local_rank
+                } else {
+                    partition.elem_owner[e]
+                };
+                for &d in dof_manager.element_dofs(e as u32) {
+                    if let Some(&fi) = dof_to_face_idx.get(&d) {
+                        face_min_elem_owner
+                            .entry(fi)
+                            .and_modify(|o| *o = (*o).min(owner))
+                            .or_insert(owner);
+                    }
+                }
+            }
             let global_node = |v: u32| partition.global_node(v);
-            for (verts, dofs) in &face_entries {
+            for (fi, (verts, dofs)) in face_entries.iter().enumerate() {
                 let mut sorted_g: Vec<u32> =
                     verts.iter().map(|&v| global_node(v)).collect();
                 sorted_g.sort_unstable();
                 let mut face_key = [u32::MAX; 4];
                 face_key[..sorted_g.len()].copy_from_slice(&sorted_g);
-                let owner = verts
-                    .iter()
-                    .map(|&v| partition.node_owner(v))
-                    .min()
-                    .expect("from_dof_manager: empty face vertex list");
+                // D122-1: min element owner over the local elements holding
+                // the face; the vertex-min rule is the fallback for a face no
+                // local element carries (unreachable for a DofManager face
+                // DOF, which exists only because some element has it).
+                let owner = face_min_elem_owner.get(&fi).copied().unwrap_or_else(|| {
+                    verts
+                        .iter()
+                        .map(|&v| partition.node_owner(v))
+                        .min()
+                        .expect("from_dof_manager: empty face vertex list")
+                });
                 let pos = face_dof_positions(
                     dof_manager, &global_node, verts, dofs,
                 );
@@ -1143,6 +1228,10 @@ impl DofPartition {
         // Face DOF id → (global face key, position within the face).
         let mut nd_face_key: HashMap<u32, (u32, u32, u32)> = HashMap::new();
         let mut nd_face_pos: HashMap<u32, u32> = HashMap::new();
+        // D122-3: face DOF → the orientation sign that converts the *space's*
+        // canonical face basis into the global (minimum-global-element) one.
+        // See Step 2c.
+        let mut nd_face_sign: HashMap<u32, f64> = HashMap::new();
         if nd_faces_active {
             // Pass A: per-face canonical data (min global elem id, owner).
             for e in mesh.elem_iter() {
@@ -1196,9 +1285,32 @@ impl DofPartition {
                     let key = (g[0], g[1], g[2]);
                     let slots = &dofs[off..off + block.n_dofs];
                     if nd_face_data[&key].0 == gid {
+                        // D122-3: the minimum-global-id element of the face is
+                        // the DP's canonical element, so its DOF block fixes
+                        // both the position **and** the global orientation of
+                        // each face DOF.  Element `signs` maps the element's own
+                        // slot basis onto the space's canonical (face-creating
+                        // element) basis — MFEM's `ND_DofTransformation` sign
+                        // — so the sign read here is exactly the local→global
+                        // conversion the permutation must apply.  The
+                        // face-creating element is the *first element of the
+                        // local traversal* touching the face, and the local
+                        // sub-mesh is ordered owned-then-ghost
+                        // (`par_partition`), so it is rank-dependent: without
+                        // this sign the two ranks express the same physical
+                        // matrix in two different face bases and
+                        // `Σ_ij M_ij = ∫|Σ_i φ_i|²` moves with the rank count
+                        // (D122-3: ND2 6.0e-3, ND3 1.6e-4 at np = 2).
+                        let signs = space.element_signs(e);
                         for (j, &d) in slots.iter().enumerate() {
                             nd_face_key.insert(d, key);
                             nd_face_pos.insert(d, j as u32);
+                            let s = signs.map(|s| s[off + j]).unwrap_or(1.0);
+                            debug_assert!(
+                                s == 1.0 || s == -1.0,
+                                "from_edge_space: face DOF sign {s} is not ±1"
+                            );
+                            nd_face_sign.insert(d, s);
                         }
                     } else {
                         for &d in slots {
@@ -1339,6 +1451,45 @@ impl DofPartition {
             global_to_local_node.insert(partition.global_node(lid), lid);
         }
 
+        // ── Step 1b: per-edge minimum *element* owner (D122-1) ────────────────
+        //
+        // The owner of a shared edge's DOFs must be a rank that **holds the
+        // edge**, i.e. one of the ranks that own an element containing it.
+        // MFEM's `GroupTopology` group for an entity is the set of ranks that
+        // *share* it and the group master (the owning rank) is the smallest
+        // rank in that set — exactly the minimum over the elements that contain
+        // the entity.  The min-*endpoint*-owner rule used below names a rank
+        // that owns one vertex of the edge, which is not the same thing: with
+        // the contiguous block partition of `cylinder-hex.mesh` at np = 2, 71
+        // edges have min-endpoint-owner = rank 0 while only rank 1 owns an
+        // element containing them, so rank 0 "owned" 596 ND1 DOFs although its
+        // 126 elements carry only 525 — MFEM's `GetTrueVSize` split is
+        // 525 / 444 (`tmp/d122r73/mfem_probe_np2.txt`).  `from_face_space`
+        // already uses this rule for RT faces, and its per-rank owned counts
+        // match MFEM's `GetTrueVSize` exactly.
+        let mut edge_min_elem_owner: HashMap<(u32, u32), Rank> = HashMap::new();
+        for e in mesh.elem_iter() {
+            let et = mesh.element_type(e);
+            let local_edges = edges_for_elem(space_type, dim as u8, et);
+            let nodes = mesh.element_nodes(e);
+            let owner = if (e as usize) < partition.n_owned_elems {
+                local_rank
+            } else {
+                partition.elem_owner[e as usize]
+            };
+            for &(a, b) in local_edges {
+                let (ga, gb) = (
+                    partition.global_node(nodes[a]),
+                    partition.global_node(nodes[b]),
+                );
+                let key = (ga.min(gb), ga.max(gb));
+                edge_min_elem_owner
+                    .entry(key)
+                    .and_modify(|o| *o = (*o).min(owner))
+                    .or_insert(owner);
+            }
+        }
+
         for (&dof_id, &(ga, gb)) in &dof_to_edge {
             let owner_a = if partition.node_id_identity {
                 // Identity mode: ga is already a local-mesh node id.
@@ -1355,7 +1506,15 @@ impl DofPartition {
                     .map(|&lid| partition.node_owner(lid))
                     .unwrap_or(Rank::MAX)
             };
-            let edge_owner = owner_a.min(owner_b);
+            // D122-1: the min-element-owner rule (Step 1b); the endpoint rule
+            // is only a fallback for an edge no local element carries (which
+            // cannot happen for an edge that came from `dof_to_edge`, itself
+            // built from the local element traversal).
+            let edge_key = (ga.min(gb), ga.max(gb));
+            let edge_owner = edge_min_elem_owner
+                .get(&edge_key)
+                .copied()
+                .unwrap_or_else(|| owner_a.min(owner_b));
 
             let info = EdgeDofInfo {
                 local_dof_id: dof_id,
@@ -1423,6 +1582,13 @@ impl DofPartition {
         if nd_faces_active {
             for (&dof_id, &key) in &nd_face_key {
                 let owner = nd_face_data[&key].1;
+                // D122-3: the sign that maps the space's canonical face basis
+                // (anchored by the *local* face-creating element) onto the
+                // global basis (anchored by the minimum-global-id element, the
+                // same rule `pos` above uses).  Both ranks then assemble the
+                // same physical matrix, so `Σ_ij M_ij` is rank-count
+                // independent; see the derivation in Pass B.
+                sign_corr[dof_id as usize] = *nd_face_sign.get(&dof_id).unwrap_or(&1.0);
                 let info = FaceDofInfo {
                     local_dof_id: dof_id,
                     face_key: key,
