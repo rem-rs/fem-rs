@@ -4494,8 +4494,12 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 | B | **D766+D754 归约确定性 + D767 GMRES 判据** | D775-777 | linalg/vector.rs、solver/block_operator.rs、examples/mfem_ex22 |
 | C | **D771 ex27 stdout 格式 + D764 旧夹具 SUPERSEDED + D763 纪律文本** | D778-779 | ex27、tmp/ledger、tmp/dbit+d735 |
 | D | **D762 IC 尘计数二分 + D768/D769/D770 潜伏族** | D780-781 | multidomain_rt、element/serendipity、solver/geometric_mg、assembly/pa/prism_pk |
+| E | **D113 剩余（覆盖矩阵唯一 H1 GAP）：细化丢父几何** | D782+ | crates/mesh/src/amr/**、crates/mesh/tests |
+| F | **D122（覆盖矩阵唯一并行 GAP）：≥2 rank ND2/RT1 ghost 分区** | D783+ | crates/parallel/**、crates/parallel/tests |
 
-主会话同时办：D763 `-vs` 纪律落 `miniapps/README.md` + `miniapps/multidomain/README.md`、独立真值表与槽位探针（上）、收尾五道门与提交。
+主会话同时办：D763 `-vs` 纪律落 `miniapps/README.md` + `miniapps/multidomain/README.md`、独立真值表与槽位探针（上）、**简化 collection 盘点**（`tmp/collections_inventory.md`，矩阵 §1.5 `?`→LAT）、收尾五道门与提交。
+**A–D 四路收工后立即追加两路（"重要的事情先完成"：矩阵里最后两个 GAP 格）**：E = D113、F = D122；并处理 A–D 路上报的新债。
+**主会话拦下的事故**：E 路在飞时把 `amr_inner.rs` 的几何字段写成 `nodes_per_element`（应为 `nodes_per_elem`）⇒ 全树 E0609、B 路无法重编验证；主会话定位后发急件，E 路秒修（`cargo check -p fem-mesh` 绿）。
 
 ### 四路交付与关门（round 72 收尾）
 
@@ -4547,6 +4551,47 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 - **新债（临时号）**：`D770-1`（曲面棱柱 PA 侧仍用 6 顶点三线性几何；无夹具未量化）、`D770-2`（新 PA 测试均单元素，无多元素共享 dof 的 PA-vs-装配 pin）、`D768-1`（若将来要 MFEM serendipity 语义须另立端口）、`D769-1`（非缺陷：scratch 改为每 mat-vec 分配）。
 - **D 路顺带实证 D763 的杀伤力**：同一 t05 档用 `-vs 1` 得 step250 cyl `−1.421315e-3`，按 `-vs 10`（默认）才回到 `−2.137667e-4` ⇒ 独立证实"对比必须钉 `-vs`"。
 - **门**：主树 d768 5/5、d769 3/3、d729 2/2、d770 4/4、prism_pk 6/6；隔离 worktree fem-assembly lib 718/0、fem-solver 264/0、fem-element 536/0（首报的 3/1 失败全是**未入库夹具**路径，非改动所致——纪律③现场）。
+
+#### E —— D113 主体关闭（**唯一 H1 GAP**：`linear_view` 分派 + 各族与 MFEM 逐值吻合）
+
+- **修复**（`crates/mesh/src/amr/amr_inner.rs`）：`refine_uniform_3d`/`refine_uniform` 开头加 `linear_view` 分派——若 `elem_type` 带高阶节点（`Hex20/27→Hex8`、`Tet10→Tet4`、`Prism15/18→Prism6`、`Pyramid13→Pyramid5`、`Tri6→Tri3`、`Quad8/9→Quad4`），取**角点**、换线性类型、**原样携带 `nodes` 几何表**再递归走各族 `curved_*` 搬运（历史 Hex20/27 臂把 geometry 设成 `None` ⇒ 静默丢曲率；其余族直接 panic）。**角点不是"每行前 N 个"**：改按元素自身阶的参考格角点槽位映射到线性元素顶点序——对顶点优先族等价，对 **Gmsh `Prism18`**（D319 layer-major 置换把槽 3..5 排成下三角边中点）是**必需**的修，否则角点取到边中点、楔形退化。**不可搬运的几何表现在报 warning（D113）而非静默丢**。
+- **逐族状态（真值 = MFEM 4.10 同一母单元 + 同一二次映射）**：**Hex27 完成**（顶点 ≤2.22e-16、子单元 `∫|det J|` ≤1.03e-15、几何节点 125=MFEM、`g` 重现 ≤2.22e-16）、**Tet10 完成**（≤1.11e-16 / ≤9.55e-16）、**Prism18 完成**（≤2.22e-16 / ≤1.72e-15 + 上述真缺陷修复）、**Tri6/Quad9（2-D）完成**（与等效 `X3/X4 + nodes` 路径**逐位相同** 0.0）；**Pyramid5+曲率 = 子债 D113-2**、**Hex20/Prism15/Pyramid13 = 子债 D113-3**。
+- **红→绿**（主会话亲跑 `cargo test --release -p fem-mesh --test d113_high_order_uniform_refine`）：修前 **5 失败**（Tri6/Quad9/Tet10/Prism18 panic + Hex27 断言）→ 修后 **6 passed / 0 failed / 1 ignored**（ignored = 夹具导出器）。
+- **未做到的真实边界（如实登记）**：① **Pyramid5+曲率族的 MFEM 真值不可得——MFEM 4.10 自己细化曲面金字塔时 SIGSEGV**（`tmp/d113/pyramid_crash_asan.log`）；② serendipity 三族的**读者不附几何表**（`gmsh_geometry_order` 有意排除）且 MFEM 的 Gmsh reader 拒收码 16-19 ⇒ 无真值可比 ⇒ 细化仍走直线，但 `element_jacobian` 对族按 serendipity 曲面求值 ⇒ **一致性缺口**，配方在 `tmp/d113/README.md §5`。
+- 顺带：E 路曾试加 `curved_prism` 的"行 == 连接度 ⇒ 已是求值序"判据，实测在 `linear_view` 之后**永不触发**（死代码）⇒ 已回退，不留在树上。
+
+#### F —— D122 部分关闭（**登记症状=过期行**；挖出 3 个活的同族缺陷 + 1 个 miniapp 缺陷）
+
+- **登记症状判定 = 误诊/过期**：`sentinel GID` + `ghost.rs:178` panic 在 HEAD **不重现**（6 网格 × ranks{1..4} × 9 族 = **216 档全绿**）；在 **pre-D412 `af9c765c`** 的隔离 worktree 上按同一命令拿到红证据（cylinder-hex ranks 2/3/4 = **336/816/1172** 条 sentinel；64 元 `unit_cube_hex(4)` = 64 条 + `requested global node 4294967295` panic + FAILED）⇒ **该缺陷已由 D412（round 48）关闭，覆盖矩阵并行行是过期行**（纪律⑥第 N 次应验）。
+- **D122-1（真缺陷，patch 在案，round 73 头号）**：MFEM MPI 探针（强制与 fem-rs 同一连续分块）显示 8 个空间 `GlobalTrueVSize` 逐档相等、**RT0/RT1/RT2/L2 的 per-rank owned 与 MFEM `TrueVSize` 逐位相等，H1/ND 不等**（ND1 596/373 vs MFEM 525/444）——根因 = 边 dof 的 owner 取"端点 min-owner"而非"**持有该边的单元** min-owner"；**打补丁后八个空间全部逐位 = MFEM**（`tmp/d122/d122_1_patch_dof_partition.diff`）。**主会话裁决：本轮不落地**（会平移所有 np≥2 基线 + 需同步三条 pin，属 D527 同类处置；且必须与 D122-3 同轮），升 **round 73 头号**。
+- **D122-2**：ghost 层因 `par_partition.rs` 面闭包 fixpoint 变成**传递闭包** ⇒ np=2 每 rank 持整网（MFEM 应为 1 层：54 元 / 205+226 顶点）。
+- **D122-3（数值缺陷，最要紧）**：NDk k≥2 装配的 `Σ M_ij` 在 np≥2 **不守恒**（ND2 np2 6.008e-3 / np4 1.010e-2；ND3 1.6e-4 / 4.3e-4），RT0/RT1/RT2/L2/**ND1** 精确 ⇒ 嫌疑集中 D412 的 ND 面 dof 键（HYPOTHESIS，未定位）；配方 = 先落 D122-1 再复测。
+- **D122-4（miniapp，不在 F 范围）**：`miniapps/electromagnetics/joule.rs:663` 的 `n_bdr` 取自**本地**网格 ⇒ np=2 打 `[1,1]` 而 MFEM 全局为 3 ⇒ 多 rank ess 掩码与 C++ 不一致（`tmp/d122/base_joule_cyl_r1.txt` vs `red_joule_cyl_r2.txt`）。**另**：np > 单元数时空 rank 在 `HCurlSpace::new`（`hcurl.rs:852`）panic 且 ThreadLauncher 挂住（`tmp/d122/scratch_run.txt`）——两者入账为 **D785/D786**。
+- **验收**：新测 `crates/parallel/tests/d122_nd2_rt1_ghost_partition_par.rs`（**5 passed / 0 failed / 3 ignored**，ignored 三条各带目标数字与 un-ignore 条件；主会话亲跑复现）；`-p fem-parallel --no-fail-fast` = 16 targets **318/0**/15 ignored、`-p fem-space` = 60 targets **590/0**/3 ignored；**红线全保**：pex3 `-o1 --ranks1` = 2.70053050699196e-2/87 it、`-o2 --ranks1` = 3.05558571614408e-4、`--ranks 2` = 2.70053058006817e-2/102 it（3 连跑逐位同）；交付面 = 新测 + `crates/parallel/Cargo.toml` 的 `fem-io` dev-dep，`crates/parallel/src/**` **零差异**（行为改动已回退，D527 未动）。
+
+#### 全量门（round 72 终稿，冻结树 = 7 笔提交，含 E/F）
+
+| 门 | 结果 | 对照 round 71 |
+|---|---|---|
+| 1 lib（十 crate 批） | **10 targets / 2643 passed / 0 failed / 5 ignored** | 2634/0（+9：D754 五测 + linalg-gpu 两测转绿 + …） |
+| 2 `--tests`（十 crate 全靶） | **308 targets / 4174 passed / 0 failed / 123 ignored** | 286/4104/0/24（targets +22、passed +70；**ignored 差异已查清**：本轮跑集为十 crate **全靶含 doc-tests**，ignored 全部落在既有诊断/oracle 族[`fem-assembly` 71 = `*_diagnostics`/`*_matches_mfem`/`d342|d493` oracle 等]、**本轮新增仅 4**（E 的夹具导出器 1 + F 的 D122-1/2/3 各 1，均带 un-ignore 条件）；round-71 的 24 是更窄跑集口径） |
+| 3 examples（`--keep-going`） | **0 错误、非 vendor 警告 0**（28 条警告全在 `vendor/linger/**`） | 同 |
+| 4 pro 层（`fem-pro` 根跑 `cargo check -p pro-bench-tests -p pro-cad`） | **rc=0**（742 条警告**全部在 pro 层自身代码** `crates/pro-physics|pro-iga/**`，与 fem-rs 无关） | 同 |
+| 5 fem-py | **构建 rc=0**（`PYO3_PYTHON` 指 uv 3.11）；`pytest ../tests/test_full_pipeline.py` = **29 passed / 10 failed** —— 失败全部是**绑定面方法缺失**（`CsrMatrix.to_dense`、`Mesh.element_type` 等，`grep` 证实绑定源码里没有这些方法）⇒ **既存 D607 缺口**，绑定源码本轮零改动 | round 71 记"all green"（口径差异；本轮如实记录 10 项失败并归因） |
+
+**主会话亲验的关键锚点（round 72）**：D765 三档验收行 = C++（9.424581e-3/6.520012e-3 等）+ 六条红线逐位；D767 tri `-p2 -o1` **276 it 收敛**（C++ 266）、tet/tri `-o2` 维持 parity；D754 ex26 五连跑 sha256 全同 = 修前串行值；D762 三档 stdout 与 round-71 金标逐字节（rt step-250 cyl **−2.137667e-4**/1.439350e-6、nd **6.932270e-5**/1.594225e-4、0 diff 行）；D113 六测全绿 + fem-mesh 487/0；D122 五测全绿 + fem-parallel 318/0。
+
+
+
+#### 主会话（round 72）
+
+- 开局独立侦察与真值：D765 的 `ND_QuadrilateralElement(3)` 自建探针（`tmp/d765x/`）与 ex22 C++/Rust 对照表（`tmp/d767x/`）、D767 的 C++ 迭代历史表、红线基线。
+- **D721 残项**：GPU hex WGSL 两 pin 修前红（着色器仍在 `[-1,1]`）⇒ 用仓内 generator 重生成 `hex_q3/q4.wgsl`；**`GP/GW` 求积常数仍 [-1,1]** ⇒ **D777**（分析 `tmp/d721x/README.md`）。
+- **简化 collection 盘点**（`tmp/collections_inventory.md`）：矩阵 §1.5 的 `?` → **LAT**（13 族映射到已有行）；真缺口 = `RefinedLinear`（全库 0 命中）、3-D `LinearNonConf`、`_R2D` 无逐 collection pin；§4 未验证队列第 2 条标记**已执行**。
+- **贯穿性发现**：`-vs` 纪律（D763）被 D 路独立证实（同档 `-vs 1` 得 −1.421315e-3、`-vs 10` 才回 −2.137667e-4）。
+- 门（详见下）、四笔提交与推送、HANDOVER/矩阵/plan 更新。
+
+
 
 ## 第七十一轮（round 71）：D749 数据流落地上游（头号，红线四值重钉）+ **D746 不确定根治（三处真缺陷）** + D743/D729（两处真缺陷）+ D748 评估器族 + D760/761/D753
 
