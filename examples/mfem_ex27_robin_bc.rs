@@ -6,12 +6,11 @@
 //! (weak Dirichlet BC via `DGDiffusionIntegrator` + `DGDirichletLFIntegrator`).
 //!
 //! The mesh generation mirrors the C++ `GenerateSerialMesh` flow: the flat
-//! periodic mesh is refined, the x=±1 seam is stitched (right-seam vertices are
-//! rewired onto the left seam at x=-1, seam boundary faces dropped), Q3 geometry
-//! is rebuilt on the stitched flat mesh, and the hole transform is applied to
-//! every geometry node.
-
-#![allow(dead_code)]
+//! mesh is refined, Q3 geometry is built and warped, and the x=±1 seam is
+//! stitched last via `make_periodic` (the C++ `v2v` + `RemoveUnusedVertices`
+//! block) — merged connectivity, seam boundary faces dropped, and each
+//! element keeps its own pre-merge geometry corners exactly like MFEM's
+//! discontinuous nodal GridFunction.
 
 use fem_assembly::dg::dg_base::{
     build_face_elem_map, face_point_geom, ref_elem_vol, xform_grads,
@@ -22,10 +21,8 @@ use fem_assembly::{
 };
 use fem_element::ReferenceElement;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
-use fem_mesh::amr::HangingNodeConstraint;
 use fem_solver::{SolverConfig, fmt_g};
 use fem_space::{H1Space, L2Space, fe_space::FESpace, constraints::boundary_dofs};
-use fem_space::constraints::{apply_hanging_constraints, identify_periodic_dof_pairs, recover_hanging_values};
 
 static mut HOLE_RADIUS: f64 = 0.2;
 
@@ -98,25 +95,14 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     let rbc = assemble_linear(&space, mesh, |_, _| a.mat_val * a.rbc_b_val, &[2], 3);
     for i in 0..n { rhs[i] += nbc[i] + rbc[i]; }
 
-    // Periodic seam: u(x=1) = u(x=-1).  Slave = tag 6 (x=1), master = tag 5
-    // (x=-1); the shift x_slave + offset = x_master gives offset = [-2, 0].
-    let pairs = identify_periodic_dof_pairs(mesh, space.dof_manager(), 5, 6, &[-2.0, 0.0], 1e-10);
-    // C++ ex27 prints the number of TRUE unknowns (seam DOFs merged by the
-    // v2v stitch): n − merged pairs.  No leading blank line — the C++ stream
-    // goes straight from the `Number of finite element unknowns: 302` row to
-    // the solver history.
-    println!("Number of finite element unknowns: {}", n - pairs.len());
-    let periodic_constraints: Vec<HangingNodeConstraint> = pairs.iter()
-        .map(|&(slave, master)| HangingNodeConstraint {
-            constrained: slave as usize,
-            parent_a:    master as usize,
-            parent_b:    master as usize,
-            coeff_a:     1.0,
-            coeff_b:     0.0,
-            extra:       vec![],
-        })
-        .collect();
-    apply_hanging_constraints(&mut stiff, &mut rhs, &periodic_constraints);
+    // Periodicity lives in the MESH: `gen_mesh` merged the seam via
+    // `make_periodic` (the C++ `v2v` stitch), so the space is constructed
+    // through the periodic-quotient dof tables and `n` already is MFEM's
+    // merged true-dof count (the old DOF-level
+    // `identify_periodic_dof_pairs` stitch is gone with D799-1).  No leading
+    // blank line — the C++ stream goes straight from the
+    // `Number of finite element unknowns:` row to the solver history.
+    println!("Number of finite element unknowns: {}", n);
 
     let ess = boundary_dofs(mesh, space.dof_manager(), &[3]);
     // C++ BilinearForm::FormLinearSystem defaults to diag_policy=DIAG_KEEP
@@ -156,10 +142,6 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     // iterations." row in the canonical ex27 stdout (D771), so the result is
     // discarded.
     let _ = fem_solver::solve_pcg_gssmoother(&stiff, &rhs, &mut x, &cfg).expect("PCG+GSSmoother");
-
-
-    // Recover the slave seam DOFs: u(slave) = u(master).
-    recover_hanging_values(&mut x, &periodic_constraints);
 
     verify_bc(a, &space, mesh, &x);
 
@@ -289,28 +271,32 @@ fn gen_mesh(rl: usize) -> Mesh<2> {
     let fc:Vec<u32> = bf.iter().flat_map(|(e,_)|e.iter().copied()).collect();
     let ft:Vec<i32> = bf.iter().map(|(_,t)|*t).collect();
     let mesh = Mesh::<2>::uniform(c,e,vec![1;16],ElementType::Quad4,fc,ft,ElementType::Line2);
-    // C++ flow: stitch (seam tags 5/6 at x=±1 identified, right seam verts merged
-    // into the left seam at x=-1) → SetCurvature(3) → refine(×2) → Transform(trans).
-    // We refine the PLAIN mesh, then fold the seam the same way the C++ stitch does:
-    // right-seam (x=1) vertices are rewired onto the left-seam (x=-1) vertices, the
-    // seam boundary faces (tags 5/6) are dropped, and the x=1 vertices are removed.
-    // The seam column stays at x=-1 in BOTH the vertex table and the Q3 geometry —
-    // matching the C++ element geometry (the C++ vertex table additionally reports
-    // the seam at x=0, an artifact of MFEM's vertex averaging during refinement).
     let mut m = mesh;
-    // C++ flow: SetCurvature(3) on the (stitched) flat mesh → refine(×2) →
-    // Transform(trans).  We keep the mesh UNFOLDED — the x=±1 seam columns stay
-    // in the geometry exactly like the C++ element geometry (the C++ merges only
-    // the seam DOFs; its L2 geometry nodes keep the x=±1 positions).  The
-    // periodicity is imposed at the DOF level with identify_periodic_dof_pairs.
+    // C++ flow: stitch → SetCurvature(3, true) → refine(×ref) → Transform(trans).
+    // We refine the PLAIN (unfolded) mesh, build the Q3 geometry, and warp it;
+    // the stitch runs last, with the same semantics as the C++ `v2v` block.
     for _level in 0..rl {
         m = fem_mesh::refine_uniform(&m);
     }
-    // Rebuild Q3 geometry on the refined FLAT mesh, then transform ALL nodes
-    // (C++: SetCurvature(3) on the flat stitched mesh → refine → Transform).
     m.set_curvature(3);
     m.transform(hole_transform);
-    m
+    // C++ stitch (ex27.cpp `GenerateSerialMesh`): `v2v` identifies the x=+1
+    // seam vertices with the x=-1 ones, `RemoveUnusedVertices` drops the
+    // merged column, and the seam edges become ordinary interior edges.  In
+    // C++ the stitch runs on the linear mesh *before* `SetCurvature(3, true)`
+    // — a DISCONTINUOUS nodal GF — so every element keeps its own pre-merge
+    // node values and the seam quads' geometry stays on their own side of the
+    // seam.  `make_periodic` mirrors exactly that: the connectivity is merged
+    // and the seam boundary faces (tags 5/6) are dropped, while the
+    // already-built high-order geometry keeps each element's pre-merge
+    // corners (`geometry_nodes != element_nodes` ⇒ the spaces construct
+    // through `DofManager::build_periodic`, the periodic-quotient path the
+    // torus/klein meshes use).  H1 then gets MFEM's merged true-dof count,
+    // and DG sees the seam as an interior face — before D799-1 it saw two
+    // disconnected bdr faces and assembled zero coupling across the seam.
+    // Side A = tag 5 (x=-1), side B = tag 6 (x=+1): a B node at (1, y) folds
+    // onto the A node at (-1, y), i.e. `x_B = x_A + [2, 0]`.
+    m.make_periodic(&[(5, 6, [2.0, 0.0])], 1e-9).expect("make_periodic")
 }
 
 fn hole_transform(p:[f64;2])->[f64;2] {
@@ -433,77 +419,12 @@ fn parse_args()->Args{
 /// points on the segment reference **[-1, 1]**, i.e. `τ = 2ξ − 1` with the
 /// weights doubled (they sum to 2 = the reference length).  Call sites that
 /// need MFEM's convention (`integrate_bc`, the L2 DG boundary helpers) perform
-/// that remap explicitly; `face_point_and_normal` and `eip_at` are written in
-/// MFEM's `[-1, 1]` parameter.
 fn seg_quad(qo: u8) -> (Vec<f64>, Vec<f64>) {
     let re = fem_element::lagrange::SegP1;
     let q = re.quadrature(qo);
     (q.points.iter().map(|p| p[0]).collect(), q.weights)
 }
 
-/// Physical point + unnormalized normal `nor = (Δy/2, −Δx/2)` on a face at the
-/// reference coordinate `xi ∈ [-1,1]`. `|nor|` equals the face Jacobian
-/// (half the edge length), matching MFEM `CalcOrtho(Face->Jacobian())`.
-/// The periodic seam (x = -1 ≡ 1) is handled by taking the shorter x-step.
-/// The normal is oriented outward from the owner element (as MFEM does via
-/// the boundary face transformation).
-fn face_point_and_normal(mesh: &Mesh<2>, elem: u32, face: u32, xi: f64) -> ([f64; 2], [f64; 2]) {
-    use fem_mesh::topology::MeshTopology as _;
-    let ns = mesh.face_nodes(face);
-    let p0 = mesh.node_coords(ns[0]);
-    let p1 = mesh.node_coords(ns[1]);
-    let (dx_raw, dy) = (p1[0] - p0[0], p1[1] - p0[1]);
-    // Periodic wrap: the shorter of the direct and the x±2 wrapped step.
-    let dx_wrapped = if dx_raw > 0.0 { dx_raw - 2.0 } else { dx_raw + 2.0 };
-    let dx = if dx_raw.abs() < dx_wrapped.abs() { dx_raw } else { dx_wrapped };
-    let xp = [0.5 * ((1.0 - xi) * p0[0] + (1.0 + xi) * (p0[0] + dx)),
-              0.5 * ((1.0 - xi) * p0[1] + (1.0 + xi) * p0[1])];
-    let mut nor = [dy / 2.0, -dx / 2.0];
-    // Orient outward: the normal must point from the element centroid to the
-    // (periodically wrapped) face midpoint.
-    let en = mesh.element_nodes(elem);
-    let (mut cx, mut cy) = (0.0, 0.0);
-    for &n in en {
-        let c = mesh.node_coords(n);
-        cx += c[0];
-        cy += c[1];
-    }
-    cx /= en.len() as f64;
-    cy /= en.len() as f64;
-    // Wrapped face midpoint (midpoint of p0 and the wrapped p1).
-    let mx = 0.5 * (p0[0] + p0[0] + dx);
-    let my = p0[1];
-    if nor[0] * (mx - cx) + nor[1] * (my - cy) < 0.0 {
-        nor[0] = -nor[0];
-        nor[1] = -nor[1];
-    }
-    ([xp[0], xp[1]], nor)
-}
-
-/// Local DOF indices of the two corners of `face` inside its owner element.
-///
-/// D779: an L² space numbers its element DOFs in **lexicographic**
-/// (`L2_DOF_MAP`) order — `l2.rs:390` ("Reference DOF coordinates,
-/// lexicographic order"), `ElementType::Quad4, 1 → QuadL2GL` — while
-/// `mesh.element_nodes` lists the corners in the topological (CCW) order.
-/// For a Quad4 the two orders differ exactly in the last two slots
-/// (topological 2 = (1,1) = lex 3, topological 3 = (0,1) = lex 2), so indexing
-/// the space's table with the topological position (the old code) scattered a
-/// face's load into the wrong DOFs on the ξ=1, η=1 and ξ=0 edges.
-/// The mapping is the order-1 Quad4 corner permutation `[0,1,3,2]`; the DG path
-/// only supports order 1 (`SegP1` trace with 2 face DOFs per element).
-const QUAD4_TOPO_TO_LEX: [usize; 4] = [0, 1, 3, 2];
-
-fn l2_face_dofs<S: FESpace>(space: &S, elem: u32, face: u32) -> [usize; 2] {
-    let en = space.mesh().element_nodes(elem);
-    let fn_ = space.mesh().face_nodes(face);
-    let mut dofs = [0usize; 2];
-    for k in 0..2 {
-        let pos = en.iter().position(|&nn| nn == fn_[k]).expect("face node not in element");
-        dofs[k] = elem as usize * 4 + QUAD4_TOPO_TO_LEX[pos];
-    }
-    dofs
-}
 
 /// MFEM `IntegrateBC`: over the boundary attributes in `tags`, compute the
 /// average of `α·n·Grad(u) + β·u` and the L² (root-mean-square) error of
@@ -652,29 +573,32 @@ fn assemble_l2_mass<S: FESpace>(
     let mut coo = fem_linalg::CooMatrix::new(n, n);
     let face_to_elem = build_face_elem_map(mesh, 2);
     let (xi_q, w_q) = seg_quad(qo);
-    let re = fem_element::lagrange::SegP1;
-    let mut phi = vec![0.0; 2];
+    let re = ref_elem_vol(ElementType::Quad4, space.order());
+    let n_dofs = re.n_dofs();
+    let mut phi = vec![0.0; n_dofs];
 
     for f in 0..mesh.n_boundary_faces() as u32 {
         if !tags.contains(&mesh.face_tag(f)) { continue; }
         let Some(&elem) = face_to_elem.get(&f) else { continue; };
-        let dofs = l2_face_dofs(space, elem, f);
+        let gd: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
+        let (fa, fb) = (mesh.face_nodes(f)[0], mesh.face_nodes(f)[1]);
         for (qi, xi) in xi_q.iter().enumerate() {
-            // D779: `face_point_and_normal` takes MFEM's **[-1,1]** face
-            // parameter (`FTr->Loc1`, |nor| = h/2), so the [0,1] Gauss point is
-            // remapped by `t = 2ξ−1` and its weight scaled by 2 — MFEM's
-            // `IntRules.Get(Geometry::SEGMENT, order)` rule.  `SegP1` keeps its
-            // own [0,1] parameter (`0.5*(1+t) = ξ`), so `eval_basis` is
-            // unchanged.  The old code passed ξ straight in: every boundary
-            // edge was sampled on its **second half only** with a half measure.
-            let t = 2.0 * xi - 1.0;
-            let (_, nor) = face_point_and_normal(mesh, elem, f, t);
-            let len = (nor[0] * nor[0] + nor[1] * nor[1]).sqrt();
-            let w = w_q[qi] * 2.0 * len * kappa;
-            re.eval_basis(&[*xi], &mut phi);
-            for i in 0..2 {
-                for j in 0..2 {
-                    coo.add(dofs[i], dofs[j], w * phi[i] * phi[j]);
+            // D804: MFEM `AddBdrFaceIntegrator(BoundaryMassIntegrator)` is a
+            // **BdrFace** integrator: the FaceElementTransformations path —
+            // shapes of the *element* at the Loc1-composed point
+            // (`face_point_geom`, D795-1), the measure from the FACE
+            // transformation, and a scatter over the element's dofs.  The
+            // D779-era bdr-element route (1-D `SegP1` shapes scattered to the
+            // two face-local dofs only) is MFEM's *other* —
+            // `AddBoundaryIntegrator` — path, which ex27 uses for H1 but NOT
+            // for DG.
+            let g = face_point_geom(mesh, elem, fa, fb, *xi);
+            let len = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]).sqrt();
+            let w = w_q[qi] * len * kappa;
+            re.eval_basis(&g.eip, &mut phi);
+            for (i, &gi) in gd.iter().enumerate() {
+                for (j, &gj) in gd.iter().enumerate() {
+                    coo.add(gi, gj, w * phi[i] * phi[j]);
                 }
             }
         }
@@ -695,24 +619,31 @@ fn assemble_l2_linear<S: FESpace, F: Fn(&[f64], &[f64]) -> f64>(
     let mut rhs = vec![0.0; n];
     let face_to_elem = build_face_elem_map(mesh, 2);
     let (xi_q, w_q) = seg_quad(qo);
-    let re = fem_element::lagrange::SegP1;
-    let mut phi = vec![0.0; 2];
+    let re = ref_elem_vol(ElementType::Quad4, space.order());
+    let n_dofs = re.n_dofs();
+    let mut phi = vec![0.0; n_dofs];
 
     for f in 0..mesh.n_boundary_faces() as u32 {
         if !tags.contains(&mesh.face_tag(f)) { continue; }
         let Some(&elem) = face_to_elem.get(&f) else { continue; };
-        let dofs = l2_face_dofs(space, elem, f);
+        let gd: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
+        let (fa, fb) = (mesh.face_nodes(f)[0], mesh.face_nodes(f)[1]);
         for (qi, xi) in xi_q.iter().enumerate() {
-            // D779: same [-1,1] face parameter / doubled-weight remap as
-            // `assemble_l2_mass` (MFEM `BoundaryLFIntegrator` at
-            // `IntRules.Get(SEGMENT, order)`).
-            let t = 2.0 * xi - 1.0;
-            let (xp, nor) = face_point_and_normal(mesh, elem, f, t);
-            let len = (nor[0] * nor[0] + nor[1] * nor[1]).sqrt();
-            let w = w_q[qi] * 2.0 * len;
-            re.eval_basis(&[*xi], &mut phi);
-            let val = g(&xp, &nor);
-            for i in 0..2 { rhs[dofs[i]] += w * val * phi[i]; }
+            // D804: MFEM `AddBdrFaceIntegrator(BoundaryLFIntegrator)` — the
+            // BdrFace path (lininteg.cpp:169): `val = Tr.Face->Weight() ·
+            // ip.weight · Q` with `el.CalcShape(eip)` — the *element's* shapes
+            // at the Loc1-composed point, scattered over the element's dofs
+            // (not the D779 1-D-shape/face-local-dof route, which is MFEM's
+            // `AddBoundaryIntegrator` path — that is what the H1 branch uses).
+            // The measure is `|nor|` of the element's facet geometry.
+            let gpt = face_point_geom(mesh, elem, fa, fb, *xi);
+            let len = (gpt.nor[0] * gpt.nor[0] + gpt.nor[1] * gpt.nor[1]).sqrt();
+            let w = w_q[qi] * len;
+            re.eval_basis(&gpt.eip, &mut phi);
+            // ex27's g is constant (`mat·nbc`, `mat·rbc_b`); the physical
+            // point is not needed for it, so pass a placeholder.
+            let val = g(&[0.0; 2], &gpt.nor);
+            for (k, &gk) in gd.iter().enumerate() { rhs[gk] += w * val * phi[k]; }
         }
     }
     rhs
