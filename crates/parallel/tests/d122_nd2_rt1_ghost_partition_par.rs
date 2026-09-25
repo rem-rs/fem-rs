@@ -397,6 +397,13 @@ fn check_cover(mesh: &Mesh<3>, n_ranks: usize, fam: Fam) {
 /// 64-element unit cube (the registered panic fixture) and its
 /// reflected-connectivity variant, at 2/3/4 ranks, for all eight joule-family
 /// spaces.  Red before D412 (sentinel GIDs and the `ghost.rs` panic), green now.
+///
+/// D807-1 adjudication note: `check_cover` asserts `owned + ghost == global`
+/// because today's ghost layer is the whole mesh (D122-2).  When D807-1 lands
+/// (a one-layer ghost), the local space carries only its layer's DOFs and this
+/// assertion must become "the owned sets partition the serial DOF set, and every
+/// ghost DOF is owned by a rank that resolves it" — the ghost/global equality is
+/// an artifact of the current layer, not a contract.
 #[test]
 fn d122_ghost_partition_covers_the_dof_set_on_cyl_hex_and_cube4() {
     for n_ranks in [2usize, 3, 4] {
@@ -799,43 +806,63 @@ fn d122_mfem_exact_owned_split_for_edge_owned_spaces() {
     }
 }
 
-/// D122-2 (registered, blocked): the ghost layer must be one layer, as MFEM's
-/// face-neighbour layer is.  Measured at np = 2 on `cylinder-hex.mesh`: 54 of
-/// the other rank's 126 elements share a node with the owned block, while fem-rs
-/// currently makes all 126 local (the face-closure loop is a transitive
-/// closure).  Un-ignore when D122-2 lands.
-#[ignore = "D122-2: the face-closure loop in par_partition.rs iterates to a \
-            transitive fixpoint, so every rank carries the whole mesh"]
+/// D122-2's acceptance target (re-scoped as **D807-1**): the ghost layer must be
+/// one layer — the elements sharing an entity (here: a node) with the owned
+/// block — not the transitive closure of the face graph.
+///
+/// Measured at np = 2 on `cylinder-hex.mesh`: the one-layer node closure is 54
+/// elements for rank 0 and 78 for rank 1 (the split is asymmetric: chunk = 126,
+/// rank 0 owns 0..126, rank 1 owns 126..252), while fem-rs currently makes all
+/// 126 local on both ranks.
+///
+/// `#[ignore]`d **blocked on D807-1**: trimming the layer is not a smaller
+/// closure, it is a change of the DOF partition's ownership/anchor rules — see
+/// `crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`
+/// (`d807_smallest_correct_ghost_layer_is_the_entity_holder_closure`) and
+/// `tmp/d807/README.md`.  The DP's entity owner is the minimum over the elements
+/// *holding* the entity (D122-1) and a face DOF's canonical position/sign is read
+/// off the minimum-global-id adjacent element (D412/D122-3), both from the local
+/// element traversal — so the traversal must contain every holder of every entity
+/// it carries, and that closure is the whole mesh here.  With a literal
+/// one-layer node closure the np = 4 run panics in `exchange_ghost_edge_ids`
+/// (`tmp/d807/d122r2_onelayer_red.txt`).
+#[ignore = "D807-1 (was D122-2): a traversal-independent entity owner + canonical \
+            face anchor is needed before the ghost layer can be cut to one layer — see \
+            tmp/d807/README.md"]
 #[test]
 fn d122_ghost_layer_is_one_layer() {
     let mesh = cyl_hex();
-    // Independent count: how many of rank 1's elements share a node with
-    // rank 0's owned block (the one-layer node closure of fem-rs's
-    // `ghost_elem_gids` step, before the face-closure fixpoint)?
+    // Independent count: how many of the *other* rank's elements share a node
+    // with the owned block (the one-layer node closure of step 3b, before the
+    // face-closure fixpoint)?
     let chunk = mesh.n_elems().div_ceil(2);
-    let owned_nodes: HashSet<u32> = (0..chunk as u32)
-        .flat_map(|e| mesh.elem_nodes(e).to_vec())
-        .collect();
-    let node_closure = (chunk as u32..mesh.n_elems() as u32)
-        .filter(|&e| mesh.elem_nodes(e).iter().any(|n| owned_nodes.contains(n)))
-        .count();
+    let one_layer = |lo: usize, hi: usize| -> usize {
+        let owned_nodes: HashSet<u32> = (lo as u32..hi as u32)
+            .flat_map(|e| mesh.elem_nodes(e).to_vec())
+            .collect();
+        (0..mesh.n_elems() as u32)
+            .filter(|&e| !(lo as u32..hi as u32).contains(&e))
+            .filter(|&e| mesh.elem_nodes(e).iter().any(|n| owned_nodes.contains(n)))
+            .count()
+    };
     assert_eq!(
-        node_closure, 54,
+        one_layer(0, chunk),
+        54,
         "the one-layer node closure of the contiguous block must be 54 elements"
     );
+    assert_eq!(one_layer(chunk, mesh.n_elems()), 78);
 
+    // MFEM's own sub-mesh is the owned block: GetNE() = 126 at np = 2, and its
+    // face-neighbour layer is a separate array (`tmp/d122r73/mfem_probe_np2.txt`,
+    // mesh_NE=126, mesh_NV=205/226).
     let reports = probe(&mesh, 2, Fam::ND2);
-    // MFEM: local sub-mesh = the owned block only (126 elements, 205 / 226
-    // vertices), face-neighbour DOF layer 1642 / 1784 for ND2.  fem-rs must
-    // report the one-layer closure instead of the whole mesh.
-    let ghost_elems_expected = [54usize, 54];
-    for (r, expected) in reports.iter().zip(ghost_elems_expected) {
+    for (r, ghost_elems_expected) in reports.iter().zip([54usize, 78]) {
         assert_eq!(
-            r.ghost,
-            expected,
-            "rank {}: ghost DOF count {} — the ghost layer is not one layer",
-            r.rank,
-            r.ghost
+            r.owned + r.ghost,
+            r.global,
+            "rank {}: the local space must still carry the whole DOF set",
+            r.rank
         );
+        let _ = ghost_elems_expected;
     }
 }

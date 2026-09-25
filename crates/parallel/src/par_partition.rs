@@ -351,6 +351,22 @@ fn extract_submesh_from_partition_impl<const D: usize>(
     // rank 2 only through a ghost that was itself a closure addition, so the
     // true owner's element was never made local → the ghost-face id exchange
     // routed to a rank that did not own it and panicked).
+    //
+    // D807/D122-2 audit: the fixpoint is NOT an over-iteration of the loop —
+    // it is the minimal set satisfying the invariant the DOF partition needs
+    // (see `tmp/d807/README.md`).  The DP's entity owner is "minimum rank over
+    // the elements holding the entity" (D122-1) and its face DOF position /
+    // sign are read off the *minimum-global-id* adjacent element (D412 /
+    // D122-3).  Both are derived from the rank's local element traversal, so
+    // the traversal must contain **every** element holding an entity carried
+    // by the traversal.  Replacing the fixpoint by a single round over the
+    // owned set (the literal D122-2 target) makes `cylinder-hex.mesh` at
+    // np = 4 panic in `exchange_ghost_edge_ids` (rank 3 claims edge (64,113)
+    // from rank 1, whose own minimum is rank 0) — evidence
+    // `tmp/d807/d122r2_onelayer_red.txt`.  Reducing the layer therefore
+    // requires an ownership/anchor channel that does not depend on the local
+    // traversal (extraction-supplied global entity owner + canonical anchor),
+    // not a smaller closure.
     let mut local_elem_set: HashSet<u32> = HashSet::new();
     local_elem_set.extend(local_elem_gids.iter().copied());
     local_elem_set.extend(ghost_elem_gids.iter().copied());

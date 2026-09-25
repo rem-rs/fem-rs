@@ -235,22 +235,35 @@ fn quad_dof_ord(or: usize, o: usize, p: usize) -> usize {
 }
 
 
-/// True when `mesh` carries a per-element geometry snapshot whose corner
-/// pairing against the folded connectivity reveals **merged (periodic)
-/// vertices**: some element corner references a different geometry node than
-/// the folded vertex — the signature of `Mesh::make_periodic`, which keeps
-/// the pre-merge table as the per-element geometry (order-1 snapshot or a
-/// high-order geometry built before the merge).
+/// True when `mesh` carries a per-element geometry snapshot whose corners are
+/// **not the element's own folded vertices** — the signature of
+/// `Mesh::make_periodic`, which keeps the pre-merge table as the per-element
+/// geometry (order-1 snapshot or a high-order geometry built before the merge),
+/// so a merged element's geometry row references the pre-merge image of a
+/// vertex instead of the folded representative.
 ///
-/// Curved *non-periodic* meshes reuse the mesh vertex ids as geometry corner
-/// ids (`set_curvature`), so they never trigger; their behaviour stays
-/// bit-for-bit unchanged.
+/// The test is **set membership** (`element_nodes(e)[i] ∈ geometry_nodes(e)`),
+/// *not* slot-wise equality: a geometry row is written in the element family's
+/// own `Pk` slot frame, and for the layer-major prism families the corners are
+/// not a prefix of the row (`set_curvature_prism6`: `[v0, v1, v2, bottom-face
+/// edge nodes, …]`; D152/D164/D191).  Comparing `gn[k]` to `fnodes[k]` therefore
+/// reported **every curved prism mesh** as periodic — D808-3 — which routed its
+/// H¹ space through the D61 unfolded numbering `build_periodic` and produced a
+/// non-conforming space (on the 2-prism p = 2 fixture: 31 DOFs instead of 27,
+/// the shared quad face's 9 DOFs unmerged and 4 shared edge DOFs split;
+/// `crates/assembly/tests/d808_prism_pa_multi.rs`,
+/// `d808_curved_prism_h1_space_is_geometry_independent`).
+///
+/// Curved *non-periodic* meshes reference the mesh's own vertex ids from the
+/// geometry row (`set_curvature`), so every folded vertex is found and the
+/// predicate stays false; their behaviour is bit-for-bit unchanged.  A merged
+/// element's folded representative is *not* in its own row (the row holds its
+/// pre-merge image), so every genuinely periodic mesh still triggers.
 fn is_periodic_merged<M: MeshTopology>(mesh: &M) -> bool {
     for e in 0..mesh.n_elements() as u32 {
         let gn = mesh.geometry_nodes(e);
-        let fnodes = mesh.element_nodes(e);
-        for k in 0..fnodes.len() {
-            if gn[k] != fnodes[k] {
+        for &v in mesh.element_nodes(e) {
+            if !gn.contains(&v) {
                 return true;
             }
         }
