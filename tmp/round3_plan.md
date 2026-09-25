@@ -4493,6 +4493,16 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 5. 收尾照旧：逐路亲验 → 五道门 → 分笔提交推送 → 更新矩阵/HANDOVER。
 - 号段提醒：本轮已占 D801-x（L1）、D802-x（L2）、D803-x（L3）、D804-x（L4）。
 
+### ⭐ 接手状态更新（主会话在代理终止后亲验，2026-09-25 23:5x）
+
+两路临终前**推进得比上面"接手步骤"假设的更远**，主会话已亲跑确认：
+
+- **L1（D797-1）代码侧已完成**：新测改名 `crates/assembly/tests/d797_weak_div_scaling.rs`（**3/3 绿**，主会话亲跑：`weak_div_tet_matches_mfem_and_scales_as_length`/`weak_div_is_scale_invariant`/`weak_div_matches_mfem_on_affine_transforms`——c⁻³ 消失 + tet MFEM 对照 + 仿射不变）；额外 tet 探针证据 `tmp/d797/{red_mfem_tet.txt,femrs_tet_dump.txt}`；**三库门日志已跑**（`gate_{assembly,parallel,solver}_d797.txt`，片段全绿）。**剩余 = 消费方重验**（`DivergenceFreeProjector`/`par_mixed_assembler`/相关 miniapp 的既有锚点是否因修复移动——`grep -rn "HCurlH1WeakDiv\|WeakDiv"` 全扫）+ 全量门复跑 + 报告。
+- **L2（D800-1）代码侧已完成**：新测 `d800_use_iso_curved_geometry.rs` **6/6 绿**（主会话亲跑：曲面 quad `_l2` = MFEM、`_hcurl` pin、D793-4 的 iso/fall-through 直线一致、曲面 tet/tri 仍 = MFEM、**直线网格逐位稳定**）；`green_use_iso.log` 在案。**剩余 = 全量门 + D793-4 注释是否需要更新（L6 写的"不能补 Prism18/Pyramid13"在 geometry_nodes 修复后可能已过时——以实测为准）+ 报告**。
+- **两路合并后的整合门主会话已亲跑**：`cargo test --release -p fem-assembly --no-fail-fast` = **1228 passed / 0 failed / 71 ignored**（round-73 基线 1219 + L1 的 3 + L2 的 6 = 1228，账目闭合）⇒ **两路改动互相兼容，树是绿的**。
+- 接手动作因此简化为：①L1 消费方重验（唯一实质风险）→ ②L2 全量门 → ③重派 L3/L4 → ④五道门 → ⑤分笔提交（`fix(assembly): D797-1 …`、`fix(assembly): D800-1 …`）推送 → ⑥矩阵/HANDOVER。
+
+
 
 
 开局 HEAD = round 72 末笔 `1144288e`（现场核对一致，树净；磁盘 51G）。
