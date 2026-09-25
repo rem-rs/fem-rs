@@ -4470,7 +4470,30 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
-## 第七十三轮（round 73）：D122-1/D122-3 并行 dof 所有权与 ND 面 dof 守恒（头号）+ D787 曲面单纯形 Jacobian + D780/D778/D779 示例保真 + D777/D772/D773 同族收口
+## 第七十四轮（round 74）：D797-1 弱散度 c⁻³（头号）+ D800-1 use_iso 几何节点 + D790-1a/D785/D786 并行收尾 + D799-1 DG 缝耦合
+
+**开局 HEAD = round 73 末笔 `0df353ce`（已推送）；树上有 L1/L2 的在飞改动（见下）。**
+**本节是中断现场记录（主会话被要求写交接）——L1（D797-1）与 L2（D800-1）的代理在飞中被并发上限打断，半成品在工作树，L3（D790-1a/D785/D786）与 L4（D799-1）因并发上限未启动。**
+
+### 派单（round 74，四路）
+
+| 路 | 债务 | 状态 | 已在树的改动 |
+|----|------|------|--------------|
+| L1 | **D797-1**：`mixed::HCurlH1WeakDiv` 对已是物理的梯度又乘 `J⁻ᵀ/detJ` ⇒ 单元矩阵按 **c⁻³** 缩放（MFEM 形式尺度不变） | **在飞被断** | `crates/assembly/src/mixed/mod.rs`（±56 行）+ 新测 `crates/assembly/tests/d797_red_dump.rs`；证据 `tmp/d797/`：**MFEM 逐条目对照已完成**——`geo unit` 档 max_rel=1.960e-1、`geo s2` 档 **ratio=0.125（=2⁻³）**、`geo s05` 档 **ratio=8（=2³）** ⇒ c⁻³ 与 L4 round-73 的实测完全一致；`green_entrywise.txt`/`green_femrs_dump.txt` 已存在（看名字修复实验已开始，**未验证**) |
+| L2 | **D800-1**：`compute_l2_error_{hcurl,hdiv,l2}` 的 `use_iso` 臂传 `element_nodes`（P1 顶点行）给按几何元 dof 数索引的 `isoparametric_jacobian` ⇒ 曲面网格 panic；应传 `geometry_nodes` + 三名单统一 | **在飞被断** | `crates/assembly/src/postproc/grid_function.rs`（+131/−83）+ 新测 `crates/assembly/tests/d800_use_iso_curved_geometry.rs`；红证据 `tmp/d800/red_use_iso.log`；**未跑绿门** |
+| L3 | **D790-1a + D785 + D786**（`use_global_aggregation` 死字段；joule `n_bdr` 本地 vs 全局；空 rank panic+挂住） | **未启动**（并发上限 ×2） | 无 |
+| L4 | **D799-1**（ex27 `-dg` 网格表示差 ⇒ DG 缝上零耦合；路 A=库周期识别 / 路 B=示例重建折回网格） | **未启动**（并发上限） | 无 |
+
+### 新 session 接手步骤（重要的事情先完成）
+1. `cd fem-rs && git status --short` —— 应看到上述 **2 个 M + 2 个 ??**；先跑两个新测试定状态：
+   `cargo test --release -p fem-assembly --test d797_red_dump --test d800_use_iso_curved_geometry --no-fail-fast`
+2. **L1 续作**：读 `tmp/d797/red_entrywise.txt`（三档 ratio 0.125/1/8 = c⁻³ 铁证）与 `green_*.txt`（若绿数字已齐则直接进验收：MFEM 逐条目 ≤1e-12 + 消费方重验 `DivergenceFreeProjector`/`par_mixed_assembler`/miniapp + `cargo test -p fem-assembly/-p fem-parallel/-p fem-solver`）；若半成品不自洽，按 `mixed/mod.rs` 的 diff 读懂修法再续。
+3. **L2 续作**：读 `grid_function.rs` 的 diff（三条 `use_iso` 臂是否已改传 `geometry_nodes`、名单是否统一到一处门控）→ 跑新测 → 曲面 Quad4/tet 的 MFEM 对照 → 反回归（直线网格逐位不动；`d787_*` 10 测、`d493/d468` oracle）。
+4. **L3/L4** 按 round-73 HANDOVER 提示词的配方直接重派（L3 三笔独立、L4 的路 A/路 B 都在案）。
+5. 收尾照旧：逐路亲验 → 五道门 → 分笔提交推送 → 更新矩阵/HANDOVER。
+- 号段提醒：本轮已占 D801-x（L1）、D802-x（L2）、D803-x（L3）、D804-x（L4）。
+
+
 
 开局 HEAD = round 72 末笔 `1144288e`（现场核对一致，树净；磁盘 51G）。
 
@@ -4557,6 +4580,8 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 - **修复**：删块局部粗化（死代码即删），唯一粗化 = **ghost-aware**（全行强度 + 聚合 ID 跨 rank 交换 + 边界聚合 union-find + 粗层保留自身 ghost）；`use_global_aggregation` 保留为文档化 no-op（7 个示例仍设置它 ⇒ 残余 D790-1a）。
 - **亲验**（主会话）：`-o1 --ranks1` = **2.70053050699196e-2 / 87 it 逐位同**、`-o2 --ranks1` = **3.05558571614408e-4 逐位同**、`--ranks 2` = **2.70053057745987e-2 / 95 it**（3 连跑逐位同；相对 np1 2.6e-11，C++ 6-7 位）、`--ranks 4` = 193 it。新牙 `d790r73_amg_owner_independence_par.rs`（修前 10000 停滞红；断言收敛 + owner 无关性 + 泛函 np 无关）；fem-parallel 327/0/14、fem-space 590/0/3、D136 hpref 字节 pin 4/0、警告集与 round-72 完全一致。
 - **爆炸半径（如实）**：所有 np≥2 的 AMG 求解换用 ghost-aware 层次 ⇒ 其他 AMG 示例的迭代数会变（pex3 变好 100×）；np=1 逐位不变（实测）、仓内 AMG 测试全绿、`examples/compare/examples.json` 在 np1/2/4 比的是 DOF 数 ⇒ 无示例 pin 依赖旧层次。
+
+## 第七十三轮（round 73）：D122-1/D122-3 并行 dof 所有权与 ND 面 dof 守恒（头号）+ D787 曲面单纯形 Jacobian + D780/D778/D779 示例保真 + D777/D772/D773 同族收口
 
 ### 全量门（round 73，7 笔提交的冻结树）
 
