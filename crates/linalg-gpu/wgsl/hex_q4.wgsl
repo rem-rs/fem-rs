@@ -1,10 +1,11 @@
+
 struct PD{data:array<f32>}struct ED{dofs:array<u32>}struct XV{vals:array<f32>}struct ER{vals:array<f32>}
 @group(0)@binding(0)var<storage,read>pd:PD;@group(0)@binding(1)var<storage,read>ed:ED;
 @group(0)@binding(2)var<storage,read>xv:XV;@group(0)@binding(3)var<storage,read_write>er:ER;
 const GP:array<f32,5>=array(-0.9061798459386640,-0.5384693101056831,0.0000000000000000,0.5384693101056831,0.9061798459386640);
 const GW:array<f32,5>=array(0.2369268850561891,0.4786286704993665,0.5688888888888889,0.4786286704993665,0.2369268850561891);
-fn bary(t:f32,i:u32)->f32{let n=array<f32,5>(-1.0000000000000000,-0.6546536707079771,0.0000000000000000,0.6546536707079771,1.0000000000000000);var r=1.0;for(var j=0u;j<5u;j++){if(j!=i){r*=(t-n[j])/(n[i]-n[j]);}}return r;}
-fn dary(t:f32,i:u32)->f32{let n=array<f32,5>(-1.0000000000000000,-0.6546536707079771,0.0000000000000000,0.6546536707079771,1.0000000000000000);var r=0.0;for(var m=0u;m<5u;m++){if(m==i){continue;}var term=1.0/(n[i]-n[m]);for(var j=0u;j<5u;j++){if(j!=i&&j!=m){term*=(t-n[j])/(n[i]-n[j]);}}r+=term;}return r;}
+fn bary(t:f32,i:u32)->f32{let n=array<f32,5>(0.0000000000000000,0.1726731646460115,0.5000000000000000,0.8273268353539885,1.0000000000000000);var r=1.0;for(var j=0u;j<5u;j++){if(j!=i){r*=(t-n[j])/(n[i]-n[j]);}}return r;}
+fn dary(t:f32,i:u32)->f32{let n=array<f32,5>(0.0000000000000000,0.1726731646460115,0.5000000000000000,0.8273268353539885,1.0000000000000000);var r=0.0;for(var m=0u;m<5u;m++){if(m==i){continue;}var term=1.0/(n[i]-n[m]);for(var j=0u;j<5u;j++){if(j!=i&&j!=m){term*=(t-n[j])/(n[i]-n[j]);}}r+=term;}return r;}
 // Slot -> tensor index in the element layer's own HexQk(4) order
 // (`hex_tensor_layout`), i.e. the order `DofManager` numbers H1 element DOFs
 // in.  Pinned by `tests::hex_q3_q4_wgsl_tables_match_element`.

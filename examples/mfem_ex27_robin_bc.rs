@@ -23,14 +23,27 @@ use fem_assembly::{
 use fem_element::ReferenceElement;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
 use fem_mesh::amr::HangingNodeConstraint;
-use fem_solver::SolverConfig;
+use fem_solver::{SolverConfig, fmt_g};
 use fem_space::{H1Space, L2Space, fe_space::FESpace, constraints::boundary_dofs};
 use fem_space::constraints::{apply_hanging_constraints, identify_periodic_dof_pairs, recover_hanging_values};
 
 static mut HOLE_RADIUS: f64 = 0.2;
 
 fn main() {
-    let a = parse_args();
+    let mut a = parse_args();
+    // MFEM ex27 replaces a negative DG penalty *before* printing the options
+    // (`if (kappa < 0 && !h1) { kappa = (order+1)*(order+1); }`,
+    // ex27.cpp:137-140 then `args.PrintOptions(mfem::out)`), so the canonical
+    // `--kappa` row shows the replaced value (the `-dg` default prints 4).
+    if !a.h1 && a.kappa < 0.0 { a.kappa = (a.order as f64 + 1.0).powi(2); }
+    // MFEM `OptionsParser::ParseCheck` ends with `PrintOptions(out)`
+    // (optparser.cpp:270-271 → :331), so the upstream stdout opens with this
+    // block, before any mesh work (D771 byte-exact surface).
+    print_options_block(&a);
+    // The hole-radius reset messages are printed *after* the options block and
+    // use the raw `-a` value (ex27.cpp:142-152).
+    if a.hole_radius < 0.01 { println!("Hole radius too small, resetting to 0.01."); }
+    if a.hole_radius > 0.49 { println!("Hole radius too large, resetting to 0.49."); }
     unsafe { HOLE_RADIUS = a.hole_radius.max(0.01).min(0.49); }
 
     let mesh = gen_mesh(a.ref_levels);
@@ -39,6 +52,30 @@ fn main() {
     } else {
         solve_dg(&a, &mesh);
     }
+}
+
+/// Canonical stdout opening block — MFEM `OptionsParser::PrintOptions`
+/// (`optparser.cpp:331`): `Options used:` followed by one `   <long_name>
+/// <value>` row per declared option, in `AddOption` order.  `ENABLE` pairs
+/// print the long name that matches the current bool (MFEM prints
+/// `options[j].long_name` for true and `options[j+1].long_name` for false);
+/// numeric values go through `WriteValue` (`os << value`) i.e. the C++
+/// default-ostream `%g` form — that is `fem_solver::fmt_g` (6 significant
+/// digits, the D343/ex29/ex24 convention already used across the tree).
+fn print_options_block(a: &Args) {
+    println!("Options used:");
+    println!("   {}", if a.h1 { "--continuous" } else { "--discontinuous" });
+    println!("   --order {}", a.order);
+    println!("   --sigma {}", fmt_g(a.sigma));
+    println!("   --kappa {}", fmt_g(a.kappa));
+    println!("   --refine-serial {}", a.ref_levels);
+    println!("   --material-value {}", fmt_g(a.mat_val));
+    println!("   --dirichlet-value {}", fmt_g(a.dbc_val));
+    println!("   --neumann-value {}", fmt_g(a.nbc_val));
+    println!("   --robin-a-value {}", fmt_g(a.rbc_a_val));
+    println!("   --robin-b-value {}", fmt_g(a.rbc_b_val));
+    println!("   --radius {}", fmt_g(a.hole_radius));
+    println!("   {}", if a.visualization { "--visualization" } else { "--no-visualization" });
 }
 
 /// H1 path (MFEM ex27 steps 3–14): continuous Q1 space, essential Dirichlet BC.
@@ -65,8 +102,10 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     // (x=-1); the shift x_slave + offset = x_master gives offset = [-2, 0].
     let pairs = identify_periodic_dof_pairs(mesh, space.dof_manager(), 5, 6, &[-2.0, 0.0], 1e-10);
     // C++ ex27 prints the number of TRUE unknowns (seam DOFs merged by the
-    // v2v stitch): n − merged pairs.
-    println!("\nNumber of finite element unknowns: {}", n - pairs.len());
+    // v2v stitch): n − merged pairs.  No leading blank line — the C++ stream
+    // goes straight from the `Number of finite element unknowns: 302` row to
+    // the solver history.
+    println!("Number of finite element unknowns: {}", n - pairs.len());
     let periodic_constraints: Vec<HangingNodeConstraint> = pairs.iter()
         .map(|&(slave, master)| HangingNodeConstraint {
             constrained: slave as usize,
@@ -112,8 +151,11 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     // `sqrt(1e-12) = 1e-6`, not 1e-12 (the old value gave 41 iterations /
     // ARF 0.505 where the C++ gold converges in 29 / 0.603605).
     let cfg = SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
-    let res = fem_solver::solve_pcg_gssmoother(&stiff, &rhs, &mut x, &cfg).expect("PCG+GSSmoother");
-    println!("  Solved in {} iterations.", res.iterations);
+    // MFEM's legacy `PCG()` wrapper prints the iteration history and the ARF
+    // from inside `Mult` and *nothing else* — there is no "Solved in N
+    // iterations." row in the canonical ex27 stdout (D771), so the result is
+    // discarded.
+    let _ = fem_solver::solve_pcg_gssmoother(&stiff, &rhs, &mut x, &cfg).expect("PCG+GSSmoother");
 
 
     // Recover the slave seam DOFs: u(slave) = u(master).
@@ -139,10 +181,11 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
 fn solve_dg(a: &Args, mesh: &Mesh<2>) {
     let space = L2Space::new(mesh.clone(), a.order as u8);
     let n = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {}", n);
+    println!("Number of finite element unknowns: {}", n);
 
-    // MFEM ex27: negative kappa is replaced with (order+1)².
-    let penalty = if a.kappa < 0.0 { (a.order as f64 + 1.0).powi(2) } else { a.kappa };
+    // MFEM ex27: a negative kappa was already replaced with (order+1)² in
+    // `main` (before the options block), exactly as ex27.cpp:137-140 does.
+    let penalty = a.kappa;
     let qo = 2 * a.order as u8;
 
     let ifl = InteriorFaceList::build(mesh);
@@ -161,7 +204,10 @@ fn solve_dg(a: &Args, mesh: &Mesh<2>) {
 
     let mut x = vec![0.0; n];
     let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
-    let res = if a.sigma == -1.0 {
+    // As in the H1 path: the legacy `PCG()`/`GMRES()` wrappers print only the
+    // iteration history + ARF (D771 canonical surface), so the result is
+    // discarded.
+    let _ = if a.sigma == -1.0 {
         fem_solver::solve_pcg_gssmoother(&stiff, &rhs, &mut x, &cfg).expect("PCG+GSSmoother")
     } else {
         // MFEM ex27: GMRES with restart 10 for the non-symmetric (NIP) case.
@@ -170,7 +216,6 @@ fn solve_dg(a: &Args, mesh: &Mesh<2>) {
         let gcfg = SolverConfig { rtol: 1e-10, ..cfg.clone() };
         fem_solver::solve_gmres_gssmoother(&stiff, &rhs, &mut x, 10, &gcfg).expect("GMRES+GSSmoother")
     };
-    println!("  Solved in {} iterations.", res.iterations);
 
     verify_bc(a, &space, mesh, &x);
 
@@ -188,23 +233,23 @@ fn verify_bc<S: FESpace>(a: &Args, space: &S, mesh: &Mesh<2>, x: &[f64]) {
     let (avg, mut err) = integrate_bc(space, mesh, x, &[3], 0.0, 1.0, a.dbc_val, 3);
     let hom = a.dbc_val == 0.0;
     err /= if hom { 1.0 } else { a.dbc_val.abs() };
-    println!("Average of solution on Gamma_dbc:\t{avg},\t{} error {err}",
-             if hom { "absolute" } else { "relative" });
+    println!("Average of solution on Gamma_dbc:\t{}, \t{} error {}",
+             fmt_g(avg), if hom { "absolute" } else { "relative" }, fmt_g(err));
 
     let (avg, mut err) = integrate_bc(space, mesh, x, &[1], 1.0, 0.0, a.nbc_val, 3);
     let hom = a.nbc_val == 0.0;
     err /= if hom { 1.0 } else { a.nbc_val.abs() };
-    println!("Average of n.Grad(u) on Gamma_nbc:\t{avg},\t{} error {err}",
-             if hom { "absolute" } else { "relative" });
+    println!("Average of n.Grad(u) on Gamma_nbc:\t{}, \t{} error {}",
+             fmt_g(avg), if hom { "absolute" } else { "relative" }, fmt_g(err));
 
     let (avg, err) = integrate_bc(space, mesh, x, &[4], 1.0, 0.0, 0.0, 3);
-    println!("Average of n.Grad(u) on Gamma_nbc0:\t{avg},\tabsolute error {err}");
+    println!("Average of n.Grad(u) on Gamma_nbc0:\t{}, \tabsolute error {}", fmt_g(avg), fmt_g(err));
 
     let (avg, mut err) = integrate_bc(space, mesh, x, &[2], 1.0, a.rbc_a_val, a.rbc_b_val, 3);
     let hom = a.rbc_b_val == 0.0;
     err /= if hom { 1.0 } else { a.rbc_b_val.abs() };
-    println!("Average of n.Grad(u)+a*u on Gamma_rbc:\t{avg},\t{} error {err}",
-             if hom { "absolute" } else { "relative" });
+    println!("Average of n.Grad(u)+a*u on Gamma_rbc:\t{}, \t{} error {}",
+             fmt_g(avg), if hom { "absolute" } else { "relative" }, fmt_g(err));
 }
 
 fn gen_mesh(rl: usize) -> Mesh<2> {
@@ -352,7 +397,10 @@ fn assemble_linear<F:Fn(&[f64],&[f64])->f64>(s:&H1Space<Mesh<2>>,m:&Mesh<2>,f:F,
 
 struct Args{h1:bool,order:i32,sigma:f64,kappa:f64,ref_levels:usize,mat_val:f64,dbc_val:f64,nbc_val:f64,rbc_a_val:f64,rbc_b_val:f64,hole_radius:f64,visualization:bool}
 fn parse_args()->Args{
-    let mut a=Args{h1:true,order:1,sigma:-1.0,kappa:-1.0,ref_levels:2,mat_val:1.0,dbc_val:0.0,nbc_val:1.0,rbc_a_val:1.0,rbc_b_val:1.0,hole_radius:0.2,visualization:false};
+    // `visualization` mirrors MFEM's `-vis/--visualization -no-vis/--no-visualization`
+    // ENABLE pair, whose default is `true` (ex27.cpp:90); the GLVis socket step
+    // itself is not ported, so the flag only feeds the canonical options block.
+    let mut a=Args{h1:true,order:1,sigma:-1.0,kappa:-1.0,ref_levels:2,mat_val:1.0,dbc_val:0.0,nbc_val:1.0,rbc_a_val:1.0,rbc_b_val:1.0,hole_radius:0.2,visualization:true};
     let mut it=std::env::args().skip(1);
     while let Some(arg)=it.next(){match arg.as_str(){
         "-h1"|"--continuous"=>a.h1=true,"-dg"|"--discontinuous"=>a.h1=false,
@@ -366,6 +414,7 @@ fn parse_args()->Args{
         "-rbc-a"|"--robin-a-value"=>a.rbc_a_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(1.0),
         "-rbc-b"|"--robin-b-value"=>a.rbc_b_val=it.next().and_then(|s|s.parse().ok()).unwrap_or(1.0),
         "-a"|"--radius"=>a.hole_radius=it.next().and_then(|s|s.parse().ok()).unwrap_or(0.2),
+        "-vis"|"--visualization"=>a.visualization=true,
         "-no-vis"|"--no-visualization"=>a.visualization=false,_=>{}}}
     a
 }

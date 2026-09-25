@@ -60,7 +60,7 @@
 | mfem_ex24_discrete_ops | ex24 | `-m data/star.mesh -p 0 -o 1 -no-vis` | **BIT** | logs/… + ref/ex24_p0o1.out | **本轮现对拍**：数值行逐字节；豁免 = Rust 的 Options 块少 3 行（--no-static-condensation/--no-partial-assembly/--device） |
 | mfem_ex25_pml_maxwell | ex25 | 默认 beam-hex | RUN | logs/… | rc=0（复 PML 系统完成） |
 | mfem_ex26_geom_mg | ex26 | 默认 star；hex 档 `-m inline-hex -gr 0 -or 2` | RUN | logs/mfem_ex26_geom_mg.log、logs/mfem_ex26_hex.log + ref/ex26_hex.out | 默认档 rc=0。hex 档本轮**实况对拍**：274625 未知数同、6 迭代轨迹机器精度级吻合（ARF 0.0435272 vs 0.0435273、iter1 1.55112e-6 vs 1.55209e-6），**非逐字节**（Chebyshev smoother 特征值估计 ulp 级分叉）。round 60 存档对 tmp/d31/ex26_{rs,cpp}.log 数值逐字节，但其原命令不可复原 ⇒ 存档对不作为本轮逐字节证据引用 |
-| mfem_ex27_robin_bc | ex27 | 默认 | RUN | logs/… | rc=0 |
+| mfem_ex27_robin_bc | ex27 | 默认 `-no-vis` | **BIT\***（round 72 D771） | logs/… + `tmp/d771/`（gold/diff/probe） | **canonical stdout 对齐**：Options 块 12 行 + 去前导空行 + 删非 C++ 的 `Solved in N iterations.` + 平均值行 `", \t"` 与 `%g6`（`fem_solver::fmt_g`）⇒ **default 51 行中 49 行逐字节、`-dbc 2.5` 52 行中 50 行逐字节**（残 2 行/档 = 半面求积 + 网格表示差 **D778**，非格式）；迭代历史 29/30 行零差异保持；**`-dg` 迭代历史逐字节不回退**（其 C++ 差距 = **D779**） |
 | mfem_ex28_sliding_elasticity | ex28 | 默认 | RUN | logs/… | rc=0 |
 | mfem_ex29_curved_poisson | ex29 | 默认（-mt 4 -mo 3） | RUN | logs/… + ref/ex29.out | 迭代 0–7 逐字节；C++@7 停（ARF 0.0969461）Rust@11（ARF 0.0719572）；终误差 ‖u−u_h‖ 0.00138643 / ‖f−f_h‖ 0.00797749 **逐字节同**；Rust 多 2 行头注 → D634 |
 | mfem_ex30_aniso_amr | ex30 | 默认 star | RUN | logs/… | rc=0（三系数预处理完成） |
@@ -301,3 +301,66 @@
 - **ex27 之外的 D746 连带**：pex3 的 L² 锚复活（`-o1` = 2.70053050699196e-2 逐位稳定、
   `-o2` = 3.05558571614408e-4）——**round-69 的 14 位锚 …562224e-4 是随机编号的一次抽样，
   永久作废**；口径可回到 ~14 位（同命令 5 连跑逐位相同）。
+
+## round 72 增量（C 路：D771 ex27 canonical stdout + D763/D764 纪律）
+
+- **D771 关闭（格式部分）**：`examples/mfem_ex27_robin_bc.rs` 打印面按 MFEM 4.10 实源重塑，
+  **数值行一字未动**（迭代历史逐字保持）。五处改动：①新增 `print_options_block`（MFEM
+  `OptionsParser::PrintOptions`，optparser.cpp:331：`Options used:` + 每选项一行 `   --<long> <value>`，
+  ENABLE 对按当前 bool 选 long_name，数值走 C++ 默认 ostream `%g` = 复用 `fem_solver::fmt_g`）；
+  ②`-dg` 时 `--kappa` 打印**替换后**的值（ex27.cpp:137-140 在 PrintOptions 之前）；③去掉
+  `println!("\nNumber…")` 前导空行；④删掉 Rust 独有的 `  Solved in N iterations.` 行（**C++ 侧根本
+  没有这一行**——简报"Rust 缺 Solved in"的前提是反的）；⑤平均值 4 行改 `", \t"` + `%g6`。
+  另按 MFEM 语义把 `-vis/--visualization` 补进参数解析（默认 true，仅喂 Options 块）。
+  **验收（cmp，亲自跑）**：default 档 `-no-vis` — 51 行 **49 行逐字节**，`tmp/d771/diff_default.txt`
+  只余 2 行；`-dbc 2.5 -no-vis` — 52 行 **50 行逐字节**（`tmp/d771/diff_dbc25.txt`）；`-dg` 迭代
+  历史（129 行 = 128 it + ARF）与改造前**逐字节相同**（`tmp/d771/before_dg_iters.txt` vs
+  `after_dg_iters.txt`，cmp 全等）。gold = `tmp/d771/cpp_{default,dbc25,dg}.gold`（C++ 现跑，
+  binary `$HOME/work/d771/ex27_cpp`；default gold 与 `$HOME/work/d771/ex27_cpp_default.out`
+  cmp 全等）+ Rust 侧 `tmp/d771/rust_{default,dbc25,dg}.out`。
+- **残 2 行/档 → D778（新债）——两个 ~1e-7 量级的实因，均有实测**：default 的 `Gamma_nbc`
+  相对误差（C++ 0.0663354 / Rust 0.0663353）与 `Gamma_nbc0` 平均（-0.00120978 / -0.00120977）；
+  dbc25 的 `Gamma_nbc0` 平均（0.000199341 / 0.00019934）与 `Gamma_rbc` 相对误差
+  （0.0278363 / 0.0278362）。由打印区间反解，两侧真值至少差 6.3e-9 绝对（~1e-7 相对）。
+  **(a) 示例 `integrate_bc` 的"半面"求积（真发现）**：`seg_quad` 取 `SegP1::quadrature` 的
+  **[0,1] Gauss 点**（实测 `xi_q=[0.11270, 0.5, 0.88730]`、权重和 1），而 `eip_at` 的八个臂按
+  **[-1,1]** 语义做 `0.5*(1±t)`（`deip` 也配 0.5）⇒ **每个面只采到"半条边"**（哪一半取决于面
+  结点序相对单元角序的方向）。判决实验（`tmp/d771/ex27_bc_probe.cpp` mode 0/2/3，同网格+同解）：
+  全幅/后半幅/前半幅三口径在 `Gamma_nbc` 相差 ~4e-8、`Gamma_rbc` ~2e-8，而 Rust 打印值**落在
+  半面区间内**（Rust 网格：mode2=1.0086846150、mode3=1.0086846924、Rust=1.0086846240；
+  全幅 mode0=1.0086846538 在区间外）⇒ 半面求积坐实（全表 `tmp/d771/probe_face_modes.txt`）。
+  偏差仅 ~1e-8 是因为这些边界积分的被积
+  函数沿单面近乎常数——**6 位打印长期掩盖了它**。修法（示例侧；会动 4 个平均值）：
+  `eip_at` 改 MFEM `Loc1` 的 [0,1]↦[0,1] 恒等语义（如 `(0,1) => [t, 0.0]`）并去掉
+  `deip` 的 0.5，即 `s=t` 而非 `0.5*(1±t)`。
+  **(b) 网格构造顺序/表示差（实测）**：C++ = 缝合（folded）→ `SetCurvature(3)` → refine×2 →
+  `Transform(trans)`；Rust = refine×2 → `set_curvature(3)` → `transform`（且**未折叠** + DOF 级
+  周期）。只依赖网格的探针（同文件 tag3 洞边界）：洞边界曲线差 ~4e-10 相对（`sum_x2`
+  25.920000602506406 vs 25.920000591255853、洞周长 nrm 1.25663706399702 vs 1.25663706131693；
+  两侧单元体积分布与总面积 1.74867 = 2−2πa² 全同 ⇒ 两网格各自都合法），该差经边界平均值的
+  相消放大到 ~1e-7 相对（同网格 mode0 对比：nbc avg 1.0086845458[C++ 网格] vs
+  1.0086846538[Rust 网格] = 1.1e-7）。probe 口径自述（`sol.gf` 8 位往返）见
+  `tmp/d771/probe_face_modes.txt`（两网格 × 4 口径全表）。
+  **两个效应的加性账目闭合（`Gamma_nbc`，default 档）**：C++ 全幅 = 1.0086845457865752
+  → [+1.0806e-7 = 网格差（Rust 网格全幅 1.0086846538487606）] → [−2.9872e-8 = 半面求积
+  （Rust 实打 1.0086846239769045）] = **net +7.8190e-8 = 观测差**（Rust 打印 1.00868 vs C++
+  1.00868，误差行 0.0663353 vs 0.0663354）。同法验 `Gamma_nbc` 误差行：C++ 0.066335350867800846
+  → [+4.5903e-8 网格] → [−5.3028e-8 半面] → 0.06633534374250515 = Rust 打印值 ✓（闭合到 1e-17）。
+  ⇒ 残 2 行/档**不是格式问题**，而是上述两因叠加；两因都在示例侧（可控）——(a) 改求积点映射
+  即恢复 MFEM 口径，(b) 改网格构造顺序/折叠表示才可能达 stdout 全等（都会动这 4 个平均值）。
+- **D779（新债）`-dg` 档与 C++ 未对齐（非格式）**：C++ `-dg -no-vis` 104 行（82 it，iter0
+  `(B r,r)` = 0.142775）vs Rust 150 行（128 it，iter0 = 0.0220206）——`X0 = 0` 时 iter0 =
+  ‖B‖²，**从第 0 步起 RHS/系统就不同**（DG 弱 Dirichlet/Boundary 载荷族或 `DgAssembler` 口径；
+  **HYPOTHESIS**：(a) 类求积点映射错（`face_point_and_normal`/`assemble_l2_*` 同样用
+  `(1∓xi)/2` 的 [-1,1] 语义配 [0,1] Gauss 点）可能是同族贡献者），且 Rust 用 `rtol 1e-12` 而非
+  legacy `PCG()` 的 `sqrt(1e-12)` 语义 → 需专项裁决。**回归口径**：`-dg` 只保证"不回退"
+  （D753 立场），与 C++ 的差距是本债内容。
+- **D763 `-vs` 纪律（examples 侧交叉引用）**：该纪律的主记录在
+  `tmp/ledger/miniapps_ledger.md` §round 72；要点：miniapps/multidomain 的打印步长参与**求解轨迹**，
+  任何对比/回归必须显式钉 `-vs`（三档标准命令见该节），未钉 `-vs` 的历史记录一律降档为
+  **不可复现**。（ex27 无 `-vs`，不受影响。）
+- **D764 旧夹具 SUPERSEDED**：`tmp/dbit/multidomain_{rt,nd}_printref.cpp`（及其逐字节副本
+  `tmp/d735/{rt,nd}_ref.cpp`）+ `tmp/dbit/*.txt` 18 件证据快照 + `tmp/d735/evidence.txt` 均已加
+  SUPERSEDED 头（旧"never-refresh"模型 (2)，被 round 71 D749 证伪；现行权威 =
+  `tmp/d749/multidomain_{rt,nd}_printref_refresh.cpp`、`tmp/d737/multidomain_h1_printref.cpp`；
+  重钉四值 rt cyl −2.137667e-4/1.439350e-6、nd cyl 6.932270e-5/1.594225e-4）。历史证据保留未删。

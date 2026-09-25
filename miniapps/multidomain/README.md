@@ -260,6 +260,19 @@ exactly). Both are ~22 orders below the field norm; the evolved trajectories
 are unaffected (byte-exact everywhere). Core-level (projection equivalence up
 to roundoff) — registered D735, not worked around.
 
+⚠️ **`-vs` discipline (round 71 D763 — mandatory for every comparison):** the
+print stride is now part of the *solve trajectory*, not just of the output.
+Round 71 D749 landed the upstream data flow: inside the `last_step || ti % vs ==
+0` block the port refreshes `gf_state` from the RK3 state (`SetFromTrueDofs` in
+the upstream sources, `multidomain_rt.cpp:386-387` / `multidomain_nd.cpp:391-392`),
+and `Transfer` then reads/writes that refreshed field — so the step at which a
+print happens feeds the next transfer. Two runs with different `-vs` therefore
+produce *different numbers*, not merely different amounts of output. **Every
+port-vs-harness run, every regression profile and every quoted trajectory value
+must state `-vs` explicitly** (default 10 on both sides, upstream
+`multidomain_rt.cpp:217`); any historical record that omits it is downgraded to
+non-reproducible.
+
 Data-flow no-regression: the round-68 pinned step-250 bytes are preserved —
 rt `cyl: sum=-6.420799e-6 ssq=1.430509e-6`, nd
 `cyl: sum=1.337180e-5 ssq=1.594132e-4` (now proven 7-significant-digit exact

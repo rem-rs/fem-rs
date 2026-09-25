@@ -566,7 +566,13 @@ miniapps/
 │                                block 场终态相对差 7e-6; cylinder 案
 │                                例促成 D1 修复(曲线 hex 细化顶点吸附,
 │                                480/480 逐角点对照), 待流水线复验;
-│                                _nd/_rt 版已添加(H(curl)/H(div) 变体)
+│                                _nd/_rt 版已添加(H(curl)/H(div) 变体);
+│                                ⚠️ round 71 D749 已把 rt/nd 数据流落地
+│                                上游模型(打印块刷 gf_state), 红线四值重钉
+│                                rt cyl −2.137667e-4 / nd 6.932270e-5;
+│                                **对比/回归必须显式钉 `-vs`(D763)** —
+│                                打印步长参与求解轨迹; 详见
+│                                `miniapps/multidomain/README.md`
 ├── shifted/                 ← 对应 miniapps/shifted/ (SBM3 内核:
 │   ├── shifted_distance.rs     sbm3_dirichlet/neumann 积分器 1:1,
 │   ├── shifted_diffusion.rs    Nitsche patch test 3D 4e-13;

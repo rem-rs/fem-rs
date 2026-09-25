@@ -151,8 +151,8 @@ multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变�
 | 文件 | 档位 | 分类 | 备注 |
 |---|---|---|---|
 | multidomain.rs | **BIT\***（round 70 D737；straight 口径） | 官方 `multidomain.cpp` 也 **PAR-only**（rc=2 实证）→ print-ref harness（`tmp/d737/multidomain_h1_printref.cpp`）；7 处格式差对齐（Options 4 行 / bdr_attrs 探针剥离 / 新增 `Block interface tdofs: 416` / IC sum / 步进行改 sum+ssq 家族）；**规则修正为 MFEM 逐积分器默认**（曲 mass9/conv9/diff6 = 125/125/64 pt，直 6/6/6，harness `-rules` 探针实证）；**数据流补上游打印块 GF 刷新**（`cyl_gf_state`；norefresh 模型 step250 差 5.4e-4）；验收：alt 档 6 行全字节、t005 block 全一致 + cyl 10/26 行第 7 位（≤9.8e-7 = D750）、IC 行无豁免；曲边档待复跑 | |
-| multidomain_nd.rs | **BIT\***【round 64 D657 → 68 D708 → 69 格式 → 70 D737 家族 → **71 D749 数据流落地上游**】 | 官方 nd.cpp PAR-only → print-ref **刷新变体** harness（tmp/d737/…_refresh.cpp；round 71 逐行审计+GF 触碰点普查确认忠实）；数据流 = **上游模型 ③**：Transfer 目的地 gf_state 仅在**打印步**由 RK3 态刷新（`SetFromTrueDofs`，nd.cpp:391-392），非打印步读到"上次打印步 RK3 态 + 期间接口写入"；dof/ess 7708/5664、1168/800 = MFEM 全等；三档 t005/t05/alt vs 刷新 harness 逐字节、仅 IC 尘行豁免；**红线四值（round 71 重钉，step 250）**：cyl sum=**6.932270e-5** ssq=**1.594225e-4**（旧 ② 模型 1.337180e-5/1.594132e-4，5.18×）；t05 末行 cyl sum=1.025167e-1 ssq=1.543678e0；alt 末行 cyl sum=−5.234577e-5；**D736**：收窄至 t≤0.2（20001 step）逐字节（末行 cyl sum=1.200152e0；t=0.5 超预算声明）；**D763**：`-vs` 参与轨迹——对比必须钉死 `-vs` | |
-| multidomain_rt.rs | **BIT\***【round 64 D657 → 68 D708 → 69 格式 → **71 D749 数据流落地上游**】 | 同上链；官方 rt.cpp PAR-only → 刷新变体 harness；**红线四值（round 71 重钉）**：cyl sum=**−2.137667e-4** ssq=**1.439350e-6**（旧 ② 模型 −6.420799e-6/1.430509e-6，33.3×）；t05 末行 cyl sum=6.288435e-4 ssq=3.197051e-4；alt 末行 cyl sum=−1.654377e-5；**D736**：t≤0.5（50001 step/2513 行）逐字节（末行 cyl sum=2.546904e-2——round-70 的 7.995288e-6 系 ② 模型值已作废）；**D762**：IC 尘行零元素计数 512→448 漂移（非本轮所致，待 worktree 二分） | |
+| multidomain_nd.rs | **BIT\***【round 64 D657 → 68 D708 → 69 格式 → 70 D737 家族 → **71 D749 数据流落地上游**】 | 官方 nd.cpp PAR-only → print-ref **刷新变体** harness（tmp/d737/…_refresh.cpp；round 71 逐行审计+GF 触碰点普查确认忠实）；数据流 = **上游模型 ③**：Transfer 目的地 gf_state 仅在**打印步**由 RK3 态刷新（`SetFromTrueDofs`，nd.cpp:391-392），非打印步读到"上次打印步 RK3 态 + 期间接口写入"；dof/ess 7708/5664、1168/800 = MFEM 全等；三档 t005/t05/alt vs 刷新 harness 逐字节、仅 IC 尘行豁免；**红线四值（round 71 重钉，step 250）**：cyl sum=**6.932270e-5** ssq=**1.594225e-4**（旧 ② 模型 1.337180e-5/1.594132e-4，5.18×）；t05 末行 cyl sum=1.025167e-1 ssq=1.543678e0；alt 末行 cyl sum=−5.234577e-5；**D736**：收窄至 t≤0.2（20001 step）逐字节（末行 cyl sum=1.200152e0；t=0.5 超预算声明）；**D763**：`-vs` 参与轨迹——对比必须钉死 `-vs`（**标准命令 + 降档声明见 §round 72**；旧夹具 SUPERSEDED 见该节 D764） | |
+| multidomain_rt.rs | **BIT\***【round 64 D657 → 68 D708 → 69 格式 → **71 D749 数据流落地上游**】 | 同上链；官方 rt.cpp PAR-only → 刷新变体 harness；**红线四值（round 71 重钉）**：cyl sum=**−2.137667e-4** ssq=**1.439350e-6**（旧 ② 模型 −6.420799e-6/1.430509e-6，33.3×）；t05 末行 cyl sum=6.288435e-4 ssq=3.197051e-4；alt 末行 cyl sum=−1.654377e-5；**D736**：t≤0.5（50001 step/2513 行）逐字节（末行 cyl sum=2.546904e-2——round-70 的 7.995288e-6 系 ② 模型值已作废）；**D762**：IC 尘行零元素计数 512→448 漂移（非本轮所致，待 worktree 二分）；**D763**：`-vs` 参与轨迹——对比必须钉死 `-vs`（**标准命令 + 降档声明见 §round 72**；旧夹具 SUPERSEDED 见该节 D764） | |
 
 ### shifted/（3）——均需 `-no-vis`（默认档 rc=3 vis 注记，声明兑现）
 | 文件 | 档位 | 分类 | 备注 |
@@ -272,3 +272,57 @@ multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变�
 lor_solvers×3 档、mesh_bounding_boxes×2 档、schwarz_ex1、block_solvers×3 档、
 mg_abs_l1_jacobi、nurbs_mesh_info（现编 C++ 全新逐字节）、nurbs_patch_ex1（netlib oracle 档）
 ——均 BIT。
+
+## round 72 增量（C 路：D763 `-vs` 纪律落地 + D764 旧夹具 SUPERSEDED）
+
+### D763 —— `-vs` 纪律（**强制，适用于 multidomain/{,nd,rt}.rs 三变体**）
+
+**① 纪律原文（round 71 发现，round 72 落文）**：`-vs`（打印步长）**参与求解轨迹**，不再只是
+"输出多少行"。round 71 D749 把 rt/nd 数据流落地上游模型 (3)：打印块内
+`last_step || ti % vs == 0` 分支用 `SetFromTrueDofs`（上游 `multidomain_rt.cpp:386-387` /
+`multidomain_nd.cpp:391-392`；H1 版 `multidomain.cpp:381-382`，端口 `cyl_gf_state`）**从 RK3 态刷新
+Transfer 目的地 gf_state**，而 `Transfer` 读/写正是这个被刷新的场 ⇒ **哪一步发生打印，会喂给下一次
+传递**。因此不同 `-vs` 产生**不同的数值**（不止是不同的输出行数），`-vs` 与 `-tf/-dt/-o/-qp/-nr`
+同级的**求解配置**。**凡 port-vs-harness 对比、回归档位、台账/报告里引用的任何轨迹数值，都必须
+显式写出 `-vs`**；两侧默认值相同（10：上游 `multidomain_rt.cpp:217` / 端口 `parse_u32("-vs",10)`），
+但"用默认值"不等于"已钉死"。
+
+**② 三档对比/回归标准命令（以 round-71 D749/D736 证据 `tmp/d749/` 为准；`-vs` 一律显式）**：
+
+```
+# C++ 对照物（print-ref 刷新变体 harness，cwd = $HOME/work/d749/；构建见 tmp/d749/build_cpp.sh）
+$HOME/work/d749/rt_refresh  -tf 0.005  -dt 1e-5 -vs 10      # t005 档（251 行）
+$HOME/work/d749/rt_refresh  -tf 0.05   -dt 1e-5 -vs 10      # t05  档（2501 行）
+$HOME/work/d749/rt_refresh  -tf 0.0002 -dt 1e-5 -vs 2       # alt  档（判别力档）
+# （nd 同：$HOME/work/d749/nd_refresh <同参数>；H1：tmp/d737/multidomain_h1_printref.cpp 编出者）
+# Rust 端口（cwd = fem-rs 仓库根，默认网格 data/multidomain-hex.mesh）
+target/debug/examples/multidomain_rt.exe -tf 0.005  -dt 1e-5 -vs 10
+target/debug/examples/multidomain_rt.exe -tf 0.05   -dt 1e-5 -vs 10
+target/debug/examples/multidomain_rt.exe -tf 0.0002 -dt 1e-5 -vs 2
+# （multidomain_nd.exe / multidomain.exe 同参数；round-71 的 alt 档只写 `-tf 0.0002 -vs 2`
+#   而省略 `-dt`，因默认 dt 已是 1e-5 —— 现行口径要求把 `-dt` 也写全）
+```
+档位判据：t005/t05/alt 三档与刷新 harness 逐字节（**唯一豁免 = IC 尘行**，D735）；红线四值
+（step 250，默认加密）rt cyl sum=−2.137667e-4 ssq=1.439350e-6、nd cyl sum=6.932270e-5
+ssq=1.594225e-4；长窗口 rt `-tf 0.5`（50001 step，末行 cyl sum 2.546904e-2）逐字节、
+nd `-tf 0.2`（20001 step，末行 1.200152e0）逐字节。
+
+**③ 降档声明**：**未显式钉 `-vs` 的历史记录一律降档为"不可复现"**——这是**降档而非作废**：
+若其 `-vs` 可从上文/脚本复原（如 `tmp/d749/run_cpp.sh` 的 `alt) A=(-tf 0.0002 -vs 2)`），
+按复原值重跑即可重新入档；无法复原者，只作为历史线索，不得作为基线引用。
+（round-70 d737 阶段的 records 未写 `-vs` —— 其 t005/t05 假定默认 10，round-71 已按默认值复跑
+逐字节，故该批结论保持有效，但引用时必须补注 `-vs 10`。）
+
+### D764 —— 旧 print-ref 夹具 SUPERSEDED（不删历史）
+
+被标记对象：`tmp/dbit/multidomain_rt_printref.cpp`、`tmp/dbit/multidomain_nd_printref.cpp`
+（round-64/69 系；`tmp/d735/{rt,nd}_ref.cpp` 是它们的**逐字节副本**）、`tmp/dbit/*.txt` 18 件证据
+快照（diff/printref/rust 输出）、`tmp/d735/evidence.txt`。**错在哪**：这批夹具的打印块**从不刷新**
+Transfer 目的地（"never-refresh" = 模型 (2)），而上游每个打印步都刷新（`SetFromTrueDofs`
+`multidomain_rt.cpp:386-387` / `nd.cpp:391-392` = 模型 (3)）⇒ 它们产出的 cyl 值是**（2）模型值**，
+比上游小 33.3×（rt）/5.2×（nd）。**现行权威**：`tmp/d749/multidomain_{rt,nd}_printref_refresh.cpp`、
+`tmp/d737/multidomain_h1_printref.cpp`（两个 `_refresh.cpp` 与 `tmp/d737/` 下的同名文件
+**逐字节相同**：`tmp/d749/build_cpp.sh` 只是复制后编译）。**重钉四值**（step 250，默认加密，模型 (3)）：
+rt cyl sum=**−2.137667e-4** ssq=**1.439350e-6**、nd cyl sum=**6.932270e-5** ssq=**1.594225e-4**；
+round-69/70 的 `−6.420799e-6 / 1.337180e-5` 系（2）模型值，**永久作废**（round-70 的 H1 侧
+`−6.420799e-6` 记录同源，但 H1 的行文已按 D737 数据流过，仅 rt/nd 需作废）。
