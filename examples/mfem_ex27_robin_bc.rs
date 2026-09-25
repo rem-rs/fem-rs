@@ -425,6 +425,45 @@ fn seg_quad(qo: u8) -> (Vec<f64>, Vec<f64>) {
     (q.points.iter().map(|p| p[0]).collect(), q.weights)
 }
 
+/// The mesh's single element family (D799-2).
+///
+/// MFEM picks the element's finite element through
+/// `FECollection::FiniteElementForGeometry(Geometry::Type)`, i.e. from the
+/// element's *own* geometry — never from a fixed guess.  These meshes are
+/// built with one geometry type (`Mesh::uniform` in `gen_mesh`), so the family
+/// is the type of the first element; uniformity is asserted so that a mixed
+/// mesh fails loudly instead of silently assembling with the wrong basis.
+fn mesh_family(mesh: &Mesh<2>) -> ElementType {
+    let et = mesh.element_type(0);
+    assert!(
+        (0..mesh.n_elements() as u32).all(|e| mesh.element_type(e) == et),
+        "ex27: mixed element families are not supported (element 0 is {et:?})"
+    );
+    et
+}
+
+/// Volume reference element by **element family** (D799-2).
+///
+/// `ref_elem_vol` already dispatches `Quad4`/`Tri3`/`Tet4` to the right basis
+/// (the L²/DG `GaussLegendre` default, MFEM `DG_FECollection` = `L2_FECollection`);
+/// the H¹ branch uses the nodal basis of the same family (`QuadQk`, `TriPk` —
+/// MFEM's `H1_FECollection`).  Both used to be selected against a hardcoded
+/// `ElementType::Quad4`, which on a triangle mesh handed the L² path a 4-dof
+/// `QuadL2GL` basis (the space has 3 dofs per element) and the H¹ path a
+/// `QuadQk` basis with the wrong dof count and node layout — silent
+/// mis-assembly, or an index panic from the 4×4 scatter over 3 dofs.
+fn vol_ref_elem(et: ElementType, order: u8, l2: bool) -> Box<dyn ReferenceElement> {
+    if l2 {
+        ref_elem_vol(et, order)
+    } else {
+        match et {
+            ElementType::Quad4 => Box::new(fem_element::lagrange::QuadQk::new(order as usize)),
+            ElementType::Tri3 => Box::new(fem_element::lagrange::factory::TriPk::new(order as usize)),
+            _ => panic!("ex27: no H1 volume reference element for {et:?}"),
+        }
+    }
+}
+
 
 /// MFEM `IntegrateBC`: over the boundary attributes in `tags`, compute the
 /// average of `α·n·Grad(u) + β·u` and the L² (root-mean-square) error of
@@ -465,11 +504,7 @@ fn integrate_bc<S: FESpace>(
     // with `QuadQk` (the old unconditional choice, correct only for H1)
     // misaligns dof i ↔ basis i, so the DG verification rows reported
     // n.Grad(u) = 0.449 instead of the imposed 1.0.
-    let re: Box<dyn ReferenceElement> = if space.l2_basis().is_some() {
-        ref_elem_vol(ElementType::Quad4, order)
-    } else {
-        Box::new(fem_element::lagrange::QuadQk::new(order as usize))
-    };
+    let re = vol_ref_elem(mesh_family(mesh), order, space.l2_basis().is_some());
     let n_dofs = re.n_dofs();
 
     let mut phi = vec![0.0; n_dofs];
@@ -573,7 +608,7 @@ fn assemble_l2_mass<S: FESpace>(
     let mut coo = fem_linalg::CooMatrix::new(n, n);
     let face_to_elem = build_face_elem_map(mesh, 2);
     let (xi_q, w_q) = seg_quad(qo);
-    let re = ref_elem_vol(ElementType::Quad4, space.order());
+    let re = ref_elem_vol(mesh_family(mesh), space.order());
     let n_dofs = re.n_dofs();
     let mut phi = vec![0.0; n_dofs];
 
@@ -619,7 +654,7 @@ fn assemble_l2_linear<S: FESpace, F: Fn(&[f64], &[f64]) -> f64>(
     let mut rhs = vec![0.0; n];
     let face_to_elem = build_face_elem_map(mesh, 2);
     let (xi_q, w_q) = seg_quad(qo);
-    let re = ref_elem_vol(ElementType::Quad4, space.order());
+    let re = ref_elem_vol(mesh_family(mesh), space.order());
     let n_dofs = re.n_dofs();
     let mut phi = vec![0.0; n_dofs];
 
@@ -681,7 +716,7 @@ fn assemble_l2_dg_dirichlet_lf<S: FESpace>(
     let mut rhs = vec![0.0; n];
     let face_to_elem = build_face_elem_map(mesh, dim);
     let (xi_q, w_q) = seg_quad(qo);
-    let re = ref_elem_vol(ElementType::Quad4, order);
+    let re = ref_elem_vol(mesh_family(mesh), order);
     let n_dofs = re.n_dofs();
 
     let mut phi = vec![0.0; n_dofs];

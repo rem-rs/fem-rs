@@ -68,7 +68,8 @@ pub enum L2FaceValues {
 /// canonical direction is element 1's local edge order `nodes[0] → nodes[1]`.
 /// The CCW-left normal of that direction is the **inward** normal of
 /// element 1 — face integrators needing outward normals must orient them
-/// (see `crate::dg::dg_base::orient_normal_outward`).
+/// (`crate::dg::dg_base::face_point_geom` does so from element 1's own
+/// counter-clockwise edge direction, D799-3).
 // MFEM: Mesh::FaceInformation (2-D subset: element[0], element[1], vertices)
 #[derive(Debug, Clone)]
 pub struct RestrictedFace {

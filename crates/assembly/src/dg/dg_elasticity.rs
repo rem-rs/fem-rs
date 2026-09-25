@@ -8,11 +8,11 @@
 use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::transformation::element_jacobian_at;
 use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
-    build_face_elem_map, face_geom_2d, orient_normal_outward, phys_to_ref,
-    ref_elem_face, ref_elem_vol, simplex_jac, xform_grads,
+    build_face_elem_map, face_point_geom, ref_elem_face, ref_elem_vol, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 
@@ -144,21 +144,34 @@ fn assemble_volume<S: FESpace>(
 
         let dofs: Vec<usize> =
             space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(e);
-        let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-        // D696 batch 4: abs RETAINED — degeneracy guard (skip collapsed
-        // cells); a magnitude test, not a measure.
-        if det_j.abs() < 1e-30 {
-            continue;
-        }
-        let jit = jac.try_inverse().unwrap().transpose();
 
         let mut gref = vec![0.0_f64; n_l * dim];
         let mut gphys = vec![0.0_f64; n_l * dim];
 
         for (qi, xi) in q.points.iter().enumerate() {
+            // D799-3: MFEM's `ElasticityIntegrator::AssembleElementMatrix`
+            // evaluates the element's **isoparametric** transformation — the
+            // order-`g` curved map on a curved mesh, the P1/bilinear map on a
+            // straight one (`Trans.Weight()` and `Trans.AdjugateJacobian()`,
+            // bilininteg.cpp:1615).  The pre-fix `simplex_jac` used a single
+            // centroid Jacobian per element (exact only for affine tets/tris and
+            // parallelograms).
+            let (jac, _xp) = element_jacobian_at(mesh, e, xi, dim);
             // D696 batch 4: SIGNED — `ip.weight * T.Weight()` (MFEM
             // nonlininteg class); bitwise |det| on valid meshes.
+            let det_j = jac.determinant();
+            // Degeneracy guard (magnitude test only, D696 batch 4 precedent):
+            // skip collapsed cells, never taken on a valid mesh.
+            if det_j.abs() < 1e-30 {
+                continue;
+            }
+            let jit = jac
+                .try_inverse()
+                .unwrap_or_else(|| {
+                    eprintln!("  warning: degenerate elasticity element {e}");
+                    nalgebra::DMatrix::identity(dim, dim)
+                })
+                .transpose();
             let w = q.weights[qi] * det_j;
             re.eval_grad_basis(xi, &mut gref);
             xform_grads(&jit, &gref, &mut gphys, n_l, dim);
@@ -276,11 +289,10 @@ fn assemble_interior_face_stress<S: FESpace>(
     quad_order: u8,
 ) {
     let order = space.order();
-    let (h_f, mut normal) = face_geom_2d(mesh, face_nodes);
-    orient_normal_outward(mesh, el, face_nodes, &mut normal);
-
     let face_re = ref_elem_face(ElementType::Line2, order);
     let q_face = face_re.quadrature(quad_order);
+    let fa = face_nodes[0];
+    let fb = face_nodes[1];
 
     let et_l = mesh.element_type(el);
     let re_l = ref_elem_vol(et_l, order);
@@ -292,20 +304,10 @@ fn assemble_interior_face_stress<S: FESpace>(
     let dofs_l: Vec<usize> = space.element_dofs(el).iter().map(|&d| d as usize).collect();
     let dofs_r: Vec<usize> = space.element_dofs(er).iter().map(|&d| d as usize).collect();
 
-    let nodes_l = mesh.element_nodes(el);
-    let nodes_r = mesh.element_nodes(er);
-    let (jac_l, _det_l) = simplex_jac(mesh, nodes_l, dim);
-    let (jac_r, _det_r) = simplex_jac(mesh, nodes_r, dim);
-    let jit_l = jac_l.clone().try_inverse().unwrap().transpose();
-    let jit_r = jac_r.clone().try_inverse().unwrap().transpose();
-
     let lam_l = lambda_elem[el as usize];
     let mu_l = mu_elem[el as usize];
     let lam_r = lambda_elem[er as usize];
     let mu_r = mu_elem[er as usize];
-
-    let x0f = mesh.node_coords(face_nodes[0]);
-    let x1f = mesh.node_coords(face_nodes[1]);
 
     // Accumulate 4 blocks: K_LL, K_LR, K_RL, K_RR
     let mut kll = vec![0.0_f64; n_l * n_l * dim * dim];
@@ -321,18 +323,40 @@ fn assemble_interior_face_stress<S: FESpace>(
     let mut gphys_r = vec![0.0_f64; n_r * dim];
 
     for (qi, xi_f) in q_face.points.iter().enumerate() {
+        // D799-3: the isoparametric face route (`face_point_geom`, D795-1) —
+        // MFEM `DGElasticityIntegrator::AssembleFaceMatrix` composes the face
+        // transformation through `Elem1`/`Elem2`'s order-`g` maps
+        // (`Trans.SetAllIntPoints` → `Loc1`/`Loc2`, `nor = CalcOrtho(
+        // Trans.Jacobian())`, `Trans.Elem1->Weight()`), and its per-QP algorithm
+        // (bilininteg.cpp:4012 `AssembleBlock` + :4055) is, with
+        // `w = ip.weight/2`, `w1 = w/Trans.Elem1->Weight()`,
+        // `nL = w1·λ·nor`, `nM = w1·μ·nor`, `dshape_ps = dshape·adjJ`:
+        //   elmat(φ_a·e_i, φ_b·e_j) += shape_a · [ dshape_b·nL_i
+        //                                            + δᵢⱼ·dshape_b·nM
+        //                                            + dshape_b_j·nM_i ]
+        //   jmatcoef = kappa·(nor·nor)·(wL1+2wM1+wL2+2wM2)
+        // and then `elmat := -elmat + alpha·elmatᵀ + jmat`.  The factors of
+        // `Weight` cancel exactly as in `dg.rs`: `dshape_ps·nM` is
+        // `det(J)·w1·μ·(J⁻ᵀ∇φ)·nor = (ip.weight/2)·μ·∇ₓφ·nor`, and
+        // `jmatcoef` is `kappa·|nor|²·ip.weight/2·( (λ+2μ)/det₁ + (λ+2μ)/det₂ )`
+        // — which is exactly the `w_f·pen` term kept below with `w_f` the
+        // isoparametric face measure (`ipw·|nor|`) and `pen` the stress-based
+        // penalty `kappa(λ+2μ)/|nor|`.  Both are unchanged *numbers* on a
+        // straight element, where `|nor|` is the edge length.
+        let g1 = face_point_geom(mesh, el, fa, fb, xi_f[0]);
+        let g2 = face_point_geom(mesh, er, fa, fb, xi_f[0]);
+        // Face size from the isoparametric edge (`nor`'s magnitude = |dX/dξ|;
+        // MFEM's `sqrt(nor·nor)`), and the unit normal MFEM's `nor` reduces to.
+        let h_f = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
+        let normal = [g1.nor[0] / h_f, g1.nor[1] / h_f];
         let w_f = q_face.weights[qi] * h_f;
-        let xp: Vec<f64> = (0..dim).map(|i| x0f[i] + (x1f[i] - x0f[i]) * xi_f[0]).collect();
 
-        let xi_l = phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim);
-        let xi_r = phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim);
-
-        re_l.eval_basis(&xi_l, &mut phi_l);
-        re_r.eval_basis(&xi_r, &mut phi_r);
-        re_l.eval_grad_basis(&xi_l, &mut gref_l);
-        re_r.eval_grad_basis(&xi_r, &mut gref_r);
-        xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
-        xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
+        re_l.eval_basis(&g1.eip, &mut phi_l);
+        re_r.eval_basis(&g2.eip, &mut phi_r);
+        re_l.eval_grad_basis(&g1.eip, &mut gref_l);
+        re_r.eval_grad_basis(&g2.eip, &mut gref_r);
+        xform_grads(&g1.jit, &gref_l, &mut gphys_l, n_l, dim);
+        xform_grads(&g2.jit, &gref_r, &mut gphys_r, n_r, dim);
 
         // SIP interior penalty with averaged Lame constants
         let lam_face = 0.5 * (lam_l + lam_r);
@@ -504,21 +528,13 @@ fn assemble_boundary_face_stress<S: FESpace>(
 ) {
     let order = space.order();
     let face_nodes = mesh.face_nodes(face);
-    let (h_f, mut normal) = face_geom_2d(mesh, face_nodes);
-    orient_normal_outward(mesh, elem, face_nodes, &mut normal);
+    let fa = face_nodes[0];
+    let fb = face_nodes[1];
 
     let et = mesh.element_type(elem);
     let re = ref_elem_vol(et, order);
     let n = re.n_dofs();
     let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
-
-    let nodes = mesh.element_nodes(elem);
-    let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-    // D696 batch 4: abs RETAINED — degeneracy guard (magnitude test).
-    if det_j.abs() < 1e-30 {
-        return;
-    }
-    let jit = jac.clone().try_inverse().unwrap().transpose();
 
     let lam = lambda_elem[elem as usize];
     let mu = mu_elem[elem as usize];
@@ -526,22 +542,27 @@ fn assemble_boundary_face_stress<S: FESpace>(
     let face_re = ref_elem_face(ElementType::Line2, order);
     let q_face = face_re.quadrature(quad_order);
 
-    let x0f = mesh.node_coords(face_nodes[0]);
-    let x1f = mesh.node_coords(face_nodes[1]);
-
     let mut kbd = vec![0.0_f64; n * n * dim * dim];
     let mut phi = vec![0.0_f64; n];
     let mut gref = vec![0.0_f64; n * dim];
     let mut gphys = vec![0.0_f64; n * dim];
 
     for (qi, xi_f) in q_face.points.iter().enumerate() {
+        // D799-3: same isoparametric face route as the interior term.  MFEM's
+        // `DGElasticityIntegrator` boundary case is the `ndofs2 == 0` arm of
+        // `AssembleFaceMatrix`: `w = ip.weight` (no ½), `w1 = w/Weight₁`,
+        // `wLM = wL1 + 2wM1`, `jmatcoef = kappa·(nor·nor)·wLM`, so the
+        // consistency/symmetry terms carry no det(J) and the penalty is
+        // `kappa·|nor|²·ip.weight·(λ+2μ)/det₁` — again the `w_f·pen` kept below
+        // with the isoparametric face measure and `pen = kappa(λ+2μ)/|nor|`.
+        let g1 = face_point_geom(mesh, elem, fa, fb, xi_f[0]);
+        let h_f = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
+        let normal = [g1.nor[0] / h_f, g1.nor[1] / h_f];
         let w_f = q_face.weights[qi] * h_f;
-        let xp: Vec<f64> = (0..dim).map(|i| x0f[i] + (x1f[i] - x0f[i]) * xi_f[0]).collect();
-        let xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
 
-        re.eval_basis(&xi_e, &mut phi);
-        re.eval_grad_basis(&xi_e, &mut gref);
-        xform_grads(&jit, &gref, &mut gphys, n, dim);
+        re.eval_basis(&g1.eip, &mut phi);
+        re.eval_grad_basis(&g1.eip, &mut gref);
+        xform_grads(&g1.jit, &gref, &mut gphys, n, dim);
 
         let pen = kappa * (lam + 2.0 * mu) / h_f;
 

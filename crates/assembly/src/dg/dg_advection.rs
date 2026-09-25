@@ -14,8 +14,6 @@
 //! - [`assemble_dg_interior_faces`] — generic face-assembly driver.
 //! - [`DgAdvectionRhs`] — right-hand side closure for explicit RK time stepping.
 
-use nalgebra::DMatrix;
-
 use std::f64::consts::PI;
 
 use fem_core::types::{ElemId, NodeId};
@@ -27,6 +25,8 @@ use fem_space::fe_space::FESpace;
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 use crate::interior_faces::InteriorFaceList;
+
+use super::dg_base::{face_point_geom, face_point_geom_3d};
 
 
 // ─── DgFaceQpData ─────────────────────────────────────────────────────────────
@@ -40,6 +40,11 @@ pub struct DgFaceQpData<'a> {
     /// Spatial dimension.
     pub dim: usize,
     /// Effective integration weight: quadrature weight × face Jacobian.
+    ///
+    /// D799-3: on the isoparametric face route this is `ipw·|nor|` — MFEM's
+    /// `ip.weight·nor` with the unit normal folded out — so it stays the same
+    /// *number* on a straight element (where `|nor|` is the chord length) and
+    /// carries the curved face measure on a curved one.
     pub weight: f64,
     /// Basis function values on the left element; length `n_dofs_l`.
     pub phi_l: &'a [f64],
@@ -51,6 +56,9 @@ pub struct DgFaceQpData<'a> {
     /// Physical gradients on the right element; length `n_dofs_r × dim`.
     pub grad_phys_r: &'a [f64],
     /// Unit normal pointing outward from the left element; length `dim`.
+    ///
+    /// D799-3: the unit form of MFEM's `nor = CalcOrtho(Trans.Jacobian())`, so
+    /// `weight·normal` is exactly MFEM's `ip.weight·nor`.
     pub normal: &'a [f64],
     /// Physical coordinates of this quadrature point; length `dim`.
     pub x_phys: &'a [f64],
@@ -98,34 +106,6 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         let er = face.elem_right;
         let face_nodes = &face.face_nodes;
 
-        // Face geometry
-        let mut normal_l: Vec<f64>;
-        let h_f: f64;
-
-        if dim == 2 {
-            let x0 = mesh.node_coords(face_nodes[0]);
-            let x1 = mesh.node_coords(face_nodes[1]);
-            let dx = x1[0] - x0[0];
-            let dy = x1[1] - x0[1];
-            h_f = (dx*dx + dy*dy).sqrt();
-            normal_l = vec![dy / h_f, -dx / h_f];
-        } else {
-            // 3-D: use the first two face nodes for a rough normal
-            let x0 = mesh.node_coords(face_nodes[0]);
-            let x1 = mesh.node_coords(face_nodes[1]);
-            let x2 = mesh.node_coords(face_nodes[2]);
-            let v1 = [x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]];
-            let v2 = [x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]];
-            let nx = v1[1]*v2[2] - v1[2]*v2[1];
-            let ny = v1[2]*v2[0] - v1[0]*v2[2];
-            let nz = v1[0]*v2[1] - v1[1]*v2[0];
-            h_f = (nx*nx + ny*ny + nz*nz).sqrt();
-            normal_l = vec![nx / h_f, ny / h_f, nz / h_f];
-        }
-
-        // Ensure normal points outward from left element
-        orient_normal_outward(mesh, el, face_nodes, &mut normal_l);
-
         // Reference element for the face
         let face_elem_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
         let ref_face = ref_elem_face(face_elem_type, order);
@@ -142,24 +122,6 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         let elem_order_r = space.element_order(er);
         let re_l = ref_elem_vol(et_l, elem_order_l);
         let re_r = ref_elem_vol(et_r, elem_order_r);
-
-        let nodes_l = mesh.element_nodes(el);
-        let nodes_r = mesh.element_nodes(er);
-
-        // Jacobians for both elements (affine for tri, centroid for quad)
-        let (jac_l, det_l) = simplex_jac(mesh, nodes_l, dim);
-        let (jac_r, det_r) = simplex_jac(mesh, nodes_r, dim);
-        let jit_l = jac_l.clone().try_inverse().unwrap_or_else(|| {
-            eprintln!("  warning: degenerate left element {} for face, det={:.3e}", el, det_l);
-            DMatrix::identity(2, 2)
-        }).transpose();
-        let jit_r = jac_r.clone().try_inverse().unwrap_or_else(|| {
-            eprintln!("  warning: degenerate right element {} for face, det={:.3e}", er, det_r);
-            DMatrix::identity(2, 2)
-        }).transpose();
-
-        let x0_l = mesh.node_coords(nodes_l[0]);
-        let x0_r = mesh.node_coords(nodes_r[0]);
 
         // Scatter: face quadrature points along the edge (2-D) or triangle (3-D)
         let face_points: Vec<Vec<f64>> = q_face.points.clone();
@@ -178,32 +140,72 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         let mut gphys_r = vec![0.0_f64; n_r * dim];
 
         for (qi, xi_f) in face_points.iter().enumerate() {
-            let w_f = face_weights[qi] * h_f;
-
-            // Physical quadrature point on the face (linear interpolation of face nodes)
-            let xp: Vec<f64> = if dim == 2 {
-                let x0f = mesh.node_coords(face_nodes[0]);
-                let x1f = mesh.node_coords(face_nodes[1]);
-                let t = xi_f[0];
-                (0..dim).map(|i| (1.0 - t) * x0f[i] + t * x1f[i]).collect()
+            // ── D799-3: the isoparametric face geometry (MFEM
+            // `Trans.SetAllIntPoints` + `nor = CalcOrtho(Trans.Jacobian())`).
+            //
+            // The pre-fix route built its own normal out of the face's **corner
+            // nodes** (`(dy/h, -dx/h)` in 2-D; three of the face's vertices in
+            // 3-D), scaled the QP weight by that chord, and recovered the
+            // element reference point by *inverting the physical map*
+            // (`phys_to_ref` over `simplex_jac`, an affine or centroid
+            // Jacobian).  MFEM instead composes the face transformation through
+            // `Elem1`'s isoparametric map:
+            //   * the element reference point is `Loc1`/`Loc2` (pure reference
+            //     composition — a curved element is sampled at the exact point
+            //     of its own order-`g` map),
+            //   * `nor` is the orthogonal of the composed face Jacobian
+            //     `J_elem(eip)·d(eip)/dξ` — its **magnitude** is the face
+            //     measure, not a unit normal (`|nor|` = the edge arc-length
+            //     derivative in 2-D, the face area element in 3-D),
+            //   * the physical QP comes from `Elem1->Transform(eip)`, which is
+            //     what the velocity coefficient is evaluated at.
+            // The face rules are MFEM's `[0,1]` rules (`Σw = 1` on a segment,
+            // `1/2` on a triangle), and `weight = ipw·|nor|` is MFEM's
+            // `ip.weight·nor` with the unit normal folded out — identical on a
+            // straight element (where `|nor|` *is* the chord length) and
+            // isoparametric on a curved one.
+            let (eip_l, eip_r, jit_l, jit_r, xp, nor_unit, h_face) = if dim == 2 {
+                let g1 = face_point_geom(mesh, el, face_nodes[0], face_nodes[1], xi_f[0]);
+                let g2 = face_point_geom(mesh, er, face_nodes[0], face_nodes[1], xi_f[0]);
+                let nrm = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
+                (
+                    g1.eip.to_vec(),
+                    g2.eip.to_vec(),
+                    g1.jit,
+                    g2.jit,
+                    g1.xp.to_vec(),
+                    vec![g1.nor[0] / nrm, g1.nor[1] / nrm],
+                    nrm,
+                )
             } else {
-                // Barycentric interpolation for 3-D triangular faces
-                let c0 = mesh.node_coords(face_nodes[0]);
-                let c1 = mesh.node_coords(face_nodes[1]);
-                let c2 = mesh.node_coords(face_nodes[2]);
-                let u = xi_f[0];
-                let v = xi_f[1];
-                (0..dim).map(|i| (1.0 - u - v) * c0[i] + u * c1[i] + v * c2[i]).collect()
+                let g1 = face_point_geom_3d(
+                    mesh, el, face_nodes[0], face_nodes[1], face_nodes[2],
+                    [xi_f[0], xi_f[1]],
+                );
+                let g2 = face_point_geom_3d(
+                    mesh, er, face_nodes[0], face_nodes[1], face_nodes[2],
+                    [xi_f[0], xi_f[1]],
+                );
+                let nrm = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]
+                    + g1.nor[2] * g1.nor[2])
+                    .sqrt()
+                    .max(1e-30);
+                (
+                    g1.eip.to_vec(),
+                    g2.eip.to_vec(),
+                    g1.jit,
+                    g2.jit,
+                    g1.xp.to_vec(),
+                    vec![g1.nor[0] / nrm, g1.nor[1] / nrm, g1.nor[2] / nrm],
+                    nrm,
+                )
             };
+            let w_f = face_weights[qi] * h_face;
 
-            // Map physical point to reference coordinates of each element
-            let xi_l = phys_to_ref(&jac_l, x0_l, &xp, dim);
-            let xi_r = phys_to_ref(&jac_r, x0_r, &xp, dim);
-
-            re_l.eval_basis(&xi_l, &mut phi_l);
-            re_r.eval_basis(&xi_r, &mut phi_r);
-            re_l.eval_grad_basis(&xi_l, &mut gref_l);
-            re_r.eval_grad_basis(&xi_r, &mut gref_r);
+            re_l.eval_basis(&eip_l, &mut phi_l);
+            re_r.eval_basis(&eip_r, &mut phi_r);
+            re_l.eval_grad_basis(&eip_l, &mut gref_l);
+            re_r.eval_grad_basis(&eip_r, &mut gref_r);
             // Transform gradients (needed only if integrator uses grad, but computed for consistency)
             xform_grads(&jit_l, &gref_l, &mut gphys_l, n_l, dim);
             xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
@@ -217,7 +219,7 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
                 phi_r: &phi_r,
                 grad_phys_l: &gphys_l,
                 grad_phys_r: &gphys_r,
-                normal: &normal_l,
+                normal: &nor_unit,
                 x_phys: &xp,
                 elem_l: el,
                 elem_r: er,
@@ -427,17 +429,6 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
     for f in mesh.face_iter() {
         if !tags.contains(&mesh.face_tag(f)) { continue; }
         let fnodes = mesh.face_nodes(f);
-        let h_f: f64;
-        let normal: Vec<f64>;
-
-        if dim == 2 {
-            let x0 = mesh.node_coords(fnodes[0]);
-            let x1 = mesh.node_coords(fnodes[1]);
-            let dx = x1[0] - x0[0];
-            let dy = x1[1] - x0[1];
-            h_f = (dx*dx + dy*dy).sqrt();
-            normal = vec![dy / h_f, -dx / h_f];
-        } else { return rhs; } // 3-D not implemented yet
 
         // Find owning element
         let elem = find_face_elem(mesh, f, fnodes);
@@ -450,23 +441,39 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
         let ref_elem = ref_elem_vol(et, order);
         let n_dofs_e = ref_elem.n_dofs();
         let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(elem);
-        let (jac, _) = simplex_jac(mesh, nodes, dim);
-        let x0_e = mesh.node_coords(nodes[0]);
 
         let mut f_elem = vec![0.0_f64; n_dofs_e];
         let mut phi = vec![0.0_f64; n_dofs_e];
 
         for (qi, xi_f) in q_face.points.iter().enumerate() {
-            let w_f = q_face.weights[qi] * h_f;
-            let xp: Vec<f64> = {
-                let x0f = mesh.node_coords(fnodes[0]);
-                let x1f = mesh.node_coords(fnodes[1]);
-                let t = xi_f[0];
-                (0..dim).map(|i| (1.0 - t) * x0f[i] + t * x1f[i]).collect()
+            // D799-3: same isoparametric face route as `assemble_dg_interior_faces`
+            // — `nor = CalcOrtho(Trans.Jacobian())` through `Elem1`'s order-`g`
+            // map, the reference point from `Loc1` (here `face_point_geom`'s
+            // `eip`), the physical point from `Elem1->Transform`, and the
+            // `[0,1]` face rule (`Σw = 1`).  `weight = ipw·|nor|` is MFEM's
+            // `ip.weight·nor` with the unit normal folded out.
+            let (eip, xp, normal, h_face) = if dim == 2 {
+                let g = face_point_geom(mesh, elem, fnodes[0], fnodes[1], xi_f[0]);
+                let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]).sqrt().max(1e-30);
+                (g.eip.to_vec(), g.xp.to_vec(), vec![g.nor[0] / nrm, g.nor[1] / nrm], nrm)
+            } else {
+                let g = face_point_geom_3d(
+                    mesh, elem, fnodes[0], fnodes[1], fnodes[2],
+                    [xi_f[0], xi_f[1]],
+                );
+                let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]
+                    + g.nor[2] * g.nor[2])
+                    .sqrt()
+                    .max(1e-30);
+                (
+                    g.eip.to_vec(),
+                    g.xp.to_vec(),
+                    vec![g.nor[0] / nrm, g.nor[1] / nrm, g.nor[2] / nrm],
+                    nrm,
+                )
             };
-            let xi = phys_to_ref(&jac, x0_e, &xp, dim);
-            ref_elem.eval_basis(&xi, &mut phi);
+            let w_f = q_face.weights[qi] * h_face;
+            ref_elem.eval_basis(&eip, &mut phi);
 
             let ctx = CoeffCtx::from_qp(&xp, dim, elem, mesh.face_tag(f), None, None);
             let mut b = [0.0_f64; 3];
@@ -513,21 +520,8 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
     for f in mesh.face_iter() {
         if !tags.contains(&mesh.face_tag(f)) { continue; }
         let fnodes = mesh.face_nodes(f);
-        let h_f: f64;
-        let mut normal: Vec<f64>;
-
-        if dim == 2 {
-            let x0 = mesh.node_coords(fnodes[0]);
-            let x1 = mesh.node_coords(fnodes[1]);
-            let dx = x1[0] - x0[0];
-            let dy = x1[1] - x0[1];
-            h_f = (dx*dx + dy*dy).sqrt();
-            normal = vec![dy / h_f, -dx / h_f];
-        } else { return (coo.into_csr(), rhs); } // 3-D not implemented yet
 
         let elem = find_face_elem(mesh, f, fnodes);
-        // Ensure normal points outward
-        orient_normal_outward(mesh, elem, fnodes, &mut normal);
 
         let face_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
         let ref_face = ref_elem_face(face_type, order);
@@ -537,24 +531,42 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
         let ref_elem = ref_elem_vol(et, order);
         let n_dofs_e = ref_elem.n_dofs();
         let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
-        let nodes = mesh.element_nodes(elem);
-        let (jac, _) = simplex_jac(mesh, nodes, dim);
-        let x0_e = mesh.node_coords(nodes[0]);
 
         let mut f_elem = vec![0.0_f64; n_dofs_e];
         let mut k_elem = vec![0.0_f64; n_dofs_e * n_dofs_e];
         let mut phi = vec![0.0_f64; n_dofs_e];
 
         for (qi, xi_f) in q_face.points.iter().enumerate() {
-            let w_f = q_face.weights[qi] * h_f;
-            let xp: Vec<f64> = {
-                let x0f = mesh.node_coords(fnodes[0]);
-                let x1f = mesh.node_coords(fnodes[1]);
-                let t = xi_f[0];
-                (0..dim).map(|i| (1.0 - t) * x0f[i] + t * x1f[i]).collect()
+            // D799-3: the same isoparametric face route as
+            // `assemble_dg_interior_faces` — `nor = CalcOrtho(Trans.Jacobian())`
+            // through `Elem1`'s order-`g` map, outward from the owner element by
+            // construction (`face_point_geom`'s own-edge orientation), the
+            // reference point from `Loc1`, the physical point from
+            // `Elem1->Transform`, and the `[0,1]` face rule (`Σw = 1`).
+            // `weight = ipw·|nor|` is MFEM's `ip.weight·nor` with the unit
+            // normal folded out — the same number on a straight element.
+            let (eip, xp, normal, h_face) = if dim == 2 {
+                let g = face_point_geom(mesh, elem, fnodes[0], fnodes[1], xi_f[0]);
+                let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]).sqrt().max(1e-30);
+                (g.eip.to_vec(), g.xp.to_vec(), vec![g.nor[0] / nrm, g.nor[1] / nrm], nrm)
+            } else {
+                let g = face_point_geom_3d(
+                    mesh, elem, fnodes[0], fnodes[1], fnodes[2],
+                    [xi_f[0], xi_f[1]],
+                );
+                let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]
+                    + g.nor[2] * g.nor[2])
+                    .sqrt()
+                    .max(1e-30);
+                (
+                    g.eip.to_vec(),
+                    g.xp.to_vec(),
+                    vec![g.nor[0] / nrm, g.nor[1] / nrm, g.nor[2] / nrm],
+                    nrm,
+                )
             };
-            let xi = phys_to_ref(&jac, x0_e, &xp, dim);
-            ref_elem.eval_basis(&xi, &mut phi);
+            let w_f = q_face.weights[qi] * h_face;
+            ref_elem.eval_basis(&eip, &mut phi);
 
             let ctx = CoeffCtx::from_qp(&xp, dim, elem, mesh.face_tag(f), None, None);
             let mut b = [0.0_f64; 3];
@@ -611,20 +623,6 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
     let q_face = ref_face.quadrature(quad_order);
 
     for &(el_l, el_r, ref fn_l, ref fn_r) in pairs {
-        // Face geometry from LEFT element's face nodes
-        // Periodic interface normal: opposite of the raw edge normal.
-        // The raw normal (dy/h_f, -dx/h_f) is the RIGHT-of-edge convention,
-        // which after orient_normal_outward gives the outward normal from
-        // the left element.  For periodic faces the interface normal should
-        // point FROM left element TO right element through the periodic
-        // boundary — the OPPOSITE of the outward normal.
-        let p0 = mesh.node_coords(fn_l[0]);
-        let p1 = mesh.node_coords(fn_l[1]);
-        let dx = p1[0] - p0[0];
-        let dy = p1[1] - p0[1];
-        let h_f = (dx * dx + dy * dy).sqrt();
-        let normal_l = vec![-dy / h_f, dx / h_f];
-
         // Get element data for both sides
         let dofs_l: Vec<usize> = space.element_dofs(el_l).iter().map(|&d| d as usize).collect();
         let dofs_r: Vec<usize> = space.element_dofs(el_r).iter().map(|&d| d as usize).collect();
@@ -636,12 +634,6 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
         let o_r = space.element_order(el_r);
         let re_l = ref_elem_vol(et_l, o_l);
         let re_r = ref_elem_vol(et_r, o_r);
-        let nodes_l = mesh.element_nodes(el_l);
-        let nodes_r = mesh.element_nodes(el_r);
-        let (jac_l, _) = simplex_jac(mesh, nodes_l, dim);
-        let (jac_r, _) = simplex_jac(mesh, nodes_r, dim);
-        let x0_l = mesh.node_coords(nodes_l[0]);
-        let x0_r = mesh.node_coords(nodes_r[0]);
 
         let mut phi_l = vec![0.0; n_l];
         let mut phi_r = vec![0.0; n_r];
@@ -651,30 +643,25 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
         let mut k_rr = vec![0.0; n_r * n_r];
 
         for (qi, xi_f) in q_face.points.iter().enumerate() {
-            let w_f = q_face.weights[qi] * h_f;
+            // D799-3: each side's own isoparametric face geometry (the periodic
+            // pair's two faces are *different* edges in the mesh tables, so each
+            // element is composed through its own `Loc1`/`Elem1` map — the
+            // pre-fix chord interpolation and physical-inverse map only agreed
+            // with MFEM on straight edges).  The convention for the interface
+            // normal is unchanged: it points from the left element *towards* the
+            // right one through the periodic seam, i.e. the **negated** outward
+            // normal of the left element (`face_point_geom`'s `nor` is always
+            // outward).
+            let g_l = face_point_geom(mesh, el_l, fn_l[0], fn_l[1], xi_f[0]);
+            let g_r = face_point_geom(mesh, el_r, fn_r[0], fn_r[1], xi_f[0]);
+            let nrm = (g_l.nor[0] * g_l.nor[0] + g_l.nor[1] * g_l.nor[1]).sqrt().max(1e-30);
+            let normal_l = vec![-g_l.nor[0] / nrm, -g_l.nor[1] / nrm];
+            let w_f = q_face.weights[qi] * nrm;
+            let xp_l = g_l.xp.to_vec();
 
-            // Physical point on LEFT element's face
-            let t = xi_f[0];
-            let xp_l: Vec<f64> = (0..dim).map(|i| {
-                let p0 = mesh.node_coords(fn_l[0]);
-                let p1 = mesh.node_coords(fn_l[1]);
-                (1.0 - t) * p0[i] + t * p1[i]
-            }).collect();
-
-            // Physical point on RIGHT element's face
-            let xp_r: Vec<f64> = (0..dim).map(|i| {
-                let p0 = mesh.node_coords(fn_r[0]);
-                let p1 = mesh.node_coords(fn_r[1]);
-                (1.0 - t) * p0[i] + t * p1[i]
-            }).collect();
-
-            // Map to reference coordinates
-            let xi_l = phys_to_ref(&jac_l, x0_l, &xp_l, dim);
-            let xi_r = phys_to_ref(&jac_r, x0_r, &xp_r, dim);
-
-            // Evaluate bases
-            re_l.eval_basis(&xi_l, &mut phi_l);
-            re_r.eval_basis(&xi_r, &mut phi_r);
+            // Evaluate bases at each element's own composed reference point
+            re_l.eval_basis(&g_l.eip, &mut phi_l);
+            re_r.eval_basis(&g_r.eip, &mut phi_r);
 
             // Velocity at left face QP
             let ctx = CoeffCtx::from_qp(&xp_l, dim, el_l, 0, None, None);
@@ -877,7 +864,6 @@ pub use super::dg_base::ref_elem_face;
 pub use super::dg_base::simplex_jac;
 pub use super::dg_base::find_face_elem;
 pub use super::dg_base::{phys_to_ref, xform_grads};
-pub(crate) use super::dg_base::orient_normal_outward;
 
 /// (Unique to this module) Return a Crouzeix-Raviart reference element.
 pub fn ref_elem_cr(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {

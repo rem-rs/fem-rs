@@ -231,6 +231,13 @@ pub struct FacePointGeom {
     pub det_j: f64,
     /// `J^{-T}` of the element transformation at `eip`.
     pub jit: DMatrix<f64>,
+    /// `Trans.Elem1->Transform(eip)`: the physical face point through the
+    /// element's own isoparametric map — the point MFEM's coefficients
+    /// (`u->Eval(vu, *Trans.Elem1, eip1)`) are evaluated at.  On a straight
+    /// element it is bit-equal to the affine interpolation of the face's two
+    /// corner nodes (D799-3: the chord parameterisation the pre-fix code
+    /// built by hand).
+    pub xp: [f64; 2],
 }
 
 /// Find the local edge of a 2-D element whose endpoint nodes are `{a, b}`.
@@ -305,16 +312,20 @@ pub fn face_point_geom<M: MeshTopology + ?Sized>(
 ) -> FacePointGeom {
     let et = mesh.element_type(elem);
     let (le, forward) = find_local_edge(mesh, elem, a, b);
-    // ξ runs a → b; the element's own edge runs corner le → corner le+1.
+    // ξ runs a → b (the face's own node order, MFEM `Loc1`'s parameterisation);
+    // the element's own edge runs corner le → corner le+1.
     let s = if forward { xi } else { 1.0 - xi };
     let (eip, ds) = ref_edge_map(et, le, s);
-    let (jac, _xp) = element_jacobian_at(mesh, elem, &eip, 2);
-    // d(eip)/dξ = ± d(ref_edge)/ds, following the a → b parameterisation.
-    let tangent = if forward { ds } else { [-ds[0], -ds[1]] };
-    // J_face = J_elem · tangent  (the composed face Jacobian)
+    let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 2);
+    // J_face = J_elem · d(eip)/ds, with `ds` the element's **own** CCW edge
+    // tangent — `ref_edge_map`'s derivative is constant in `s`, so it is the
+    // same on either traversal direction.  Using the element's own direction
+    // (not the a → b one) is what makes `nor` MFEM's, i.e. pointing *out of*
+    // this element: MFEM fixes the sign through `FaceInfo`'s orientation bits,
+    // independently of how `Loc1` parameterises the face.
     let tf = [
-        jac[(0, 0)] * tangent[0] + jac[(0, 1)] * tangent[1],
-        jac[(1, 0)] * tangent[0] + jac[(1, 1)] * tangent[1],
+        jac[(0, 0)] * ds[0] + jac[(0, 1)] * ds[1],
+        jac[(1, 0)] * ds[0] + jac[(1, 1)] * ds[1],
     ];
     let nor = [tf[1], -tf[0]];
     let det_j = jac.determinant();
@@ -328,7 +339,146 @@ pub fn face_point_geom<M: MeshTopology + ?Sized>(
             DMatrix::identity(2, 2)
         })
         .transpose();
-    FacePointGeom { eip, nor, det_j, jit }
+    FacePointGeom { eip, nor, det_j, jit, xp: [xp[0], xp[1]] }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3-D face geometry by *reference composition*
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Everything a 3-D DG face term needs at one face quadrature point.
+pub struct FacePointGeom3 {
+    /// Reference point inside the element: MFEM `GetElement1IntPoint()`.
+    pub eip: [f64; 3],
+    /// MFEM `nor = CalcOrtho(Trans.Jacobian())` = the cross product of the two
+    /// columns of the composed face Jacobian `J_elem(eip)·d(eip)/dξ`; `|nor|`
+    /// is the face area element (`dA = |nor|·dξ₁dξ₂` for the `[0,1]²` face
+    /// rule, whose weights sum to 1/2 on a triangle).
+    pub nor: [f64; 3],
+    /// MFEM `Trans.Elem1->Weight()` = `det(J)` of the element transformation
+    /// at `eip` (signed).
+    pub det_j: f64,
+    /// `J^{-T}` of the element transformation at `eip`.
+    pub jit: DMatrix<f64>,
+    /// `Trans.Elem1->Transform(eip)`.
+    pub xp: [f64; 3],
+}
+
+/// Reference-tetrahedron vertex coordinates, MFEM `Geometry::TETRAHEDRON`
+/// reference element (`[0,1]³` simplex).
+const TET_REF_V: [[f64; 3]; 4] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+];
+
+/// D799-3 3-D counterpart of [`face_point_geom`]: MFEM
+/// `FaceElementTransformations` geometry at the reference-face coordinate
+/// `ξ ∈ [0,1]²` of the **triangular** face whose nodes are `(a, b, c)`.
+///
+/// The face is parameterised from node `a`: `ξ₁` runs `a → b` and `ξ₂` runs
+/// `a → c` (the reference triangle `(0,0),(1,0),(0,1)` of MFEM's
+/// `Geometry::TRIANGLE`), and the element reference point is obtained by the
+/// **reference composition** `Loc1` — never by inverting the physical map.  The
+/// composed face Jacobian is `J_face = J_elem(eip)·[d(eip)/dξ₁ | d(eip)/dξ₂]`
+/// and MFEM's `CalcOrtho` in 3-D returns the **cross product of its two
+/// columns** (`densemat.cpp:2760`, `n = c₀ × c₁`).
+///
+/// Orientation: MFEM's `FaceInfo` orientation bits order the face's vertices so
+/// that `c₀ × c₁` points *out of* `Elem1`.  The same is achieved here at the
+/// reference level: the sign of `nor` is flipped whenever `c₀ × c₁` would point
+/// *into* the element (tested against the element's fourth vertex in the
+/// reference tetrahedron, which is exact and mesh-independent), while the
+/// `ξ ↦ eip` parameterisation stays the face's own `(a, b, c)` order — the same
+/// point both neighbours are composed at, exactly as `Loc1`/`Loc2` receive the
+/// same `ip`.  On a straight tetrahedron this reproduces the affine face
+/// geometry bit for bit; on a curved one it follows the isoparametric map.
+///
+/// Only tetrahedral (triangular-face) elements are supported: the 3-D DG paths
+/// take their face measure from the `Tri3` reference element and the face list
+/// only covers tetrahedra (`build_face_elem_map`'s `(4,3)` arm).
+// MFEM: FaceElementTransformations::Jacobian + CalcOrtho + Elem1->Weight()
+pub fn face_point_geom_3d<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+    xi: [f64; 2],
+) -> FacePointGeom3 {
+    let et = mesh.element_type(elem);
+    if et != ElementType::Tet4 {
+        panic!("face_point_geom_3d: unsupported element type {et:?} (triangular faces of Tet4 only)");
+    }
+    let en = mesh.element_nodes(elem);
+    if en.len() != 4 {
+        panic!("face_point_geom_3d: element {elem} has {} nodes, expected 4 (Tet4)", en.len());
+    }
+    let idx_of = |n: u32| -> usize {
+        en.iter().position(|&m| m == n).unwrap_or_else(|| {
+            panic!("face_point_geom_3d: element {elem} has no node {n}")
+        })
+    };
+    let (ia, ib, ic) = (idx_of(a), idx_of(b), idx_of(c));
+    let (ra, rb, rc) = (TET_REF_V[ia], TET_REF_V[ib], TET_REF_V[ic]);
+    // The element's fourth reference vertex: the one index not in {a, b, c}.
+    let id = (0..4).find(|&k| k != ia && k != ib && k != ic).unwrap();
+    let rd = TET_REF_V[id];
+    // Reference-face normal c₀ × c₁ with the face's own (a, b, c) order; the
+    // sign is corrected below when it points into the element.
+    let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
+    let t2 = [rc[0] - ra[0], rc[1] - ra[1], rc[2] - ra[2]];
+    let nref = [
+        t1[1] * t2[2] - t1[2] * t2[1],
+        t1[2] * t2[0] - t1[0] * t2[2],
+        t1[0] * t2[1] - t1[1] * t2[0],
+    ];
+    let to_4th = [rd[0] - ra[0], rd[1] - ra[1], rd[2] - ra[2]];
+    let outward = nref[0] * to_4th[0] + nref[1] * to_4th[1] + nref[2] * to_4th[2] < 0.0;
+    let (x1, x2) = (xi[0], xi[1]);
+    let eip = [
+        ra[0] + x1 * (rb[0] - ra[0]) + x2 * (rc[0] - ra[0]),
+        ra[1] + x1 * (rb[1] - ra[1]) + x2 * (rc[1] - ra[1]),
+        ra[2] + x1 * (rb[2] - ra[2]) + x2 * (rc[2] - ra[2]),
+    ];
+    let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 3);
+    // Composed face Jacobian columns: J_elem · d(eip)/dξ_k, in the face's own
+    // (a, b, c) parameterisation — the same ξ both neighbours are composed at.
+    let mut col = [[0.0_f64; 3]; 2];
+    for k in 0..2 {
+        let tan = if k == 0 {
+            [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]]
+        } else {
+            [rc[0] - ra[0], rc[1] - ra[1], rc[2] - ra[2]]
+        };
+        for i in 0..3 {
+            col[k][i] = jac[(i, 0)] * tan[0] + jac[(i, 1)] * tan[1] + jac[(i, 2)] * tan[2];
+        }
+    }
+    // CalcOrtho (3-D): the cross product of the two Jacobian columns, with its
+    // sign chosen so that `nor` points *out of* this element — MFEM's `FaceInfo`
+    // orientation bits do the same at the reference level, independently of the
+    // face's parameterisation.
+    let (c0, c1) = (col[0], col[1]);
+    let mut nor = [
+        c0[1] * c1[2] - c0[2] * c1[1],
+        c0[2] * c1[0] - c0[0] * c1[2],
+        c0[0] * c1[1] - c0[1] * c1[0],
+    ];
+    if !outward {
+        nor = [-nor[0], -nor[1], -nor[2]];
+    }
+    let det_j = jac.determinant();
+    // Degeneracy guard (magnitude test only, D696 batch 4 precedent).
+    let jit = jac
+        .try_inverse()
+        .unwrap_or_else(|| {
+            eprintln!("  warning: degenerate element {elem} in 3-D DG face assembly");
+            DMatrix::identity(3, 3)
+        })
+        .transpose();
+    FacePointGeom3 { eip, nor, det_j, jit, xp: [xp[0], xp[1], xp[2]] }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -380,94 +530,6 @@ pub fn phys_to_ref(
         }
     }
     xi
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Face geometry
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// 2-D face geometry: returns `(edge_length, unit_normal)`.
-///
-/// The normal is the 90° CCW rotation of the edge direction.
-/// Use `orient_normal_outward` to guarantee outward orientation from the
-/// adjacent element.
-// MFEM: CalcOrtho (2D face Jacobian)
-pub fn face_geom_2d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> (f64, Vec<f64>) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let x1 = mesh.node_coords(nodes[1]);
-    let dx = x1[0] - x0[0];
-    let dy = x1[1] - x0[1];
-    let len = (dx * dx + dy * dy).sqrt();
-    (len, vec![-dy / len, dx / len])
-}
-
-/// 3-D face geometry: returns `(face_area, unit_normal)` using the cross
-/// product of two edge vectors.
-// MFEM: CalcOrtho (3D face Jacobian)
-pub fn face_geom_3d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> (f64, Vec<f64>) {
-    let a = mesh.node_coords(nodes[0]);
-    let b = mesh.node_coords(nodes[1]);
-    let c = mesh.node_coords(nodes[2]);
-    let v1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let cr = [
-        v1[1] * v2[2] - v1[2] * v2[1],
-        v1[2] * v2[0] - v1[0] * v2[2],
-        v1[0] * v2[1] - v1[1] * v2[0],
-    ];
-    let area = 0.5 * (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2])
-        .sqrt()
-        .max(1e-30);
-    let nrm = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2])
-        .sqrt()
-        .max(1e-30);
-    (area, vec![cr[0] / nrm, cr[1] / nrm, cr[2] / nrm])
-}
-
-/// Ensure `normal` points outward from `elem` by checking against the element
-/// centroid.  If `dot(normal, face_midpoint − centroid) < 0`, the normal
-/// points inward → flip it.
-// MFEM: no direct MFEM equivalent; computed from element geometry
-pub fn orient_normal_outward<M: MeshTopology>(
-    mesh: &M,
-    elem: u32,
-    face_nodes: &[u32],
-    normal: &mut [f64],
-) {
-    let dim = mesh.dim() as usize;
-    let enodes = mesh.element_nodes(elem);
-    let npe = enodes.len();
-    // Element centroid
-    let mut centroid = vec![0.0_f64; dim];
-    for &n in enodes {
-        let c = mesh.node_coords(n);
-        for d in 0..dim {
-            centroid[d] += c[d];
-        }
-    }
-    for d in 0..dim {
-        centroid[d] /= npe as f64;
-    }
-    // Face midpoint
-    let mut midpoint = vec![0.0_f64; dim];
-    for &n in face_nodes {
-        let c = mesh.node_coords(n);
-        for d in 0..dim {
-            midpoint[d] += c[d];
-        }
-    }
-    for d in 0..dim {
-        midpoint[d] /= face_nodes.len() as f64;
-    }
-    // Check orientation
-    let dot: f64 = (0..dim)
-        .map(|d| normal[d] * (midpoint[d] - centroid[d]))
-        .sum();
-    if dot < 0.0 {
-        for d in 0..dim {
-            normal[d] = -normal[d];
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
