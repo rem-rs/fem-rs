@@ -2251,6 +2251,67 @@ pub fn vector_l2_norm(mass: &CsrMatrix<f64>, dofs: &[f64]) -> f64 {
     dot.max(0.0).sqrt()
 }
 
+/// D800-1: the single geometry-arm gate for the three L² error estimators
+/// `compute_l2_error_hcurl` / `compute_l2_error_hdiv` / `compute_l2_error_l2`
+/// — one helper instead of three copies of the same cell-type list.
+///
+/// Returns `Some((geometry element, node row))` when the estimator's geometry
+/// comes from the isoparametric arm ([`crate::isoparametric_jacobian`] over
+/// [`crate::geo_ref_elem_from_mesh`]), and `None` when it must fall through
+/// to [`fem_mesh::transformation::element_jacobian_at`]:
+///
+/// * straight cells (`geom_order <= 1`) of the historical list
+///   `Quad4/Quad8/Quad9, Hex8/Hex20/Hex27, Prism6/Prism15, Pyramid5`: the
+///   vertex row with the order-1 family geometry element — the exact
+///   pre-D800-1 route, kept bit for bit (the D696 signed-det pins and the
+///   ex22/ex24/ex25 consumers sit on it);
+/// * curved cells (`geom_order > 1`) of the same list whose
+///   [`MeshTopology::geometry_nodes`] row has the geometry element's dof
+///   count: the high-order table `set_curvature` wrote, in the family
+///   element's own slot order — D787's `curved_geometry` gate
+///   (`geom_order >= 2` **and** row length == family `n_dofs()`).  Before
+///   D800-1 the arm walked the geometry element's slots over the *P1 vertex
+///   row* here, so every curved cell of the list panicked in
+///   `isoparametric_jacobian` (a curved Quad4: 9 slots over 4 entries).
+///
+/// Everything else — the simplices (whose curved geometry
+/// `element_jacobian_at` has served since D787), the complete
+/// `Prism18`/`Pyramid13` rows, and any curved row that does not match its
+/// family element (serendipity rows in a mixed mesh) — falls through to
+/// `element_jacobian_at`, which is family-aware and declines the same
+/// mismatched rows the same way.  (Measured in
+/// `tests/d800_use_iso_curved_geometry.rs`: on straight Prism18/Pyramid13 the
+/// two routes are pointwise bitwise-identical, so the historical membership
+/// of the list is value-neutral, not load-bearing.)
+fn l2_error_iso_geometry<M: MeshTopology>(
+    mesh: &M,
+    e: u32,
+) -> Option<(Box<dyn ReferenceElement>, Vec<u32>)> {
+    let et = mesh.element_type(e);
+    // The historical list, verbatim (straight-cell isoparametric set).
+    let use_iso = matches!(et,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+        | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+        | ElementType::Prism6 | ElementType::Prism15
+        | ElementType::Pyramid5);
+    if !use_iso {
+        return None;
+    }
+    let geo_elem = crate::geo_ref_elem_from_mesh(mesh, e)?;
+    if mesh.geom_order() > 1 {
+        // D800-1: walk the *geometry* table, not the P1 vertex row; a row
+        // that does not match the family element keeps the fall-through
+        // (D787's gate, e.g. a serendipity row inside a mixed mesh).
+        let row = mesh.geometry_nodes(e);
+        if row.len() != geo_elem.n_dofs() {
+            return None;
+        }
+        Some((geo_elem, row.to_vec()))
+    } else {
+        Some((geo_elem, mesh.element_nodes(e).to_vec()))
+    }
+}
+
 // ─── H(curl) L² error ────────────────────────────────────────────────────
 
 /// Compute the L² error of an H(curl) field against an exact vector field.
@@ -2293,30 +2354,23 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
             Some(crate::vector_assembler::nd_element_local_dofs(nd_space, e, dofs))
         };
         let mut ref_bv = vec![0.0; n_ldofs * dim];
-        let nodes = mesh.element_nodes(e);
-        // D793-4: `Prism18`/`Pyramid13` are deliberately NOT in this list even
-        // though their families (`Prism6/Prism15`, `Pyramid5`) are: the arm
-        // hands `isoparametric_jacobian` the element's *node* row
-        // (`mesh.element_nodes`, the P1 vertex table on a curved mesh) while
-        // the geometry element walks its own `n_dofs()` of the *geometry*
-        // table, so it is only valid for straight cells — a curved `Quad4`
-        // already panics here (index out of bounds, `vector_assembler.rs`;
-        // verified in round 73).  Adding the two labels would replace the
-        // correct `element_jacobian_at` fall-through of a curved
-        // Prism18/Pyramid13 with that panic, so the list stays as it is and
-        // the family-consistent route waits for the `geometry_nodes` fix (see
-        // the round-73 D800 sub-debt).
-        let use_iso = matches!(et,
-            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
-            | ElementType::Prism6 | ElementType::Prism15
-            | ElementType::Pyramid5);
-        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
+        // D800-1: the geometry route comes from the shared
+        // `l2_error_iso_geometry` helper (this used to be a private copy of
+        // the same cell-type list).  On a curved cell the helper hands the
+        // isoparametric arm the element's *geometry* row
+        // (`mesh.geometry_nodes`), so it no longer walks the geometry
+        // element's slots over the P1 vertex row — a curved `Quad4` used to
+        // panic there (index out of bounds; round-73 evidence
+        // `tmp/d793/smoke_post_fix.log`), and the whole list is now
+        // curve-safe.  `Prism18`/`Pyramid13` keep the family-aware
+        // `element_jacobian_at` fall-through (D787), which on straight cells
+        // is pointwise bitwise-identical to what their iso arm would compute
+        // (measured in `tests/d800_use_iso_curved_geometry.rs`).
+        let iso_geom = l2_error_iso_geometry(mesh, e);
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (w, jac, xp) = if use_iso {
-                let ge = geo_elem.as_ref().unwrap();
-                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+            let (w, jac, xp) = if let Some((ge, geo_row)) = iso_geom.as_ref() {
+                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, geo_row, ge.as_ref(), xi, dim);
                 // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
                 // Trans.Weight() = Det(J) signed; bitwise |det| on valid
                 // meshes.
@@ -2387,30 +2441,23 @@ pub fn compute_l2_error_hdiv<M: MeshTopology>(
         let elem_dofs: Vec<usize> = rt_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = rt_space.element_signs(e);
         let mut ref_bv = vec![0.0; n_ldofs * dim];
-        let nodes = mesh.element_nodes(e);
-        // D793-4: `Prism18`/`Pyramid13` are deliberately NOT in this list even
-        // though their families (`Prism6/Prism15`, `Pyramid5`) are: the arm
-        // hands `isoparametric_jacobian` the element's *node* row
-        // (`mesh.element_nodes`, the P1 vertex table on a curved mesh) while
-        // the geometry element walks its own `n_dofs()` of the *geometry*
-        // table, so it is only valid for straight cells — a curved `Quad4`
-        // already panics here (index out of bounds, `vector_assembler.rs`;
-        // verified in round 73).  Adding the two labels would replace the
-        // correct `element_jacobian_at` fall-through of a curved
-        // Prism18/Pyramid13 with that panic, so the list stays as it is and
-        // the family-consistent route waits for the `geometry_nodes` fix (see
-        // the round-73 D800 sub-debt).
-        let use_iso = matches!(et,
-            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
-            | ElementType::Prism6 | ElementType::Prism15
-            | ElementType::Pyramid5);
-        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
+        // D800-1: the geometry route comes from the shared
+        // `l2_error_iso_geometry` helper (this used to be a private copy of
+        // the same cell-type list).  On a curved cell the helper hands the
+        // isoparametric arm the element's *geometry* row
+        // (`mesh.geometry_nodes`), so it no longer walks the geometry
+        // element's slots over the P1 vertex row — a curved `Quad4` used to
+        // panic there (index out of bounds; round-73 evidence
+        // `tmp/d793/smoke_post_fix.log`), and the whole list is now
+        // curve-safe.  `Prism18`/`Pyramid13` keep the family-aware
+        // `element_jacobian_at` fall-through (D787), which on straight cells
+        // is pointwise bitwise-identical to what their iso arm would compute
+        // (measured in `tests/d800_use_iso_curved_geometry.rs`).
+        let iso_geom = l2_error_iso_geometry(mesh, e);
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (w, jac, xp) = if use_iso {
-                let ge = geo_elem.as_ref().unwrap();
-                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+            let (w, jac, xp) = if let Some((ge, geo_row)) = iso_geom.as_ref() {
+                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, geo_row, ge.as_ref(), xi, dim);
                 // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
                 // Trans.Weight() = Det(J) signed; bitwise |det| on valid
                 // meshes.
@@ -2476,19 +2523,11 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
             if e as usize >= mask.len() || mask[e as usize] { continue; }
         }
         let et = mesh.element_type(e);
-        let nodes = mesh.element_nodes(e);
-        // D793-4: `Prism18`/`Pyramid13` are deliberately NOT in this list — see
-        // the note in `compute_l2_error_hcurl`: the arm walks the geometry
-        // element's `n_dofs()` over the *node* row, so it is only valid for
-        // straight cells (a curved Quad4 panics), and adding the labels would
-        // replace the correct `element_jacobian_at` fall-through of a curved
-        // Prism18/Pyramid13 with that panic.
-        let use_iso = matches!(et,
-            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
-            | ElementType::Prism6 | ElementType::Prism15
-            | ElementType::Pyramid5);
-        let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
+        // D800-1: the geometry route comes from the shared
+        // `l2_error_iso_geometry` helper (this used to be a private copy of
+        // the same cell-type list; see the note in `compute_l2_error_hcurl`
+        // for the curved-vertex-row panic this replaces).
+        let iso_geom = l2_error_iso_geometry(mesh, e);
 
         let (quad, n_ldofs, use_lagrange, l2_re) = if order == 0 {
             // P0: use HDiv reference element's quadrature
@@ -2513,9 +2552,8 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
         for (qi, xi) in quad.points.iter().enumerate() {
             // D696 batch 3: SIGNED — MFEM ComputeL2Error weights with
             // Trans.Weight() = Det(J) signed; bitwise |det| on valid meshes.
-            let (w, xp) = if use_iso {
-                let ge = geo_elem.as_ref().unwrap();
-                let (_jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+            let (w, xp) = if let Some((ge, geo_row)) = iso_geom.as_ref() {
+                let (_jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, geo_row, ge.as_ref(), xi, dim);
                 (quad.weights[qi] * det, xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);
