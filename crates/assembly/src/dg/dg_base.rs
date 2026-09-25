@@ -20,6 +20,7 @@ use fem_element::{
     },
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
+use fem_mesh::transformation::element_jacobian_at;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Reference-element dispatch
@@ -160,8 +161,7 @@ pub fn quad_jac_at(x: &[f64], y: &[f64], xi: f64, eta: f64) -> (DMatrix<f64>, f6
 
 /// Per-point Jacobian of the bilinear quad map on the reference square `[0,1]²`
 /// with the **topological** (CCW) node order `(0,0),(1,0),(1,1),(0,1)` —
-/// the order MFEM's `ElementTransformation` uses for element nodes.  (The L2
-/// solution basis is lexicographic; geometry is always topological.)
+/// the order MFEM's `ElementTransformation` uses for element nodes.  (The L2/// solution basis is lexicographic; geometry is always topological.)
 pub fn quad_jac_at_01(x: &[f64], y: &[f64], xi: f64, eta: f64) -> (DMatrix<f64>, f64) {
     // N1=(1-x)(1-y)@(0,0), N2=x(1-y)@(1,0), N3=xy@(1,1), N4=(1-x)y@(0,1)
     let dxi  = [-(1.0 - eta),  (1.0 - eta),  eta, -eta];
@@ -213,6 +213,122 @@ pub fn phys_to_ref_quad_01(
         xi[1] += deta;
     }
     xi
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2-D face geometry by *reference composition* (MFEM FaceElementTransformations)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Everything a 2-D DG face term needs at one face quadrature point.
+pub struct FacePointGeom {
+    /// Reference point inside the element: MFEM `GetElement1IntPoint()`.
+    pub eip: [f64; 2],
+    /// MFEM `nor = CalcOrtho(Trans.Jacobian())` — outward from the element,
+    /// magnitude = the edge arc-length derivative `|dX/dξ|`.
+    pub nor: [f64; 2],
+    /// MFEM `Trans.Elem1->Weight()` = `det(J)` of the element transformation
+    /// at `eip` (signed).
+    pub det_j: f64,
+    /// `J^{-T}` of the element transformation at `eip`.
+    pub jit: DMatrix<f64>,
+}
+
+/// Find the local edge of a 2-D element whose endpoint nodes are `{a, b}`.
+///
+/// Returns `(le, forward)` where the element's own local edge `le` runs from
+/// its corner `le` to corner `le + 1 (mod nv)` and `forward` is `true` when
+/// that direction runs from `a` to `b` (MFEM `FaceInfo::Elem1Inf`'s
+/// orientation bit, decoded at the reference level).
+// MFEM: Mesh::GetLocalFaceTransformation
+pub fn find_local_edge<M: MeshTopology + ?Sized>(mesh: &M, elem: u32, a: u32, b: u32) -> (usize, bool) {
+    let en = mesh.element_nodes(elem);
+    let nv = en.len();
+    for le in 0..nv {
+        let (p, q) = (en[le], en[(le + 1) % nv]);
+        if p == a && q == b {
+            return (le, true);
+        }
+        if p == b && q == a {
+            return (le, false);
+        }
+    }
+    panic!("find_local_edge: element {elem} has no edge ({a}, {b})");
+}
+
+/// Reference-edge parameterisation of a 2-D element: the point and its tangent
+/// at `s ∈ [0,1]` along local edge `le`, which runs from the element's corner
+/// `le` to corner `le + 1 (mod nv)`.
+///
+/// Reference domains: `Quad4` on `[0,1]²` with CCW corners
+/// `(0,0),(1,0),(1,1),(0,1)` and `Tri3` on `[0,1]²` with vertices
+/// `(0,0),(1,0),(0,1)` — the same domains MFEM's `Geometry::SQUARE` /
+/// `Geometry::TRIANGLE` and this crate's `Quad4`/`Tri3` reference elements use.
+// MFEM: Mesh::GetLocalFaceTransformation
+pub fn ref_edge_map(et: ElementType, le: usize, s: f64) -> ([f64; 2], [f64; 2]) {
+    match (et, le) {
+        (ElementType::Quad4, 0) => ([s, 0.0], [1.0, 0.0]),
+        (ElementType::Quad4, 1) => ([1.0, s], [0.0, 1.0]),
+        (ElementType::Quad4, 2) => ([1.0 - s, 1.0], [-1.0, 0.0]),
+        (ElementType::Quad4, 3) => ([0.0, 1.0 - s], [0.0, -1.0]),
+        (ElementType::Tri3, 0) => ([s, 0.0], [1.0, 0.0]),
+        (ElementType::Tri3, 1) => ([1.0 - s, s], [-1.0, 1.0]),
+        (ElementType::Tri3, 2) => ([0.0, 1.0 - s], [0.0, -1.0]),
+        _ => panic!("ref_edge_map: unsupported ({et:?}, le={le})"),
+    }
+}
+
+/// MFEM `FaceElementTransformations` geometry at the reference-face
+/// coordinate `ξ ∈ [0,1]` of the 2-D edge whose endpoint nodes are `{a, b}`.
+///
+/// The face is parameterised from node `a` (`ξ = 0`) to node `b` (`ξ = 1`) and
+/// the element reference point is obtained by **direct reference composition**
+/// (`FaceElementTransformations::Loc1`), never by inverting the physical map —
+/// so a curved element is sampled at the exact point of its own isoparametric
+/// map, as MFEM's `Trans.SetAllIntPoints(&ip)` does.
+///
+/// The composed face Jacobian is
+/// `J_face = J_elem(eip) · d(eip)/dξ` (chain rule, `Trans.Jacobian()`), and
+/// MFEM's `CalcOrtho` in 2-D returns `(J_face(1,0), -J_face(0,0))`.  With the
+/// element's own CCW edge direction (`find_local_edge`'s `forward` flag) that
+/// is the *outward* normal scaled by `|dX/dξ|` — the exact analogue of MFEM's
+/// `Elem1Inf` orientation bits.  On a straight mesh this reproduces the chord
+/// (`|nor|` = edge length, the `[0,1]` reference segment); on a curved mesh it
+/// follows the isoparametric edge (MFEM's `Mesh::GetFaceTransformation`
+/// curved branch composes the face transformation through `Elem1`).
+// MFEM: FaceElementTransformations::Jacobian + CalcOrtho + Elem1->Weight()
+pub fn face_point_geom<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: u32,
+    a: u32,
+    b: u32,
+    xi: f64,
+) -> FacePointGeom {
+    let et = mesh.element_type(elem);
+    let (le, forward) = find_local_edge(mesh, elem, a, b);
+    // ξ runs a → b; the element's own edge runs corner le → corner le+1.
+    let s = if forward { xi } else { 1.0 - xi };
+    let (eip, ds) = ref_edge_map(et, le, s);
+    let (jac, _xp) = element_jacobian_at(mesh, elem, &eip, 2);
+    // d(eip)/dξ = ± d(ref_edge)/ds, following the a → b parameterisation.
+    let tangent = if forward { ds } else { [-ds[0], -ds[1]] };
+    // J_face = J_elem · tangent  (the composed face Jacobian)
+    let tf = [
+        jac[(0, 0)] * tangent[0] + jac[(0, 1)] * tangent[1],
+        jac[(1, 0)] * tangent[0] + jac[(1, 1)] * tangent[1],
+    ];
+    let nor = [tf[1], -tf[0]];
+    let det_j = jac.determinant();
+    // Degeneracy guard (magnitude test only, D696 batch 4 precedent): a
+    // singular element Jacobian falls back to the identity so that assembly
+    // stays finite instead of panicking.  Never taken on a valid mesh.
+    let jit = jac
+        .try_inverse()
+        .unwrap_or_else(|| {
+            eprintln!("  warning: degenerate element {elem} in DG face assembly");
+            DMatrix::identity(2, 2)
+        })
+        .transpose();
+    FacePointGeom { eip, nor, det_j, jit }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
