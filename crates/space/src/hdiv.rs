@@ -390,7 +390,13 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// - If the element type is not supported.
     pub fn new(mesh: M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
-        let first_type = mesh.element_type(0);
+        // D786: an empty local mesh (np > n_elements) constructs an empty
+        // space — placeholder type, never consulted without cells.
+        let first_type = if mesh.n_elements() > 0 {
+            mesh.element_type(0)
+        } else {
+            ElementType::Hex8
+        };
         let is_mixed = (1..mesh.n_elements() as u32).any(|e| mesh.element_type(e) != first_type);
         if !is_mixed {
             Self::validate_order(dim, &first_type, order);
@@ -423,7 +429,11 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// On other mesh types the two constructors build the same space.
     pub fn new_gauss_lobatto_integrated_gll(mesh: M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
-        let first_type = mesh.element_type(0);
+        let first_type = if mesh.n_elements() > 0 {
+            mesh.element_type(0)
+        } else {
+            ElementType::Hex8 // D786: empty-space placeholder
+        };
         let is_mixed = (1..mesh.n_elements() as u32).any(|e| mesh.element_type(e) != first_type);
         if !is_mixed {
             Self::validate_order(dim, &first_type, order);

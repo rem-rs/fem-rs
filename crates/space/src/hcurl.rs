@@ -849,11 +849,15 @@ impl<M: MeshTopology> HCurlSpace<M> {
     fn build(mesh: M, order: u8, quad_igll: bool) -> Self {
         assert!(order >= 1, "HCurlSpace: order must be >= 1");
         let dim = mesh.dim() as usize;
-        assert!(mesh.n_elements() > 0, "HCurlSpace: mesh must contain at least one element");
+        // D786: an empty local mesh (np > n_elements over-partitioning) must
+        // construct a valid empty space instead of panicking — the entity
+        // loops below simply run zero times.
         let k = order as usize;
         let dofs_per_edge = k;
         let n_elem = mesh.n_elements();
-        let first_cell_type = mesh.element_type(0);
+        let first_cell_type = (n_elem > 0)
+            .then(|| mesh.element_type(0))
+            .unwrap_or(ElementType::Hex8);
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
