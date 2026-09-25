@@ -439,11 +439,15 @@ pub trait HCurlH1Integrator: Send + Sync {
     );
 }
 
-/// Integrator for HCurl×H¹ weak divergence `b(v, u) = -∫ v (∇·u) dx` (MFEM
-/// `VectorFEWeakDivergenceIntegrator`).  Row space = H¹ (scalar test), column
-/// space = HCurl (vector trial).  The weak-divergence form is:
-///   M[i,j] = -∫ (Q / det(J)) · adj(J)^T · grad(v_i) · u_j dx
-/// which is the canonical mixed term in the DivergenceFreeProjector.
+/// Integrator for HCurl×H¹ weak divergence `b(v, u) = -(∇v, u)_K` (MFEM
+/// `VectorFEWeakDivergenceIntegrator`, `fem/bilininteg.cpp:1852`).
+/// Row space = H¹ (scalar test), column space = HCurl (vector trial).
+/// MFEM assembles (reference-element integrand, weight `ip.weight·Q` only —
+/// no detJ factor):
+///   M[j,i] = -Σ_q ip.weight · (Q/det(J)) · û_iᵀ adj(J) adj(J)ᵀ ∇̂v_j,
+/// i.e. in physical terms (`adj(J)ᵀ = det(J)·J⁻ᵀ`, ND physical value
+/// `J⁻ᵀû`, `fe_base.cpp:1168 CalcVShape_ND`):
+///   M[j,i] = -∫_K Q ∇v_j · u_i dx.
 pub trait HCurlH1WeakDivIntegrator: Send + Sync {
     fn add_to_element_matrix(
         &self,
@@ -456,7 +460,8 @@ pub trait HCurlH1WeakDivIntegrator: Send + Sync {
     );
 }
 
-/// `b(v, u) = -∫ v (∇·u) dx` — weak divergence for DivergenceFreeProjector.
+/// `b(v, u) = -(∇v, u)_K` — element-local weak divergence (`(v, ∇·u)_K` up to
+/// the boundary term), consumed via `ParMixedAssembler::assemble_hcurl_h1_weak_div`.
 pub struct HCurlH1WeakDiv<C: ScalarCoeff = f64> {
     pub coeff: C,
 }
@@ -472,7 +477,11 @@ impl<C: ScalarCoeff> HCurlH1WeakDivIntegrator for HCurlH1WeakDiv<C> {
         vec_col: &[f64],
         dim: usize,
         inv_jac_t: &nalgebra::DMatrix<f64>,
-        det_j: f64,
+        // D797-1: the weight already carries the signed det(J) (assembler:
+        // `w = ref_weight * det_j`), and MFEM's remaining det(J) lives inside
+        // `adj(J)ᵀ = det(J)·J⁻ᵀ` — folded into `grad_phys` below.  No
+        // reciprocal of `det_j` survives, so D696's degeneracy guard is moot.
+        _det_j: f64,
         m_elem: &mut [f64],
     ) {
         let n_r = qp_scalar.n_dofs;
@@ -483,28 +492,29 @@ impl<C: ScalarCoeff> HCurlH1WeakDivIntegrator for HCurlH1WeakDiv<C> {
             Some(qp_scalar.phi), qp_scalar.elem_dofs,
         );
         let q_val = self.coeff.eval(&ctx);
-        // D696 verdict: **keep abs** — magnitude-only degeneracy guard; the
-        // reciprocal itself uses the signed det (as in MFEM, no such guard).
-        let inv_det_j = if det_j.abs() > 1e-15 { 1.0 / det_j } else { 0.0 };
 
         for j in 0..n_r {
-            // Physical gradient of H¹ basis: adj(J)^T · grad_ref
-            let mut grad_phys = [0.0_f64; 3];
-            for d in 0..dim {
-                for dd in 0..dim {
-                    grad_phys[d] += inv_jac_t[(d, dd)] * qp_scalar.grad_phys[j * dim + dd];
-                }
-            }
+            // H¹ test gradient: `grad_phys` is already the physical gradient
+            // J⁻ᵀ·∇̂v_j (transformed once by the assembler).  MFEM's
+            // `dshapedxt = dshape·adj(J)` equals `det(J)·(this)` and the
+            // assembler's weight carries that det(J) — no adjugate multiply
+            // here (D797-1: this line used to apply J⁻ᵀ a *second* time plus
+            // a 1/det(J), scaling the whole matrix by c⁻³ under x ↦ c·x).
+            let grad_j = &qp_scalar.grad_phys[j * dim..j * dim + dim];
             for i in 0..n_c {
-                // HCurl basis (physical): J^{-T} · u_ref
+                // HCurl trial basis (physical): J⁻ᵀ · û_i (MFEM
+                // `CalcVShape_ND`, `fe_base.cpp:1168`).
                 let mut u_phys = [0.0_f64; 3];
                 for d in 0..dim {
                     for dd in 0..dim {
                         u_phys[d] += inv_jac_t[(d, dd)] * vec_col[i * dim + dd];
                     }
                 }
-                let dot = grad_phys[0] * u_phys[0] + grad_phys[1] * u_phys[1] + grad_phys[2] * u_phys[2];
-                m_elem[j * n_c + i] += -w * q_val * inv_det_j * dot;
+                let mut dot = 0.0_f64;
+                for d in 0..dim {
+                    dot += grad_j[d] * u_phys[d];
+                }
+                m_elem[j * n_c + i] += -w * q_val * dot;
             }
         }
     }
@@ -534,10 +544,13 @@ impl HCurlH1Integrator for HCurlH1CurlIntegrator {
     }
 }
 
-/// Assemble HCurl × H¹ weak divergence form (for DivergenceFreeProjector).
+/// Assemble HCurl × H¹ weak divergence form (MFEM
+/// `VectorFEWeakDivergenceIntegrator`, `fem/bilininteg.cpp:1852`).
 ///
-/// Computes `M[i,j] = -∫ (Q / det(J)) · adj(J)^T · grad(v_i) · u_j dx`
-/// where `v_i ∈ H¹` (rows) and `u_j ∈ HCurl` (columns).
+/// Computes `M[j,i] = -∫_K Q ∇v_j · u_i dx` with `v_j ∈ H¹` (rows) and
+/// `u_i ∈ HCurl` (columns) — the element-local weak divergence `(v, ∇·u)_K`
+/// up to the boundary term (D797-1: the reference-element form is
+/// `-ip.weight·(Q/detJ)·ûᵀ adj(J) adj(J)ᵀ ∇̂v`, weight `ip.weight·Q` only).
 pub fn assemble_hcurl_h1_weak_div<SR, SC>(
     row_space: &SR,   // H¹ (scalar test)
     col_space: &SC,   // HCurl (vector trial)
