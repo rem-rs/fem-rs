@@ -491,6 +491,34 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
     accumulate_vector_bilinear_element_blocks(space, e, integrators, quad_order, coo, &[]);
 }
 
+/// Interior (bubble) basis of a `Quad4` H(curl) element that carries more DOFs
+/// than its paired reference element: `2k` gradient-bubble modes on the
+/// element's **`[0,1]²`** reference square, x-family first then y-family,
+/// normalized so that `∫b² = 1`.
+///
+/// Both callers (the surface arm and the volume arm of the bilinear assembly)
+/// used to carry their own copy, and the volume one was written in the
+/// historical `[-1,1]²` frame (`(1-y²)·xᵐ` with a different scale) — a silent
+/// wrong-frame trap, since the rest of the quad stack is `[0,1]²` (D765 moved
+/// the paired element to MFEM's `ND_QuadrilateralElement`, whose interior nodes
+/// are nodal rather than bubbly, so this fallback is unreachable in practice;
+/// see D776).
+fn quad_nd_interior_phi(x: f64, y: f64, k: usize, n_i: usize, dim: usize, out: &mut [f64]) {
+    debug_assert_eq!(2 * k, n_i, "Quad4 interior bubble count");
+    debug_assert!(out.len() >= n_i * dim);
+    for m in 0..k {
+        let s = (30.0 * (2.0 * m as f64 + 1.0)).sqrt();
+        out[m * dim] = s * y * (1.0 - y) * x.powi(m as i32);
+        out[m * dim + 1] = 0.0;
+    }
+    for m in 0..k {
+        let s = (30.0 * (2.0 * m as f64 + 1.0)).sqrt();
+        let idx = k + m;
+        out[idx * dim] = 0.0;
+        out[idx * dim + 1] = s * x * (1.0 - x) * y.powi(m as i32);
+    }
+}
+
 /// [`accumulate_vector_bilinear_element`] with the D37 ND face-DOF block
 /// transform applied: the element matrix is rotated into the canonical
 /// (shared-face) basis, `A ← Tᵀ·A·T`, before scattering.  `blocks` is the
@@ -639,24 +667,13 @@ pub fn accumulate_vector_bilinear_element_blocks_with_basis<S: FESpace>(
             // Interior DOFs (bubble modes) on a surface: same gradient-bubble
             // basis as the flat case, Piola-mapped through J·G⁻¹.  The bubble
             // lives on [0,1]² (matching the RT/ND basis): y(1-y)·x^m and
-            // x(1-x)·y^m, normalized so ∫b² = 1 over [0,1]².
+            // x(1-x)·y^m, normalized so ∫b² = 1 over [0,1]² (shared with the
+            // volume arm through `quad_nd_interior_phi`, D776).
             if n_i > 0 && elem_type == ElementType::Quad4 {
-                let x = xi[0]; let y = xi[1];
                 let k = space.order() as usize;
-                let n_per_dir = k;
                 let mut int_phi = vec![0.0_f64; n_i * 2];
-                let mut idx = 0;
-                for m in 0..n_per_dir {
-                    let s = (30.0 * (2.0 * m as f64 + 1.0)).sqrt();
-                    let b = s * y * (1.0 - y) * x.powi(m as i32);
-                    int_phi[idx * 2] = b; int_phi[idx * 2 + 1] = 0.0; idx += 1;
-                }
-                for m in 0..n_per_dir {
-                    let s = (30.0 * (2.0 * m as f64 + 1.0)).sqrt();
-                    let b = s * x * (1.0 - x) * y.powi(m as i32);
-                    int_phi[idx * 2] = 0.0; int_phi[idx * 2 + 1] = b; idx += 1;
-                }
-                debug_assert_eq!(idx, n_i);
+                quad_nd_interior_phi(xi[0], xi[1], k, n_i, 2, &mut int_phi);
+                debug_assert!(int_phi.iter().all(|v| v.is_finite()));
 
                 let mut int_phys = vec![0.0_f64; n_i * dim];
                 for i in 0..n_i {
@@ -777,27 +794,19 @@ pub fn accumulate_vector_bilinear_element_blocks_with_basis<S: FESpace>(
         // Interior DOFs (bubble modes): zero curl, only mass contribution.
         // For NDk H(curl) on Quad4: 2*k*(k-1) interior DOFs, gradient-bubble type.
         // Use normalized gradient-bubble functions for better conditioning.
+        //
+        // D765/D776: the pairing is 1:1 by construction now (`n_i` is the space's
+        // DOF count minus the paired element's, and the dispatch pairs the
+        // space's own element), so `n_i == 0` and this branch is a *fallback* for
+        // a mismatched pairing.  Its basis must match the surface arm's `[0,1]²`
+        // definition (the old `(1-y²)` form was the `[-1,1]²` frame — a silent
+        // wrong-frame trap if it ever fired); both arms now share
+        // `quad_nd_interior_phi`.
         if n_i > 0 && elem_type == ElementType::Quad4 {
-            let x = xi[0]; let y = xi[1];
             let k = space.order() as usize;
-
-            // Interior bubble basis functions for Quad4 NDk:
-            // x-dir: (1-η²)·ξᵐ · (1,0)ᵀ, normalized: scale = √(15(2m+1)/32)
-            // y-dir: (1-ξ²)·ηᵐ · (0,1)ᵀ, normalized: scale = √(15(2m+1)/32)
-            let n_per_dir = k;
             let mut int_phi = vec![0.0_f64; n_i * dim];
-            let mut idx = 0;
-            for m in 0..n_per_dir {
-                let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
-                let b = s * (1.0 - y * y) * x.powi(m as i32);
-                int_phi[idx * dim] = b; int_phi[idx * dim + 1] = 0.0; idx += 1;
-            }
-            for m in 0..n_per_dir {
-                let s = ((15.0 * (2.0 * m as f64 + 1.0)) / 32.0).sqrt();
-                let b = s * (1.0 - x * x) * y.powi(m as i32);
-                int_phi[idx * dim] = 0.0; int_phi[idx * dim + 1] = b; idx += 1;
-            }
-            debug_assert_eq!(idx, n_i);
+            quad_nd_interior_phi(xi[0], xi[1], k, n_i, dim, &mut int_phi);
+            debug_assert!(int_phi.iter().all(|v| v.is_finite()) && n_i == 2 * k);
 
             // Piola transform for interior functions (covariant)
             let mut int_phys = vec![0.0_f64; n_i * dim];

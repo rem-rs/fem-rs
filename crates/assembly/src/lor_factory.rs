@@ -561,9 +561,11 @@ pub fn build_lor_sgs_rt_quad(
 // basis the two-level pencil degrades under refinement (D76: the quad RT1 leg
 // went 7 → 10 → 24 with an exact inner, against 5 → 5 with the pair below).
 //
-// The library's default quad elements (`vec_ref_elem`: the legacy `QuadNDk`,
-// `QuadRT1` / `QuadRTk::new`) all use the GaussLegendre open basis, so the LOR
-// entry points below assemble the HO operator with the IntegratedGLL variants
+// The library's default quad elements (`vec_ref_elem`: `QuadND` for ND o≥3 —
+// MFEM's `ND_QuadrilateralElement` since D765, the legacy Lagrange × hat
+// `QuadNDk` before that — plus `QuadRT1` / `QuadRTk::new`) all use the
+// GaussLegendre open basis, so the LOR entry points below assemble the HO
+// operator with the IntegratedGLL variants
 // at the element level.  They are the *only* place the pair is wired in: every
 // other (non-LOR) assembly keeps its GaussLegendre results bit for bit.
 
@@ -1324,8 +1326,9 @@ mod lor_vector_tests {
     /// `(GaussLobatto, IntegratedGLL)` pair, as MFEM's `CheckBasisType`
     /// demands) through the library entry
     /// [`assemble_lor_compatible_nd_quad`] (round 24 promoted it out of the
-    /// test module; D80) — the library `vec_ref_elem` still picks the legacy
-    /// Lagrange × hat element for quad ND o≥3, so the IGLL HO matrix cannot go
+    /// test module; D80) — the library `vec_ref_elem` pairs the space with
+    /// `QuadND`, whose open basis is GaussLegendre (D765; the legacy Lagrange ×
+    /// hat element before that), so the IGLL HO matrix cannot go
     /// through `HCurlSpace`'s own assembly path (the same situation the hex D63
     /// path is in).  The LOR space (ND1 on the refined mesh) and the
     /// assumed-constraint permutation are the library ones; at order 1 all

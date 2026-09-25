@@ -545,7 +545,11 @@ fn mobius_default_matches_cpp_artifact() {
 #[test]
 fn klein_default_matches_cpp_artifact() {
     let mesh = klein_mesh(16, 8, 3, bottle_trans);
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("klein-bottle.mesh");
+    // Distinct filename per test: cargo runs the tests in one binary on
+    // parallel threads, so two tests sharing `klein-bottle.mesh` in the same
+    // `CARGO_TARGET_TMPDIR` race on the write/read pair (observed as an
+    // intermittent gate failure that passes in isolation).
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("klein-bottle-artifact.mesh");
     write_mfem_file_3d_nodes(&path, &mesh, NodesSpace::Continuous).expect("write");
     assert_matches_cpp_fixture(&path, "klein_bottle_cpp_default.mesh");
 }
