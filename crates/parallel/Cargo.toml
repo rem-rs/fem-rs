@@ -37,6 +37,13 @@ default = []
 mpi     = ["dep:mpi"]
 hdf5    = ["dep:fem-io", "fem-io/hdf5", "dep:hdf5"]
 
+# Mesh fixtures for the parallel integration tests: the D122 partition pins
+# read `data/*.mesh` through `fem_io::mfem::read_mfem_file` — the same reader
+# the joule miniapp uses — so the pinned geometry is the real fixture rather
+# than an inline approximation of it.
+[dev-dependencies]
+fem-io = { path = "../io" }
+
 [dependencies.hdf5]
 version = "0.8"
 optional = true
