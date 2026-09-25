@@ -76,18 +76,34 @@ fn dsmoother_dinv(mat: &fem_linalg::CsrMatrix<f64>, ess: &[usize]) -> Vec<f64> {
     dinv
 }
 
-/// MFEM ex22's `pcOp` (ex22.cpp:344-362) for the **H¹ (p=0)** and **H(Div)
-/// (p=2)** problems: the system's stiffness operator plus *both* mass terms —
-/// `massCoef + lossCoef` (`-ω²ε + ωσ`) — assembled with a single combined
-/// coefficient and then BC-eliminated.
+/// MFEM's `FormLinearSystem` output `X` (ex22.cpp:379-380) — the initial vector
+/// handed to GMRES: the essential DOFs carry the projected BC values
+/// (`x[ess]`), and every other entry is zero because ex22 calls
+/// `FormLinearSystem` with the default `copy_interior == 0`
+/// (`bilinearform.cpp:904-906`: `X.MakeRef(x, ...)` +
+/// `X.SetSubVectorComplement(ess_tdof_list, 0.0)`).
 ///
-/// D767: the p=0/p=2 paths used to precondition with `sys.k_re` alone, i.e.
-/// without the loss term (`ωσ·M`).  On `-p 2 -o 1 -m data/inline-tri.mesh` that
-/// is a 37x weaker `‖M b‖` (9.60 vs MFEM's 0.2554) and cost the whole
-/// iteration budget — 1000 iterations with `GMRES: No convergence!` where
-/// MFEM converges in 266.
-fn pc_mass_alpha(omega: f64, mass_coef: f64, loss_coef: f64) -> f64 {
-    -omega * omega * mass_coef + omega * loss_coef
+/// D780: ex22 applies GMRES in `iterative_mode`, so the first printed residual
+/// is `‖M(B − A X)‖`, *not* `‖M B‖`.  Leaving `X` at zero made the essential
+/// rows contribute the bare `B_e` instead of `B_e − X_e = −(A x)_e`; on
+/// `-p 2 -o 1` (`data/inline-tri.mesh`) that alone inflated the first line from
+/// MFEM's 0.255409 to 0.561457 (**2.20×**) and cost one extra iteration in every
+/// converging configuration.  With the BC values in place the first 251 of the
+/// 267 history lines are byte-identical to MFEM and the iteration counts agree
+/// exactly (266 / 6 / 15 / 19 / 86 and every p=0 / p=1 profile).  The one
+/// straggler is `-p 2 -o 3` on the quad mesh: rows 0..21 are byte-identical
+/// there too, the tail diverges and the run stops one iteration later (30 vs
+/// 29) — a late-trajectory rounding fate, not a preconditioner difference
+/// (the element-level pc composition was checked separately: splitting the
+/// combined mass coefficient back into MFEM's two integrators changes no
+/// printed digit of any converging run).
+fn initial_guess(n: usize, ess_bdr: &[usize], bc_re: &[f64], bc_im: &[f64]) -> Vec<f64> {
+    let mut x = vec![0.0; 2 * n];
+    for (k, &d) in ess_bdr.iter().enumerate() {
+        x[d] = bc_re[k];
+        x[n + d] = bc_im[k];
+    }
+    x
 }
 
 // ─── CLI struct ───────────────────────────────────────────────────────────
@@ -324,7 +340,7 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
     let mut rhs = vec![0.0; 2 * n];
 
-    if exact_sol_known {
+    let (bc_re, bc_im): (Vec<f64>, Vec<f64>) = if exact_sol_known {
         // Project BOTH real and imaginary parts of the exact solution onto the
         // boundary DOFs (C++ ex22: ProjectBdrCoefficient(u0_r, u0_i)).  The
         // imaginary part was previously zeroed, which badly corrupted the
@@ -337,28 +353,32 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
             let (_re, im) = u0_exact(x, mu, epsilon, sigma, omega);
             im
         }).as_slice().to_vec();
-        let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_im[d]).collect();
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
+        (ess_bdr.iter().map(|&d| u_proj[d]).collect(),
+         ess_bdr.iter().map(|&d| u_proj_im[d]).collect())
     } else {
-        let bc_re = vec![0.0; ess_bdr.len()];
-        let bc_im = vec![0.0; ess_bdr.len()];
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
-    }
+        (vec![0.0; ess_bdr.len()], vec![0.0; ess_bdr.len()])
+    };
+    sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
 
     let flat = sys.to_flat_csr();
 
-    // Preconditioner: DSmoother (Jacobi) on MFEM's `pcOp` (see `dsmoother_dinv`)
-    let pc_mass = MassIntegrator { rho: pc_mass_alpha(omega, mass_coef, loss_coef) };
+    // Preconditioner: DSmoother (Jacobi) on MFEM's `pcOp` (see `dsmoother_dinv`).
+    // ex22.cpp:346-348 adds **three** integrators —
+    // `DiffusionIntegrator(stiffnessCoef)`, `MassIntegrator(massCoef=-ω²ε)` and
+    // `MassIntegrator(lossCoef=ωσ)` — each contributing its own element matrix
+    // (D780: the loss term is part of the preconditioner; D767 — `k_re` alone
+    // is 37x weaker on `-p 2 -o 1` and cost the whole iteration budget).
+    let pc_mass1 = MassIntegrator { rho: -omega * omega * mass_coef };
+    let pc_mass2 = MassIntegrator { rho: omega * loss_coef };
     let pc_op = fem_assembly::assembler::Assembler::assemble_bilinear(
         &space,
-        &[&DiffusionIntegrator { kappa: stiffness_coef }, &pc_mass],
+        &[&DiffusionIntegrator { kappa: stiffness_coef }, &pc_mass1, &pc_mass2],
         quad_order,
     );
     let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
-    let mut X = vec![0.0; sys.n_total()];
+    let mut X = initial_guess(n, &ess_bdr, &bc_re, &bc_im);
     let pre = |r: &[f64], z: &mut [f64]| {
         for i in 0..n { z[i] = dinv[i] * r[i]; }
         for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }
@@ -441,7 +461,7 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     let s: f64 = if cfg.herm_conv { -1.0 } else { 1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
-    if exact_sol_known {
+    let (bc_re, bc_im): (Vec<f64>, Vec<f64>) = if exact_sol_known {
         let u_proj = space.interpolate_vector(&|x| {
             let (re, _im) = u0_exact(x, mu, epsilon, sigma, omega);
             let mut v = vec![0.0; x.len()];
@@ -456,16 +476,14 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
         });
         let u_proj_all: Vec<f64> = u_proj.as_slice().to_vec();
         let u_proj_all_im: Vec<f64> = u_proj_im.as_slice().to_vec();
-        let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_all[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_all_im[d]).collect();
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
+        (ess_bdr.iter().map(|&d| u_proj_all[d]).collect(),
+         ess_bdr.iter().map(|&d| u_proj_all_im[d]).collect())
     } else {
-        let bc_re = vec![0.0; ess_bdr.len()];
-        let bc_im = vec![0.0; ess_bdr.len()];
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
-    }
+        (vec![0.0; ess_bdr.len()], vec![0.0; ess_bdr.len()])
+    };
+    sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
     let flat = sys.to_flat_csr();
-    let mut X = vec![0.0; sys.n_total()];
+    let mut X = initial_guess(n, &ess_bdr, &bc_re, &bc_im);
 
     let pre = |r: &[f64], z: &mut [f64]| {
         let vr = DenseVec::from(r[..n].to_vec());
@@ -534,16 +552,18 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     );
     println!("Size of linear system: {}", sys.n_total());
 
-    // pcOp (ex22.cpp:352-362): GradDiv(1/μ) + VectorMass(-ω²ε) + VectorMass(ωσ)
-    // — the loss term is part of the preconditioner (D767; `k_re` alone is 37x
-    // weaker here and cost the iteration budget on the tri mesh).
-    let pc_mass = VectorMassIntegrator { alpha: pc_mass_alpha(omega, mass_coef, loss_coef) };
-    let pc_op = VectorAssembler::assemble_bilinear(&space, &[&grad_div, &pc_mass], quad_order);
+    // pcOp (ex22.cpp:356-358): DivDiv(1/μ) + VectorFEMass(-ω²ε) +
+    // VectorFEMass(ωσ) — three integrators, each with its own element matrix,
+    // as the C++ `BilinearForm` does.
+    let pc_mass1 = VectorMassIntegrator { alpha: -omega * omega * mass_coef };
+    let pc_mass2 = VectorMassIntegrator { alpha: omega * loss_coef };
+    let pc_op = VectorAssembler::assemble_bilinear(
+        &space, &[&grad_div, &pc_mass1, &pc_mass2], quad_order);
     let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
-    if exact_sol_known {
+    let (bc_re, bc_im): (Vec<f64>, Vec<f64>) = if exact_sol_known {
         let u_proj = space.interpolate_vector(&|x| {
             let (re, _im) = u0_exact(x, mu, epsilon, sigma, omega);
             let mut v = vec![0.0; x.len()];
@@ -558,16 +578,14 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
         });
         let u_proj_all: Vec<f64> = u_proj.as_slice().to_vec();
         let u_proj_all_im: Vec<f64> = u_proj_im.as_slice().to_vec();
-        let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_all[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_all_im[d]).collect();
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
+        (ess_bdr.iter().map(|&d| u_proj_all[d]).collect(),
+         ess_bdr.iter().map(|&d| u_proj_all_im[d]).collect())
     } else {
-        let bc_re = vec![0.0; ess_bdr.len()];
-        let bc_im = vec![0.0; ess_bdr.len()];
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
-    }
+        (vec![0.0; ess_bdr.len()], vec![0.0; ess_bdr.len()])
+    };
+    sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
     let flat = sys.to_flat_csr();
-    let mut X = vec![0.0; sys.n_total()];
+    let mut X = initial_guess(n, &ess_bdr, &bc_re, &bc_im);
 
     let pre = |r: &[f64], z: &mut [f64]| {
         for i in 0..n { z[i] = dinv[i] * r[i]; }
@@ -773,7 +791,7 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     println!("Size of linear system: {}", sys.n_total());
 
     let mut rhs = vec![0.0; 2 * n];
-    if exact_sol_known {
+    let (bc_re, bc_im): (Vec<f64>, Vec<f64>) = if exact_sol_known {
         // D718: BOTH components of the essential BC come from the nodal
         // projection of the exact solution (C++ `ProjectBdrCoefficient(u0_r,
         // u0_i, ess_bdr)` evaluates re AND im at the boundary nodes).  The
@@ -789,28 +807,28 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
             let (_re, im) = u0_exact(&c[..dim], mu, epsilon, sigma, omega);
             im
         }).collect();
-        let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_im[d]).collect();
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
+        (ess_bdr.iter().map(|&d| u_proj[d]).collect(),
+         ess_bdr.iter().map(|&d| u_proj_im[d]).collect())
     } else {
-        let bc_re = vec![0.0; ess_bdr.len()];
-        let bc_im = vec![0.0; ess_bdr.len()];
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
-    }
+        (vec![0.0; ess_bdr.len()], vec![0.0; ess_bdr.len()])
+    };
+    sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
 
     let flat = sys.to_flat_csr();
-    // Preconditioner: DSmoother on MFEM's `pcOp` = Diffusion(1/μ) + Mass(-ω²ε
-    // + ωσ) (ex22.cpp:344-352; D767 — `k_re` alone omits the loss term).
-    let pc_mass = MassIntegrator { rho: pc_mass_alpha(omega, mass_coef, loss_coef) };
+    // Preconditioner: DSmoother on MFEM's `pcOp` = Diffusion(1/μ) +
+    // Mass(-ω²ε) + Mass(ωσ) (ex22.cpp:346-348, three integrators; D767 — `k_re`
+    // alone omits the loss term).
+    let pc_mass1 = MassIntegrator { rho: -omega * omega * mass_coef };
+    let pc_mass2 = MassIntegrator { rho: omega * loss_coef };
     let pc_op = fem_assembly::assembler::Assembler::assemble_bilinear(
         &space,
-        &[&DiffusionIntegrator { kappa: stiffness_coef }, &pc_mass],
+        &[&DiffusionIntegrator { kappa: stiffness_coef }, &pc_mass1, &pc_mass2],
         quad_order,
     );
     let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
-    let mut X = vec![0.0; sys.n_total()];
+    let mut X = initial_guess(n, &ess_bdr, &bc_re, &bc_im);
     let pre = |r: &[f64], z: &mut [f64]| {
         for i in 0..n { z[i] = dinv[i] * r[i]; }
         for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }
@@ -877,7 +895,7 @@ fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     let s: f64 = if cfg.herm_conv { -1.0 } else { 1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
-    if exact_sol_known {
+    let (bc_re, bc_im): (Vec<f64>, Vec<f64>) = if exact_sol_known {
         let u_proj = space.interpolate_vector(&|x| {
             let (re, _im) = u0_exact(x, mu, epsilon, sigma, omega);
             let mut v = vec![0.0; x.len()]; v[0] = re; v
@@ -886,14 +904,14 @@ fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
             let (_re, im) = u0_exact(x, mu, epsilon, sigma, omega);
             let mut v = vec![0.0; x.len()]; v[0] = im; v
         });
-        let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj.as_slice()[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_im.as_slice()[d]).collect();
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
+        (ess_bdr.iter().map(|&d| u_proj.as_slice()[d]).collect(),
+         ess_bdr.iter().map(|&d| u_proj_im.as_slice()[d]).collect())
     } else {
-        sys.apply_dirichlet(&ess_bdr, &vec![0.0; ess_bdr.len()], &vec![0.0; ess_bdr.len()], &mut rhs);
-    }
+        (vec![0.0; ess_bdr.len()], vec![0.0; ess_bdr.len()])
+    };
+    sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
     let flat = sys.to_flat_csr();
-    let mut X = vec![0.0; sys.n_total()];
+    let mut X = initial_guess(n, &ess_bdr, &bc_re, &bc_im);
     let pre = |r: &[f64], z: &mut [f64]| {
         let vr = DenseVec::from(r[..n].to_vec()); let mut zr = DenseVec::zeros(n);
         gsmoother.apply_precond(&vr, &mut zr); for i in 0..n { z[i] = zr[i]; }
@@ -940,15 +958,18 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     );
     println!("Size of linear system: {}", sys.n_total());
 
-    // Preconditioner: DSmoother on MFEM's `pcOp` = GradDiv(1/μ) + VectorMass(-ω²ε
-    // + ωσ) (ex22.cpp:352-362; D767 — `k_re` alone omits the loss term).
-    let pc_mass = VectorMassIntegrator { alpha: pc_mass_alpha(omega, mass_coef, loss_coef) };
-    let pc_op = VectorAssembler::assemble_bilinear(&space, &[&grad_div, &pc_mass], quad_order);
+    // Preconditioner: DSmoother on MFEM's `pcOp` = GradDiv(1/μ) +
+    // VectorFEMass(-ω²ε) + VectorFEMass(ωσ) (ex22.cpp:356-358, three
+    // integrators; D767 — `k_re` alone omits the loss term).
+    let pc_mass1 = VectorMassIntegrator { alpha: -omega * omega * mass_coef };
+    let pc_mass2 = VectorMassIntegrator { alpha: omega * loss_coef };
+    let pc_op = VectorAssembler::assemble_bilinear(
+        &space, &[&grad_div, &pc_mass1, &pc_mass2], quad_order);
     let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
-    if exact_sol_known {
+    let (bc_re, bc_im): (Vec<f64>, Vec<f64>) = if exact_sol_known {
         let u_proj = space.interpolate_vector(&|x| {
             let (re, _im) = u0_exact(x, mu, epsilon, sigma, omega);
             let mut v = vec![0.0; x.len()]; v[x.len()-1] = re; v
@@ -957,14 +978,14 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
             let (_re, im) = u0_exact(x, mu, epsilon, sigma, omega);
             let mut v = vec![0.0; x.len()]; v[x.len()-1] = im; v
         });
-        let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj.as_slice()[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_im.as_slice()[d]).collect();
-        sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
+        (ess_bdr.iter().map(|&d| u_proj.as_slice()[d]).collect(),
+         ess_bdr.iter().map(|&d| u_proj_im.as_slice()[d]).collect())
     } else {
-        sys.apply_dirichlet(&ess_bdr, &vec![0.0; ess_bdr.len()], &vec![0.0; ess_bdr.len()], &mut rhs);
-    }
+        (vec![0.0; ess_bdr.len()], vec![0.0; ess_bdr.len()])
+    };
+    sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
     let flat = sys.to_flat_csr();
-    let mut X = vec![0.0; sys.n_total()];
+    let mut X = initial_guess(n, &ess_bdr, &bc_re, &bc_im);
     let pre = |r: &[f64], z: &mut [f64]| {
         for i in 0..n { z[i] = dinv[i] * r[i]; }
         for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }

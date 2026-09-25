@@ -14,7 +14,7 @@
 #![allow(dead_code)]
 
 use fem_assembly::dg::dg_base::{
-    build_face_elem_map, phys_to_ref, quad_jac_at, ref_elem_vol, simplex_jac, xform_grads,
+    build_face_elem_map, face_point_geom, ref_elem_vol, xform_grads,
 };
 use fem_assembly::{
     Assembler, DgAssembler, ElimPolicy, InteriorFaceList, eliminate_ess_tdofs,
@@ -203,7 +203,14 @@ fn solve_dg(a: &Args, mesh: &Mesh<2>) {
     for i in 0..n { rhs[i] += dglf[i] + nbc[i] + rbc[i]; }
 
     let mut x = vec![0.0; n];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
+    // D779: C++ ex27 calls the legacy wrapper `PCG(*A, M, B, X, 1, 500, 1e-12,
+    // 0.0)`, and that wrapper is `SetRelTol(sqrt(RTOLERANCE))`
+    // (solvers.cpp:1076) ⇒ **rel_tol 1e-6**, not 1e-12.  This solver's `rtol`
+    // *is* MFEM's `rel_tol` (the criterion is `nom <= max(rtol²·nom0, atol²)`,
+    // solvers.cpp:919 ≈ iterative.rs:258), so 1e-12 ran the DG system to a
+    // needlessly tight residual — 128 iterations / 150 history lines where the
+    // C++ gold converges in 82 / 104.  Same D753/round-32 lesson as the H1 path.
+    let cfg = SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 500, verbose: true, ..Default::default() };
     // As in the H1 path: the legacy `PCG()`/`GMRES()` wrappers print only the
     // iteration history + ARF (D771 canonical surface), so the result is
     // discarded.
@@ -419,7 +426,15 @@ fn parse_args()->Args{
     a
 }
 
-/// Reference quadrature on the 1-D segment face ξ ∈ [-1, 1] (SegP1 basis).
+/// Gauss-Legendre quadrature on the reference segment **[0, 1]** (points `ξ`,
+/// weights summing to 1) for a polynomial of degree `qo`.
+///
+/// MFEM's face rule is `IntRules.Get(Geometry::SEGMENT, order)` — the same
+/// points on the segment reference **[-1, 1]**, i.e. `τ = 2ξ − 1` with the
+/// weights doubled (they sum to 2 = the reference length).  Call sites that
+/// need MFEM's convention (`integrate_bc`, the L2 DG boundary helpers) perform
+/// that remap explicitly; `face_point_and_normal` and `eip_at` are written in
+/// MFEM's `[-1, 1]` parameter.
 fn seg_quad(qo: u8) -> (Vec<f64>, Vec<f64>) {
     let re = fem_element::lagrange::SegP1;
     let q = re.quadrature(qo);
@@ -465,15 +480,27 @@ fn face_point_and_normal(mesh: &Mesh<2>, elem: u32, face: u32, xi: f64) -> ([f64
     ([xp[0], xp[1]], nor)
 }
 
-/// Local DOF indices of the two corners of `face` inside its owner element
-/// (L² spaces store DOFs element-by-element: `e*ndofs .. e*ndofs+ndofs`).
+/// Local DOF indices of the two corners of `face` inside its owner element.
+///
+/// D779: an L² space numbers its element DOFs in **lexicographic**
+/// (`L2_DOF_MAP`) order — `l2.rs:390` ("Reference DOF coordinates,
+/// lexicographic order"), `ElementType::Quad4, 1 → QuadL2GL` — while
+/// `mesh.element_nodes` lists the corners in the topological (CCW) order.
+/// For a Quad4 the two orders differ exactly in the last two slots
+/// (topological 2 = (1,1) = lex 3, topological 3 = (0,1) = lex 2), so indexing
+/// the space's table with the topological position (the old code) scattered a
+/// face's load into the wrong DOFs on the ξ=1, η=1 and ξ=0 edges.
+/// The mapping is the order-1 Quad4 corner permutation `[0,1,3,2]`; the DG path
+/// only supports order 1 (`SegP1` trace with 2 face DOFs per element).
+const QUAD4_TOPO_TO_LEX: [usize; 4] = [0, 1, 3, 2];
+
 fn l2_face_dofs<S: FESpace>(space: &S, elem: u32, face: u32) -> [usize; 2] {
     let en = space.mesh().element_nodes(elem);
     let fn_ = space.mesh().face_nodes(face);
     let mut dofs = [0usize; 2];
     for k in 0..2 {
         let pos = en.iter().position(|&nn| nn == fn_[k]).expect("face node not in element");
-        dofs[k] = elem as usize * 4 + pos;
+        dofs[k] = elem as usize * 4 + QUAD4_TOPO_TO_LEX[pos];
     }
     dofs
 }
@@ -511,10 +538,17 @@ fn integrate_bc<S: FESpace>(
     let face_to_elem = build_face_elem_map(mesh, dim);
     // MFEM: int_order = 2*fe.GetOrder() + 3
     let (xi_q, w_q) = seg_quad(2 * order + 3);
-    // H1 space basis: QuadQk on [0,1]² with H1 topological node order
-    // (matches H1Space's element_dofs).  NOT dg_base::ref_elem_vol (QuadL2GL
-    // lex order) — using that misaligns dof i ↔ basis i and corrupts u/∇u.
-    let re = fem_element::lagrange::QuadQk::new(order as usize);
+    // D779: the element basis must match the space's DOF table.  An L² space
+    // numbers its element DOFs in lexicographic `L2_DOF_MAP` order (QuadL2GL),
+    // while H1 uses the topological node order (QuadQk).  Pairing the L² table
+    // with `QuadQk` (the old unconditional choice, correct only for H1)
+    // misaligns dof i ↔ basis i, so the DG verification rows reported
+    // n.Grad(u) = 0.449 instead of the imposed 1.0.
+    let re: Box<dyn ReferenceElement> = if space.l2_basis().is_some() {
+        ref_elem_vol(ElementType::Quad4, order)
+    } else {
+        Box::new(fem_element::lagrange::QuadQk::new(order as usize))
+    };
     let n_dofs = re.n_dofs();
 
     let mut phi = vec![0.0; n_dofs];
@@ -551,8 +585,18 @@ fn integrate_bc<S: FESpace>(
         };
 
         for (qi, xi) in xi_q.iter().enumerate() {
+            // D778: MFEM's face rule is `IntRules.Get(Geometry::SEGMENT,
+            // 2p+3)` — Gauss-Legendre on the segment reference **[-1,1]** —
+            // while `seg_quad` returns the [0,1] rule (weights sum 1).  Map the
+            // point by `t = 2ξ−1` and scale the weight by 2 before feeding
+            // `eip_at`/`deip`, whose `0.5*(1±t)` arms are the [-1,1] face→
+            // element map (`FTr->Loc1`).  Feeding ξ directly (the old code)
+            // sampled only the second half of every boundary edge, and the
+            // missing ×2 halved `nrm`/`avg`.  Same form as the parallel
+            // `mfem_pex27_parallel_robin_bc.rs` integrator.
+            let t = 2.0 * xi - 1.0;
             // Face ref point t ∈ [-1,1] → element ref point eip ∈ [0,1]².
-            let eip = eip_at(*xi);
+            let eip = eip_at(t);
             // Q3 isoparametric element geometry: J, det, physical face point.
             let (jq, detq, _xp) = mesh.element_jacobian(elem, &eip);
             // Face tangent dF/dt = J·d(eip)/dt; face_weight = |tangent|.
@@ -569,7 +613,7 @@ fn integrate_bc<S: FESpace>(
                 .transpose();
             xform_grads(&jit, &gref, &mut gphys, n_dofs, dim);
 
-            let w = w_q[qi] * face_weight;
+            let w = w_q[qi] * 2.0 * face_weight;
             nrm += w;
             let mut val = 0.0;
             if !a_is_zero {
@@ -616,9 +660,17 @@ fn assemble_l2_mass<S: FESpace>(
         let Some(&elem) = face_to_elem.get(&f) else { continue; };
         let dofs = l2_face_dofs(space, elem, f);
         for (qi, xi) in xi_q.iter().enumerate() {
-            let (_, nor) = face_point_and_normal(mesh, elem, f, *xi);
+            // D779: `face_point_and_normal` takes MFEM's **[-1,1]** face
+            // parameter (`FTr->Loc1`, |nor| = h/2), so the [0,1] Gauss point is
+            // remapped by `t = 2ξ−1` and its weight scaled by 2 — MFEM's
+            // `IntRules.Get(Geometry::SEGMENT, order)` rule.  `SegP1` keeps its
+            // own [0,1] parameter (`0.5*(1+t) = ξ`), so `eval_basis` is
+            // unchanged.  The old code passed ξ straight in: every boundary
+            // edge was sampled on its **second half only** with a half measure.
+            let t = 2.0 * xi - 1.0;
+            let (_, nor) = face_point_and_normal(mesh, elem, f, t);
             let len = (nor[0] * nor[0] + nor[1] * nor[1]).sqrt();
-            let w = w_q[qi] * len * kappa;
+            let w = w_q[qi] * 2.0 * len * kappa;
             re.eval_basis(&[*xi], &mut phi);
             for i in 0..2 {
                 for j in 0..2 {
@@ -651,9 +703,13 @@ fn assemble_l2_linear<S: FESpace, F: Fn(&[f64], &[f64]) -> f64>(
         let Some(&elem) = face_to_elem.get(&f) else { continue; };
         let dofs = l2_face_dofs(space, elem, f);
         for (qi, xi) in xi_q.iter().enumerate() {
-            let (xp, nor) = face_point_and_normal(mesh, elem, f, *xi);
+            // D779: same [-1,1] face parameter / doubled-weight remap as
+            // `assemble_l2_mass` (MFEM `BoundaryLFIntegrator` at
+            // `IntRules.Get(SEGMENT, order)`).
+            let t = 2.0 * xi - 1.0;
+            let (xp, nor) = face_point_and_normal(mesh, elem, f, t);
             let len = (nor[0] * nor[0] + nor[1] * nor[1]).sqrt();
-            let w = w_q[qi] * len;
+            let w = w_q[qi] * 2.0 * len;
             re.eval_basis(&[*xi], &mut phi);
             let val = g(&xp, &nor);
             for i in 0..2 { rhs[dofs[i]] += w * val * phi[i]; }
@@ -665,9 +721,19 @@ fn assemble_l2_linear<S: FESpace, F: Fn(&[f64], &[f64]) -> f64>(
 /// MFEM `DGDirichletLFIntegrator`: the weak Dirichlet boundary load
 /// `∫_Γ u_D·(σ·a·∇v·n + κ·a·h⁻¹·v) ds` on the tagged faces.
 ///
-/// `nor` is the unnormalized face normal (|nor| = face Jacobian) and the
-/// element gradients use the bilinear (corner) geometry — the same convention
-/// as the DG face assembly.
+/// D795-1: MFEM's `AssembleRHSElementVect` (lininteg.cpp:877-924) evaluates the
+/// **isoparametric** element geometry — `nor = CalcOrtho(Tr.Jacobian())` (the
+/// curved face tangent, `[0,1]` reference segment, weights summing to 1) and
+/// `Tr.Elem1->Weight()` / `CalcAdjugate(Tr.Elem1->Jacobian())` at the
+/// reference-composed point `Tr.GetElement1IntPoint()`:
+///
+/// ```text
+///   dshape_dn_j = ip.weight·u_D·a·(∇_xφ_j·nor)      (det(J) cancels)
+///   elvect_j   += sigma·dshape_dn_j
+///               + kappa·ip.weight·u_D·a·|nor|²/det(J)·φ_j
+/// ```
+///
+/// so this is the exact adjoint of `DgAssembler`'s boundary face term.
 fn assemble_l2_dg_dirichlet_lf<S: FESpace>(
     space: &S,
     mesh: &Mesh<2>,
@@ -695,40 +761,24 @@ fn assemble_l2_dg_dirichlet_lf<S: FESpace>(
         if !tags.contains(&mesh.face_tag(f)) { continue; }
         let Some(&elem) = face_to_elem.get(&f) else { continue; };
         let gd: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
-
-        let nodes = mesh.element_nodes(elem);
-        let (jac, _) = simplex_jac(mesh, nodes, dim);
-        let jit = jac.clone().try_inverse()
-            .unwrap_or_else(|| { eprintln!("  warning: degenerate element"); nalgebra::DMatrix::identity(2, 2) })
-            .transpose();
-        let (xl, yl): (Vec<f64>, Vec<f64>) = if nodes.len() > 3 {
-            let xl: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[0]).collect();
-            let yl: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[1]).collect();
-            (xl, yl)
-        } else {
-            (vec![], vec![])
-        };
+        let (fa, fb) = (mesh.face_nodes(f)[0], mesh.face_nodes(f)[1]);
 
         let mut fe = vec![0.0; n_dofs];
         for (qi, xi) in xi_q.iter().enumerate() {
-            let (xp, nor) = face_point_and_normal(mesh, elem, f, *xi);
-            let nor2 = nor[0] * nor[0] + nor[1] * nor[1];
-            let mut xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
-            if nodes.len() > 3 { for v in &mut xi_e { *v -= 1.0; } }
-            re.eval_basis(&xi_e, &mut phi);
-            re.eval_grad_basis(&xi_e, &mut gref);
-            let (jit_pt, det_pt) = if nodes.len() > 3 {
-                let (j, d) = quad_jac_at(&xl, &yl, xi_e[0], xi_e[1]);
-                (j.clone().try_inverse().unwrap_or_else(|| nalgebra::DMatrix::identity(2, 2)).transpose(), d.abs().max(1e-14))
-            } else {
-                (jit.clone(), jac.determinant().abs().max(1e-14))
-            };
-            xform_grads(&jit_pt, &gref, &mut gphys, n_dofs, dim);
+            // D795-1: reference composition (`FTr->Loc1.Transform(ip, eip)`) on
+            // the isoparametric geometry — no physical inverse map, no corner
+            // chord normal, and the `[0,1]` segment weights are used as-is
+            // (`IntRules.Get(SEGMENT, 2·order)`, `Σw = 1`).
+            let g = face_point_geom(mesh, elem, fa, fb, *xi);
+            let nor2 = g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1];
+            re.eval_basis(&g.eip, &mut phi);
+            re.eval_grad_basis(&g.eip, &mut gref);
+            xform_grads(&g.jit, &gref, &mut gphys, n_dofs, dim);
             let w = w_q[qi];
             // MFEM: elvect += sigma·(uD·Q·∇v·nor) + kappa·(uD·Q·|nor|²/|det J|·v)
             for k in 0..n_dofs {
-                let du_dn = gphys[k * dim] * nor[0] + gphys[k * dim + 1] * nor[1];
-                fe[k] += w * (sigma * u_d * a * du_dn + penalty * u_d * a * nor2 / det_pt * phi[k]);
+                let du_dn = gphys[k * dim] * g.nor[0] + gphys[k * dim + 1] * g.nor[1];
+                fe[k] += w * (sigma * u_d * a * du_dn + penalty * u_d * a * nor2 / g.det_j * phi[k]);
             }
         }
         for (k, &g) in gd.iter().enumerate() { rhs[g] += fe[k]; }
