@@ -32,6 +32,11 @@ pub trait FluxRecovery {
     ///
     /// Returns a flat array `[n_flux_dofs × dim]` where
     /// `flux[i * dim + d]` = d-th component at the i-th flux-space DOF.
+    ///
+    /// `dim` is MFEM's `spaceDim = Trans.GetSpaceDim()`: on an embedded
+    /// surface mesh (`mesh.dim() > mesh.topological_dim()`, e.g. a `Mesh<3>`
+    /// of `Tri3`) the flux has **three** components and is the *tangential*
+    /// gradient `J·(JᵀJ)⁻¹·∇_ξu_h` — see [`surface_geometry`] (D806-2).
     fn compute_element_flux<M: MeshTopology, S: FESpace<Mesh = M>>(
         &self,
         mesh: &M,
@@ -110,6 +115,58 @@ fn is_simplex(elem_type: ElementType) -> bool {
     matches!(elem_type, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10)
 }
 
+/// The `(geometry element, geometry node table)` pair MFEM's
+/// `Mesh::GetElementTransformation` would use for an embedded-surface
+/// `element`: the order-`g` `Nodes` table when the mesh is curved, the P1
+/// vertex table otherwise.  `ref_elem_vol`'s simplex arms
+/// ([`fem_space::ref_elem::h1_simplex_slots`]) and the P1 geometry element
+/// [`ElementType::ref_elem`]`(1)` live on the *same* unit-triangle reference
+/// domain, and a curved triangle's `H1TriPk(g)` geometry table shares it with
+/// `h1_simplex_slots(Tri3, g)` too, so a quadrature point taken on the
+/// solution basis means the same point for the geometry — no frame change
+/// (the assembler's `geom_quad_point` is the identity for simplices for the
+/// same reason).
+///
+/// D806-2: the embedded arm is wired for the 2-D **simplex** in 3-D only,
+/// and refuses everything else loudly.  MFEM's `CalcInverse` covers only
+/// `Width < Height <= 3` (`linalg/densemat.cpp:2675`) and `DenseMatrix::
+/// Weight()` only `2×1`, `3×1` and `3×2` (`linalg/densemat.cpp:560-575`), so
+/// the *rectangular* contract exists exactly for those; the fem-rs surface
+/// arm additionally needs the geometry element to sit in the **solution
+/// basis's** reference frame, which the `Quad4` surface case does not
+/// ([`ref_elem_vol`] hands back the legacy `[-1,1]²` `QuadQ1`, while
+/// `geo_ref_elem` returns the `[0,1]²` bilinear map) and the 1-D curve arms
+/// (`CalcLeftInverse<2,1>` / `<3,1>`) are unwired.  Reading a frame the basis
+/// was not evaluated in silently corrupts every flux, so this refuses instead;
+/// before D806-2 such a cell fell into [`geom_jacobian`]'s P1-corner
+/// fallback — **singular** on a planar `Quad4` surface (`det J ≡ 0`), silently
+/// wrong on a warped one.
+fn surface_geometry<'a, M: MeshTopology>(
+    mesh: &'a M,
+    element: u32,
+    elem_type: ElementType,
+) -> (Box<dyn ReferenceElement>, &'a [u32]) {
+    let edim = mesh.dim() as usize;
+    let tdim = mesh.topological_dim() as usize;
+    assert!(
+        edim == 3 && tdim == 2 && is_simplex(elem_type),
+        "flux_recovery: embedded (surface) cells have no flux-recovery \
+         geometry contract for ({elem_type:?}: {tdim}-D cell in {edim}-D \
+         space).  D806-2 wires the 2-D simplex in 3-D only — the one case \
+         whose geometry frames coincide (MFEM `CalcLeftInverse<3,2>`, \
+         `linalg/kernels.hpp:1217`, and `DenseMatrix::Weight()`'s \
+         `3×2` branch, `linalg/densemat.cpp:571`).  A `Quad4` surface mesh's \
+         solution basis is the legacy `[-1,1]²` `QuadQ1` while its geometry \
+         element is the `[0,1]²` bilinear map, and the 1-D curve arms \
+         (`CalcLeftInverse<2,1>`/`<3,1>`) are unwired; both would silently \
+         read the wrong reference frame."
+    );
+    match crate::assembler::geo_ref_elem(mesh, element) {
+        Some(geo) => (geo, mesh.geometry_nodes(element)),
+        None => (elem_type.ref_elem(1), mesh.element_nodes(element)),
+    }
+}
+
 /// Geometric-mapping Jacobian at reference point `xi` on `element`.
 ///
 /// - **Simplex** (Tri3/Tri6/Tet4/Tet10): delegated to
@@ -134,6 +191,13 @@ fn is_simplex(elem_type: ElementType) -> bool {
 ///   straight-pyramid geometry and the Fuentes solution basis live on the same
 ///   unit-pyramid reference domain, so one `xi` means the same point for both.
 /// - **Anything else**: the P1 corner-difference map.
+///
+/// Embedded (surface) cells never reach this function: their Jacobian is
+/// **rectangular** (`spaceDim × cellDim`) and has no `dim × dim` inverse at
+/// all, so [`compute_element_flux`] / [`compute_flux_energy`] route them
+/// through [`surface_geometry`] + [`crate::assembler::surface_jacobian`]
+/// (D806-2).  See [`surface_geometry`] for why the square-Jacobian helper
+/// cannot serve them.
 ///
 /// D353 sweep.  The last arm used to be the only one for 3-D non-simplex
 /// cells, and it is **singular on a hex**: `nodes[1]`, `nodes[2]`, `nodes[3]`
@@ -395,7 +459,16 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         solution_dofs: &[f64],
         flux_dof_coords: &[Vec<f64>],
     ) -> Vec<f64> {
-        let dim = mesh.dim() as usize;
+        // MFEM `DiffusionIntegrator::ComputeElementFlux`
+        // (`fem/bilininteg.cpp:1173-1186`) splits the *embedding* dimension
+        // from the *cell* dimension: `dim = el.GetDim()` sizes the reference
+        // gradient (`dshape(nd, dim)`) and `spaceDim = Trans.GetSpaceDim()`
+        // sizes the flux vector and the Jacobian's rows.  On a volume mesh
+        // the two are equal; on an embedded surface mesh (`Mesh<3>` holding
+        // `Tri3`, MFEM's `Dim = 2, spaceDim = 3`) they are not, and reading
+        // `mesh.dim()` for both roles made the whole arm singular (D806-2).
+        let edim = mesh.dim() as usize;              // MFEM `spaceDim`
+        let tdim = mesh.topological_dim() as usize;  // MFEM `el.GetDim()`
         let n_flux_dofs = flux_dof_coords.len();
         let elem_type = mesh.element_type(element);
         let order = space.order();
@@ -413,6 +486,51 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let elem_dofs = space.element_dofs(element);
         check_h1_flux_layout(space, element, elem_type, n_ldofs);
 
+        let mut flux = vec![0.0; n_flux_dofs * edim];
+
+        if edim != tdim {
+            // ── D806-2: embedded-surface arm (2-D simplex in 3-D) ───────────
+            // MFEM builds the rectangular `spaceDim × dim` Jacobian here and
+            // inverts it with `CalcInverse`'s left-inverse branch
+            // (`linalg/densemat.cpp:2679` -> `kernels::CalcLeftInverse<3,2>`,
+            // `linalg/kernels.hpp:1217`), i.e. `invdfdx = (JᵀJ)⁻¹Jᵀ`, and
+            // `invdfdx.MultTranspose(vec, vecdxt)` is the **tangential**
+            // gradient `J·(JᵀJ)⁻¹·∇_ξu_h` — the projection of the reference
+            // gradient onto the cell's tangent plane, in `spaceDim`
+            // components.  `surface_jacobian` is the assembler's single source
+            // of truth for exactly that 3×2 geometry (the surface path of
+            // `accumulate_volume_bilinear_element`), so the recovered flux and
+            // the surface stiffness use one geometry contract.
+            let (geo, geo_nodes) = surface_geometry(mesh, element, elem_type);
+            let mut grad_ref = vec![0.0; n_ldofs * tdim];
+            let mut vec_xi = vec![0.0; tdim];
+            for (i, xi) in flux_dof_coords.iter().enumerate() {
+                ref_elem.eval_grad_basis(xi, &mut grad_ref);
+                for j in 0..tdim {
+                    let mut s = 0.0;
+                    for k in 0..n_ldofs {
+                        s += solution_dofs[elem_dofs[k] as usize] * grad_ref[k * tdim + j];
+                    }
+                    vec_xi[j] = s;
+                }
+                // `j` is column-major `[∂x/∂ξ₀ (3), ∂x/∂ξ₁ (3)]`, `ginv` the
+                // row-major inverse metric `[[a, b], [b, c]]` of `JᵀJ`.
+                let (_measure, j, ginv, _xp) = crate::assembler::surface_jacobian(
+                    mesh, geo_nodes, geo.as_ref(), xi, edim, tdim,
+                );
+                // ∇_phys = J · (JᵀJ)⁻¹ · ∇_ξ  (the same product the surface
+                // stiffness path forms; MFEM writes it transposed as
+                // `invdfdxᵀ·vec` with `invdfdx = (JᵀJ)⁻¹Jᵀ`).
+                let t0 = ginv[0] * vec_xi[0] + ginv[1] * vec_xi[1];
+                let t1 = ginv[1] * vec_xi[0] + ginv[2] * vec_xi[1];
+                for d in 0..edim {
+                    flux[i * edim + d] = j[d] * t0 + j[edim + d] * t1;
+                }
+            }
+            return flux;
+        }
+        let dim = edim;
+
         // MFEM DiffusionIntegrator::ComputeElementFlux evaluates κ·∇u_h at the
         // flux-space DOF nodes (fluxelem.GetNodes()) directly — no L²
         // projection, no quadrature.  Per node:
@@ -426,7 +544,6 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         // the AMR error threshold.
         let mut grad_ref = vec![0.0; n_ldofs * dim];
         let mut vec = vec![0.0; dim];
-        let mut flux = vec![0.0; n_flux_dofs * dim];
         for (i, xi) in flux_dof_coords.iter().enumerate() {
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
             for j in 0..dim {
@@ -500,7 +617,13 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         element: u32,
         flux_diff: &[f64],
     ) -> f64 {
-        let dim = mesh.dim() as usize;
+        // MFEM `ComputeFluxEnergy` reads `spaceDim = Trans.GetSpaceDim()` for
+        // the flux components and `fluxelem.GetDim()` for the basis (D806-2:
+        // on an embedded surface mesh these differ, and the measure is the
+        // rectangular-Jacobian `Trans.Weight()` below, not a square `det J`).
+        let edim = mesh.dim() as usize;              // MFEM `spaceDim`
+        let tdim = mesh.topological_dim() as usize;  // MFEM `fluxelem.GetDim()`
+        let dim = edim;
         let elem_type = mesh.element_type(element);
         // The flux space has the same order as the solution space (ex15: the
         // estimator's flux FES is built from the same H1_FECollection).  The
@@ -520,6 +643,16 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let n_ldofs = ref_elem.n_dofs();
         let nodes = mesh.element_nodes(element);
         let quad = ref_elem.quadrature(quad_order);
+        // D806-2: an embedded surface's measure is `sqrt(det(JᵀJ))` of the
+        // rectangular Jacobian — MFEM's `Trans.Weight()` for a `spaceDim > dim`
+        // cell (`linalg/densemat.cpp:571`) — which has no `det J` at all.
+        let surface = edim != tdim;
+        let surface_geo = if surface {
+            let (geo, geo_nodes) = surface_geometry(mesh, element, elem_type);
+            Some((geo, geo_nodes))
+        } else {
+            None
+        };
 
         // MFEM ComputeFluxEnergy: for each quadrature point
         //   pointflux_d = Σ_j flux_diff(j,d) · φ_j(ip)      (CalcPhysShape:
@@ -531,7 +664,19 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let mut pointflux = vec![0.0; dim];
         let mut energy = 0.0;
         for (q, xi) in quad.points.iter().enumerate() {
-            let (_, det_j) = geom_jacobian(mesh, element, nodes, xi, dim, elem_type);
+            // D806-2: an embedded surface's weight is the rectangular-Jacobian
+            // measure `sqrt(det(JᵀJ))` (MFEM `Trans.Weight()`), which is
+            // non-negative by construction; the volume arms keep the square
+            // `det J` below.
+            let det_j = match &surface_geo {
+                Some((geo, geo_nodes)) => {
+                    let (measure, _j, _ginv, _xp) = crate::assembler::surface_jacobian(
+                        mesh, geo_nodes, geo.as_ref(), xi, edim, tdim,
+                    );
+                    measure
+                }
+                None => geom_jacobian(mesh, element, nodes, xi, dim, elem_type).1,
+            };
             // D696 batch 3 adjudication (revised on the d365 red light):
             // MFEM ComputeFluxEnergy weights with `Trans.Weight()·ip.weight`
             // and the MFEM probe `tmp/d696b/bipyramid_probe.cpp` proves
