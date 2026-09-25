@@ -783,18 +783,29 @@ pub fn refine_nonconforming(
 ///
 /// - Tri3  → 4 Tri3  (newest-vertex bisection).
 /// - Quad4 → 4 Quad4 (conforming split matching MFEM UniformRefinement2D_base).
+///
+/// A high-order element *type* (`Tri6`, `Quad8`, `Quad9`) first takes its
+/// [linear view](linear_view) — corners only, `nodes` geometry table carried —
+/// and then the same family path, so a quadratic import refines into its
+/// family's linear type carrying the transported geometry (D113).
 pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     // Mixed Tri3+Quad4 meshes: per-element-type refinement with a shared
     // edge-midpoint map (MFEM UniformRefinement2D_base handles mixed meshes).
     if mesh.elem_types.is_some() {
         return refine_uniform_2d_mixed(mesh);
-    }    match mesh.elem_type {
+    }
+    // High-order element *types* (`Tri6`, `Quad8/9`) work on the linear view
+    // of their family (corners + the carried `nodes` geometry table) — D113.
+    if let Some(lin) = linear_view(mesh) {
+        return refine_uniform(&lin);
+    }
+    match mesh.elem_type {
         ElementType::Tri3 => refine_marked(mesh, &all),
         ElementType::Quad4 => refine_uniform_quad4(mesh),
-        _ => panic!(
-            "refine_uniform: unsupported element type {:?} (only Tri3 and Quad4 are supported)",
-            mesh.elem_type
+        other => panic!(
+            "refine_uniform: unsupported element type {other:?} (a high-order element type must \
+             be routed through its linear view — see `linear_family`)"
         ),
     }
 }
@@ -1783,12 +1794,166 @@ fn avg4(a: &[f64; 2], b: &[f64; 2], c: &[f64; 2], d: &[f64; 2]) -> [f64; 2] {
     ]
 }
 
+/// The linear element type a *high-order element type* belongs to, together
+/// with the number of its corner nodes — `None` for a linear type (and for
+/// every type that carries no extra nodes).
+///
+/// D113: fem-rs element types name the node count (`Hex27`, `Tet10`,
+/// `Prism18`, `Pyramid13`, …), but a mesh read from Gmsh/Cubit keeps the
+/// second-order node list while every refinement kernel is written for the
+/// linear family (`Tet4`/`Hex8`/`Prism6`/`Pyramid5`).  The kernels index an
+/// element's **first** `npe` nodes for corners (`local_edges_*` /
+/// `local_faces_*` are offset tables into that view), so the extra nodes live
+/// in the `coords` table and the high-order `GeometryData` — exactly the
+/// linear view built here.
+fn linear_family(et: ElementType, dim: usize) -> Option<(ElementType, usize)> {
+    match (dim, et) {
+        (2, ElementType::Tri6) => Some((ElementType::Tri3, 3)),
+        (2, ElementType::Quad8 | ElementType::Quad9) => Some((ElementType::Quad4, 4)),
+        (_, ElementType::Tet10) => Some((ElementType::Tet4, 4)),
+        (_, ElementType::Hex20 | ElementType::Hex27) => Some((ElementType::Hex8, 8)),
+        (_, ElementType::Prism15 | ElementType::Prism18) => Some((ElementType::Prism6, 6)),
+        (_, ElementType::Pyramid13) => Some((ElementType::Pyramid5, 5)),
+        _ => None,
+    }
+}
+
+/// Whether the family refinement path for the *linear* type `linear`
+/// transports a high-order `nodes` table of `order`/`dpe` to its children —
+/// i.e. whether `curved_hex` / `curved_tet` / `curved_prism` (3-D) or
+/// `curved_quad` / `curved_tri` (2-D) accepts the table.  The criterion is the
+/// `nodes_per_elem == h1_family_dofs(linear, order)` stride those modules
+/// check on construction.
+fn geometry_transport_available(linear: ElementType, order: u8, dpe: usize) -> bool {
+    order >= 2
+        && matches!(
+            linear,
+            ElementType::Tri3
+                | ElementType::Quad4
+                | ElementType::Tet4
+                | ElementType::Hex8
+                | ElementType::Prism6
+        )
+        && dpe == crate::simplex::h1_family_dofs(linear, order)
+}
+
+/// The **linear view** of a mesh whose element *type* carries high-order
+/// nodes: per element only the `corners` corner nodes are kept, the element
+/// type becomes the family's linear type, the coordinate table and the
+/// high-order `GeometryData` are carried over unchanged, and the boundary
+/// tables are dropped (every refinement path rebuilds them).
+///
+/// The corner nodes are **not** assumed to be the first `corners` entries of
+/// an element row: which row slot holds which vertex is read from the
+/// element's own order-`order` lattice (`ref_elem(order).dof_coords()` — a slot
+/// whose reference position is a reference-cell corner) and mapped to the
+/// linear element's vertex order.  For the vertex-first families (`Hex20/27`,
+/// `Tet10`, `Tri6`, `Quad8/9`) that is the identity, but a **Gmsh `Prism18`**
+/// import stores its row in the evaluation element's *layer-major* order
+/// (D319's permutation), where slots 3..5 are the bottom triangle's edge
+/// midpoints and the top vertices sit at slots 12..14 — taking the first six
+/// nodes as corners builds a degenerate wedge (measured before the fix: the
+/// refined children of an affine unit prism no longer tiled it, sum 4.392e-1
+/// vs 5.0e-1).
+///
+/// `None` for a linear element type (nothing to do) and for mixed-element
+/// meshes (`elem_types` carry per-element strides; those keep the
+/// `refine_mixed_3d` path, D628).
+///
+/// Carrying the geometry table is the D113 fix: the historical Hex20/Hex27
+/// arm rebuilt a `Hex8` view with `geometry: None` and so **silently**
+/// downgraded an order-2+ mesh to straight-sided children, while
+/// Tet10/Prism15/Prism18/Pyramid13 were not routed at all (the family kernels
+/// assert their linear type).  With the table attached, each family's
+/// `curved_*` transport runs exactly as it does for the `X8 + nodes` form of
+/// the same mesh.  A table the family path cannot transport (a serendipity
+/// table, or a Pyramid5 table — D336) is reported instead of being dropped in
+/// silence.
+fn linear_view<const D: usize>(mesh: &Mesh<D>) -> Option<Mesh<D>> {
+    let (linear, corners) = linear_family(mesh.elem_type, D)?;
+    if mesh.elem_types.is_some() {
+        return None;
+    }
+    let npe = mesh.elem_type.nodes_per_element();
+    debug_assert!(corners < npe, "linear view only for extra-node element types");
+    if let Some(g) = mesh.geometry.as_ref() {
+        if !geometry_transport_available(linear, g.order, g.nodes_per_elem) {
+            eprintln!(
+                "warning (D113): refining a {:?} mesh whose `nodes` geometry (order {}, {} dofs/\
+                 elem) has no {:?}-family transport — the refined mesh is straight-sided; the \
+                 high-order geometry is dropped",
+                mesh.elem_type, g.order, g.nodes_per_elem, linear
+            );
+        }
+    }
+    let order = mesh.geom_order().max(2);
+    let hi = mesh.elem_type.ref_elem(order);
+    let hi_coords = hi.dof_coords();
+    let lo_coords = linear.ref_elem(1).dof_coords();
+    let mut slot_of_vertex = vec![usize::MAX; corners];
+    for (k, c) in hi_coords.iter().enumerate() {
+        if !c.iter().take(D).all(|&x| x == 0.0 || x == 1.0) {
+            continue; // not a reference-cell corner
+        }
+        if let Some(v) = lo_coords
+            .iter()
+            .position(|lc| (0..D).all(|d| lc[d] == c[d]))
+        {
+            slot_of_vertex[v] = k;
+        }
+    }
+    assert!(
+        slot_of_vertex.iter().all(|&k| k != usize::MAX),
+        "linear_view: {:?} order-{order} lattice does not place every corner of {:?}",
+        mesh.elem_type,
+        linear
+    );
+    assert!(
+        slot_of_vertex.iter().all(|&k| k < npe),
+        "linear_view: {:?} carries {npe} nodes per element but its order-{order} geometry \
+         lattice puts a corner at a higher slot",
+        mesh.elem_type
+    );
+    let mut conn = Vec::with_capacity(mesh.n_elems() * corners);
+    for e in 0..mesh.n_elems() as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for &k in &slot_of_vertex {
+            let n = ns[k];
+            conn.push(n);
+        }
+    }
+    Some(Mesh {
+        coords: mesh.coords.clone(),
+        conn,
+        elem_tags: mesh.elem_tags.clone(),
+        elem_type: linear,
+        face_conn: vec![],
+        face_tags: vec![],
+        face_type: linear.boundary_type().unwrap_or(mesh.face_type),
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: mesh.geometry.clone(),
+        nc_vertex_view: None,
+        vertex_parents: vec![],
+    })
+}
+
 /// Uniformly refine all elements of a 3-D mesh, dispatching to the appropriate
 /// refinement path.
 ///
-/// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Hex20 → 8 Hex8, Hex27 → 8 Hex8,
-/// Prism6 → 8 Prism6, Pyramid5 → 6 Pyramid5 + 4 Tet4 (D472: MFEM's
-/// `UniformRefinement3D_base` PYRAMID branch — the child mesh is mixed).
+/// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Prism6 → 8 Prism6, Pyramid5 → 6 Pyramid5 +
+/// 4 Tet4 (D472: MFEM's `UniformRefinement3D_base` PYRAMID branch — the child
+/// mesh is mixed).  A high-order element *type* (`Tet10`, `Hex20`, `Hex27`,
+/// `Prism15/18`, `Pyramid13`) first takes its [linear view](linear_view) —
+/// corners only, geometry table carried — and then the same family path; the
+/// refined mesh is the family's linear type carrying the transported geometry
+/// table, the representation MFEM writes for the same mesh (`nodes` on top of
+/// 8/4/6/5-node elements).
 ///
 /// A **mixed**-element mesh (`elem_types` set) takes the `refine_mixed_3d`
 /// path, where a Pyramid5 follows the same MFEM PYRAMID branch;
@@ -1800,6 +1965,11 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     if mesh.elem_types.is_some() {
         return refine_mixed_3d(mesh);
     }
+    // High-order element *types* work on the linear view of their family
+    // (corners + the carried `nodes` geometry table) — D113.
+    if let Some(lin) = linear_view(mesh) {
+        return refine_uniform_3d(&lin);
+    }
     // Topological maps of the prism refinement, needed by the boundary rebuild
     // below when the mesh is curved (see the match tail).
     let mut prism_maps: Option<(
@@ -1807,45 +1977,12 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
         HashMap<[NodeId; 4], NodeId>,
     )> = None;
     let mut result = match mesh.elem_type {
-        ElementType::Tet4 | ElementType::Tet10 => {
+        ElementType::Tet4 => {
             let (m, _, _) = refine_nonconforming_3d(mesh, &all, None);
             m
         }
         ElementType::Hex8 => {
             let (m, _, _, _) = refine_nonconforming_hex(mesh, &all, None);
-            m
-        }
-        ElementType::Hex20 | ElementType::Hex27 => {
-            // Documented gap (D166 follow-up): fem-rs refines Hex20/Hex27 by
-            // keeping the first 8 corner nodes and re-running the Hex8 path,
-            // so the children are Hex8 and any high-order `nodes` geometry is
-            // dropped (`geometry: None` below).  MFEM instead splits a Hex27
-            // into eight Hex27 children with interpolated mid-edge/face/center
-            // nodes.  No code path currently produces a curved Hex20/Hex27
-            // mesh (the MFEM reader stores curved hexahedra as Hex8 + `nodes`),
-            // so nothing consumes the dropped table today; revisit if a
-            // generator starts emitting quadratic+ hexahedra.
-            let n_elems = mesh.n_elems();
-            let npe = mesh.elem_type.nodes_per_element();
-            let mut hex8_conn = Vec::with_capacity(n_elems * 8);
-            for e in 0..n_elems {
-                let off = e * npe;
-                hex8_conn.extend_from_slice(&mesh.conn[off..off + 8]);
-            }
-            let hex8_mesh = Mesh {
-                coords: mesh.coords.clone(),
-                conn: hex8_conn,
-                elem_tags: mesh.elem_tags.clone(),
-                elem_type: ElementType::Hex8,
-                face_conn: vec![], face_tags: vec![],
-                face_type: ElementType::Quad4,
-                elem_types: None, elem_offsets: None,
-                face_types: None, face_offsets: None,
-                face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
-            nc_vertex_view: None,
-vertex_parents: vec![],
-};
-            let (m, _, _, _) = refine_nonconforming_hex(&hex8_mesh, &all, None);
             m
         }
         ElementType::Prism6 => {
@@ -1857,24 +1994,27 @@ vertex_parents: vec![],
             let (m, _) = refine_pyramid5_uniform(mesh, &all);
             m
         }
-        _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
+        other => panic!(
+            "refine_uniform_3d: unsupported element type {other:?} (a high-order element type \
+             must be routed through its linear view — see `linear_family`)"
+        ),
     };
     match mesh.elem_type {
-        // Hex8/Hex20/Hex27: `refine_nonconforming_hex` already rebuilt the
-        // boundary faces itself — topologically, from its own midpoint and
-        // face-center maps, in the exact MFEM `new_boundary` order. Running
-        // the coordinate-lookup rebuild here would be redundant for linear
-        // meshes and *wrong* for curved ones (new vertex coordinates are the
-        // exact geometry-dof picks, not recomputable averages).
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {}
-        // Tet4/Tet10: `refine_nonconforming_3d` rebuilt the boundary faces
-        // itself (topologically, from its own midpoint map — in MFEM's
+        // Hex8: `refine_nonconforming_hex` already rebuilt the boundary faces
+        // itself — topologically, from its own midpoint and face-center maps,
+        // in the exact MFEM `new_boundary` order. Running the
+        // coordinate-lookup rebuild here would be redundant for linear meshes
+        // and *wrong* for curved ones (new vertex coordinates are the exact
+        // geometry-dof picks, not recomputable averages).
+        ElementType::Hex8 => {}
+        // Tet4: `refine_nonconforming_3d` rebuilt the boundary faces itself
+        // (topologically, from its own midpoint map — in MFEM's
         // `new_boundary` order wherever the curved-uniform gate switched it
         // on).  A curved mesh must not run the coordinate-keyed rebuild again
         // (its new vertices carry geometry-pick coordinates no average can
         // reproduce); a straight-sided mesh keeps the historical second pass
         // whose MFEM-template output the straight regression outputs pin.
-        ElementType::Tet4 | ElementType::Tet10 => {
+        ElementType::Tet4 => {
             if mesh.geometry.is_none() {
                 rebuild_3d_boundary(&mut result, mesh, None);
             }
@@ -1896,7 +2036,7 @@ vertex_parents: vec![],
         // and synthetic boundary tables that split the prisms' quads into
         // triangle *diagonals* only resolve this way (those edges are not in
         // the maps).
-        _ => {
+        ElementType::Prism6 => {
             let taken = prism_maps.take();
             let maps = if mesh.geometry.is_some() {
                 taken.as_ref().map(|(mid, qfc)| {
@@ -1907,6 +2047,10 @@ vertex_parents: vec![],
             };
             rebuild_3d_boundary(&mut result, mesh, maps);
         }
+        other => panic!(
+            "refine_uniform_3d: unsupported element type {other:?} (a high-order element type \
+             must be routed through its linear view — see `linear_family`)"
+        ),
     }
     result
 }
