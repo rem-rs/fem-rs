@@ -1513,12 +1513,14 @@ pub fn solve_hcurl_gssmoother(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, S
 
 /// L² norm of the error using the existing quadrature-based H(Curl) integration.
 ///
-/// Order-aware (D672): the reference basis is selected from
-/// `space.order()` — ND1 (Whitney) for order 1, the MFEM-faithful
-/// `TriND2`/`QuadND2` for order 2, the generic `TriNDk`/`QuadNDk` family for
-/// order ≥ 3 — exactly mirroring the assembler's
-/// `vec_ref_elem_with_basis` dispatch, so the evaluated basis always matches
-/// the slot tables the solution was assembled with.
+/// Order-aware (D672/D765): the reference basis is the one the *assembler*
+/// paired with this space's slot/sign tables —
+/// [`fem_assembly::paired_vector_reference_element`] with the space's own
+/// `(space.order(), elem_type)` — never a hand-picked `...NDk::new(k)`.  The
+/// evaluated basis therefore always matches the tables the solution was
+/// assembled with, whatever the per-cell reference element happens to be
+/// (ND1 Whitney / `TriND2` / `QuadND2` / the order-generic `TriNDk` /
+/// `QuadND` family for order ≥ 3).
 pub fn l2_error_hcurl_exact<F>(
     space: &HCurlSpace<Mesh<2>>,
     uh: &[f64],
@@ -1542,7 +1544,6 @@ where
     F: Fn(&[f64]) -> [f64; 2],
     P: Fn(u32) -> bool,
 {
-    use fem_element::nedelec::{QuadND2, QuadNDk, TriND2, TriNDk};
     use fem_element::VectorReferenceElement;
 
     let mesh = space.mesh();
@@ -1575,11 +1576,21 @@ where
 
         match elem_type {
             ElementType::Tri3 => {
-                let ref_elem: Box<dyn VectorReferenceElement> = match order {
-                    1 => Box::new(TriNDk::new(1)),
-                    2 => Box::new(TriND2),
-                    o => Box::new(TriNDk::new(o)),
-                };
+                // D748/D765: never hand-pick the reference element here — ask
+                // the assembler for the one it *paired* with this space's
+                // slot/sign tables (`paired_vector_reference_element`).  A
+                // mismatched basis is silently wrong (wrong field values, no
+                // panic); the D672/D693/D738/D765 evaluator family was exactly
+                // that drift, and D765's quad -o 3 row (6.603119e-2 vs the
+                // C++ 9.42458e-3) was the legacy `QuadNDk` picked here while
+                // the space's tables describe MFEM's `ND_QuadrilateralElement`.
+                let ref_elem: Box<dyn VectorReferenceElement> =
+                    fem_assembly::paired_vector_reference_element(
+                        fem_space::fe_space::SpaceType::HCurl,
+                        elem_type,
+                        2,
+                        space.order(),
+                    );
                 let quad = ref_elem.quadrature(quad_order);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
@@ -1622,11 +1633,13 @@ where
                 }
             }
             ElementType::Quad4 => {
-                let ref_elem: Box<dyn VectorReferenceElement> = match order {
-                    1 => Box::new(QuadNDk::new(1)),
-                    2 => Box::new(QuadND2),
-                    o => Box::new(QuadNDk::new(o)),
-                };
+                let ref_elem: Box<dyn VectorReferenceElement> =
+                    fem_assembly::paired_vector_reference_element(
+                        fem_space::fe_space::SpaceType::HCurl,
+                        elem_type,
+                        2,
+                        space.order(),
+                    );
                 let quad = ref_elem.quadrature(quad_order);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];

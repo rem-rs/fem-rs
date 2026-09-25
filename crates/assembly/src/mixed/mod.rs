@@ -18,7 +18,7 @@
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
-use fem_element::nedelec::{QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
+use fem_element::nedelec::{QuadND, QuadND2, QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use crate::vector_assembler::{
@@ -1482,10 +1482,22 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         }
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetNDk::new(1)),
+        // D765: the 2-D quad H(curl) arms must select the elements the
+        // *space's* slot/sign tables describe (`var_ref_elem_choice`), because
+        // every caller of this dispatch assembles with
+        // `space.element_dofs(e)` + `space.element_signs(e)`.  The legacy
+        // `QuadNDk` is a different element from order 2 on (equispaced open
+        // nodes, top/left edge slot order reversed against the edge direction)
+        // and there was no order >= 3 arm at all (`Err` on
+        // `data/inline-quad.mesh -o 3`).  See `tmp/d765/slot_adjudication.md`.
         (SpaceType::HCurl, ElementType::Quad4, 1) => Box::new(QuadNDk::new(1)),
-        (SpaceType::HCurl, ElementType::Quad4, 2) => Box::new(QuadNDk::new(2)),
+        (SpaceType::HCurl, ElementType::Quad4, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Quad4, o) if o >= 3 => Box::new(QuadND::new(o as usize)),
         (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadNDk::new(1)),
-        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadNDk::new(2)),
+        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, o) if o >= 3 => {
+            Box::new(QuadND::new(o as usize))
+        }
         (SpaceType::HCurl, ElementType::Hex8, 1) => Box::new(HexNDk::new(1)),
         (SpaceType::HCurl, ElementType::Hex8, 2) => Box::new(HexNDk::new(2)),
         (SpaceType::HCurl, ElementType::Hex20, 1) => Box::new(HexNDk::new(1)),

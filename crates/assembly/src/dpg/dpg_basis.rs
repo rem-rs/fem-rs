@@ -48,7 +48,7 @@ use fem_element::{
     lagrange::{factory::{TetPk, TriPk}, HexL2GL, QuadL2GL},
     quadrature::{gauss_legendre_01, hex_rule, quad_rule_01, tet_rule, tri_rule},
     raviart_thomas::{HexRTk, QuadRTk, TetRTk, TriRTk},
-    nedelec::{HexNDk, QuadNDk, TetNDk, TriNDk},
+    nedelec::{HexNDk, QuadND, QuadND2, QuadNDk, TetNDk, TriNDk},
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
@@ -146,11 +146,22 @@ pub fn vector_ref_elem(et: ElementType, order: u8) -> Box<dyn VectorReferenceEle
 }
 
 /// H(curl) reference element of order `order`.
+///
+/// D765: the quad arm selects the elements `HCurlSpace`'s slot/sign tables
+/// describe ([`crate::vector_assembler::paired_vector_reference_element`]):
+/// order 1 is the Whitney `QuadNDk::new(1)`, order 2 `QuadND2`, and order >= 3
+/// the MFEM-faithful `QuadND` — the legacy `QuadNDk` has equispaced open nodes
+/// and reverses the top/left edge slot order, so it is a different element
+/// (`tmp/d765/slot_adjudication.md`).
 pub fn hcurl_ref_elem(et: ElementType, order: u8) -> Box<dyn VectorReferenceElement> {
     let p = order as usize;
     match et {
         ElementType::Tri3 | ElementType::Tri6 => Box::new(TriNDk::new(p)),
-        ElementType::Quad4 => Box::new(QuadNDk::new(p)),
+        ElementType::Quad4 => match p {
+            1 => Box::new(QuadNDk::new(1)),
+            2 => Box::new(QuadND2),
+            _ => Box::new(QuadND::new(p)),
+        },
         ElementType::Tet4 => Box::new(TetNDk::new(p)),
         ElementType::Hex8 => Box::new(HexNDk::new(p)),
         _ => panic!("dpg_basis::hcurl_ref_elem: unsupported {et:?}"),

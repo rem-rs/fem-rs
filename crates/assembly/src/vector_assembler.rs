@@ -146,10 +146,23 @@ fn vec_ref_elem_choice(
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
-        (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        // D765: order >= 3 must use the MFEM-faithful `QuadND`
+        // (= `ND_QuadrilateralElement(p, GaussLobatto, GaussLegendre)`, the
+        // element `ND_FECollection(p, 2)` builds): the space's quad slot/sign
+        // tables place local edge slot `m` at the m-th *Gauss-Legendre* point
+        // along the local edge direction, which only `QuadND` implements.  The
+        // legacy `QuadNDk` uses equispaced open nodes and enumerates the
+        // top/left edge slots in reverse, so pairing it with these tables
+        // assembles a matrix that is not the bilinear form of the space at all
+        // (ex22 -p 1 -o 3: 6.603119e-2 vs the C++ 9.42458e-3 = 7.0x).
+        (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => {
+            Box::new(fem_element::nedelec::QuadND::new(o as usize))
+        }
         (SpaceType::HCurl, ElementType::Quad4, 3, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 3, 2) => Box::new(QuadND2),
-        (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => {
+            Box::new(fem_element::nedelec::QuadND::new(o as usize))
+        }
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => Box::new(TetNDk::new(o as usize)),

@@ -1853,12 +1853,14 @@ impl<M: MeshTopology> HCurlSpace<M> {
     ///
     /// Every DOF is the MFEM point-value functional `σ(Φ) = Φ(x_i)·t̂_i`: edge
     /// DOFs at the Gauss-Legendre points of the canonical (min→max) edge
-    /// direction; tri interior / tet face / tet interior DOFs at MFEM's
-    /// `FE::Nodes` points with the `dof2tk` tangent pairs pushed through the
-    /// element map (`J·t̂`).  Tet face DOFs use the shared face's canonical
-    /// (face-creating element) functional list, so the returned values are the
-    /// canonical (global) dof values — see [`Self::element_face_blocks`] for
-    /// the per-element 2×2 change of basis (D37).
+    /// direction; tri interior / quad interior / tet face / tet interior DOFs
+    /// at MFEM's `FE::Nodes` points with the `dof2tk` tangent pairs pushed
+    /// through the element map (`J·t̂`) — quad interiors through the bilinear
+    /// map of the paired `fem_element::nedelec::QuadND` (D765).  Tet face DOFs
+    /// use the shared face's canonical (face-creating element) functional list,
+    /// so the returned values are the canonical (global) dof values — see
+    /// [`Self::element_face_blocks`] for the per-element 2×2 change of basis
+    /// (D37).
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         let k = self.order as usize;
@@ -2068,6 +2070,69 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     let fv = f(&pt);
                     r[dofs[b_start + 2 * m] as usize] = j00 * fv[0] + j10 * fv[1];
                     r[dofs[b_start + 2 * m + 1] as usize] = j01 * fv[0] + j11 * fv[1];
+                }
+            }
+        } else if self.dim == 2
+            && k >= 3
+            && matches!(self.cell_type, ElementType::Quad4 | ElementType::Quad8)
+        {
+            // Quad NDk (k >= 3) interior DOFs (D765): point values at the
+            // MFEM `FE::Nodes` sites of `ND_QuadrilateralElement(k)` with each
+            // slot's reference tangent pushed through the element's bilinear
+            // map (`Φ(x)·(J·t̂)`, MFEM's `Project_ND`).  The paired element is
+            // `fem_element::nedelec::QuadND` — the element the assembly
+            // dispatcher selects for order >= 3 (`vec_ref_elem_choice`) and the
+            // one whose `dof_coords()` the space's interior layout is built
+            // from (`HCurlSpace::build`), so the slots and tangents below are
+            // exactly the assemble-time functional list.  Before D765 this
+            // branch did not exist at all: every 2-D quad NDk (k >= 3) interior
+            // dof silently stayed 0.
+            let n_interior = 2 * k * (k - 1);
+            let qnd = QuadND::new(k);
+            let coords = qnd.dof_coords();
+            let tks = qnd.dof_tangents();
+            let base = coords.len() - n_interior;
+            for e in 0..n_elem as u32 {
+                let dofs = self.element_dofs(e);
+                let b_start = dofs.len() - n_interior;
+                let nodes = self.mesh.element_nodes(e);
+                let c: Vec<[f64; 2]> = (0..4)
+                    .map(|i| {
+                        let p = self.mesh.node_coords(nodes[i]);
+                        [p[0], p[1]]
+                    })
+                    .collect();
+                let r = result.as_slice_mut();
+                for n in 0..n_interior {
+                    let xi = &coords[base + n];
+                    let t = tks[base + n];
+                    let (x, y) = (xi[0], xi[1]);
+                    // Bilinear quad map and its Jacobian at the dof site.
+                    let w = [
+                        (1.0 - x) * (1.0 - y),
+                        x * (1.0 - y),
+                        x * y,
+                        (1.0 - x) * y,
+                    ];
+                    let pt = [
+                        w[0] * c[0][0] + w[1] * c[1][0] + w[2] * c[2][0] + w[3] * c[3][0],
+                        w[0] * c[0][1] + w[1] * c[1][1] + w[2] * c[2][1] + w[3] * c[3][1],
+                    ];
+                    let dx_dxi = [
+                        (1.0 - y) * (c[1][0] - c[0][0]) + y * (c[2][0] - c[3][0]),
+                        (1.0 - y) * (c[1][1] - c[0][1]) + y * (c[2][1] - c[3][1]),
+                    ];
+                    let dx_deta = [
+                        (1.0 - x) * (c[3][0] - c[0][0]) + x * (c[2][0] - c[1][0]),
+                        (1.0 - x) * (c[3][1] - c[0][1]) + x * (c[2][1] - c[1][1]),
+                    ];
+                    let fv = f(&pt);
+                    // J·t with J = [dx/dξ dx/dη] column-wise.
+                    let jt = [
+                        t[0] * dx_dxi[0] + t[1] * dx_deta[0],
+                        t[0] * dx_dxi[1] + t[1] * dx_deta[1],
+                    ];
+                    r[dofs[b_start + n] as usize] = fv[0] * jt[0] + fv[1] * jt[1];
                 }
             }
         } else if self.dim == 3 && k >= 2 {

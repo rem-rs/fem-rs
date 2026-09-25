@@ -136,10 +136,16 @@ fn vec_ref_elem(
         }
         (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
-        (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        // D765: mirror of `vector_assembler::vec_ref_elem_choice` — the
+        // MFEM-faithful `QuadND` for order >= 3 (see the long note there).
+        (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => {
+            Box::new(fem_element::nedelec::QuadND::new(o as usize))
+        }
         (SpaceType::HCurl, ElementType::Quad4, 3, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 3, 2) => Box::new(QuadND2),
-        (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => {
+            Box::new(fem_element::nedelec::QuadND::new(o as usize))
+        }
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => {
