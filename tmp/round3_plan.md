@@ -4470,6 +4470,108 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十三轮（round 73）：D122-1/D122-3 并行 dof 所有权与 ND 面 dof 守恒（头号）+ D787 曲面单纯形 Jacobian + D780/D778/D779 示例保真 + D777/D772/D773 同族收口
+
+开局 HEAD = round 72 末笔 `1144288e`（现场核对一致，树净；磁盘 51G）。
+
+### 开局（主会话亲办）
+- 现场核对 + 四路派单（号段 D790–D798）；**主会话先复核 L2 的前提**：`crates/mesh/src/transformation.rs:519 element_jacobian_at` 的分派**只有曲面金字塔（D334）与曲面 hex（D715）有等参分支**，`(None,None)` 一律落 `et.ref_elem(1)` = P1 顶点表 ⇒ 曲面 tet/prism **以及曲面 quad/tri（2-D）** 都走直线映射（D787 成立，且面比登记更宽）。
+
+### 派单（四路并行，文件互斥）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| L1 | **D122-1 + D122-3（头号）**：边 dof owner 改"持有该边的单元 min"（MFEM 逐位对齐）+ NDk 面 dof 守恒（数值） | D790-792 | crates/parallel/**、必要时 space/{hcurl,hdiv}.rs（须先报） |
+| L2 | **D787**：`element_jacobian_at` 曲面 tet/prism（+2-D）等参分支 | D793-794 | crates/mesh/**（含 tests、transformation.rs、curved*.rs） |
+| L3 | **D780 + D778 + D779**：ex22 pc 元素级合成（2.20×/+1 迭代）、ex27 半面求积 + 网格构造序、ex27 `-dg` | D795-796 | examples/mfem_ex22*、examples/mfem_ex27*、examples/mfem_pex27*、examples/src/** |
+| L4 | **D777 + D772/D773**：GPU hex WGSL 求积帧（GP/GW → [0,1] + 扩 pin 到 q1/q2）、mixed/dpg 的 HCurl **tri** 臂配对 | D797-798 | crates/linalg-gpu/**、assembly/{mixed/mod.rs,dpg/dpg_basis.rs}、必要时 element/nedelec/tri* |
+
+主会话同时办：本骨架、L2 前提复核（上）、收工后逐路亲验 + 五道门 + 分笔提交推送。
+
+#### L1 —— D122-1 关闭 + D122-3 关闭（头号；真因与登记假设不同）
+
+- **D122-1 落地**：owner 改为"**持有该实体的单元**的最小 owner"（`from_dof_manager` 的边 + 3-D H¹ 面；`from_edge_space_ordered` 的边），端点规则降级为不可达 fallback。**九空间 per-rank owned 逐位 = MFEM `GetTrueVSize()`**（np=1/2/4）：H1o1 364 → 205/159、H1o2 2443 → **1303/1140**、ND1 969 → **525/444**、ND2 6882 → **3594/3288**、ND3 22275 → **11475/10800**、L2o1 2016 → 1008/1008、RT0/RT1/RT2 不变。**与主会话独立探针 `tmp/d122r73/main_probe_np{2,4}.txt` 逐位一致**（探针 libmfem.a md5 `9160ee953039671fed965d613e14aa49`）；改前红证据 `head_red_run.txt`（ND1 596/373 等）；**np=1 逐字节零变化**（改前/改后 dump 的 np=1 行 `diff` 为空 + 构造性论证）＋结构牙测试 `d122r73_nd1_owned_edges_are_held_by_their_owner`。
+- **D122-3 关闭（根因 ≠ 登记的"面 dof 键"，而是**面 dof 的符号修正缺失**）**：局部子网格是"owned 单元在前"序 ⇒ `HCurlSpace` 的面 dof 正则锚随 rank 变，而 DP 全局基是最小全局单元锚（D412）——两者差一个**带符号置换**；`from_edge_space_ordered` 只给**边** dof 写 `sign_corrections`，**面 dof 恒 1.0**。逐项实测（修前）：`common=642850 disagreeing=24012`，**全部 v1 == −v0 且全在面 dof 行列**；修后 **0**。修法 = `sign_corr(d) = signs_flat[e_min][d 在最小全局单元面块中的槽位]`（用现成 `FESpace::element_signs`，**未动 crates/space**）。**守恒表**：ND2 np2 **4.03e-14** / np4 **2.85e-14**（改前 5.885e-3 / 1.018e-2）、ND3 **1.42e-13** / **9.43e-14**（改前 1.561e-4 / 4.205e-4）、其余族 ≤9.5e-14。
+- **pin 处置（逐条给理由）**：`par_p2_nd2_gradient_hex3d_matches_the_serial_gradient_multi_rank` **不改期望值、修库**——`ParDiscreteLinearOperator::gradient` **根本没乘符号修正**（隔壁 `curl_3d` 走 `permute_rect_csr` 有），其文档与同文件断言却声称"已乘"⇒ 真 bug（面 dof 符号非平凡后被 pin 抓到，rank1 4.619），改走 `permute_rect_csr` 后原期望全绿；`h1_q2_hex_operator_consistent_across_rank_counts` 与 `par_space_p2_matrix_consistent_across_partitions` **再基线**——它们拿 `x = gid` 算 `A·x` 跨 np 比，比的是**编号**不是算子（实测复现旧编号：`n_bad=0 worst=1.4e-12`；当前编号 `n_bad=1765 worst=3.389e2`），改为按**实体**取值 + 新增逐项 pin `d122r73_h1_q2_operator_matches_by_entity_across_rank_counts`（135625 项 0 差异）；两条 D122 测试**解除 `#[ignore]`** 转正。
+- **红线**：`-o1 --ranks1` = **2.70053050699196e-2 / 87 it**（逐位同）、`-o2 --ranks1` = **3.05558571614408e-4**（逐位同）；`--ranks 2` = 2.70053057596938e-2（1.5e-9 内，C++ 6-7 位）但 **PCG+AMG 由 102 it 收敛变为 10000 it 停滞**（主会话亲跑复核：`PCG Iterations = 10000 / rel 8.688239e-8`）⇒ **本轮回归，登记 D790-1 并已让 L1 接力修**（根因 = `ParAmg::build_coarse_level` 在 owned 行上做局部聚合，owner 集一变 ⇒ 粗空间变弱）。
+- **门**：fem-parallel **326/0/14 ign**（+2 转正 + 6 新）、fem-space **590/0/3**、fem-assembly 1219/1/71 ign（唯一失败是协作者在飞的 scratch 测试，非跟踪靶）。
+- **新债**：**D790-1**（pex3 np2 AMG 停滞，本轮回归，已派修复）、**D790-2**（D122-1 的跨 rank 论证依赖 ghost 层含全部单元 = D122-2；D122-2 落地后需用一层 ghost 复核）、**D790-3**（tet k≥2 面 dof 的 element↔canonical 是 2×2 旋转，标量符号表达不了；本轮夹具 hex-only 未测）。
+- **风险提示（供收尾）**：任何 np≥2 且用 H1 o≥2 / ND 的示例，其 PCG+AMG **迭代数**可能平移（解值应不变）——收尾重测红线时把 pex3/pex40 等 np≥2 档一并复跑。
+
+
+
+#### L2 —— D787 关闭（曲面单纯形等参几何；含两处消费方三方对照）
+
+- **红证据（登记数字复现）**：修前 `element_jacobian_at` 对曲面单纯形走顶点表直线映射——tet P2 `∫|detJ|` `1.99999999999999956e-1` vs MFEM `1.829847222222222e-1`（**+9.30%**，与 E 路 round-72 的 9.3% 逐位一致）、prism P2 +0.216%、quad P2 −0.130%、tri P2 +1.12%；采样点 `det J` 修前常数 1.2 而 MFEM 各点 1.0199–1.1978。夹具 = 单位元胞 + `set_curvature(2)` + D319 warp（与 MFEM `SetCurvature(2)`+同名 warp 逐点同一）；真值来自新探针 `tmp/d787/d787_probe.cpp` → `mfem_truth_*.txt`。
+- **修复**（`crates/mesh/src/transformation.rs`，+90/−42）：把 D715 的 `curved_hex_geometry` **迁移**为**族感知** `curved_geometry`（hex→`HexQk(g)`、tet→`H1TetPk(g)`、prism→`PrismPk(g)`、tri→`H1TriPk(g)`、quad→`QuadQk(g)`），门控 = `geom_order≥2` **且**行长度 == 族元 `n_dofs()`（直线/尖角/serendipity 行**逐位不变**）；金字塔仍走 `curved_pyramid_geometry`（未碰）。**同一臂补进另一公开入口 `geometry_jacobian`**（修前它对所有曲面非金字塔族也返回直线映射，`mixed_hyperelasticity` 的 `J⁻ᵀ` 因此与装配几何不符）。
+- **修后**：tet P2 2.5e-16、tet P3 1.7e-15、prism P2 2.5e-15、prism P3 1.1e-14、quad P2 2e-16、tri P2 1e-15（相对偏差 vs MFEM）；`J` 全 9 项 + `x(ξ)` 逐点 ≤1e-15（含 **PrismPk 参考帧三循环换轴**）；两内部入口逐位一致 0.0。
+- **消费方三方对照**（`compute_l2_error_l2`，`u=1+x+2y`，quad 12 = MFEM `irs`）：曲面 tet P2 修前 `0.72718635850791347`（+5.26%）→ 修后 **`0.69081382746219200` vs MFEM `0.69081382746219189`**；曲面 tri P2 → **`0.87562549072077600` vs `0.87562549072077578`**。
+- **归因更正（纪律⑥）**：登记把 `compute_l2_error`(H1)/`hdiv_error` 也列为受害方，逐处读码后**判定它们不受影响**（各自有 `use_ho_geo`/`geo_ref_elem_from_mesh` 正确臂）；真正受影响的是 `_l2/_hcurl/_hdiv`（tet/tri/Prism18 不在 `use_iso` 名单）、`dgmassinv`、`complex`、`topology_optimization`；`flux_recovery` 的 tet 臂**根本不走** `element_jacobian_at`。
+- **测试与门**：新测 `d787_curved_simplex_geometry`（8）+ `d787_consumer_l2_error`（2），修前 6+2 红 → 修后 **10/10 绿**（**主会话亲跑复核**）；fem-mesh **497/0**（37 靶，基线 487+10）、fem-io 306/0、fem-assembly 1202/0/71 ign；曲面 pin 逐套件同基线（`curved_hex_refine` 10/0、`d336` 2/0、`d334` 5/0、`d331` 4/0/1ign、`d715` 4/0、`d113` 6/0/1ign、`toroid_wedge_curved_refine` 3/0、`d624` 4/0）；零新警告。
+- **新债（临时号）**：**D793-1**（`postproc/flux_recovery.rs::geom_jacobian` 的 `is_simplex` 臂仍顶点表）、**D793-2**（**`physics/topology_optimization.rs:185` 的 `det_j` 是 2×2 ⇒ 3-D 静默丢第三行/列**，真 bug）、**D793-3**（`postproc/grid_function.rs` 的 `needs_iso` 名单缺 Tet/Tri/Prism18 ⇒ 与刚修好的 `_l2` 族互相不一致）、**D793-4**（`use_iso` 名单 Prism15 在、Prism18 不在）、**D793-5**（事实记录：MFEM `Mesh::GetElementVolume` 用 `IntRules.Get(geom, OrderJ())`，曲面元上**它自己欠积分**——曲面 P2 tri −9.4e-4、P2 tet +7.5e-4 相对）。**D793-1/-2/-3 已即时派 L6**。
+- **文档提示**：round-68/69 的 D715 关闭账引用的旧名 `curved_hex_geometry` 已迁移为 `curved_geometry`（hex 臂逐位不变）——主会话更新矩阵/plan 时留意。
+
+
+
+#### L3 —— D780 关闭（真因反转）+ D778 关闭（逐字节）+ D779 部分关闭
+
+- **D780 真因反转（纪律⑥再应验）**：**不是** pc 元素级合成（L3 实测：合系数 vs 拆成 MFEM 三积分器只差 ~1e-16 相对舍入，与 2.2× 不相容），而是 **GMRES 的初始迭代向量 X**——C++ ex22 走 `FormLinearSystem(..., copy_interior=0)`（`bilinearform.cpp:904-906`）⇒ `X` 的 ess dof 携带投影 BC 值、其余为 0，而 ex22 用 `iterative_mode` ⇒ 首行打印的是 `‖M(B − A·X)‖` 而非 `‖M B‖`；Rust 原以 `X = 0` 起步 ⇒ ess 行贡献裸 `B_e`。修法 = 新增 `initial_guess()`（六站点：2-D/3-D × p0/p1/p2）。另外按 `ex22.cpp:346-358` 把 pcOp 改回**三积分器**（+DIAG_ONE）——**打印位一字未变**（只有 1000 it 不收敛的 tet `-o2` 第 6 位微动），pcOp 现与 C++ 逐行同构。
+- **主会话亲验**（`tmp/d780my/`）：tri `-p2 -o1` 首值 **0.255409 = C++**、**266 it = C++**（修前 0.561457/276；L3 另证 267 行历史**前 251 行逐字节相同**）；quad `-o1/-o2` = **6/15**、hex `-o2` = **19**、quad `-o3` 30 vs C++ 29（**舍入命运**：拆积分器后该档一字未变，反证非 pc 差异）；tet 两档与 tri `-o2` 维持 No convergence = parity；**红线全保**（`-p1 -o3 quad` = 9.424581e-3/6.520012e-3、`-p0 -o2 -r1` = 5.643641e-3 台账 pin）。
+- **D778 关闭（逐字节）**：半面求积确认（`seg_quad` 的 **[0,1]** 点喂 `[-1,1]` 八臂，且权重和为 1 却配半长 `|nor|` ⇒ 只采**后半条**边且测度减半）；修法 `t = 2ξ−1` + `w = w_q·2·face_weight`。**登记勘误**：`mfem_pex27_parallel_robin_bc.rs` 的同名积分器**本来就是对的**（`:378-396` 已做 `t=2ξ-1` 与 ×2）⇒ 该文件未改（round-72 的"pex27 同款"registration 有误）。**主会话亲跑 ex27：default 51/51 与 `-dbc 2.5` 52/52 均 IDENTICAL**（round-72 时各差 2 行）。
+- **D779 部分关闭（如实降档）**：已落地四点——(1) L2 DG 边界装配器同款半面+半测度（首值 0.0220206 → 0.0878067）；(2) 停机判据对齐 legacy `PCG()` 的 `SetRelTol(sqrt(1e-12)) = 1e-6`（128 → **90** it，C++ 82）；(3) `integrate_bc` 的元素基按空间取（H1→`QuadQk` 拓扑序 / L2→`ref_elem_vol` 字典序）；(4) `l2_face_dofs` 的**拓扑序→字典序**置换 `[0,1,3,2]`（常值载荷下潜伏、非常值必需）。**剩余 = 约定级差异**：`-dg` 首残比在 `-rs 0/1/2/3` 恒为 0.602/0.617/0.615/0.613（非离散化级），头号嫌疑 = DG 装配的**元素几何约定**（角点双线性 vs MFEM Q3 等参 `Tr.Elem1->Weight()`）⇒ 需改 `crates/assembly/src/dg/dg.rs`，L3 未动并登记 **D795-1**（含四步配方）。
+- **L3 新债**：**D795-1**（DG 元素几何约定，`-dg` 收尾；需 `crates/assembly/src/dg/dg.rs`）、**D795-2**（ex22 非 inline 网格的 BC 值：C++ 用 `ProjectBdrCoefficient(oneCoef, zeroCoef, ess_bdr)`，Rust else 分支全 0 ⇒ 解级差异，inline 验收表测不到）、**D795-3**（pex27 的 DG 桩与 `assemble_l2_*` 同款拓扑序→字典序错配）、**D795-4**（ex27 DG helper 以物理点反解求参考点；DG 仅支持 order 1）、**D795-5**（D778 第二因网格构造序已降到 6 位打印精度之下，独立小债保留）。
+
+
+#### L4 —— D777 关闭（GPU 求积帧 + **两个更硬的缺陷**）+ D772/D773 关闭（tri 臂）
+
+- **D777 三缺陷同处**（`crates/linalg-gpu/src/pa_apply.rs::generate_hex_qk_wgsl`）：① 登记的**求积帧**（`GP/GW` 用 generator 自带 `gauss_legendre_f64` 的 `[-1,1]` 表，而 `bary/dary` 节点与 `pd` 缓冲都是 `[0,1]`）；② **新发现（更硬）：模板收尾 `}}}}` 只闭合两层 ⇒ 生成的 WGSL 缺 `cs_main` 的收尾 `}`**，round-72 重生成的 `hex_q{3,4}.wgsl` 花括号 23/22、**根本无法编译**（此前无任何 GPU 侧测试编译过它们，pin 只比文本）⇒ 整条 GPU hex Qk 路径是死的而无人看见；③ q1/q2 未随 D721 迁移（bespoke `[-1,1]`）。
+- **修复**：改用元素层同源的 `gauss_legendre_01(nq)`、补收尾 `}`、删死代码 `gauss_legendre_f64`、抽 `fmt_numbers`、q1..q4 全部重生成（临时 test 写完即删）。
+- **pin 清单**：`hex_qk_wgsl_tables_match_element`（**新**：p=1..4 表+GLL 节点数组+**GP/GW == 元素层 [0,1] 规则**，并用 `hex_rule(2p)` 的 1-D 因子交叉校验）、`hex_qk_wgsl_is_generator_output`（**新**，p=1..4）、f64 变体扩展到 p=1..4、`generated_qk_wgsl_follows_element_layer`、`hex_q2_wgsl_slots_match_element` 改写（保留 MFEM `H1_HexahedronElement(2)` 的 slot 8/16 正 pin）；**数值 pin**：`d777_pa_frame.rs::shipped_hex_qk_shader_matches_cpu_pa`（**不需 GPU**：从 shipped 文本解析常数在 Rust 复算内核 vs CPU PA；修前相对误差 **2.579e8**）与 `shipped_hex_qk_gpu_shader_matches_cpu_pa`（**真设备 f32 执行**，p=1..4 = 1.7e-7…4.9e-7）。**f64 GPU 数值 pin 做不了**：本机 adapter 无 `SHADER_F64`（如实记录）。
+- **主会话亲验**：`cargo test --release -p fem-linalg-gpu --no-fail-fast` = **31 passed / 0 failed / 1 ignored**；四个 `.wgsl` 花括号全部 23/23 平衡（修前 q3/q4 为 23/22 —— 该残项**自 `2af8c124`（着色器诞生提交）起就存在**，round-72 的重生成只是把它一起搬了过来，见 `tmp/d777main/README.md` 的三版本括号计数）。
+- **D772/D773 关闭 + 裁决**：`TriND2` 与 `TriNDk::new(p)` **不是两个族**——节点逐槽 ≤1e-15、在 MFEM 的 `(Nodes, tk)` 泛函下皆 nodal ≤1e-10、基函数逐点差 **3.6e-15**、`dof_coords` 仅 slot 3/5 差 1 ulp ⇒ D772 = **缺臂**（`mixed::ref_elem_vec` 的 tri o≥2 直接 `Err`）、D773 = **命名不一致**（`dpg_basis` 写 `TriNDk::new(2)` 而装配器写 `TriND2`）。修复 = 两处都改调 `vector_assembler::paired_vector_reference_element`（选择器成唯一出处）；新 pin `d772r73_tri_nd_pairing.rs` **6/6**（含 MFEM 单元矩阵 golden ≤1e-12、`VectorFEWeakDivergenceIntegrator` H¹o1 × ND o2/o3）。**真值探针两个坑**：手工 `AddTriangle` 的 MFEM `Mesh` 给轮换过的参考参数化（须 `T.SetIdentityTransformation(Geometry::TRIANGLE)`）；`IntRules.Get(TRIANGLE,4)` 与 `tri_rule(4)` 同点集不同枚举序。
+- **验收**：`-p fem-space` 590/0/3、`fem-linalg-gpu` 31/0/1、ex22 tri `-p1 -o3` = **7.888743e-3/1.886954e-2**（= C++，不动）、`-o4` = 3.817910e-3/2.122214e-3（= C++，不动）。
+- **新债**：**D797-1（重要，实测 O(1) 级）**：`mixed::HCurlH1WeakDiv` 对已是物理梯度的 `grad_phys` **又乘一次 `J^{-T}` 并额外乘 `1/detJ`**；MFEM 是 `-ip.weight·(adj(J)ᵀ∇̂v)·(J^{-T}û)`。实测单三角形弱散度单元矩阵随边长缩放 ∈ {1,2,0.5} 得 `K(0,7) = 3.75e-1/4.6875e-2/3.0e0` = **严丝合缝 c⁻³**，而该形式本就尺度不变；消费方 = `DivergenceFreeProjector`/`par_mixed_assembler`/相关 miniapp ⇒ 属"改+重验"独立工作，本轮只登记；**D797-2**（`wgsl/quad_q1.wgsl` 与 CPU builder 同为 `[-1,1]` 自洽但无帧 pin、与全树 `[0,1]` 口径不一致）、**D797-3**（`hdg`/`wg` 的 tri ND 用 `TriNDk::new(2)`，数值一致纯一致性）。
+
+#### L5 —— D795-1 关闭（DG 元素几何**前提被驳** + 逐项对齐）
+
+- **前提反驳（纪律⑥）**：L3 的"MFEM 面规则在 `[-1,1]`、权重和为 2"**是错的**——MFEM 4.10 的 `Geometry::SEGMENT` 规则在 **[0,1]、Σw=1**，`nor = CalcOrtho` 在直边上 `|nor| = h`（整条边长）。`dg.rs` 里那些"经验减半 / ×4 / (2/det_l+2/det_r)"系数**全是在补这个错前提**。
+- **修复**（`dg_base.rs` + `dg.rs` + ex27 的 DG RHS）：新增 `find_local_edge`/`ref_edge_map`/`face_point_geom`（参考组合 `Loc1`、等参 `J⁻ᵀ`/带符号 `detJ`、`nor` 旋转 90° 并按 `forward` 定向向外）；体项与面项全部改走 `element_jacobian_at`，逐项对齐 `bilinearinteg.cpp:3770`（`dshape_dn=(ipw/2)·∇ₓφ·nor`，detJ 抵消；`wq=κ·ipw/2·|nor|²·(1/det₁+1/det₂)`）。**直网格上代数恒等** ⇒ 直网格示例不可能被移动。
+- **红→绿**（判据 = MFEM 逐条目 dump，2×2 quad + `SetCurvature(3,true)` 的最小曲面场景，256 条目 × 3 模式）：vol **1.370e0 → 1.492e-13**、all **1.046e0 → 1.173e-13**、tag3 **7.510e-1 → 1.173e-13**（>1e-12 条目 0/256）；几何表 `detJ` ≤2.5e-15、`J` ≤1.8e-14（等参 vs 角点双线性在该网格差 0.9% = 测试的"牙"）。
+- **ex27 `-dg`（诚实降档）**：几何归因**不是该档主因**（默认档只动 0.06%：`-rs 2` 首残 0.142775(C++) vs 0.0877261(Rust)，比 0.615 仍在）；但 RHS 隔离开**立竿见影**——`-dg -nbc 0 -dbc 2.5 -rbc-a 1 -rbc-b 0` 的 `-rs 2` 首残从 **6427.63（81×）→ 78.9719 = C++ 逐位相同**（`-rs 0/1` 比 1.0006/1.000005）。**新债 D799-1（已用硬证据定位）**：ex27 `-dg` 残余 = **网格表示不同**（同 `-rs 2`：C++ `refined.mesh` 302 顶点/96 bdr 面/tags 1-4（折回连通），Rust 311/112/tags 1-6（未折 + 缝面））；DG（L2）无 dof 识别 ⇒ 缝面既非内部面也不在 Dirichlet tag ⇒ **缝上零 DG 耦合**。配方 = 让 `InteriorFace` 支持两侧各自节点对（动 `interior_faces.rs`）或示例侧重建成折回网格。另 **D799-2**（RHS helper 硬编码 Quad4）、**D799-3**（`dg_elasticity`/`dg_advection`/`dg_hyperbolic` 面几何未切换）。
+- **反回归（有意外收获）**：ex14（DG Poisson，直网格）**309 行迭代史 + ARF 0.956044 逐字节 = C++**（台账原记"500 maxiter / 0.950077"，现与 C++ 同迭代收敛）；ex8（DPG）首值 = C++（ARF 1.7% 既有残余，不走 `DgAssembler`）；**ex27 H1 双档仍逐字节**（**主会话亲跑复核**）。
+- **测试**：新 `d795_dg_curved_geometry.rs` **3/3**（**主会话亲跑**）；`fem-assembly` 1219/1（唯一失败是 L6 在飞的 scratch 测试）、`fem-space` 590/0、`fem-mesh` 497/0；零新警告。
+
+
+
+#### L6 —— D793-1/-2/-3 关闭（D787 的消费方收尾族）+ D793-4 裁定
+
+- **D793-1**（`postproc/flux_recovery.rs::geom_jacobian` 的 `is_simplex` 臂）：改走 `element_jacobian_at`（与同函数 hex/prism/pyramid 臂一致）。红→绿：曲面 tet P2 上 flux dof0 修前 `1.00000000000000022e0` vs MFEM `1.19999999999999996e0` → 修后 12 分量 worst |Δ| **4.441e-16**；`compute_flux_energy` tet `2.56177780734199523e0` vs MFEM `…7`、tri `2.96666666666666634e0` vs `…677e0`。
+- **D793-2（真 bug）**：`physics/topology_optimization.rs:185` 的 `det_j` 用 **2×2** 公式 ⇒ 3-D 静默丢第三行/列；改按 `dim` 分派（2-D 保留原式**逐位**、3-D 用 MFEM `CalcDet` 的余子式展开）。红→绿：`ρ≡1` 时精确解 `ρ̃≡1`，修前 hex 2×2×2 给 `2.00000000000120570e0`（h² vs h³，恰 2×）、tet 给 `1.65507188385163777e-16`（2×2 余子式恰 0）；修后 hex `1.960e-12/4.184e-12`、tet `8.882e-16/1.776e-15`；非常数 ρ 的能量和从"恰 2× MFEM"变为 **2.450e-12** worst |Δ|。**可达性如实说明**：`HelmholtzFilter::solve_forward` 仓内**无调用方**（ex37 只调 `solve_adjoint`）⇒ 公开 API 的 3-D 潜在缺陷，本轮首次接入测试。
+- **D793-3**（`postproc/grid_function.rs` 的 `needs_iso` 缺 Tet/Tri/Prism18）：门控改为"非曲面网格 ⇒ 全 H1 族走 `element_jacobian_at`"，曲面（embedded）保持历史 `surface_iso` 名单**逐位不变**。红→绿：曲面 tet P2 `‖u‖_L2` 修前 `1.16137849127663784e0`（+5.016%）→ `1.10590356389047839e0` vs MFEM `1.1059035638904782`；曲面 tri P2 → `1.61824596399929233e0` vs `1.6182459639992921`；`compute_element_l2_errors`（`u_h≡1`）从 √0.2 变为 **√(D787 体积真值)**。**顺带修直线档同族错**（比登记更宽）：`Hex27` 修前 `‖1‖_L2 = 0.0`（slots 1..3 是底面对角线 ⇒ `det J ≡ 0`，正是 D353 类）、`Pyramid13` 同臂、`Prism18` 把 6 顶点读成单位立方体（应 1/2）；修后 Hex27 `1.00000000000000044e0`、Pyramid13 `5.77350269189625509e-1`（√⅓）、Prism18 `7.07106781186547795e-1`（√½）。
+- **D793-4 裁定（不按登记补名单）**：往三条 `use_iso` 名单补 Prism18/Pyramid13 会把 `element_nodes`（曲面网格上仍是 P1 顶点行）交给按**几何元 dof 数**索引的 `isoparametric_jacobian` ⇒ 实测 panic（`vector_assembler.rs:350: index out of bounds: the len is 4 but the index is 4`，曲面 Quad4）⇒ 只在三处加说明注释，**正确配方登记为 D800-1**（改传 `mesh.geometry_nodes(e)`，之后三名单统一到族感知单一路径）。另 **D800-2**：`flux_recovery::compute_element_flux` 对 embedded 曲面单纯形无 3×2 几何契约（修前 `nodes[3]` 越界 panic，修后仍是 panic）。
+- **门**：fem-assembly **1219/0/71 ign**（101 targets）、fem-mesh 497/0、fem-solver 450/0、14 靶定向回归 78/0；新测 `d793_flux_recovery_curved_simplex`(2)/`d793_coeff_l2_norm_curved_simplex`(4)/`d793_topology_filter_3d`(3) **主会话亲跑 9/9 绿**；零新警告。
+
+#### L1（续）—— D790-1 关闭（本轮引入的回归，ghost-aware 粗化）
+
+- **根因实证**：先证"不是算子的问题"（owned 计数、装配算子、解值都对），临时插桩显示 np=2 的**聚合质量与 np=1 相当**（首层 mean 3.73/3.76 vs 3.83）；只把 offd 计入强度仍 10000 it、强制 ghost-aware 立刻 95 it ⇒ 病根 = `build_coarse_level` 只在 owned 点聚合、粗层**块对角**（界面误差在粗空间无表示）；旧 owner 规则因 owned 集带一圈邻居内部 dof 而**意外**耦合了粗块，D122-1 后该近似崩掉（ρ 0.998 → 0.84）。
+- **修复**：删块局部粗化（死代码即删），唯一粗化 = **ghost-aware**（全行强度 + 聚合 ID 跨 rank 交换 + 边界聚合 union-find + 粗层保留自身 ghost）；`use_global_aggregation` 保留为文档化 no-op（7 个示例仍设置它 ⇒ 残余 D790-1a）。
+- **亲验**（主会话）：`-o1 --ranks1` = **2.70053050699196e-2 / 87 it 逐位同**、`-o2 --ranks1` = **3.05558571614408e-4 逐位同**、`--ranks 2` = **2.70053057745987e-2 / 95 it**（3 连跑逐位同；相对 np1 2.6e-11，C++ 6-7 位）、`--ranks 4` = 193 it。新牙 `d790r73_amg_owner_independence_par.rs`（修前 10000 停滞红；断言收敛 + owner 无关性 + 泛函 np 无关）；fem-parallel 327/0/14、fem-space 590/0/3、D136 hpref 字节 pin 4/0、警告集与 round-72 完全一致。
+- **爆炸半径（如实）**：所有 np≥2 的 AMG 求解换用 ghost-aware 层次 ⇒ 其他 AMG 示例的迭代数会变（pex3 变好 100×）；np=1 逐位不变（实测）、仓内 AMG 测试全绿、`examples/compare/examples.json` 在 np1/2/4 比的是 DOF 数 ⇒ 无示例 pin 依赖旧层次。
+
+### 全量门（round 73，7 笔提交的冻结树）
+
+| 门 | 结果 | 对照 round 72 |
+|---|---|---|
+| 1 lib（十 crate 批） | **10 targets / 2644 passed / 0 failed / 5 ignored** | 2643/0（+1） |
+| 2 `--tests`（十 crate 全靶） | **321 targets / 4213 passed / 0 failed** / 122 ignored —— 首跑有 1 个 `klein_default_matches_cpp_structure` 失败，**单跑绿 + 三连跑绿 ⇒ 并发门 flake**；根因 = 同文件两测试写同一 `CARGO_TARGET_TMPDIR/klein-bottle.mesh`（322/548 行）⇒ **已修**（给后者独立文件名 + 注释记录），修后 `-p fem-io --no-fail-fast` = **306/0/3** | 308/4174/0/123 |
+| 3 examples | 见收尾（`--keep-going` 0 错误、非 vendor 警告 0） | 同 |
+| 4 pro 层 | 见收尾 | rc=0 |
+| 5 fem-py | 见收尾 | 构建 rc=0（D607 pytest 缺口） |
+
+**主会话亲验的关键锚点（round 73）**：D122-1 九空间 per-rank owned 表（自建 MPI 探针逐位）+ D122-3 守恒表（ND2/ND3 4e-14/1.4e-13）+ **pex3 `-o1/-o2 --ranks1` 逐位不动、`--ranks 2` 95 it 收敛（3 连跑同值）**；D787 十测全绿（tet/prism/quad/tri P2 + tet/prism P3 + 两 guard）；**ex27 default 51/51、`-dbc 2.5` 52/52 逐字节**（L3 与 L5 两次改动后各复验一次）；ex22 tri `-p2 -o1` 首残 0.255409 / 266 it = C++；linalg-gpu 31/0/1 且四个 `.wgsl` 花括号 23/23；D793 九测全绿；D795 DG 三测全绿。
+
+
+
 ## 第七十二轮（round 72）：D765 2-D quad NDk（k≥3）空间/装配器配对裁决（头号）+ D766/D754 归约确定性 + D767 GMRES 判据 + D771 ex27 格式 + D762/D768-D770
 
 开局 HEAD = round 71 末笔 `c1986cab`（现场核对一致）；磁盘 48G → 清 `target/debug`（20G）→ 68G；树净（仅未跟踪 `.mimosa/`）。
