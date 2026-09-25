@@ -21,29 +21,6 @@ fn nd_01(p: usize) -> Vec<f64> {
     (0..=p).map(|i| i as f64 / p as f64).collect()
 }
 
-// Quad serendipity: monomials {x^i y^j : i=0 or i=p or j=0 or j=p}
-fn mono_ij(p: usize) -> Vec<(usize, usize)> {
-    let mut v = Vec::new();
-    for j in 0..=p {
-        for i in 0..=p {
-            if i == 0 || i == p || j == 0 || j == p {
-                v.push((i, j));
-            }
-        }
-    }
-    v
-}
-fn nodes_2d(p: usize) -> Vec<(usize, usize)> {
-    let mut v = Vec::new();
-    for j in 0..=p {
-        for i in 0..=p {
-            if i == 0 || i == p || j == 0 || j == p {
-                v.push((i, j));
-            }
-        }
-    }
-    v
-}
 fn pow(x: f64, e: usize) -> f64 {
     if e == 0 {
         1.
@@ -52,105 +29,164 @@ fn pow(x: f64, e: usize) -> f64 {
     }
 }
 
-fn build_coef2d(p: usize) -> Vec<f64> {
-    let n = 4 * p;
-    let xv = nd_01(p);
-    let mi = mono_ij(p);
-    let nds = nodes_2d(p);
-    let mut v = vec![0.; n * n];
-    for r in 0..n {
-        let (ni, nj) = nds[r];
-        // D768: monomials are evaluated in the element's own `[0,1]²`
-        // coordinates (the old code shifted them into `[0,2]`, the `[-1,1]²`
-        // arm's frame).
-        let xi = xv[ni];
-        let et = xv[nj];
-        for c in 0..n {
-            let (mi, mj) = mi[c];
-            v[r * n + c] = pow(xi, mi) * pow(et, mj);
-        }
-    }
-    let mut inv = vec![0.; n * n];
-    for i in 0..n {
-        inv[i * n + i] = 1.;
-    }
-    let mut a = v;
-    for c in 0..n {
-        let mut mr = c;
-        let mut mv = a[c * n + c].abs();
-        for r in (c + 1)..n {
-            let x = a[r * n + c].abs();
-            if x > mv {
-                mv = x;
-                mr = r
-            }
-        }
-        for j in 0..n {
-            a.swap(c * n + j, mr * n + j);
-            inv.swap(c * n + j, mr * n + j);
-        }
-        let pv = a[c * n + c];
-        let ip = 1. / pv;
-        for j in 0..n {
-            a[c * n + j] *= ip;
-            inv[c * n + j] *= ip;
-        }
-        for r in 0..n {
-            if r == c {
-                continue;
-            }
-            let f = a[r * n + c];
-            for j in 0..n {
-                a[r * n + j] -= f * a[c * n + j];
-                inv[r * n + j] -= f * inv[c * n + j];
-            }
-        }
-    }
-    let mut c = vec![0.; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            c[i * n + j] = inv[j * n + i];
-        }
-    }
-    c
-}
-
 /// Serendipity quadrilateral of order `p` on MFEM's **`[0,1]²` unit square**
-/// (D768; the 2-D sibling of [`HexSerendipityPk`]): `4p` DOFs on the equispaced
-/// `i/p` lattice, interpolating the truncated tensor space
-/// `{x^i y^j : i ∈ {0,p} ∨ j ∈ {0,p}}`.  `p = 1` is MFEM's
-/// `BiLinear2DFiniteElement` (`fe_fixed_order.cpp:115`, bit-for-bit, via the
-/// same factorised formulas).
+/// — a faithful port of MFEM 4.10's `H1Ser_QuadrilateralElement`
+/// (`fem/fe/fe_ser.cpp:25`, the only 2-D serendipity class MFEM ships; it is
+/// reached through `H1_FECollection(p, 2, BasisType::Serendipity)`,
+/// `fe_coll.cpp:1844`).
 ///
-/// **Audit note (D768)** — this element is *not* MFEM's
-/// `H1Ser_QuadrilateralElement` (`fe_ser.cpp:25`), the only serendipity class
-/// MFEM ships: MFEM's element uses the **Gauss-Lobatto** lattice,
-/// `(p² + 3p + 6)/2` DOFs (interior *bubble* — non-nodal — functions appear at
-/// `p ≥ 4`) and the genuine serendipity space `S_p = {x^i y^j : sd(i,j) ≤ p}`
-/// (`sd` = superlinear degree; `xy` ∈ `S_2`, `x²y²` ∉).  This crate's element
-/// is the `[0,1]²` analogue of the D743 hex arm: equispaced lattice, `4p`
-/// nodal DOFs, superlinear degree `2p`-truncated tensor space.  The two agree
-/// in DOF count and node positions only at `p ≤ 2`, and their spans are
-/// different spaces from `p = 2` on, so no pointwise ≤1e-12 match with MFEM's
-/// serendipity class is possible for `p ≥ 2` — measured in
-/// `crates/element/tests/d768_quad_serendipity.rs`, which pins the p = 1
-/// bit-for-bit equality that *is* available.
+/// **D809 (round 75)** — the D768 audit below had established that this arm
+/// was *not* MFEM's element: it used the equispaced `i/p` lattice, `4p` nodal
+/// DOFs and the truncated tensor span `{xⁱyʲ : i ∈ {0,p} ∨ j ∈ {0,p}}`.  MFEM's
+/// class is a genuinely different construction, now reproduced here:
+///
+/// * **DOF count** `(p² + 3p + 6)/2` — `5/8/12/17/23` for `p = 1..5`
+///   (`(pm3·pm2)/2` *interior* DOFs plus the `4p` boundary ones,
+///   `fe_coll.cpp:1850`).  The old `4p` matches this only for `p = 2, 3`;
+///   from `p = 4` the serendipity space carries interior **bubble** DOFs
+///   (`p = 4` → 1, `p = 5` → 3).
+/// * **Nodes** `poly1d.ClosedPoints(p, GaussLobatto)` — the *Gauss-Lobatto*
+///   closed lattice mapped onto `[0,1]`.  For `n = p+1` points this is
+///   `{0, 1}` for `p = 1`, `{0, ½, 1}` for `p = 2` (the GLL interior node of
+///   the 3-point rule *is* the midpoint, so `p = 2` coincides with the old
+///   equispaced lattice) and genuinely clustered from `p = 3`
+///   (`0.2764/0.7236` at `p = 3`).
+/// * **Span** the real serendipity space `S_p = {xⁱyʲ : sd(i,j) ≤ p}` (`sd` =
+///   superlinear degree): `xy ∈ S_2` but `x²y² ∉`.  The old span had it
+///   backwards (`x²y²` in, `xy` out).
+/// * **Slot order** vertices `(0,0),(1,0),(1,1),(0,1)`, then south → east →
+///   north → west edge DOFs, then the interior bubbles — MFEM's order, not the
+///   old row-major lattice order.
+/// * **Nodal?** `p ≤ 3` only.  From `p = 4` the interior functions are the
+///   Legendre-product bubbles `P_k(x)P_{j-4-k}(y)·x(1-x)y(1-y)`, which are
+///   *not* nodal (`fe_ser.cpp:110`).
+///
+/// * **`p = 1` is kept as the 4-DOF bilinear** (`BiLinear2DFiniteElement`,
+///   bit-for-bit).  MFEM's own `H1Ser_QuadrilateralElement(1)` is degenerate:
+///   the DOF formula gives 5, the constructor's edge loop is empty, so the
+///   fifth shape function is **identically zero** — measured, see
+///   `tests/d809_mfem_h1ser_port.rs` (`shape 1 4 = 0` at every sample point,
+///   and `kron p=1` = 1.0, i.e. not even nodal).  MFEM's ordinary
+///   `H1_FECollection(1)` — what a `Quad4`/`Quad8` mesh is actually built
+///   with — uses the bilinear, which is the useful member and the one D768
+///   pinned.  The old docs' `4p` claim therefore survives at `p = 1` and `p = 2`
+///   only by coincidence of the count formula.
 pub struct QuadSerendipityPk {
     p: usize,
-    co: Vec<f64>,
-    mi: Vec<(usize, usize)>,
-    nds: Vec<(usize, usize)>,
+    /// Gauss-Lobatto closed points on `[0,1]` — MFEM
+    /// `poly1d.ClosedPoints(p, GaussLobatto)`.
+    cp: Vec<f64>,
+    /// The 1-D GLL nodal basis on `[-1,1]` — MFEM
+    /// `poly1d.GetBasis(p, GaussLobatto)`.  Evaluated at `2x−1` for a point
+    /// `x ∈ [0,1]`.
+    lag: crate::lagrange::factory::Lagrange1D,
+    nd: usize,
 }
 
 impl QuadSerendipityPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1);
-        Self {
-            p,
-            co: build_coef2d(p),
-            mi: mono_ij(p),
-            nds: nodes_2d(p),
+        // GLL closed points on [-1,1] → [0,1] (MFEM's Poly_1D lives on [0,1]).
+        let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
+        let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+        let lag = crate::lagrange::factory::Lagrange1D::new(p);
+        let nd = if p == 1 { 4 } else { (p * p + 3 * p + 6) / 2 };
+        Self { p, cp, lag, nd }
+    }
+
+    /// MFEM `Poly_1D::CalcLegendre(p, x, u)`: shifted Legendre `P_0..P_p` at
+    /// `x ∈ [0,1]` (the recursion runs on `z = 2x−1`), `fe_base.cpp:2343`.
+    fn legendre(&self, p: usize, x: f64) -> Vec<f64> {
+        let mut u = vec![0.0_f64; p + 1];
+        u[0] = 1.0;
+        if p == 0 {
+            return u;
         }
+        let z = 2.0 * x - 1.0;
+        u[1] = z;
+        for n in 1..p {
+            let (nf, zf) = (n as f64, z);
+            u[n + 1] = ((2.0 * nf + 1.0) * zf * u[n] - nf * u[n - 1]) / (nf + 1.0);
+        }
+        u
+    }
+
+    /// MFEM `Poly_1D::CalcLegendre(p, x, u, d)`: values and **d/dx**
+    /// derivatives (note `d[1] = 2`, the `dz/dx` factor), `fe_base.cpp:2357`.
+    fn legendre_d(&self, p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+        let mut u = vec![0.0_f64; p + 1];
+        let mut d = vec![0.0_f64; p + 1];
+        u[0] = 1.0;
+        if p == 0 {
+            return (u, d);
+        }
+        let z = 2.0 * x - 1.0;
+        u[1] = z;
+        d[1] = 2.0;
+        for n in 1..p {
+            let (nf, zf) = (n as f64, z);
+            u[n + 1] = ((2.0 * nf + 1.0) * zf * u[n] - nf * u[n - 1]) / (nf + 1.0);
+            d[n + 1] = (4.0 * nf + 2.0) * u[n] + d[n - 1];
+        }
+        (u, d)
+    }
+
+    /// The interior bubble count and slot base — MFEM's
+    /// `4 + 4·(p−1) + interior_total` (`fe_ser.cpp:161`).
+    fn interior_base(&self) -> usize {
+        4 + 4 * (self.p - 1)
+    }
+
+    /// MFEM's interior slot list in fill order: `(j, k)` with
+    /// `j ∈ 4..=p`, `k ∈ 0..j−3` (`fe_ser.cpp:162`).
+    fn interior_slots(&self) -> Vec<(usize, usize)> {
+        let mut v = Vec::new();
+        if self.p > 3 {
+            for j in 4..=self.p {
+                for k in 0..(j - 3) {
+                    v.push((j, k));
+                }
+            }
+        }
+        v
+    }
+
+    /// MFEM `H1Ser_QuadrilateralElement`'s node table: the tensor
+    /// `Sr_DOF_MAP` (`fe_base.cpp:2515`) reduced to the serendipity DOFs —
+    /// vertices, then south/east/north/west edge DOFs, then the interior
+    /// tensor slots in `j`-major order (`fe_ser.cpp:38-53`).
+    fn nodes(&self) -> Vec<[f64; 2]> {
+        let p = self.p;
+        if p == 1 {
+            // The 4-DOF bilinear member: MFEM `BiLinear2DFiniteElement` vertex
+            // order, which is this arm's historical slot order.
+            return vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        }
+        let cp = &self.cp;
+        let mut n = Vec::with_capacity(self.nd);
+        n.push([cp[0], cp[0]]);
+        n.push([cp[p], cp[0]]);
+        n.push([cp[p], cp[p]]);
+        n.push([cp[0], cp[p]]);
+        for i in 1..p {
+            n.push([cp[i], cp[0]]); // south
+        }
+        for i in 1..p {
+            n.push([cp[p], cp[i]]); // east
+        }
+        for i in 1..p {
+            n.push([cp[p - i], cp[p]]); // north
+        }
+        for i in 1..p {
+            n.push([cp[0], cp[p - i]]); // west
+        }
+        // Interior: the first `nd - 4p` tensor slots of the `j`-major interior
+        // loop, i.e. `(cp[i], cp[1])` for `i = 1, 2, …` (Sr_DOF_MAP).
+        let extra = self.nd - 4 * p;
+        for t in 0..extra {
+            n.push([cp[1 + t], cp[1]]);
+        }
+        n
     }
 }
 
@@ -162,15 +198,15 @@ impl ReferenceElement for QuadSerendipityPk {
         self.p as u8
     }
     fn n_dofs(&self) -> usize {
-        4 * self.p
+        self.nd
     }
     fn eval_basis(&self, xi: &[f64], vals: &mut [f64]) {
-        let n = self.n_dofs();
         // p = 1 *is* MFEM's `BiLinear2DFiniteElement` (`fe_fixed_order.cpp:115`,
         // `Geometry::SQUARE` = `[0,1]²`): the four factorised products are used
-        // directly so the p = 1 member is bit-for-bit the MFEM element instead
-        // of the LU-solved monomial interpolant of it (the D743 hex lesson).
-        // The monomial machinery below is only needed from p = 2 on.
+        // directly so the p = 1 member is bit-for-bit the MFEM element.
+        // (MFEM's `H1Ser_QuadrilateralElement(1)` is degenerate — 5 DOFs with
+        // an identically zero fifth shape — so the bilinear is the faithful
+        // choice for a `Quad4`/`Quad8` order-1 reference element.)
         if self.p == 1 {
             let (x, y) = (xi[0], xi[1]);
             let (ox, oy) = (1.0 - x, 1.0 - y);
@@ -182,17 +218,51 @@ impl ReferenceElement for QuadSerendipityPk {
             vals[3] = x * y;
             return;
         }
-        for i in 0..n {
-            let mut s = 0.;
-            for j in 0..n {
-                let (mi, mj) = self.mi[j];
-                s += self.co[i * n + j] * pow(xi[0], mi) * pow(xi[1], mj);
-            }
-            vals[i] = s;
+        let p = self.p;
+        let (x, y) = (xi[0], xi[1]);
+        // MFEM `poly1d.GetBasis(p, GaussLobatto).Eval` — the 1-D GLL nodal
+        // basis, evaluated at the `[0,1]` point through `z = 2x−1`.
+        let nx = self.lag.val(2.0 * x - 1.0);
+        let ny = self.lag.val(2.0 * y - 1.0);
+        // Edge DOFs: a nodal interpolant on the edge, weighted by the linear
+        // function that vanishes on the opposite edge (`fe_ser.cpp:66-75`).
+        for i in 0..p - 1 {
+            vals[4 + i] = nx[i + 1] * (1.0 - y); // south (y = 0)
+            vals[4 + (p - 1) + i] = ny[i + 1] * x; // east  (x = 1)
+            vals[4 + 3 * (p - 1) - i - 1] = nx[i + 1] * y; // north (y = 1)
+            vals[4 + 4 * (p - 1) - i - 1] = ny[i + 1] * (1.0 - x); // west (x = 0)
         }
+        // Interior bubbles (p ≥ 4), `fe_ser.cpp:110-127`.
+        let slots = self.interior_slots();
+        if !slots.is_empty() {
+            let leg_x = self.legendre(p - 2, x);
+            let leg_y = self.legendre(p - 2, y);
+            let base = self.interior_base();
+            let w = x * (1.0 - x) * y * (1.0 - y);
+            for (t, &(j, k)) in slots.iter().enumerate() {
+                vals[base + t] = leg_x[k] * leg_y[j - 4 - k] * w;
+            }
+        }
+        // Vertex DOFs: the bilinear minus the incident edge corrections
+        // (`fe_ser.cpp:88-105`).  MFEM's `BiLinear2DFiniteElement` order is
+        // (0,0), (1,0), (1,1), (0,1); the `1 − edgePts[i+1]` weights are the
+        // bilinear of *that* vertex at the (slot-reversed) edge node, which is
+        // why the north/west reads look permuted.
+        let bil = [(1.0 - x) * (1.0 - y), x * (1.0 - y), x * y, (1.0 - x) * y];
+        let (mut f0, mut f1, mut f2, mut f3) = (0.0_f64, 0.0, 0.0, 0.0);
+        for i in 0..p - 1 {
+            let w = 1.0 - self.cp[i + 1];
+            f0 += w * (vals[4 + i] + vals[4 + 4 * (p - 1) - i - 1]);
+            f1 += w * (vals[4 + (p - 1) + i] + vals[4 + (p - 2) - i]);
+            f2 += w * (vals[4 + 2 * (p - 1) + i] + vals[1 + 2 * p - i]);
+            f3 += w * (vals[4 + 3 * (p - 1) + i] + vals[3 * p - i]);
+        }
+        vals[0] = bil[0] - f0;
+        vals[1] = bil[1] - f1;
+        vals[2] = bil[2] - f2;
+        vals[3] = bil[3] - f3;
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let n = self.n_dofs();
         // Same p = 1 specialisation as `eval_basis`: MFEM
         // `BiLinear2DFiniteElement::CalcDShape` (fe_fixed_order.cpp:124),
         // verbatim per vertex — including its `-1.+y` / `1.-y` spellings, which
@@ -208,28 +278,68 @@ impl ReferenceElement for QuadSerendipityPk {
             }
             return;
         }
-        let u = xi[0];
-        let v = xi[1];
-        for i in 0..n {
-            let mut sx = 0.;
-            let mut sy = 0.;
-            for j in 0..n {
-                let (mi, mj) = self.mi[j];
-                let mx = if mi == 0 {
-                    0.
-                } else {
-                    mi as f64 * pow(u, mi - 1) * pow(v, mj)
-                };
-                let my = if mj == 0 {
-                    0.
-                } else {
-                    mj as f64 * pow(u, mi) * pow(v, mj - 1)
-                };
-                sx += self.co[i * n + j] * mx;
-                sy += self.co[i * n + j] * my;
+        let p = self.p;
+        let (x, y) = (xi[0], xi[1]);
+        let (nx, dnx) = self.lag.val_d(2.0 * x - 1.0);
+        let (ny, dny) = self.lag.val_d(2.0 * y - 1.0);
+        // `lag.val_d` differentiates w.r.t. its own ([-1,1]) argument, so the
+        // chain rule contributes a factor 2 (`fe_ser.cpp:141-155` uses
+        // `edgeNodalBasis.Eval(x, nodalX, DnodalX)` directly at `x ∈ [0,1]`,
+        // which is the same value).
+        for i in 0..p - 1 {
+            let (vx, dx_, vy, dy_) = (nx[i + 1], 2.0 * dnx[i + 1], ny[i + 1], 2.0 * dny[i + 1]);
+            let s = 4 + i;
+            grads[2 * s] = dx_ * (1.0 - y);
+            grads[2 * s + 1] = -vx;
+            let e = 4 + (p - 1) + i;
+            grads[2 * e] = vy;
+            grads[2 * e + 1] = dy_ * x;
+            let nn = 4 + 3 * (p - 1) - i - 1;
+            grads[2 * nn] = dx_ * y;
+            grads[2 * nn + 1] = vx;
+            let w = 4 + 4 * (p - 1) - i - 1;
+            grads[2 * w] = -vy;
+            grads[2 * w + 1] = dy_ * (1.0 - x);
+        }
+        // Interior bubbles (`fe_ser.cpp:180-206`).
+        let slots = self.interior_slots();
+        if !slots.is_empty() {
+            let (leg_x, dleg_x) = self.legendre_d(p - 2, x);
+            let (leg_y, dleg_y) = self.legendre_d(p - 2, y);
+            let base = self.interior_base();
+            for (t, &(j, k)) in slots.iter().enumerate() {
+                let (kx, ky) = (leg_x[k], leg_y[j - 4 - k]);
+                let (dkx, dky) = (dleg_x[k], dleg_y[j - 4 - k]);
+                grads[2 * (base + t)] =
+                    ky * y * (1.0 - y) * (dkx * x * (1.0 - x) + kx * (1.0 - 2.0 * x));
+                grads[2 * (base + t) + 1] =
+                    kx * x * (1.0 - x) * (dky * y * (1.0 - y) + ky * (1.0 - 2.0 * y));
             }
-            grads[i * 2] = sx;
-            grads[i * 2 + 1] = sy;
+        }
+        // Vertex gradients: bilinear minus the incident edge corrections
+        // (`fe_ser.cpp:157-186`).
+        let dbil = [
+            [-(1.0 - y), -(1.0 - x)],
+            [1.0 - y, -x],
+            [y, x],
+            [-y, 1.0 - x],
+        ];
+        for k in 0..4 {
+            grads[2 * k] = dbil[k][0];
+            grads[2 * k + 1] = dbil[k][1];
+        }
+        for i in 0..p - 1 {
+            let w = 1.0 - self.cp[i + 1];
+            let pairs = [
+                (4 + i, 4 + 4 * (p - 1) - i - 1),
+                (4 + (p - 1) + i, 4 + (p - 2) - i),
+                (4 + 2 * (p - 1) + i, 1 + 2 * p - i),
+                (4 + 3 * (p - 1) + i, 3 * p - i),
+            ];
+            for (v, &(a, b)) in pairs.iter().enumerate() {
+                grads[2 * v] -= w * (grads[2 * a] + grads[2 * b]);
+                grads[2 * v + 1] -= w * (grads[2 * a + 1] + grads[2 * b + 1]);
+            }
         }
     }
     /// MFEM's `IntRules.Get(Geometry::SQUARE, order)` — the `[0,1]²` rule the
@@ -239,12 +349,7 @@ impl ReferenceElement for QuadSerendipityPk {
         quad_rule_01(o)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        let xv = nd_01(self.p);
-        let mut c = Vec::new();
-        for &(i, j) in &self.nds {
-            c.push(vec![xv[i], xv[j]]);
-        }
-        c
+        self.nodes().into_iter().map(|n| n.to_vec()).collect()
     }
 }
 
@@ -558,9 +663,14 @@ mod tests {
     }
     #[test]
     fn q4() {
-        assert_eq!(QuadSerendipityPk::new(4).n_dofs(), 16);
-        pou(&QuadSerendipityPk::new(4));
-        interp(&QuadSerendipityPk::new(4));
+        // D809: MFEM's `(p²+3p+6)/2` — 17 at p = 4 (16 boundary + 1 interior
+        // bubble DOF).  The partition of unity and nodality checks do *not*
+        // apply from p = 4 on: MFEM's own `H1Ser_QuadrilateralElement` loses
+        // both (`Σ∫φ = 1.0278`, POU residual 6.25e-2 — D809-1), and this arm
+        // reproduces that faithfully.  Both are pinned per-order in
+        // `tests/d809_mfem_h1ser_port.rs`, against the MFEM dump.
+        assert_eq!(QuadSerendipityPk::new(4).n_dofs(), 17);
+        grad(&QuadSerendipityPk::new(4), &[[0.2, 0.3], [0.7, 0.9]]);
     }
     /// D768 — the 2-D arm's frame is `[0,1]²`: nodes, quadrature points and the
     /// p = 1 corner labels all sit inside the unit square.  Red before the
