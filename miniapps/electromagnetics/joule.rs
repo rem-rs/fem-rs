@@ -660,8 +660,13 @@ fn main() {
         // `bdr_attributes.Max()` is the largest boundary attribute of the mesh
         // (fem-rs has no `Array<int> bdr_attributes`; the maximum over the
         // boundary-face tags is the same number).
-        let n_bdr = (0..local_mesh.n_boundary_faces() as u32)
-            .map(|fc| local_mesh.face_tag(fc) as usize)
+        //
+        // D785: the max runs over the **global** mesh (`mesh0`), not the rank
+        // partition — C++'s `bdr_attributes.Max()` is a whole-mesh quantity,
+        // and on np≥2 a rank whose partition misses the largest-tag boundary
+        // face would build a shorter (wrong) ess mask.
+        let n_bdr = (0..mesh0.n_boundary_faces() as u32)
+            .map(|fc| mesh0.face_tag(fc) as usize)
             .max()
             .unwrap_or(0);
         let (ess_bdr, thermal_ess_bdr, poisson_ess_bdr) = if opts.problem == "coil" {
