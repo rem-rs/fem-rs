@@ -33,3 +33,11 @@ fem-space    = { path = "../space" }
 fem-assembly = { path = "../assembly" }
 fem-solver   = { path = "../solver" }
 fem-element  = { path = "../element" }
+# D808: the shipped `wgsl/` sources must *parse as WGSL*.  `naga` is the same
+# front end `wgpu` compiles them with (wgpu 27 pulls naga 27), and it is
+# declared here so a GPU-less machine can still pin shader validity — the
+# defect class that bit twice (D777's dropped `cs_main` brace in the hex
+# template, D808's `if`-expressions in `quad_q1.wgsl`).  `default-features =
+# false` + `wgsl-in` is a subset of what `wgpu` already enables, so this adds no
+# new dependency to the lock file.
+naga = { version = "27", default-features = false, features = ["wgsl-in"] }

@@ -13,15 +13,33 @@
 //! 3. contract the layer index back.
 //!
 //! **Geometry (D770).**  Each quadrature point carries the full symmetric
-//! metric `W = w_q · detJ · κ(x_q) · J⁻ᵀ·J⁻¹` (6 values) of the element's
-//! analytic trilinear Jacobian.  The previous version stored `J⁻ᵀ` and used
-//! only the *first* QP's `|detJ|` and `κ` as one scalar factor outside the
-//! Kronecker sum, with the Jacobian itself taken from a **finite-difference**
-//! (ε = 1e-6) probe of the mapping.  That is only correct for a prism whose
-//! map is a similarity (`J⁻ᵀJ⁻¹ ∝ I`): every sheared, stretched or twisted
-//! prism — i.e. every prism mesh that is not made of identical unit prisms —
-//! was silently integrated with the wrong metric (a stretched prism is off by
-//! the anisotropy ratio, a twisted one by O(1)).
+//! metric `W = w_q · detJ · κ(x_q) · J⁻ᵀ·J⁻¹` (6 values).  The previous version
+//! stored `J⁻ᵀ` and used only the *first* QP's `|detJ|` and `κ` as one scalar
+//! factor outside the Kronecker sum, with the Jacobian itself taken from a
+//! **finite-difference** (ε = 1e-6) probe of the mapping.  That is only correct
+//! for a prism whose map is a similarity (`J⁻ᵀJ⁻¹ ∝ I`): every sheared,
+//! stretched or twisted prism — i.e. every prism mesh that is not made of
+//! identical unit prisms — was silently integrated with the wrong metric (a
+//! stretched prism is off by the anisotropy ratio, a twisted one by O(1)).
+//!
+//! **Curved prisms (D783).**  The geometry of a *straight* prism is the
+//! 6-vertex trilinear map ([`PrismGeom`], the P1 vertex table).  A mesh
+//! carrying a **high-order geometry table** (`geom_order ≥ 2`:
+//! [`Mesh::set_curvature`] or the reader's `nodes` table, e.g. a curved
+//! Prism15/18 element) is instead evaluated with the mesh crate's order-`g`
+//! isoparametric map ([`fem_mesh::element_jacobian_at`] →
+//! `PrismPk(g)` over `Mesh::geometry_nodes`), i.e. *exactly* the map the
+//! assembled path evaluates (`assembler::geo_ref_elem` /
+//! `geo_ref_elem_from_mesh` return the same `PrismPk(g)` for `g > 1`).
+//! Before D783 every prism was approximated by its six straight-edged
+//! vertices, so a curved element was integrated with the wrong metric while
+//! the assembled matrix used the curved one (the D732/D734 class of gap; on
+//! this file's fixture the pre-fix deviation is O(1e-1) relative).
+//! The straight branch (`geom_order ≤ 1`) keeps [`PrismGeom`]'s analytic
+//! trilinear Jacobian bit for bit (the mesh crate's D715/D787 gating pattern).
+//! Pinned by `crates/assembly/tests/d808_prism_pa_multi.rs`.
+//!
+//! [`Mesh::set_curvature`]: fem_mesh::Mesh::set_curvature
 //!
 //! The quadrature is the assembled path's own: `p+1` Gauss-Legendre points on
 //! `[0,1]` (the 1-D factor of MFEM's `IntRules.Get(Geometry::PRISM, 2p+1)`,
@@ -36,6 +54,20 @@
 //! carrying a *high-order* geometry table (curved prisms, Prism15/18) is
 //! approximated by its straight-edged vertices here, while the assembled path
 //! uses the curved map — the same class of gap as D732/D734.
+//!
+//! **D783 (round 75) closes that residual for curved meshes**: when the mesh
+//! carries a geometry table of order `g ≥ 2` ([`Mesh::set_curvature`], the
+//! reader's `nodes` table), the per-QP `(J, x)` come from
+//! [`fem_mesh::element_jacobian_at`] — the mesh crate's order-`g`
+//! isoparametric `PrismPk(g)` path, i.e. *exactly* the map the assembled path
+//! evaluates (`assembler::geo_ref_elem` / `geo_ref_elem_from_mesh` return the
+//! same `PrismPk(g)` for `g > 1`).  The straight branch (`geom_order ≤ 1`)
+//! still uses [`PrismGeom`]'s analytic trilinear Jacobian, so every straight
+//! prism keeps its previous values bit for bit (the D715/D787 gating pattern).
+//! Pinned by `crates/assembly/tests/d808_prism_pa_multi.rs` (curved and
+//! straight, multi-element, shared DOFs).
+//!
+//! [`Mesh::set_curvature`]: fem_mesh::Mesh::set_curvature
 
 use crate::pa::types::PaData;
 use fem_element::lagrange::H1TriPk;
@@ -220,6 +252,41 @@ fn ref_metric(jinv: &[[f64; 3]; 3]) -> [f64; 6] {
 /// components of `W = w_q · detJ · κ(x_q) · J⁻ᵀ·J⁻¹` (D770).
 pub const PA_GEOM: usize = 6;
 
+/// The per-QP `(J, x_phys)` of a **curved** prism (D783), from the mesh's own
+/// order-`g` isoparametric geometry table.
+///
+/// Returns `None` for a straight mesh (`geom_order ≤ 1`), where the caller
+/// keeps [`PrismGeom`]'s analytic trilinear map bit for bit.  The geometry
+/// element and node table are the mesh crate's
+/// [`fem_mesh::element_jacobian_at`] choice — the same `PrismPk(g)` and
+/// per-element geometry row the assembled path uses
+/// (`assembler::geo_ref_elem` / `assembler::geo_ref_elem_from_mesh`), so a
+/// curved prism's PA and assembly integrate the same map at the same
+/// quadrature points.
+///
+/// `element_jacobian_at` hands back `J[i][j] = ∂x_i/∂ξ_j` (rows physical); the
+/// PA data build works in `∂x_d/∂ξ_c` (rows reference, the convention
+/// [`invert_3x3`] and [`ref_metric`] are written in), hence the transpose.
+fn curved_prism_jacobian<M: MeshTopology>(
+    mesh: &M,
+    e: u32,
+    xi: f64,
+    eta: f64,
+    zeta: f64,
+) -> Option<([[f64; 3]; 3], [f64; 3])> {
+    if mesh.geom_order() < 2 {
+        return None;
+    }
+    let (j, xp) = fem_mesh::element_jacobian_at(mesh, e, &[xi, eta, zeta], 3);
+    let mut jac = [[0.0_f64; 3]; 3];
+    for c in 0..3 {
+        for d in 0..3 {
+            jac[c][d] = j[(d, c)];
+        }
+    }
+    Some((jac, [xp[0], xp[1], xp[2]]))
+}
+
 // ─── PA data build ─────────────────────────────────────────────────────────
 
 /// Build PA data for Prism Pk diffusion: per-element `PaData` with geometry info.
@@ -229,6 +296,8 @@ pub const PA_GEOM: usize = 6;
 /// in ξ × `tri_rule(2p+1)`), computed from the element's analytic trilinear
 /// Jacobian (D770; the old data carried `J⁻ᵀ`, `|detJ|` and `κ` of a
 /// finite-difference Jacobian and the apply used only the first QP's scalars).
+/// A curved mesh (`geom_order ≥ 2`) takes the mesh's order-`g` isoparametric
+/// map instead of the 6 vertices (D783 — see the module docs).
 pub fn build_prism_pk_pa_data<M: MeshTopology>(
     mesh: &M,
     kappa: &dyn Fn(&[f64]) -> f64,
@@ -243,9 +312,12 @@ pub fn build_prism_pk_pa_data<M: MeshTopology>(
     let mut pd = PaData::new(n_elems, nqp, PA_GEOM);
 
     let (xi_qpts, xi_wts) = gauss_legendre_1d(nq_1d);
+    // D783: a curved mesh (`geom_order ≥ 2`) takes its geometry from the
+    // mesh's order-`g` isoparametric table instead of the 6 vertices.
+    let curved = mesh.geom_order() >= 2;
 
     for e in 0..n_elems {
-        let geom = PrismGeom::from_mesh(mesh, e as u32);
+        let geom = if curved { None } else { Some(PrismGeom::from_mesh(mesh, e as u32)) };
 
         for (qxi, &xi) in xi_qpts.iter().enumerate() {
             for (qtri, tri_qp) in tri_rule.points.iter().enumerate() {
@@ -253,11 +325,14 @@ pub fn build_prism_pk_pa_data<M: MeshTopology>(
                 let eta = tri_qp[0];
                 let zeta = tri_qp[1];
 
-                let jac = geom.jacobian(xi, eta, zeta);
+                let (jac, xc) = match geom.as_ref() {
+                    Some(g) => (g.jacobian(xi, eta, zeta), g.map(xi, eta, zeta)),
+                    None => curved_prism_jacobian(mesh, e as u32, xi, eta, zeta)
+                        .expect("geom_order ≥ 2 prism geometry table"),
+                };
                 let (det, jinv) = invert_3x3(&jac);
                 let metric = ref_metric(&jinv);
 
-                let xc = geom.map(xi, eta, zeta);
                 let scale = xi_wts[qxi] * tri_rule.weights[qtri] * det * kappa(&xc);
 
                 let qd = pd.elem_qp_mut(e, qi);

@@ -827,6 +827,7 @@ dependencies = [
  "fem-solver",
  "fem-space",
  "log",
+ "naga",
  "pollster",
  "thiserror 2.0.18",
  "wgpu",

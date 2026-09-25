@@ -18,13 +18,13 @@ let l0x=l0(GP[qx]);let l1x=l1(GP[qx]);let d0x=d0(GP[qx]);let d1x=d1(GP[qx]);
 let l0y=l0(GP[qy]);let l1y=l1(GP[qy]);let d0y=d0(GP[qy]);let d1y=d1(GP[qy]);
 var fl:array<f32,2>=array(0.0,0.0);
 for(var j=0u;j<4u;j++){let a=qa(j);let b=qb(j);
-let pa=if(a==0u){l0x}else{l1x};let pb=if(b==0u){l0y}else{l1y};
-let da=if(a==0u){d0x}else{d1x};let db=if(b==0u){d0y}else{d1y};
+let pa=select(l1x,l0x,a==0u);let pb=select(l1y,l0y,b==0u);
+let da=select(d1x,d0x,a==0u);let db=select(d1y,d0y,b==0u);
 let pg0=jit00*da*pb+jit01*pa*db;let pg1=jit10*da*pb+jit11*pa*db;
 fl[0]+=pg0*xe[j];fl[1]+=pg1*xe[j];}
 for(var i=0u;i<4u;i++){let a=qa(i);let b=qb(i);
-let pa=if(a==0u){l0x}else{l1x};let pb=if(b==0u){l0y}else{l1y};
-let da=if(a==0u){d0x}else{d1x};let db=if(b==0u){d0y}else{d1y};
+let pa=select(l1x,l0x,a==0u);let pb=select(l1y,l0y,b==0u);
+let da=select(d1x,d0x,a==0u);let db=select(d1y,d0y,b==0u);
 let pg0=jit00*da*pb+jit01*pa*db;let pg1=jit10*da*pb+jit11*pa*db;
 ye[i]+=sc*(pg0*fl[0]+pg1*fl[1]);}
 }}
