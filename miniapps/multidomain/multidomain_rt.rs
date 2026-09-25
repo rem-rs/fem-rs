@@ -671,6 +671,70 @@ fn main() {
     let ic_sum: f64 = field_block.iter().sum();
     println!("Block initial BC dofs (nonzero): {nonzero}  IC sum: {ic_sum:.6e}");
 
+    // ── D762 adjudication: the `nonzero` count above is a dust detector ──────
+    // `square_xy = (-2y, 2x, 0)` is tangent to the z-normal cap faces, so its
+    // normal trace on those faces is *identically* zero and the corresponding
+    // wall dofs hold pure round-off dust.  Measured on the canonical fixture
+    // (`data/multidomain-hex.mesh`, 160 wall faces / 640 wall dofs): 96 faces
+    // (384 dofs) carry a real flux, 64 z-normal faces (256 dofs) are
+    // mathematically zero.  C++ `ProjectBdrCoefficientNormal` leaves dust on
+    // all 256 (max |dust| 9.35e-17, D735) so it prints 640; fem-rs'
+    // `interpolate_vector` collapses some of them to exact 0.0 (192 now, 128
+    // before the round-70 `beb8442a` D721 hex `[0,1]³` flip, 512 -> 448: the
+    // flip changed the geometry-kernel association order that decides
+    // dust-vs-zero — isolated-worktree bisect in tmp/d762/run_*.txt).  The
+    // count is therefore NOT reproducible and carries no information; the
+    // frame-stable content is the real-flux set (384 dofs, matched 1:1 against
+    // the C++ dump per D735's `j2.txt` index comparison) plus the ~1e-17 IC
+    // sum.  The pins below hold the *real* invariant and are the exemption's
+    // teeth: a regression that zeroes a real dof (or inflates the dust) trips
+    // them even though the printed count is free to move.
+    let real = field_block.iter().filter(|&&v| v.abs() >= 1.0e-12).count();
+    assert_eq!(
+        real % 4,
+        0,
+        "D762 pin: the real (>=1e-12) wall dofs must come in whole RT face blocks, got {real}"
+    );
+    for f in &block_wall_faces {
+        let mut s4 = *f;
+        s4.sort_unstable();
+        let fk = FaceKey::new(s4[0], s4[1], s4[2]);
+        let Some(ds) = fes_block.face_dofs(fk) else {
+            continue;
+        };
+        let (p0, p1, p2) = (
+            mesh_blk.node_coords(f[0]),
+            mesh_blk.node_coords(f[1]),
+            mesh_blk.node_coords(f[2]),
+        );
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let z_normal = n[0] == 0.0 && n[1] == 0.0;
+        for &d in &ds {
+            if field_block[d as usize] == 0.0 {
+                assert!(
+                    z_normal,
+                    "D762 pin: wall dof {d} is exactly zero on a face with normal \
+                     ({}, {}, {}) — only the z-normal cap faces may hold exact \
+                     zeros for `square_xy`",
+                    n[0], n[1], n[2]
+                );
+            } else {
+                assert!(
+                    field_block[d as usize].abs() >= 1.0e-12 || z_normal,
+                    "D762 pin: wall dof {d} holds sub-1e-12 dust on a non-cap face \
+                     (value {:e})",
+                    field_block[d as usize].abs()
+                );
+            }
+        }
+    }
+
     // Block → cylinder transfer map (C++ multidomain_rt.cpp:383-386).
     let field_block_to_cylinder_map = BlockToCylinderMap::new(
         &fes_cylinder,

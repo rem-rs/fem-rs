@@ -1,22 +1,48 @@
-//! Prism Pk partial-assembly using Kronecker sum structure.
+//! Prism Pk partial assembly on the wedge's tensor structure.
 //!
-//! The prism stiffness matrix is `A = S₁ ⊗ M₂ + M₁ ⊗ S₂` where:
-//! - S₁/M₁ are 1D Lagrange stiffness/mass matrices on [0,1]
-//! - S₂/M₂ are triangle Lagrange stiffness/mass matrices
+//! MFEM's `H1_WedgeElement` is a tensor product of a 1-D `[0,1]` factor and a
+//! triangle factor ([`H1TriPk`], MFEM `H1_TriangleElement`), so the diffusion
+//! form on a prism can be applied with a two-factor sum-factorization instead
+//! of a dense element matrix:
 //!
-//! This enables O(p⁴) evaluation instead of O(p⁶) for full assembly.
+//! 1. contract the layer (ξ) index of the element vector for every axial
+//!    quadrature point (values and ξ-derivatives),
+//! 2. at each full quadrature point `(ξ_q, η_t, ζ_t)`, contract the triangle
+//!    factor to get the reference gradient `(∂_ξ u, ∂_η u, ∂_ζ u)`, map it
+//!    through the per-QP metric and scatter it back into the triangle factor,
+//! 3. contract the layer index back.
 //!
-//! # Kronecker sum application
+//! **Geometry (D770).**  Each quadrature point carries the full symmetric
+//! metric `W = w_q · detJ · κ(x_q) · J⁻ᵀ·J⁻¹` (6 values) of the element's
+//! analytic trilinear Jacobian.  The previous version stored `J⁻ᵀ` and used
+//! only the *first* QP's `|detJ|` and `κ` as one scalar factor outside the
+//! Kronecker sum, with the Jacobian itself taken from a **finite-difference**
+//! (ε = 1e-6) probe of the mapping.  That is only correct for a prism whose
+//! map is a similarity (`J⁻ᵀJ⁻¹ ∝ I`): every sheared, stretched or twisted
+//! prism — i.e. every prism mesh that is not made of identical unit prisms —
+//! was silently integrated with the wrong metric (a stretched prism is off by
+//! the anisotropy ratio, a twisted one by O(1)).
 //!
-//! `y = (S₁ ⊗ M₂ + M₁ ⊗ S₂)·x` is computed as:
-//! 1. For each 1D layer k: `t[k] = M₂ · x[:,k]` and `w[k] = S₂ · x[:,k]`
-//! 2. `y = S₁ · t + M₁ · w` (matrix-multiply across layers)
+//! The quadrature is the assembled path's own: `p+1` Gauss-Legendre points on
+//! `[0,1]` (the 1-D factor of MFEM's `IntRules.Get(Geometry::PRISM, 2p+1)`,
+//! which is `seg_rule(2p+1)`) times `tri_rule(2p+1)`.  PA and assembly
+//! therefore evaluate the same integrand at the same points, and agree to
+//! round-off on *any* prism — affine, sheared or twisted (pinned in
+//! `prism_pa_all_orders_match_assembled` and
+//! `crates/assembly/tests/d770_prism_pa_geometry.rs`).
+//!
+//! Known limitation (residual, registered): the mapping used for the geometry
+//! is the 6-vertex trilinear one, i.e. the mesh's P1 geometry.  A prism mesh
+//! carrying a *high-order* geometry table (curved prisms, Prism15/18) is
+//! approximated by its straight-edged vertices here, while the assembled path
+//! uses the curved map — the same class of gap as D732/D734.
 
 use crate::pa::types::PaData;
+use fem_element::lagrange::H1TriPk;
 use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
-// ─── 1D Lagrange matrices (Gauss-Lobatto nodes on [0,1]) ──────────────────
+// ─── 1D Lagrange basis (Gauss-Lobatto nodes on [0,1]) ─────────────────────
 
 /// The closed Gauss-Lobatto points on `[0,1]` — the 1-D factor of
 /// `PrismPk`/MFEM `H1_WedgeElement` (D164), taken from the shared `[0,1]` table
@@ -67,85 +93,6 @@ fn dlag1d_all(nodes: &[f64], x: f64) -> Vec<f64> {
         *v = acc;
     }
     out
-}
-
-/// 1D Lagrange stiffness matrix: `S₁[i][j] = ∫₀¹ ℓ'_i(x)·ℓ'_j(x) dx`.
-fn build_1d_stiffness(p: usize) -> Vec<Vec<f64>> {
-    let n = p + 1;
-    // Exact integration of quadratic products of degree p-1 polynomials
-    let cp = gll_closed_points(p);
-    let (qpts, qwts) = gauss_legendre_1d(2 * p + 1);
-    let mut s = vec![vec![0.0; n]; n];
-    for (&qp, &qw) in qpts.iter().zip(qwts.iter()) {
-        let dvals = dlag1d_all(&cp, qp);
-        for i in 0..n {
-            for j in 0..n {
-                s[i][j] += dvals[i] * dvals[j] * qw;
-            }
-        }
-    }
-    s
-}
-
-/// 1D Lagrange mass matrix: `M₁[i][j] = ∫₀¹ ℓ_i(x)·ℓ_j(x) dx`.
-fn build_1d_mass(p: usize) -> Vec<Vec<f64>> {
-    let n = p + 1;
-    let cp = gll_closed_points(p);
-    let (qpts, qwts) = gauss_legendre_1d(2 * p + 1);
-    let mut m = vec![vec![0.0; n]; n];
-    for (&qp, &qw) in qpts.iter().zip(qwts.iter()) {
-        let vals = lag1d_all(&cp, qp);
-        for i in 0..n {
-            for j in 0..n {
-                m[i][j] += vals[i] * vals[j] * qw;
-            }
-        }
-    }
-    m
-}
-
-// ─── Triangle Lagrange matrices ─────────────────────────────────────────────
-
-/// Triangle stiffness matrix: `S₂[i][j] = ∫ ∇φ_i·∇φ_j dη dζ`.
-fn build_tri_stiffness(p: usize) -> Vec<Vec<f64>> {
-    let tri = fem_element::lagrange::H1TriPk::new(p);
-    let n_tri = tri.n_dofs();
-    let rule = tri.quadrature((2 * p + 2).min(15) as u8);
-    let mut s = vec![vec![0.0; n_tri]; n_tri];
-    for pt_idx in 0..rule.points.len() {
-        let pt = &rule.points[pt_idx];
-        let w = rule.weights[pt_idx]; // tri_rule integrates the unit triangle (Σw = 1/2)
-        let mut grads = vec![0.0; n_tri * 2];
-        tri.eval_grad_basis(pt, &mut grads);
-        for i in 0..n_tri {
-            let (gix, giy) = (grads[i * 2], grads[i * 2 + 1]);
-            for j in 0..n_tri {
-                let (gjx, gjy) = (grads[j * 2], grads[j * 2 + 1]);
-                s[i][j] += (gix * gjx + giy * gjy) * w;
-            }
-        }
-    }
-    s
-}
-
-/// Triangle mass matrix: `M₂[i][j] = ∫ φ_i·φ_j dη dζ`.
-fn build_tri_mass(p: usize) -> Vec<Vec<f64>> {
-    let tri = fem_element::lagrange::H1TriPk::new(p);
-    let n_tri = tri.n_dofs();
-    let rule = tri.quadrature((2 * p + 2).min(15) as u8);
-    let mut m = vec![vec![0.0; n_tri]; n_tri];
-    for pt_idx in 0..rule.points.len() {
-        let pt = &rule.points[pt_idx];
-        let w = rule.weights[pt_idx];
-        let mut vals = vec![0.0; n_tri];
-        tri.eval_basis(pt, &mut vals);
-        for i in 0..n_tri {
-            for j in 0..n_tri {
-                m[i][j] += vals[i] * vals[j] * w;
-            }
-        }
-    }
-    m
 }
 
 /// Gauss-Legendre quadrature on `[0,1]`; delegates to the crate's shared MFEM
@@ -199,28 +146,103 @@ impl PrismGeom {
                 + xi * (lam0 * self.v[n3][2] + eta * self.v[n4][2] + zeta * self.v[n5][2]),
         ]
     }
+
+    /// **Analytic** Jacobian of the trilinear prism map (D770 — the previous
+    /// version differenced `map` with `eps = 1e-6`): row `c` is `∂x/∂ξ_c` for
+    /// `ξ = (ξ, η, ζ)`, i.e.
+    /// `x = (1-ξ)·B + ξ·T` with `B = λ₀v₀ + ηv₁ + ζv₂`,
+    /// `T = λ₀v₃ + ηv₄ + ζv₅`, `λ₀ = 1-η-ζ`, hence
+    /// `∂_ξ x = T - B`, `∂_η x = (1-ξ)(v₁-v₀) + ξ(v₄-v₃)`,
+    /// `∂_ζ x = (1-ξ)(v₂-v₀) + ξ(v₅-v₃)`.
+    fn jacobian(&self, xi: f64, eta: f64, zeta: f64) -> [[f64; 3]; 3] {
+        let lam0 = 1.0 - eta - zeta;
+        let xi0 = 1.0 - xi;
+        let mut j = [[0.0_f64; 3]; 3];
+        for d in 0..3 {
+            let b = lam0 * self.v[0][d] + eta * self.v[1][d] + zeta * self.v[2][d];
+            let t = lam0 * self.v[3][d] + eta * self.v[4][d] + zeta * self.v[5][d];
+            j[0][d] = t - b;
+            j[1][d] = xi0 * (self.v[1][d] - self.v[0][d]) + xi * (self.v[4][d] - self.v[3][d]);
+            j[2][d] = xi0 * (self.v[2][d] - self.v[0][d]) + xi * (self.v[5][d] - self.v[3][d]);
+        }
+        j
+    }
 }
+
+/// Determinant and inverse of a 3×3 Jacobian whose rows are `∂x/∂ξ_c`.
+///
+/// Returns `(det, Jinv)` with `Jinv[r][c] = ∂ξ_r/∂x_c` (the true inverse; the
+/// old code clamped to `max(det, 1e-30)` and took `|det|`, which quietly
+/// produced `1e30` entries for inverted prisms instead of the negative-signed
+/// operator the assembled path assembles — D679's signed convention).
+fn invert_3x3(j: &[[f64; 3]; 3]) -> (f64, [[f64; 3]; 3]) {
+    let det = j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
+        - j[0][1] * (j[1][0] * j[2][2] - j[1][2] * j[2][0])
+        + j[0][2] * (j[1][0] * j[2][1] - j[1][1] * j[2][0]);
+    let inv = 1.0 / det;
+    let c = [
+        [
+            (j[1][1] * j[2][2] - j[1][2] * j[2][1]) * inv,
+            (j[0][2] * j[2][1] - j[0][1] * j[2][2]) * inv,
+            (j[0][1] * j[1][2] - j[0][2] * j[1][1]) * inv,
+        ],
+        [
+            (j[1][2] * j[2][0] - j[1][0] * j[2][2]) * inv,
+            (j[0][0] * j[2][2] - j[0][2] * j[2][0]) * inv,
+            (j[0][2] * j[1][0] - j[0][0] * j[1][2]) * inv,
+        ],
+        [
+            (j[1][0] * j[2][1] - j[1][1] * j[2][0]) * inv,
+            (j[0][1] * j[2][0] - j[0][0] * j[2][1]) * inv,
+            (j[0][0] * j[1][1] - j[0][1] * j[1][0]) * inv,
+        ],
+    ];
+    (det, c)
+}
+
+/// Symmetric components of `J⁻ᵀ·J⁻¹` (reference metric), in the storage order
+/// `[m_ξξ, m_ξη, m_ξζ, m_ηη, m_ηζ, m_ζζ]`.
+fn ref_metric(jinv: &[[f64; 3]; 3]) -> [f64; 6] {
+    let col = |c: usize| [jinv[0][c], jinv[1][c], jinv[2][c]];
+    let (c0, c1, c2) = (col(0), col(1), col(2));
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    [
+        dot(c0, c0),
+        dot(c0, c1),
+        dot(c0, c2),
+        dot(c1, c1),
+        dot(c1, c2),
+        dot(c2, c2),
+    ]
+}
+
+/// Number of geometry values stored per quadrature point: the six symmetric
+/// components of `W = w_q · detJ · κ(x_q) · J⁻ᵀ·J⁻¹` (D770).
+pub const PA_GEOM: usize = 6;
 
 // ─── PA data build ─────────────────────────────────────────────────────────
 
 /// Build PA data for Prism Pk diffusion: per-element `PaData` with geometry info.
 ///
-/// Stores J⁻ᵀ, |detJ|, κ at each quadrature point for affine-geometry prisms.
+/// Stores the six symmetric components of `w_q·detJ·κ·J⁻ᵀJ⁻¹` at every
+/// quadrature point of the assembled path's rule (`p+1` Gauss-Legendre points
+/// in ξ × `tri_rule(2p+1)`), computed from the element's analytic trilinear
+/// Jacobian (D770; the old data carried `J⁻ᵀ`, `|detJ|` and `κ` of a
+/// finite-difference Jacobian and the apply used only the first QP's scalars).
 pub fn build_prism_pk_pa_data<M: MeshTopology>(
     mesh: &M,
     kappa: &dyn Fn(&[f64]) -> f64,
     p: usize,
 ) -> PaData {
     let n_elems = mesh.n_elements();
-    let nq_1d = p + 1; // quadrature points in the extrusion direction
-    let tri_ref = fem_element::lagrange::H1TriPk::new(p);
+    let nq_1d = p + 1; // axial quadrature points, the factor of the 2p+1 rule
+    let tri_ref = H1TriPk::new(p);
     let tri_rule = tri_ref.quadrature((2 * p + 1).min(15) as u8);
-    let nq_tri = tri_rule.points.len(); // triangle quadrature points from rule
-    let n_geom = 11; // J⁻ᵀ (9) + |detJ| (1) + κ (1) = 11 values per QP
+    let nq_tri = tri_rule.points.len();
     let nqp = nq_1d * nq_tri;
-    let mut pd = PaData::new(n_elems, nqp, n_geom);
+    let mut pd = PaData::new(n_elems, nqp, PA_GEOM);
 
-    let (xi_qpts, _xi_wts) = gauss_legendre_1d(nq_1d);
+    let (xi_qpts, xi_wts) = gauss_legendre_1d(nq_1d);
 
     for e in 0..n_elems {
         let geom = PrismGeom::from_mesh(mesh, e as u32);
@@ -231,64 +253,32 @@ pub fn build_prism_pk_pa_data<M: MeshTopology>(
                 let eta = tri_qp[0];
                 let zeta = tri_qp[1];
 
-                // Finite-difference Jacobian
-                let eps = 1e-6;
+                let jac = geom.jacobian(xi, eta, zeta);
+                let (det, jinv) = invert_3x3(&jac);
+                let metric = ref_metric(&jinv);
+
                 let xc = geom.map(xi, eta, zeta);
-                let xdx = geom.map((xi + eps).min(1.0), eta, zeta);
-                let xdy = geom.map(xi, (eta + eps).min(1.0), zeta);
-                let xdz = geom.map(xi, eta, (zeta + eps).min(1.0));
-
-                let jac = [
-                    [(xdx[0] - xc[0]) / eps, (xdx[1] - xc[1]) / eps, (xdx[2] - xc[2]) / eps],
-                    [(xdy[0] - xc[0]) / eps, (xdy[1] - xc[1]) / eps, (xdy[2] - xc[2]) / eps],
-                    [(xdz[0] - xc[0]) / eps, (xdz[1] - xc[1]) / eps, (xdz[2] - xc[2]) / eps],
-                ];
-
-                let det = jac[0][0] * (jac[1][1] * jac[2][2] - jac[1][2] * jac[2][1])
-                    - jac[0][1] * (jac[1][0] * jac[2][2] - jac[1][2] * jac[2][0])
-                    + jac[0][2] * (jac[1][0] * jac[2][1] - jac[1][1] * jac[2][0]);
-                let det_j = det.abs();
-                let inv = 1.0 / det.max(1e-30);
-
-                let jit = [
-                    [(jac[1][1] * jac[2][2] - jac[1][2] * jac[2][1]) * inv,
-                     (jac[0][2] * jac[2][1] - jac[0][1] * jac[2][2]) * inv,
-                     (jac[0][1] * jac[1][2] - jac[0][2] * jac[1][1]) * inv],
-                    [(jac[1][2] * jac[2][0] - jac[1][0] * jac[2][2]) * inv,
-                     (jac[0][0] * jac[2][2] - jac[0][2] * jac[2][0]) * inv,
-                     (jac[0][2] * jac[1][0] - jac[0][0] * jac[1][2]) * inv],
-                    [(jac[1][0] * jac[2][1] - jac[1][1] * jac[2][0]) * inv,
-                     (jac[0][1] * jac[2][0] - jac[0][0] * jac[2][1]) * inv,
-                     (jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0]) * inv],
-                ];
+                let scale = xi_wts[qxi] * tri_rule.weights[qtri] * det * kappa(&xc);
 
                 let qd = pd.elem_qp_mut(e, qi);
-                for a in 0..3 {
-                    for b in 0..3 {
-                        qd[a * 3 + b] = jit[a][b];
-                    }
+                for c in 0..PA_GEOM {
+                    qd[c] = metric[c] * scale;
                 }
-                qd[9] = det_j;
-                qd[10] = kappa(&xc);
             }
         }
     }
     pd
 }
 
-// ─── PA apply (Kronecker sum) ──────────────────────────────────────────────
+// ─── PA apply (tensor sum-factorization) ───────────────────────────────────
 
-/// Apply the prism stiffness matrix using the Kronecker sum structure.
-///
-/// `y += A·x` where `A = S₁⊗M₂ + M₁⊗S₂`, O(p⁴) complexity.
-/// For affine prisms with unit Jacobian, the geometry correction factor
-/// is extracted from the first quadrature point.
+/// Apply the prism stiffness matrix with the wedge's two-factor
+/// sum-factorization: `y += A·x`.
 ///
 /// `elem_dofs` are the *space's* element dofs, which since D168 follow MFEM's
-/// `H1_WedgeElement` entity order, while the Kronecker factors act in
-/// [`PrismPk`]'s layer-major order — the application permutes through
-/// [`H1PrismPk`]'s slot table (`slot m of the H1 wedge = layer slot
-/// `perm[m]` of `PrismPk`).
+/// `H1_WedgeElement` entity order, while the factors act in [`PrismPk`]'s
+/// layer-major order — the application permutes through [`H1PrismPk`]'s slot
+/// table (`slot m of the H1 wedge = layer slot `perm[m]` of `PrismPk`).
 pub fn pa_apply_prism_pk(
     pd: &PaData,
     elem_dofs: &[Vec<u32>],
@@ -300,12 +290,6 @@ pub fn pa_apply_prism_pk(
     let np1 = p + 1;
     let n_loc = np1 * n_tri;
 
-    // Precompute 1D and 2D reference matrices
-    let s1 = build_1d_stiffness(p);
-    let m1 = build_1d_mass(p);
-    let s2 = build_tri_stiffness(p);
-    let m2 = build_tri_mass(p);
-
     // entity slot ↔ layer slot permutation (`H1PrismPk` = `PrismPk` permuted).
     let perm = fem_element::lagrange::H1PrismPk::new(p).layer_perm().to_vec();
     let mut inv = vec![0usize; n_loc];
@@ -313,51 +297,117 @@ pub fn pa_apply_prism_pk(
         inv[ls] = m;
     }
 
+    // Layer factor: GLL Lagrange values `b[q*np1+i]` and derivatives
+    // `g[q*np1+i]` at the `p+1` axial rule points (the rule of the data build).
+    let nq_1d = np1;
+    let (xi_q, _) = gauss_legendre_1d(nq_1d);
+    let nodes = gll_closed_points(p);
+    let mut b = vec![0.0; nq_1d * np1];
+    let mut g = vec![0.0; nq_1d * np1];
+    for (q, &xq) in xi_q.iter().enumerate() {
+        let v = lag1d_all(&nodes, xq);
+        let d = dlag1d_all(&nodes, xq);
+        for i in 0..np1 {
+            b[q * np1 + i] = v[i];
+            g[q * np1 + i] = d[i];
+        }
+    }
+
+    // Triangle factor: values `tv[t*n_tri+i]`, gradients
+    // `tg[t*n_tri*2 + 2 i + d]` at the same triangle rule as the data build.
+    let tri = H1TriPk::new(p);
+    let tri_rule = tri.quadrature((2 * p + 1).min(15) as u8);
+    let ntq = tri_rule.points.len();
+    let mut tv = vec![0.0; ntq * n_tri];
+    let mut tg = vec![0.0; ntq * n_tri * 2];
+    for (t, pt) in tri_rule.points.iter().enumerate() {
+        tri.eval_basis(pt, &mut tv[t * n_tri..(t + 1) * n_tri]);
+        tri.eval_grad_basis(pt, &mut tg[t * n_tri * 2..(t + 1) * n_tri * 2]);
+    }
+    debug_assert_eq!(nq_1d * ntq, pd.nqp);
+
+    // Scratch: `ue`/`ye` are [tri dof × layer], `s0`/`s1`/`f1`/`f2` are
+    // [axial qp × tri dof].
+    let mut ue = vec![0.0; n_loc];
+    let mut ye = vec![0.0; n_loc];
+    let mut s0 = vec![0.0; nq_1d * n_tri];
+    let mut s1 = vec![0.0; nq_1d * n_tri];
+    let mut f1 = vec![0.0; nq_1d * n_tri];
+    let mut f2 = vec![0.0; nq_1d * n_tri];
+
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
-        if dofs.len() < n_loc { continue; }
-
-        // Load element solution as [n_tri × np1] matrix (row = tri DOF, col =
-        // layer), reading dofs through the entity→layer permutation.
-        let mut ue = vec![vec![0.0; np1]; n_tri];
-        for layer in 0..np1 {
-            for tri_dof in 0..n_tri {
-                let ls = layer * n_tri + tri_dof;
-                ue[tri_dof][layer] = x[dofs[inv[ls]] as usize];
+        if dofs.len() < n_loc {
+            continue;
+        }
+        // Gather: layer slot `l` of tri dof `i` reads entity slot inv[l*n_tri+i].
+        for l in 0..np1 {
+            for i in 0..n_tri {
+                ue[i * np1 + l] = x[dofs[inv[l * n_tri + i]] as usize];
             }
         }
 
-        // Get geometry correction from first QP (valid for affine prisms)
-        let n_geom = 11;
-        let off0 = e * pd.nqp * n_geom;
-        let (det_j, kappa) = if off0 + 10 < pd.data.len() {
-            (pd.data[off0 + 9], pd.data[off0 + 10])
-        } else {
-            (1.0, 1.0)
-        };
-
-        // Compute Kronecker action: t = M₂·u (per layer), w = S₂·u (per layer)
-        let mut t = vec![vec![0.0; n_tri]; np1];
-        let mut w = vec![vec![0.0; n_tri]; np1];
-        for layer in 0..np1 {
+        // Phase 1: contract the layer factor (values and ξ-derivatives).
+        for q in 0..nq_1d {
             for i in 0..n_tri {
-                for j in 0..n_tri {
-                    t[layer][i] += m2[i][j] * ue[j][layer];
-                    w[layer][i] += s2[i][j] * ue[j][layer];
-                }
-            }
-        }
-
-        // Combine: ye = S₁·t + M₁·w (across layers), then scale by geometry,
-        // scattering back through the permutation.
-        for layer in 0..np1 {
-            for i in 0..n_tri {
-                let mut val = 0.0;
+                let mut a0 = 0.0;
+                let mut a1 = 0.0;
                 for l in 0..np1 {
-                    val += s1[layer][l] * t[l][i] + m1[layer][l] * w[l][i];
+                    let u = ue[i * np1 + l];
+                    a0 += u * b[q * np1 + l];
+                    a1 += u * g[q * np1 + l];
                 }
-                let ls = layer * n_tri + i;
-                y[dofs[inv[ls]] as usize] += val * kappa * det_j;
+                s0[q * n_tri + i] = a0;
+                s1[q * n_tri + i] = a1;
+            }
+        }
+
+        // Phase 2: at each full qp form the reference gradient, apply the
+        // metric `W`, and scatter the fluxes back into the triangle factor.
+        f1.iter_mut().for_each(|v| *v = 0.0);
+        f2.iter_mut().for_each(|v| *v = 0.0);
+        for q in 0..nq_1d {
+            for t in 0..ntq {
+                let qi = q * ntq + t;
+                debug_assert!(qi < pd.nqp);
+                let w = pd.elem_qp(e, qi);
+                let (w00, w01, w02, w11, w12, w22) = (w[0], w[1], w[2], w[3], w[4], w[5]);
+
+                let mut u_xi = 0.0;
+                let mut u_eta = 0.0;
+                let mut u_zeta = 0.0;
+                for i in 0..n_tri {
+                    u_xi += s1[q * n_tri + i] * tv[t * n_tri + i];
+                    u_eta += s0[q * n_tri + i] * tg[t * n_tri * 2 + i * 2];
+                    u_zeta += s0[q * n_tri + i] * tg[t * n_tri * 2 + i * 2 + 1];
+                }
+                let f_xi = w00 * u_xi + w01 * u_eta + w02 * u_zeta;
+                let f_eta = w01 * u_xi + w11 * u_eta + w12 * u_zeta;
+                let f_zeta = w02 * u_xi + w12 * u_eta + w22 * u_zeta;
+
+                for i in 0..n_tri {
+                    f1[q * n_tri + i] += tv[t * n_tri + i] * f_xi;
+                    f2[q * n_tri + i] += tg[t * n_tri * 2 + i * 2] * f_eta
+                        + tg[t * n_tri * 2 + i * 2 + 1] * f_zeta;
+                }
+            }
+        }
+
+        // Phase 3: contract the layer factor back.
+        for i in 0..n_tri {
+            for l in 0..np1 {
+                let mut v = 0.0;
+                for q in 0..nq_1d {
+                    v += g[q * np1 + l] * f1[q * n_tri + i] + b[q * np1 + l] * f2[q * n_tri + i];
+                }
+                ye[i * np1 + l] = v;
+            }
+        }
+
+        // Scatter back through the entity↔layer permutation.
+        for l in 0..np1 {
+            for i in 0..n_tri {
+                y[dofs[inv[l * n_tri + i]] as usize] += ye[i * np1 + l];
             }
         }
     }
@@ -384,35 +434,6 @@ mod tests {
             vec![], vec![],
             fem_mesh::ElementType::Tri3,
         )
-    }
-
-    #[test]
-    fn prism_1d_stiffness_is_spd() {
-        let s = build_1d_stiffness(2);
-        let n = s.len();
-        // Check symmetry and positive diagonal
-        for i in 0..n {
-            assert!(s[i][i] > 0.0, "diag[{i}] should be positive");
-            for j in 0..n {
-                assert!((s[i][j] - s[j][i]).abs() < 1e-14, "S1 should be symmetric");
-            }
-        }
-    }
-
-    #[test]
-    fn prism_1d_mass_is_spd() {
-        let m = build_1d_mass(2);
-        for i in 0..m.len() {
-            assert!(m[i][i] > 0.0);
-        }
-    }
-
-    #[test]
-    fn prism_tri_stiffness_is_spd_p2() {
-        let s = build_tri_stiffness(2);
-        for i in 0..s.len() {
-            assert!(s[i][i] > 0.0, "tri stiffness diag should be positive");
-        }
     }
 
     #[test]
@@ -468,10 +489,10 @@ mod tests {
             .fold(0.0_f64, f64::max);
         let pa_nrm: f64 = y_pa.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
 
-        // Exact quadrature on both sides (affine unit-Jacobian prism): the PA
-        // Kronecker apply must reproduce the assembled diffusion to roundoff.
+        // PA and assembly share the rule and the (analytic) geometry, so the
+        // only difference left is summation order (D770).
         assert!(
-            max_err < 1e-10,
+            max_err < 1e-12,
             "Prism P{p} PA vs assembled max abs err = {max_err:.3e} (pa_nrm={pa_nrm:.3e})"
         );
     }
@@ -517,7 +538,7 @@ mod tests {
         }
     }
 
-    /// D729 — the axial nodes of the Kronecker factors are MFEM's `[0,1]`
+    /// D729 — the axial nodes of the tensor factors are MFEM's `[0,1]`
     /// Gauss-Lobatto nodes (`poly1d.ClosedPoints`), not `0.5·(x+1)` images of
     /// the `[-1,1]` table (the double rounding is a 1-ulp shim for `p >= 5`).
     #[test]
@@ -538,9 +559,74 @@ mod tests {
         }
     }
 
-    /// D729 — the PA Kronecker apply must reproduce the assembled diffusion at
-    /// every order, including `p >= 4` (whose `2p+1 = 9+` point axial rule fell
-    /// into the old trapezoidal fallback).
+    /// D770 — the per-QP metric must be the analytic trilinear one: the
+    /// finite-difference Jacobian it replaced (`eps = 1e-6`) agreed with the
+    /// analytic Jacobian only to ~1e-10, and the apply used the first QP's
+    /// scalars only.  On the unit prism the analytic Jacobian is exactly `I`.
+    #[test]
+    fn prism_geometry_is_analytic() {
+        let mesh = make_prism_mesh();
+        let geom = PrismGeom::from_mesh(&mesh, 0);
+        // Unit prism: ∂x/∂ξ = (0,0,1), ∂x/∂η = (1,0,0), ∂x/∂ζ = (0,1,0).  The
+        // corner points are exact bitwise; interior points carry the rounded
+        // `λ₀ = 1-η-ζ` sum (a plain arithmetic fact, not an FD error — the
+        // finite-difference Jacobian this replaced was off by ~1e-10 *relative*
+        // everywhere).
+        let want: [[f64; 3]; 3] = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        for (xi, eta, zeta) in [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)] {
+            let j = geom.jacobian(xi, eta, zeta);
+            for c in 0..3 {
+                for d in 0..3 {
+                    assert_eq!(
+                        j[c][d].to_bits(),
+                        want[c][d].to_bits(),
+                        "J[{c}][{d}] at ({xi},{eta},{zeta}) = {}",
+                        j[c][d]
+                    );
+                }
+            }
+            let (det, jinv) = invert_3x3(&j);
+            assert_eq!(det, 1.0);
+            // `jinv` is the standard matrix inverse of `jac`; its *columns* are
+            // `∂ξ_r/∂x_d` (the rows of `A = (∂ξ/∂x)`, see `ref_metric`).
+            for r in 0..3 {
+                for d in 0..3 {
+                    let mut s = 0.0;
+                    for k in 0..3 {
+                        s += j[r][k] * jinv[k][d];
+                    }
+                    assert!((s - if r == d { 1.0 } else { 0.0 }).abs() < 1e-15);
+                }
+            }
+            let m = ref_metric(&jinv);
+            assert_eq!(m, [1.0, 0.0, 0.0, 1.0, 0.0, 1.0]);
+        }
+        for (xi, eta, zeta) in [(0.3, 0.2, 0.5), (0.5, 1.0 / 3.0, 1.0 / 3.0)] {
+            let j = geom.jacobian(xi, eta, zeta);
+            for c in 0..3 {
+                for d in 0..3 {
+                    assert!(
+                        (j[c][d] - want[c][d]).abs() < 1e-15,
+                        "J[{c}][{d}] at ({xi},{eta},{zeta}) = {} vs {}",
+                        j[c][d],
+                        want[c][d]
+                    );
+                }
+            }
+            let (det, jinv) = invert_3x3(&j);
+            assert!((det - 1.0).abs() < 1e-15, "detJ = {det}");
+            let m = ref_metric(&jinv);
+            for (k, v) in m.iter().enumerate() {
+                let w = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0][k];
+                assert!((v - w).abs() < 1e-15, "metric[{k}] = {v} vs {w}");
+            }
+        }
+    }
+
+    /// D770 — the PA Kronecker apply must reproduce the assembled diffusion at
+    /// every order (the D729 trapezoidal-fallback defect) and now with the
+    /// exact per-QP geometry, so the residual is round-off, not 1e-10
+    /// finite-difference noise.
     #[test]
     fn prism_pa_all_orders_match_assembled() {
         let mesh = make_prism_mesh();
@@ -568,10 +654,9 @@ mod tests {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
             let pa_nrm: f64 = y_pa.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-            // Residual ~1e-10 absolute is the finite-difference Jacobian of
-            // `build_prism_pk_pa_data` (eps = 1e-6), not a quadrature defect.
+            println!("prism P{p}: PA vs assembled max abs err = {max_err:.3e} (pa_nrm={pa_nrm:.3e})");
             assert!(
-                max_err < 1e-9,
+                max_err < 1e-12,
                 "Prism P{p} PA vs assembled max abs err = {max_err:.3e} (pa_nrm={pa_nrm:.3e})"
             );
         }

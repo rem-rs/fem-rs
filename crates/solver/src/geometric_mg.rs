@@ -236,12 +236,19 @@ impl SumFactDiffusionOp {
 
         let p1 = self.p + 1;
         let q1d = self.q1d;
-        // Scratch arrays sized for max p=4 → p1=5, q1d=5 (P4 diffusion needs
-        // 5-point Gauss, exact to degree 9).
-        let mut tp_x = [0.0f64; 25]; // max (p+1)² = 25
-        let mut tp_y = [0.0f64; 25];
-        let mut s_b = [[0.0f64; 8]; 8]; // s_b[q][j], max q1d=5, p1=5
-        let mut s_g = [[0.0f64; 8]; 8];
+        // Scratch sized from this operator's own order (D769).  The literals
+        // that used to sit here were the p <= 4 sizes — `[f64; 25]` for the
+        // tensor-product buffer and `[[f64; 8]; 8]` for the forward
+        // intermediates — so the first order past 4 (`(p+1)² = 36 > 25`)
+        // panicked in the gather with "index out of bounds: the len is 25 but
+        // the index is 25"; `q1d = (2p+1+2)/2 = p+1` independently capped the
+        // 8×8 array at p = 7.  Dynamic buffers match the
+        // `StoredElementOperator` pattern in this file.
+        let mut tp_x = vec![0.0f64; p1 * p1];
+        let mut tp_y = vec![0.0f64; p1 * p1];
+        // s_b[q * p1 + j], s_g[q * p1 + j]
+        let mut s_b = vec![0.0f64; q1d * p1];
+        let mut s_g = vec![0.0f64; q1d * p1];
 
         for e in 0..self.n_elems {
             let dof_base = e * self.ldofs;
@@ -277,8 +284,8 @@ impl SumFactDiffusionOp {
                         sb += x_val * bq[i];
                         sg += x_val * gq[i];
                     }
-                    s_b[q][j] = sb;
-                    s_g[q][j] = sg;
+                    s_b[q * p1 + j] = sb;
+                    s_g[q * p1 + j] = sg;
                 }
             }
 
@@ -294,8 +301,8 @@ impl SumFactDiffusionOp {
                 let br = &self.B[r * p1..];
                 let gr = &self.G[r * p1..];
                 for q in 0..q1d {
-                    let sb = &s_b[q];
-                    let sg = &s_g[q];
+                    let sb = &s_b[q * p1..q * p1 + p1];
+                    let sg = &s_g[q * p1..q * p1 + p1];
 
                     let mut u_xi = 0.0;
                     let mut u_eta = 0.0;
@@ -622,13 +629,15 @@ impl PADiffusionOp {
             *v = 0.0;
         }
         let stride = self.ldofs * self.dim;
+        // Element gather buffer, sized from the local DOF count (D769): the old
+        // `[f64; 64]` literal fitted `(p+1)²` only up to p = 7 and panicked in
+        // this gather at p = 8 ("the len is 64 but the index is 64").
+        let mut xe = vec![0.0_f64; self.ldofs];
         for e in 0..self.n_elems {
             let dof_base = e * self.ldofs;
             let wdet_base = e * self.n_qp;
             let grad_base = e * self.n_qp * stride;
 
-            // Gather x_e
-            let mut xe = [0.0_f64; 64];
             for i in 0..self.ldofs {
                 xe[i] = x[self.elem_dofs[dof_base + i] as usize];
             }

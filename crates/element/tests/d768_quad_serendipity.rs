@@ -1,0 +1,393 @@
+//! D768 — the 2-D serendipity element is on MFEM's `[0,1]²` square.
+//!
+//! `QuadSerendipityPk` was the last `[-1,1]²` reference element of
+//! `crates/element/src/serendipity.rs`: its lattice, monomial frame (shifted by
+//! `+1`, i.e. `[0,2]`) and quadrature (`quad_rule`) all belonged to the
+//! historical `[-1,1]²` convention while every consumer of the crate's 2-D
+//! reference elements pairs them with a `[0,1]²` rule (`quad_rule_01`, the
+//! D729/D738 PA rule) and a `[0,1]²` geometry map.  That is the D743 hex
+//! lesson in 2-D, and it was silent, not loud:
+//!
+//! | quantity | before ([-1,1]² frame) | after (this file pins it) | MFEM 4.10 |
+//! |---|---|---|---|
+//! | `dof_coords()` of p = 1 | (-1,-1), (0,-1), (-1,0), (0,0) | (0,0), (1,0), (0,1), (1,1) | `BiLinear2DFiniteElement` nodes (0,0),(1,0),(1,1),(0,1) |
+//! | own rule points | `quad_rule` (∈ [-1,1]²) | `quad_rule_01` (∈ [0,1]²) | `IntRules.Get(SQUARE, o)` |
+//! | p = 1 mass entry `M00` (crate rule) | **1/144** | **1/9** | 1/9 (4/36) |
+//!
+//! i.e. the old element's basis is the bilinear basis scaled by 1/4 per
+//! dimension, so a consumer integrating it with the crate's `[0,1]²` rule got
+//! 1/16 of MFEM's mass entries (the hex arm's 1/64 was the same factor
+//! squared, 3-D).  Red evidence on the pre-fix source: this file run inside a
+//! `c1986cab` worktree (tmp/d768/).
+//!
+//! **Audit note.**  MFEM's only serendipity class is the *2-D*
+//! `H1Ser_QuadrilateralElement` (`fe_ser.cpp:25`), dumped by
+//! `tmp/d768/d768_probe.cpp` into `tmp/d768/mfem_2d_dump.txt`.  It is **not**
+//! this element: MFEM uses the Gauss-Lobatto lattice (`p = 3` nodes
+//! 0, 0.2764, 0.7236, 1 vs the equispaced `i/p` used here), the genuine
+//! serendipity space `S_p = {x^i y^j : sd(i,j) ≤ p}` (`xy ∈ S_2`,
+//! `x²y² ∉ S_2`) and `(p²+3p+6)/2` DOFs (interior *bubble*, hence non-nodal,
+//! functions from `p ≥ 4`) — while this crate's element is the `[0,1]²`
+//! analogue of the D743 hex arm (equispaced lattice, `4p` nodal DOFs,
+//! truncated tensor space, all nodal).  The two coincide (node set, space and
+//! values) only at `p = 1`, which is what the bit-for-bit pin below measures;
+//! for `p ≥ 2` their nodal interpolants differ at non-lattice points by
+//! O(0.1), so a ≤1e-12 pointwise match with MFEM's serendipity class is
+//! impossible by construction — the honest MFEM anchor for `p ≥ 2` is the
+//! `[0,1]²` *frame* (rule + lattice inside the unit square), pinned here.
+
+use fem_element::quadrature::quad_rule_01;
+use fem_element::serendipity::QuadSerendipityPk;
+use fem_element::ReferenceElement;
+
+/// MFEM 4.10 `BiLinear2DFiniteElement` (`fe_fixed_order.cpp:115-131`) evaluated
+/// at the probe's points — dumped verbatim into `tmp/d768/mfem_2d_dump.txt`.
+/// Slots are MFEM's vertex order (0,0), (1,0), (1,1), (0,1).
+const MFEM_BILIN_PTS: [[f64; 2]; 8] = [
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [1.0, 1.0],
+    [0.0, 1.0],
+    [0.5, 0.5],
+    [0.25, 0.75],
+    [0.10000000000000001, 0.90000000000000002],
+    [0.33333333333333331, 0.66666666666666674],
+];
+const MFEM_BILIN_VAL: [[f64; 4]; 8] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+    [0.25, 0.25, 0.25, 0.25],
+    [0.1875, 0.0625, 0.1875, 0.5625],
+    [
+        0.089999999999999983,
+        0.0099999999999999985,
+        0.090000000000000011,
+        0.81000000000000005,
+    ],
+    [
+        0.22222222222222221,
+        0.11111111111111108,
+        0.22222222222222224,
+        0.44444444444444453,
+    ],
+];
+const MFEM_BILIN_GRAD: [[f64; 8]; 8] = [
+    [-1.0, -1.0, 1.0, -0.0, 0.0, 0.0, -0.0, 1.0],
+    [-1.0, 0.0, 1.0, -1.0, 0.0, 1.0, -0.0, 0.0],
+    [0.0, 0.0, 0.0, -1.0, 1.0, 1.0, -1.0, 0.0],
+    [0.0, -1.0, 0.0, -0.0, 1.0, 0.0, -1.0, 1.0],
+    [-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5],
+    [-0.25, -0.75, 0.25, -0.25, 0.75, 0.25, -0.75, 0.75],
+    [
+        -0.099999999999999978,
+        -0.90000000000000002,
+        0.099999999999999978,
+        -0.10000000000000001,
+        0.90000000000000002,
+        0.10000000000000001,
+        -0.90000000000000002,
+        0.90000000000000002,
+    ],
+    [
+        -0.33333333333333326,
+        -0.66666666666666674,
+        0.33333333333333326,
+        -0.33333333333333331,
+        0.66666666666666674,
+        0.33333333333333331,
+        -0.66666666666666674,
+        0.66666666666666674,
+    ],
+];
+
+/// MFEM `H1Ser_QuadrilateralElement(p = 2)` values at the same points
+/// (`tmp/d768/mfem_2d_dump.txt`): slots 0..3 vertices (0,0), (1,0), (1,1),
+/// (0,1), slots 4..7 edge midpoints south, east, north, west.
+const MFEM_H1SER2_VAL: [[f64; 8]; 8] = [
+    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0, -0.0, 0.0, -0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0, -0.0, -0.0, -0.0, -0.0],
+    [0.0, 0.0, 0.0, 1.0, 0.0, -0.0, 0.0, -0.0],
+    [-0.25, -0.25, -0.25, -0.25, 0.5, 0.5, 0.5, 0.5],
+    [
+        -0.1875,
+        -0.125,
+        -0.1875,
+        0.0,
+        0.1875,
+        0.1875,
+        0.5625,
+        0.5625,
+    ],
+    [
+        -0.089999999999999983,
+        -0.025999999999999999,
+        -0.090000000000000011,
+        0.48600000000000004,
+        0.035999999999999997,
+        0.035999999999999997,
+        0.32400000000000007,
+        0.32399999999999995,
+    ],
+    [
+        -0.22222222222222221,
+        -0.1851851851851852,
+        -0.22222222222222224,
+        -0.14814814814814814,
+        0.29629629629629622,
+        0.29629629629629628,
+        0.59259259259259267,
+        0.59259259259259267,
+    ],
+];
+
+/// `QuadSerendipityPk(p)`'s lattice slot order is row-major over
+/// `(i, j) ∈ boundary lattice`, i.e. slot `s` carries the node
+/// `(s & 1, (s >> 1) & 1) · (1/p)` at `p = 1` and, at `p = 2`, the lattice
+/// points `(0,0), (½,0), (1,0), (0,½), (1,½), (0,1), (½,1), (1,1)`.  MFEM's
+/// vertex/edge order is (0,0), (1,0), (1,1), (0,1), south, east, north, west.
+const P2_SLOT_TO_MFEM_H1SER2: [usize; 8] = [0, 4, 1, 7, 5, 3, 6, 2];
+
+/// The crate's own lattice order for `p = 1` vs MFEM's vertex order.
+const P1_SLOT_TO_MFEM_VERTEX: [usize; 4] = [0, 1, 3, 2];
+
+fn integ(fe: &dyn ReferenceElement, order: u8) -> [f64; 4] {
+    let q = fe.quadrature(order);
+    let n = fe.n_dofs();
+    let mut phi = vec![0.0; n];
+    let mut int = vec![0.0; n];
+    for (qi, pt) in q.points.iter().enumerate() {
+        fe.eval_basis(pt, &mut phi);
+        for i in 0..n {
+            int[i] += q.weights[qi] * phi[i];
+        }
+    }
+    let mut out = [0.0; 4];
+    out[..n].copy_from_slice(&int);
+    out
+}
+
+/// p = 1 is MFEM's `BiLinear2DFiniteElement`, bit-for-bit (values and
+/// gradients, including its `-1.+y` spellings and `-0.0` signs).
+#[test]
+fn d768_p1_is_mfem_bilinear_bitwise() {
+    let fe = QuadSerendipityPk::new(1);
+    let mut v = vec![0.0; 4];
+    let mut g = vec![0.0; 8];
+    for (pi, pt) in MFEM_BILIN_PTS.iter().enumerate() {
+        fe.eval_basis(pt, &mut v);
+        fe.eval_grad_basis(pt, &mut g);
+        for s in 0..4 {
+            let m = P1_SLOT_TO_MFEM_VERTEX[s];
+            assert_eq!(
+                v[s].to_bits(),
+                MFEM_BILIN_VAL[pi][m].to_bits(),
+                "p=1 shape {s} at {:?}: {} vs MFEM {}",
+                pt,
+                v[s],
+                MFEM_BILIN_VAL[pi][m]
+            );
+            for d in 0..2 {
+                assert_eq!(
+                    g[2 * s + d].to_bits(),
+                    MFEM_BILIN_GRAD[pi][2 * m + d].to_bits(),
+                    "p=1 dshape {s},{d} at {:?}: {} vs MFEM {}",
+                    pt,
+                    g[2 * s + d],
+                    MFEM_BILIN_GRAD[pi][2 * m + d]
+                );
+            }
+        }
+    }
+}
+
+/// The frame quantities the consumers rely on: nodes and rule points inside
+/// `[0,1]²` (red before the fix: `(-1,-1)`-style nodes and a `[-1,1]²` rule),
+/// the rule being `quad_rule_01`, and `p = 1` at the unit-square corners.
+#[test]
+fn d768_frame_is_the_unit_square() {
+    for p in 1..=4 {
+        let fe = QuadSerendipityPk::new(p);
+        let nodes = fe.dof_coords();
+        assert_eq!(nodes.len(), 4 * p);
+        for c in &nodes {
+            assert!(
+                (0.0..=1.0).contains(&c[0]) && (0.0..=1.0).contains(&c[1]),
+                "p={p}: node {c:?} outside [0,1]²"
+            );
+        }
+        for o in 2..=6u8 {
+            let q = fe.quadrature(o);
+            assert_eq!(q.points.len(), quad_rule_01(o).points.len());
+            assert_eq!(q.weights, quad_rule_01(o).weights);
+            for pt in &q.points {
+                assert!(
+                    (0.0..=1.0).contains(&pt[0]) && (0.0..=1.0).contains(&pt[1]),
+                    "p={p} o={o}: rule point {pt:?} outside [0,1]²"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        QuadSerendipityPk::new(1).dof_coords(),
+        vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![1.0, 1.0]
+        ]
+    );
+}
+
+/// The bilinear mass matrix of a unit-square element — the D743-style red
+/// number.  `M = (1/36)·[[4,2,1,2],[2,4,2,1],[1,2,4,2],[2,1,2,4]]` (CCW vertex
+/// order); using the element's own (now `[0,1]²`) rule this must come out exact
+/// to round-off.  With the old `[-1,1]²` basis paired with the crate's
+/// `[0,1]²` rule every entry was 1/16 of these (M00 = 1/144 instead of 1/9).
+#[test]
+fn d768_p1_mass_matrix_matches_mfem_bilinear() {
+    let fe = QuadSerendipityPk::new(1);
+    let q = fe.quadrature(4);
+    let mut phi = vec![0.0; 4];
+    let mut m = [[0.0_f64; 4]; 4];
+    for (qi, pt) in q.points.iter().enumerate() {
+        fe.eval_basis(pt, &mut phi);
+        for i in 0..4 {
+            for j in 0..4 {
+                m[i][j] += q.weights[qi] * phi[i] * phi[j];
+            }
+        }
+    }
+    // crate slot order (0,0), (1,0), (0,1), (1,1) → the standard CCW matrix.
+    // (0,0)/(1,0)/(1,1)/(0,1) rows: [4,2,1,2], [2,4,2,1], [1,2,4,2], [2,1,2,4];
+    // e.g. M(0,0),(0,1) = ∫(1-x)²·∫y(1-y) = (1/3)(1/6) = 1/18 = 2/36.
+    let expect_ccw = [
+        [4.0_f64 / 36.0, 2.0 / 36.0, 1.0 / 36.0, 2.0 / 36.0],
+        [2.0 / 36.0, 4.0 / 36.0, 2.0 / 36.0, 1.0 / 36.0],
+        [1.0 / 36.0, 2.0 / 36.0, 4.0 / 36.0, 2.0 / 36.0],
+        [2.0 / 36.0, 1.0 / 36.0, 2.0 / 36.0, 4.0 / 36.0],
+    ];
+    let perm = P1_SLOT_TO_MFEM_VERTEX;
+    for i in 0..4 {
+        for j in 0..4 {
+            let e = expect_ccw[perm[i]][perm[j]];
+            assert!(
+                (m[i][j] - e).abs() < 1e-15,
+                "M[{i}][{j}] = {:e}, expected {e:e} (1/16 of it before D768)",
+                m[i][j]
+            );
+        }
+    }
+}
+
+/// The element is nodal on the crate's equispaced `[0,1]²` lattice (δ_ij), for
+/// every order — the property a `[0,1]²`-convention consumer assumes and the
+/// old `[-1,1]²` lattice lattice broke from `p = 2` on.
+#[test]
+fn d768_nodal_on_unit_square_lattice() {
+    for p in 1..=4usize {
+        let fe = QuadSerendipityPk::new(p);
+        let nodes = fe.dof_coords();
+        let n = fe.n_dofs();
+        let mut phi = vec![0.0; n];
+        for (i, c) in nodes.iter().enumerate() {
+            fe.eval_basis(c, &mut phi);
+            for j in 0..n {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (phi[j] - want).abs() < 1e-12,
+                    "p={p}: φ_{j}({c:?}) = {} (want {want})",
+                    phi[j]
+                );
+            }
+        }
+        // Partition of unity on the element's own rule points.
+        let q = fe.quadrature(2 * p as u8 + 1);
+        for pt in &q.points {
+            fe.eval_basis(pt, &mut phi);
+            let s: f64 = phi.iter().sum();
+            assert!((s - 1.0).abs() < 1e-12, "p={p}: POU = {s}");
+        }
+        // `∫_{[0,1]²} φ_i = 1/4` at p = 1 (corner subcells), summing to 1.
+        if p == 1 {
+            let int = integ(&fe, 4);
+            for (i, v) in int.iter().enumerate() {
+                assert!((v - 0.25).abs() < 1e-15, "∫φ_{i} = {v}");
+            }
+            let total: f64 = int.iter().sum();
+            assert!((total - 1.0).abs() < 1e-15, "Σ∫φ = {total}");
+        }
+    }
+}
+
+/// D768 audit pin — MFEM's `H1Ser_QuadrilateralElement` is a *different*
+/// element, and the difference is structural, not numerical: (i) its `p = 3`
+/// lattice is Gauss-Lobatto, not equispaced; (ii) at `p = 2` (where the two
+/// node sets coincide) its nodal interpolants differ from this element's at
+/// non-lattice points by O(0.1), 11 orders above the 1e-12 parity bar, because
+/// its span is the serendipity space `S_p` and this one's is the truncated
+/// tensor space.  Both facts are pinned against the MFEM dump so that a future
+/// port of MFEM's class must consciously update this file.
+#[test]
+fn d768_mfem_h1ser_is_a_different_element() {
+    // (i) p = 3 Gauss-Lobatto edge nodes (MFEM dump) vs the equispaced lattice.
+    let gll3 = [0.0, 0.27639320225002106, 0.72360679774997894, 1.0];
+    let ours = QuadSerendipityPk::new(3).dof_coords();
+    let south: Vec<f64> = ours
+        .iter()
+        .filter(|c| c[1] == 0.0)
+        .map(|c| c[0])
+        .collect();
+    assert_eq!(south.len(), 4);
+    for (i, x) in south.iter().enumerate() {
+        assert!(
+            (x - i as f64 / 3.0).abs() < 1e-15,
+            "p=3 lattice is not equispaced at slot {i}: {x}"
+        );
+    }
+    let max_lattice = gll3
+        .iter()
+        .zip(south.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_lattice > 1e-2,
+        "MFEM's p=3 lattice should differ from the equispaced one, measured {max_lattice:e}"
+    );
+
+    // (ii) p = 2 shape values vs the dumped MFEM element, slot-permuted.
+    let fe = QuadSerendipityPk::new(2);
+    let mut v = vec![0.0; 8];
+    let mut gap = 0.0_f64;
+    let mut gap_at_node = 0.0_f64;
+    for (pi, pt) in MFEM_BILIN_PTS.iter().enumerate() {
+        fe.eval_basis(pt, &mut v);
+        for s in 0..8 {
+            let d = (v[s] - MFEM_H1SER2_VAL[pi][P2_SLOT_TO_MFEM_H1SER2[s]]).abs();
+            // Points 0..3 and the edge midpoints are lattice nodes of *both*
+            // elements, so the nodal interpolants must agree there.
+            if d > gap {
+                gap = d;
+            }
+        }
+        if pi <= 3 {
+            gap_at_node = gap_at_node.max(
+                (0..8)
+                    .map(|s| (v[s] - MFEM_H1SER2_VAL[pi][P2_SLOT_TO_MFEM_H1SER2[s]]).abs())
+                    .fold(0.0_f64, f64::max),
+            );
+        }
+    }
+    assert!(
+        gap_at_node < 1e-15,
+        "at shared lattice nodes the two p=2 interpolants must be the same δ set, gap {gap_at_node:e}"
+    );
+    println!("D768: p=2 max |ours - MFEM H1Ser| over the probe points = {gap:.6e}");
+    assert!(
+        gap > 1e-3,
+        "MFEM's serendipity element is expected to be a *different* element \
+         (S_p vs the truncated tensor space); measured gap only {gap:e}"
+    );
+}
