@@ -35,9 +35,60 @@ use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::{element_jacobian_at, refine_uniform, topology::MeshTopology, Mesh};
 use fem_space::{FESpace, H1Space, HCurlSpace, HDivSpace};
 use fem_space::constraints::{boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
-use fem_solver::{linlvoPreconditioner, DenseVec, GSSmoother, right_preconditioned_gmres};
-use fem_solver::SolverConfig as SolverCfg;
-use linlvo::JacobiPrecond;
+use fem_solver::{linlvoPreconditioner, DenseVec, GSSmoother};
+use fem_solver::block_operator::{mfem_gmres, MfemGmresConfig};
+
+/// ex22.cpp:424-430 — `GMRESSolver gmres; SetPreconditioner(BDP);
+/// SetOperator(*A); SetRelTol(1e-12); SetMaxIter(1000); SetPrintLevel(1);`
+/// with MFEM's `GMRESSolver` defaults (`KDim = 50`, `abs_tol = 0.0`,
+/// `iterative_mode = true`).
+///
+/// D767: `mfem_gmres` implements MFEM `GMRESSolver::Mult` semantics — the
+/// stopping rule is on the **preconditioned** residual `‖M(b − A x)‖` and the
+/// Arnoldi step is `w = M·A·vᵢ`.  The previous `right_preconditioned_gmres`
+/// required the true residual `‖b − A x‖ ≤ rtol·‖b‖` and therefore ran to
+/// `max_iter` on the same systems (`-p 2 -o 1 -m data/inline-tri.mesh`:
+/// 1000 iterations instead of MFEM's 266).
+const GMRES_CFG: MfemGmresConfig = MfemGmresConfig {
+    kdim: 50,
+    max_iter: 1000,
+    rel_tol: 1e-12,
+    abs_tol: 0.0,
+    print_level: 1,
+    iterative_mode: true,
+};
+
+/// `1/diag` of a matrix with MFEM's boundary elimination applied — the
+/// `DSmoother` view of `pcOp` (ex22.cpp:385-403: `SetDiagonalPolicy(DIAG_ONE)`
+/// + `FormSystemMatrix(ess_tdof_list)`).
+///
+/// The symmetric elimination only rewrites the essential DOFs' rows/columns, so
+/// the interior diagonal is unchanged; the essential entries become `1.0`.
+fn dsmoother_dinv(mat: &fem_linalg::CsrMatrix<f64>, ess: &[usize]) -> Vec<f64> {
+    let mut dinv: Vec<f64> = mat
+        .diagonal()
+        .iter()
+        .map(|&d| if d.abs() > 0.0 { 1.0 / d } else { 1.0 })
+        .collect();
+    for &d in ess {
+        dinv[d] = 1.0;
+    }
+    dinv
+}
+
+/// MFEM ex22's `pcOp` (ex22.cpp:344-362) for the **H¹ (p=0)** and **H(Div)
+/// (p=2)** problems: the system's stiffness operator plus *both* mass terms —
+/// `massCoef + lossCoef` (`-ω²ε + ωσ`) — assembled with a single combined
+/// coefficient and then BC-eliminated.
+///
+/// D767: the p=0/p=2 paths used to precondition with `sys.k_re` alone, i.e.
+/// without the loss term (`ωσ·M`).  On `-p 2 -o 1 -m data/inline-tri.mesh` that
+/// is a 37x weaker `‖M b‖` (9.60 vs MFEM's 0.2554) and cost the whole
+/// iteration budget — 1000 iterations with `GMRES: No convergence!` where
+/// MFEM converges in 266.
+fn pc_mass_alpha(omega: f64, mass_coef: f64, loss_coef: f64) -> f64 {
+    -omega * omega * mass_coef + omega * loss_coef
+}
 
 // ─── CLI struct ───────────────────────────────────────────────────────────
 
@@ -297,26 +348,23 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
     let flat = sys.to_flat_csr();
 
-    // Preconditioner: DSmoother (Jacobi) on k_re
-    let pc_linlvo = fem_to_linlvo_csr(&sys.k_re);
-    let jacobi = JacobiPrecond::from_csr(&pc_linlvo).expect("Jacobi setup");
+    // Preconditioner: DSmoother (Jacobi) on MFEM's `pcOp` (see `dsmoother_dinv`)
+    let pc_mass = MassIntegrator { rho: pc_mass_alpha(omega, mass_coef, loss_coef) };
+    let pc_op = fem_assembly::assembler::Assembler::assemble_bilinear(
+        &space,
+        &[&DiffusionIntegrator { kappa: stiffness_coef }, &pc_mass],
+        quad_order,
+    );
+    let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
     let mut X = vec![0.0; sys.n_total()];
     let pre = |r: &[f64], z: &mut [f64]| {
-        let vr = DenseVec::from(r[..n].to_vec());
-        let mut zr = DenseVec::zeros(n);
-        jacobi.apply_precond(&vr, &mut zr);
-        for i in 0..n { z[i] = zr[i]; }
-        let vi = DenseVec::from(r[n..].to_vec());
-        let mut zi = DenseVec::zeros(n);
-        jacobi.apply_precond(&vi, &mut zi);
-        for i in 0..n { z[n + i] = s * zi[i]; }
+        for i in 0..n { z[i] = dinv[i] * r[i]; }
+        for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }
     };
-    match right_preconditioned_gmres(&flat, &rhs, &mut X, 50,
-        &SolverCfg { rtol: 1e-12, atol: 0.0, max_iter: 1000, ..SolverCfg::default() }, &pre) {
-        Ok(r) => println!("  GMRES: {} its  ||r||/||b|| = {:.3e}",
-                          r.iterations, r.final_residual),
+    match mfem_gmres(&flat, &rhs, &mut X, GMRES_CFG, Some(&pre)) {
+        Ok(_) => {}
         Err(e) => eprintln!("  GMRES: {e}"),
     }
 
@@ -429,10 +477,8 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
         gsmoother.apply_precond(&vi, &mut zi);
         for i in 0..n { z[n + i] = s * zi[i]; }
     };
-    match right_preconditioned_gmres(&flat, &rhs, &mut X, 50,
-        &SolverCfg { rtol: 1e-12, atol: 0.0, max_iter: 1000, ..SolverCfg::default() }, &pre) {
-        Ok(r) => println!("  GMRES: {} its  ||r||/||b|| = {:.3e}",
-                          r.iterations, r.final_residual),
+    match mfem_gmres(&flat, &rhs, &mut X, GMRES_CFG, Some(&pre)) {
+        Ok(_) => {}
         Err(e) => eprintln!("  GMRES: {e}"),
     }
 
@@ -488,9 +534,12 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     );
     println!("Size of linear system: {}", sys.n_total());
 
-    // pcOp = k_re (for p=2: pcOp = GradDiv(1/μ) - ω²ε·M + ωσ·M = k_re)
-    let pc_linlvo = fem_to_linlvo_csr(&sys.k_re);
-    let jacobi = JacobiPrecond::from_csr(&pc_linlvo).expect("Jacobi setup");
+    // pcOp (ex22.cpp:352-362): GradDiv(1/μ) + VectorMass(-ω²ε) + VectorMass(ωσ)
+    // — the loss term is part of the preconditioner (D767; `k_re` alone is 37x
+    // weaker here and cost the iteration budget on the tri mesh).
+    let pc_mass = VectorMassIntegrator { alpha: pc_mass_alpha(omega, mass_coef, loss_coef) };
+    let pc_op = VectorAssembler::assemble_bilinear(&space, &[&grad_div, &pc_mass], quad_order);
+    let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
@@ -521,19 +570,11 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     let mut X = vec![0.0; sys.n_total()];
 
     let pre = |r: &[f64], z: &mut [f64]| {
-        let vr = DenseVec::from(r[..n].to_vec());
-        let mut zr = DenseVec::zeros(n);
-        jacobi.apply_precond(&vr, &mut zr);
-        for i in 0..n { z[i] = zr[i]; }
-        let vi = DenseVec::from(r[n..].to_vec());
-        let mut zi = DenseVec::zeros(n);
-        jacobi.apply_precond(&vi, &mut zi);
-        for i in 0..n { z[n + i] = s * zi[i]; }
+        for i in 0..n { z[i] = dinv[i] * r[i]; }
+        for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }
     };
-    match right_preconditioned_gmres(&flat, &rhs, &mut X, 50,
-        &SolverCfg { rtol: 1e-12, atol: 0.0, max_iter: 1000, ..SolverCfg::default() }, &pre) {
-        Ok(r) => println!("  GMRES: {} its  ||r||/||b|| = {:.3e}",
-                          r.iterations, r.final_residual),
+    match mfem_gmres(&flat, &rhs, &mut X, GMRES_CFG, Some(&pre)) {
+        Ok(_) => {}
         Err(e) => eprintln!("  GMRES: {e}"),
     }
 
@@ -758,21 +799,24 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     }
 
     let flat = sys.to_flat_csr();
-    let pc_linlvo = fem_to_linlvo_csr(&sys.k_re);
-    let jacobi = JacobiPrecond::from_csr(&pc_linlvo).expect("Jacobi setup");
+    // Preconditioner: DSmoother on MFEM's `pcOp` = Diffusion(1/μ) + Mass(-ω²ε
+    // + ωσ) (ex22.cpp:344-352; D767 — `k_re` alone omits the loss term).
+    let pc_mass = MassIntegrator { rho: pc_mass_alpha(omega, mass_coef, loss_coef) };
+    let pc_op = fem_assembly::assembler::Assembler::assemble_bilinear(
+        &space,
+        &[&DiffusionIntegrator { kappa: stiffness_coef }, &pc_mass],
+        quad_order,
+    );
+    let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
     let mut X = vec![0.0; sys.n_total()];
     let pre = |r: &[f64], z: &mut [f64]| {
-        let vr = DenseVec::from(r[..n].to_vec()); let mut zr = DenseVec::zeros(n);
-        jacobi.apply_precond(&vr, &mut zr); for i in 0..n { z[i] = zr[i]; }
-        let vi = DenseVec::from(r[n..].to_vec()); let mut zi = DenseVec::zeros(n);
-        jacobi.apply_precond(&vi, &mut zi); for i in 0..n { z[n + i] = s * zi[i]; }
+        for i in 0..n { z[i] = dinv[i] * r[i]; }
+        for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }
     };
-    match right_preconditioned_gmres(&flat, &rhs, &mut X, 50,
-        &SolverCfg { rtol: 1e-12, atol: 0.0, max_iter: 1000, ..SolverCfg::default() }, &pre) {
-        Ok(r) => println!("  GMRES: {} its  ||r||/||b|| = {:.3e}",
-                          r.iterations, r.final_residual),
+    match mfem_gmres(&flat, &rhs, &mut X, GMRES_CFG, Some(&pre)) {
+        Ok(_) => {}
         Err(e) => eprintln!("  GMRES: {e}"),
     }
 
@@ -856,9 +900,8 @@ fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
         let vi = DenseVec::from(r[n..].to_vec()); let mut zi = DenseVec::zeros(n);
         gsmoother.apply_precond(&vi, &mut zi); for i in 0..n { z[n + i] = s * zi[i]; }
     };
-    match right_preconditioned_gmres(&flat, &rhs, &mut X, 50,
-        &SolverCfg { rtol: 1e-12, atol: 0.0, max_iter: 1000, ..SolverCfg::default() }, &pre) {
-        Ok(r) => println!("  GMRES: {} its  ||r||/||b|| = {:.3e}", r.iterations, r.final_residual),
+    match mfem_gmres(&flat, &rhs, &mut X, GMRES_CFG, Some(&pre)) {
+        Ok(_) => {}
         Err(e) => eprintln!("  GMRES: {e}"),
     }
     let gf = ComplexGridFunction::from_flat(&X);
@@ -897,8 +940,11 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     );
     println!("Size of linear system: {}", sys.n_total());
 
-    let pc_linlvo = fem_to_linlvo_csr(&sys.k_re);
-    let jacobi = JacobiPrecond::from_csr(&pc_linlvo).expect("Jacobi setup");
+    // Preconditioner: DSmoother on MFEM's `pcOp` = GradDiv(1/μ) + VectorMass(-ω²ε
+    // + ωσ) (ex22.cpp:352-362; D767 — `k_re` alone omits the loss term).
+    let pc_mass = VectorMassIntegrator { alpha: pc_mass_alpha(omega, mass_coef, loss_coef) };
+    let pc_op = VectorAssembler::assemble_bilinear(&space, &[&grad_div, &pc_mass], quad_order);
+    let dinv = dsmoother_dinv(&pc_op, &ess_bdr);
     let s: f64 = if cfg.herm_conv { 1.0 } else { -1.0 };
 
     let mut rhs = vec![0.0; 2 * n];
@@ -920,14 +966,11 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     let flat = sys.to_flat_csr();
     let mut X = vec![0.0; sys.n_total()];
     let pre = |r: &[f64], z: &mut [f64]| {
-        let vr = DenseVec::from(r[..n].to_vec()); let mut zr = DenseVec::zeros(n);
-        jacobi.apply_precond(&vr, &mut zr); for i in 0..n { z[i] = zr[i]; }
-        let vi = DenseVec::from(r[n..].to_vec()); let mut zi = DenseVec::zeros(n);
-        jacobi.apply_precond(&vi, &mut zi); for i in 0..n { z[n + i] = s * zi[i]; }
+        for i in 0..n { z[i] = dinv[i] * r[i]; }
+        for i in 0..n { z[n + i] = s * dinv[i] * r[n + i]; }
     };
-    match right_preconditioned_gmres(&flat, &rhs, &mut X, 50,
-        &SolverCfg { rtol: 1e-12, atol: 0.0, max_iter: 1000, ..SolverCfg::default() }, &pre) {
-        Ok(r) => println!("  GMRES: {} its  ||r||/||b|| = {:.3e}", r.iterations, r.final_residual),
+    match mfem_gmres(&flat, &rhs, &mut X, GMRES_CFG, Some(&pre)) {
+        Ok(_) => {}
         Err(e) => eprintln!("  GMRES: {e}"),
     }
     let gf = ComplexGridFunction::from_flat(&X);

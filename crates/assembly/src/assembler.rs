@@ -1221,13 +1221,21 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     coo.add_element_matrix(&global_dofs, &scratch.k_elem);
 }
 
-fn accumulate_volume_linear_element<S: FESpace>(
+/// Evaluate one element's local load vector (MFEM `LinearForm`'s element
+/// integral) into `scratch.f_elem`, leaving the element's global DOFs in
+/// `scratch.global_dofs`.
+///
+/// This is the *pure* half of [`accumulate_volume_linear_element`]: it performs
+/// no scatter, so callers can choose how the element contributions are
+/// accumulated into the global vector.  The serial path scatters immediately
+/// (element index order); the parallel path collects the contributions and
+/// reproduces the same per-DOF order deterministically (D754).
+fn eval_volume_linear_element<S: FESpace>(
     space: &S,
     e: u32,
     integrators: &[&dyn LinearIntegrator],
     quad: &QuadratureRule,
     quad_order: u8,
-    rhs: &mut [f64],
     scratch: &mut ElementScratch,
 ) {
     let mesh    = space.mesh();
@@ -1345,19 +1353,41 @@ fn accumulate_volume_linear_element<S: FESpace>(
             integ.add_to_element_vector(&qp, &mut scratch.f_elem);
         }
     }
-
-    coo_add_element_vec(&global_dofs, &scratch.f_elem, rhs);
 }
 
-fn accumulate_boundary_linear_face(
+/// Scatter one element's load vector into the global RHS (serial path).
+///
+/// `rhs[d] += f_elem[k]` in the element's local DOF order — a plain
+/// left-to-right accumulation per DOF as the element loop advances, which is
+/// what makes the serial association a pure function of the element order.
+fn accumulate_volume_linear_element<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn LinearIntegrator],
+    quad: &QuadratureRule,
+    quad_order: u8,
+    rhs: &mut [f64],
+    scratch: &mut ElementScratch,
+) {
+    eval_volume_linear_element(space, e, integrators, quad, quad_order, scratch);
+    coo_add_element_vec(&scratch.global_dofs, &scratch.f_elem, rhs);
+}
+
+/// Evaluate one boundary face's load vector as `(global dof, value)` pairs in
+/// the face's local DOF order.
+///
+/// The *pure* half of [`accumulate_boundary_linear_face`]: the serial path
+/// folds the pairs into the global vector in face order, the parallel path
+/// collects them per block and restores that same order deterministically
+/// (D754) — see [`accumulate_pairs_in_element_order`].
+fn eval_boundary_linear_face(
     mesh: &(dyn MeshTopology + Sync),
     f: u32,
     face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
     order: u8,
     integrators: &[&dyn BoundaryLinearIntegrator],
     quad_order: u8,
-    rhs: &mut [f64],
-) {
+) -> Vec<(u32, f64)> {
     let dim = mesh.dim() as usize;
     let fdofs: Vec<DofId> = face_dofs(f);
     let n_fdofs = fdofs.len();
@@ -1399,8 +1429,25 @@ fn accumulate_boundary_linear_face(
         }
     }
 
-    let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
-    coo_add_element_vec(&global, &f_face, rhs);
+    fdofs.iter().map(|&d| d as u32).zip(f_face).collect()
+}
+
+/// Scatter one boundary face's load vector into the global RHS (serial path).
+///
+/// `rhs[d] += f_face[k]` in the face's local DOF order, for faces in the order
+/// the caller passes them — the association the parallel path reproduces.
+fn accumulate_boundary_linear_face(
+    mesh: &(dyn MeshTopology + Sync),
+    f: u32,
+    face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+    order: u8,
+    integrators: &[&dyn BoundaryLinearIntegrator],
+    quad_order: u8,
+    rhs: &mut [f64],
+) {
+    for (d, v) in eval_boundary_linear_face(mesh, f, face_dofs, order, integrators, quad_order) {
+        rhs[d as usize] += v;
+    }
 }
 
 fn accumulate_boundary_bilinear_face(
@@ -1455,6 +1502,47 @@ fn accumulate_boundary_bilinear_face(
 
     let global: Vec<usize> = fdofs.iter().map(|&d| d as usize).collect();
     coo.add_element_matrix(&global, &k_face);
+}
+
+/// Number of element/face blocks used by the deterministic parallel assemblies.
+///
+/// The block boundaries are a pure function of the element (face) count — never
+/// of the thread count or of the work-stealing schedule — and the accumulation
+/// order is restored to *global* element order afterwards, so this constant only
+/// sets the parallel granularity; it cannot change any assembled value.
+#[cfg(feature = "parallel")]
+const PAR_ASSEMBLY_BLOCKS: usize = 64;
+
+/// Elements (or faces) per deterministic block: at most
+/// [`PAR_ASSEMBLY_BLOCKS`] blocks of at least one entry each.
+#[cfg(feature = "parallel")]
+#[inline]
+fn elem_block_len(n: usize) -> usize {
+    n.div_ceil(PAR_ASSEMBLY_BLOCKS).max(1)
+}
+
+/// Deterministic per-DOF accumulation of `(dof, value)` contribution pairs.
+///
+/// The per-block lists are concatenated in block order (= the global element /
+/// face order, because the blocks are contiguous ranges taken in index order)
+/// and then **stable**-sorted by DOF, so every DOF's contributions are added in
+/// the order they have in the global element sequence — exactly the association
+/// of the serial assembly loops.  See [`assemble_linear_volume_parallel`] for
+/// the D754 background.
+#[cfg(feature = "parallel")]
+fn accumulate_pairs_in_element_order(blocks: Vec<Vec<(u32, f64)>>, n_dofs: usize) -> Vec<f64> {
+    let mut pairs: Vec<(u32, f64)> = Vec::with_capacity(blocks.iter().map(Vec::len).sum());
+    for b in blocks {
+        pairs.extend(b);
+    }
+    // `sort_by_key` is stable ⇒ equal DOFs keep their global element order.
+    pairs.sort_by_key(|&(d, _)| d);
+
+    let mut rhs = vec![0.0_f64; n_dofs];
+    for (d, v) in pairs {
+        rhs[d as usize] += v;
+    }
+    rhs
 }
 
 #[cfg(feature = "parallel")]
@@ -1516,25 +1604,43 @@ fn assemble_linear_volume_parallel<S: FESpace>(
 ) -> Vec<f64> {
     let mesh = space.mesh();
     let n_dofs = space.n_dofs();
-    mesh.elem_iter()
-        .into_par_iter()
-        .fold(
-            || (vec![0.0_f64; n_dofs], ElementScratch::new()),
-            |(mut local_rhs, mut scratch), e| {
-                accumulate_volume_linear_element(space, e, integrators, quad, quad_order, &mut local_rhs, &mut scratch);
-                (local_rhs, scratch)
-            },
-        )
-        .reduce(
-            || (vec![0.0_f64; n_dofs], ElementScratch::new()),
-            |(mut a_rhs, a_scratch), (b_rhs, _)| {
-                for i in 0..n_dofs {
-                    a_rhs[i] += b_rhs[i];
-                }
-                (a_rhs, a_scratch)
-            },
-        )
-        .0
+    let ids: Vec<u32> = mesh.elem_iter().collect();
+
+    // D754: `fold(...).reduce(...)` combined the per-worker dense partial
+    // vectors in a Rayon reduction tree whose shape depends on the thread count
+    // and on the work-stealing schedule, so the same mesh produced a different
+    // RHS (last bits) on every run — `mfem_ex26_geom_mg`'s `sol.gf`, `ex1`'s
+    // `sol.gf` and every other full-precision artifact contained schedule noise
+    // (~1e-14 relative) until this was fixed.
+    //
+    // Deterministic scheme: each fixed-size element block collects its
+    // `(dof, value)` contributions **in element order**, the blocks are
+    // concatenated in block order (= global element order), and one stable sort
+    // by DOF restores, for every DOF, the global element order of its
+    // contributions — which is exactly the accumulation order of the serial
+    // loop in [`Assembler::assemble_linear_inner`].  The result is therefore
+    // bitwise equal to the serial assembly for any mesh, thread count and
+    // schedule (pinned by `d754_parallel_linear_assembly_is_bitwise_serial`).
+    let blocks: Vec<Vec<(u32, f64)>> = ids
+        .par_chunks(elem_block_len(ids.len()))
+        .map(|blk| {
+            let mut scratch = ElementScratch::new();
+            let mut out: Vec<(u32, f64)> = Vec::new();
+            for &e in blk {
+                eval_volume_linear_element(space, e, integrators, quad, quad_order, &mut scratch);
+                out.extend(
+                    scratch
+                        .global_dofs
+                        .iter()
+                        .zip(scratch.f_elem.iter())
+                        .map(|(&d, &v)| (d as u32, v)),
+                );
+            }
+            out
+        })
+        .collect();
+
+    accumulate_pairs_in_element_order(blocks, n_dofs)
 }
 
 #[cfg(feature = "parallel")]
@@ -1547,25 +1653,22 @@ fn assemble_boundary_linear_parallel(
     integrators: &[&dyn BoundaryLinearIntegrator],
     quad_order: u8,
 ) -> Vec<f64> {
-    face_ids
-        .par_iter()
-        .copied()
-        .fold(
-            || vec![0.0_f64; n_dofs],
-            |mut local, f| {
-                accumulate_boundary_linear_face(mesh, f, face_dofs, order, integrators, quad_order, &mut local);
-                local
-            },
-        )
-        .reduce(
-            || vec![0.0_f64; n_dofs],
-            |mut a, b| {
-                for i in 0..n_dofs {
-                    a[i] += b[i];
-                }
-                a
-            },
-        )
+    // Same D754 determinism scheme as `assemble_linear_volume_parallel`: fixed
+    // face blocks collected in face order, then one stable sort by DOF so every
+    // DOF accumulates its face contributions in global face order (= the serial
+    // association of `accumulate_boundary_linear_face`).
+    let blocks: Vec<Vec<(u32, f64)>> = face_ids
+        .par_chunks(elem_block_len(face_ids.len()))
+        .map(|blk| {
+            let mut out: Vec<(u32, f64)> = Vec::new();
+            for &f in blk {
+                out.extend(eval_boundary_linear_face(mesh, f, face_dofs, order, integrators, quad_order));
+            }
+            out
+        })
+        .collect();
+
+    accumulate_pairs_in_element_order(blocks, n_dofs)
 }
 
 #[cfg(feature = "parallel")]
@@ -3550,6 +3653,276 @@ mod tests {
         assert_eq!(adaptive_assembly_threshold_for_threads(4), 16);
         assert_eq!(adaptive_assembly_threshold_for_threads(8), 8);
         assert_eq!(adaptive_assembly_threshold_for_threads(32), 8);
+    }
+
+    /// D754: the parallel volume linear assembly must be **bitwise equal** to
+    /// the serial loop, for every Rayon thread count.
+    ///
+    /// Pre-fix the function was `elem_iter().into_par_iter().fold(dense local
+    /// rhs).reduce(+=)`: Rayon's `reduce` combines the per-worker partial
+    /// vectors in a tree that follows the thread count and the work-stealing
+    /// schedule, so the same mesh produced different RHS bits on every run
+    /// (`mfem_ex26_geom_mg`'s `sol.gf`: 5 distinct sha256 in 5 runs, 6653 of
+    /// 274627 entries differing at up to 2.1e-14 relative).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn d754_parallel_linear_assembly_is_bitwise_serial() {
+        use crate::standard::DomainSourceIntegrator;
+
+        let mesh = Mesh::<2>::make_cartesian_2d(4, 4, 1.0, 1.0);
+        let space = H1Space::new(mesh, 1);
+        let integrators: [&dyn LinearIntegrator; 1] = [&DomainSourceIntegrator::new(|_| 1.0)];
+        let quad_order = 3u8;
+        let quad = ref_elem_vol_for_space(&space, ElementType::Quad4, 1).quadrature(quad_order);
+
+        // Reference: the serial association, one global left fold in element
+        // order, using the production scatter.
+        let mut serial = vec![0.0_f64; space.n_dofs()];
+        let mut scratch = ElementScratch::new();
+        for e in space.mesh().elem_iter() {
+            accumulate_volume_linear_element(
+                &space, e, &integrators, &quad, quad_order, &mut serial, &mut scratch);
+        }
+
+        for threads in [1usize, 2, 3, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let par = pool.install(|| {
+                assemble_linear_volume_parallel(&space, &integrators, &quad, quad_order)
+            });
+            assert_eq!(par.len(), serial.len());
+            for i in 0..serial.len() {
+                assert_eq!(
+                    par[i].to_bits(), serial[i].to_bits(),
+                    "dof {i} (threads = {threads}): parallel {} vs serial {}",
+                    par[i], serial[i]
+                );
+            }
+            // The `assembly_parallel_min_elems()` dispatch must agree too (16
+            // elements ≥ the adaptive threshold here).
+            let dispatched = pool.install(|| Assembler::assemble_linear(&space, &integrators, quad_order));
+            for i in 0..serial.len() {
+                assert_eq!(
+                    dispatched[i].to_bits(), serial[i].to_bits(),
+                    "dispatched assembly differs from serial at dof {i}"
+                );
+            }
+        }
+        // Non-degenerate: the load vector is not trivially zero.
+        assert!(serial.iter().any(|&v| v.abs() > 1e-12), "empty test vector: {serial:?}");
+    }
+
+    /// D754, boundary sibling: `assemble_boundary_linear_parallel` must be
+    /// bitwise equal to the serial face loop for every thread count.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn d754_parallel_boundary_linear_assembly_is_bitwise_serial() {
+        use crate::postproc::coefficient::FnVectorCoeff;
+        use crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator;
+
+        // 1 x 1 mesh: 4 boundary faces, below the adaptive threshold, so the
+        // public entry point takes the serial branch.
+        let mesh = Mesh::<2>::make_cartesian_2d(1, 1, 1.0, 1.0);
+        let space = H1Space::new(mesh, 1);
+        let integ = VectorBoundaryNormalLFIntegrator {
+            v: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                out[0] = x[0];
+                out[1] = x[1];
+            }),
+        };
+        let fdofs = face_dofs_h1(&space);
+        let tags = [1, 2, 3, 4];
+        let order = 1u8;
+        let quad_order = 3u8;
+        let face_ids: Vec<u32> = space
+            .mesh()
+            .face_iter()
+            .filter(|&f| tags.contains(&space.mesh().face_tag(f)))
+            .collect();
+        assert_eq!(face_ids.len(), 4);
+
+        let serial = Assembler::assemble_boundary_linear(
+            space.n_dofs(), space.mesh(), &fdofs, order, &[&integ], &tags, quad_order);
+
+        for threads in [1usize, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let par = pool.install(|| {
+                assemble_boundary_linear_parallel(
+                    space.n_dofs(), space.mesh(), &face_ids, &fdofs, order, &[&integ], quad_order)
+            });
+            for i in 0..serial.len() {
+                assert_eq!(
+                    par[i].to_bits(), serial[i].to_bits(),
+                    "boundary dof {i} (threads = {threads}): parallel {} vs serial {}",
+                    par[i], serial[i]
+                );
+            }
+        }
+        let total: f64 = serial.iter().sum();
+        assert!((total - 2.0).abs() < 1e-12, "∮ v·n ds = {total}, want 2 (unit square)");
+    }
+
+    /// D754, bilinear sibling: the parallel volume bilinear assembly must be
+    /// bitwise equal to the serial element loop for every thread count.
+    ///
+    /// Pre-fix the per-worker `CooMatrix` buffers were merged with a Rayon
+    /// `reduce(append)`: the concatenation order (hence the insertion index
+    /// that `CooMatrix::into_csr` uses to order equal `(row, col)` entries)
+    /// followed the schedule, so multi-element matrix entries changed in their
+    /// last bits from run to run — `mfem_ex1_poisson`'s `sol.gf` took 5
+    /// distinct sha256 values in 5 runs while its stdout stayed identical.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn d754_parallel_bilinear_assembly_is_bitwise_serial() {
+        use crate::standard::MassIntegrator;
+
+        let mesh = Mesh::<2>::make_cartesian_2d(4, 4, 1.0, 1.0);
+        let space = H1Space::new(mesh, 1);
+        let integrators: [&dyn BilinearIntegrator; 1] = [&MassIntegrator { rho: 1.0 }];
+        let quad_order = 3u8;
+        let ref_elem = ref_elem_vol_for_space(&space, ElementType::Quad4, 1);
+        let quad = ref_elem.quadrature(quad_order);
+
+        let mut serial_coo = CooMatrix::<f64>::new(space.n_dofs(), space.n_dofs());
+        let mut scratch = ElementScratch::new();
+        for e in space.mesh().elem_iter() {
+            accumulate_volume_bilinear_element(
+                &space, e, &integrators, &quad, quad_order, &mut serial_coo, &mut scratch, &*ref_elem);
+        }
+        let serial = serial_coo.into_csr();
+
+        for threads in [1usize, 2, 3, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let par = pool.install(|| {
+                assemble_bilinear_volume_parallel(&space, &integrators, &quad, quad_order, &*ref_elem)
+            });
+            assert_eq!(par.row_ptr, serial.row_ptr, "row_ptr (threads = {threads})");
+            assert_eq!(par.col_idx, serial.col_idx, "col_idx (threads = {threads})");
+            for k in 0..par.values.len() {
+                assert_eq!(
+                    par.values[k].to_bits(), serial.values[k].to_bits(),
+                    "entry {k} (threads = {threads}): parallel {} vs serial {}",
+                    par.values[k], serial.values[k]
+                );
+            }
+        }
+        assert!(serial.values.iter().any(|&v| v != 0.0), "empty test matrix");
+    }
+
+    /// D754, boundary bilinear sibling.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn d754_parallel_boundary_bilinear_assembly_is_bitwise_serial() {
+        use crate::standard::BoundaryMassIntegrator;
+
+        let mesh = Mesh::<2>::make_cartesian_2d(1, 1, 1.0, 1.0);
+        let space = H1Space::new(mesh, 1);
+        let integrators: [&dyn BoundaryBilinearIntegrator; 1] = [&BoundaryMassIntegrator { alpha: 1.0 }];
+        let fdofs = face_dofs_h1(&space);
+        let tags = [1, 2, 3, 4];
+        let order = 1u8;
+        let quad_order = 3u8;
+        let face_ids: Vec<u32> = space
+            .mesh()
+            .face_iter()
+            .filter(|&f| tags.contains(&space.mesh().face_tag(f)))
+            .collect();
+        assert_eq!(face_ids.len(), 4);
+
+        let serial = Assembler::assemble_boundary_bilinear(
+            space.n_dofs(), space.mesh(), &fdofs, order, &integrators, &tags, quad_order);
+
+        for threads in [1usize, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let par = pool.install(|| {
+                assemble_boundary_bilinear_parallel(
+                    space.n_dofs(), space.mesh(), &face_ids, &fdofs, order, &integrators, quad_order)
+            });
+            assert_eq!(par.row_ptr, serial.row_ptr, "row_ptr (threads = {threads})");
+            assert_eq!(par.col_idx, serial.col_idx, "col_idx (threads = {threads})");
+            for k in 0..par.values.len() {
+                assert_eq!(
+                    par.values[k].to_bits(), serial.values[k].to_bits(),
+                    "entry {k} (threads = {threads}): parallel {} vs serial {}",
+                    par.values[k], serial.values[k]
+                );
+            }
+        }
+        assert!(serial.values.iter().any(|&v| v != 0.0), "empty test matrix");
+    }
+
+    /// D754, simplex sibling: on a triangle mesh (the shortest element path,
+    /// 3 local DOFs) both parallel assemblies must again be bitwise equal to
+    /// the serial loops, for every thread count.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn d754_parallel_assembly_is_bitwise_serial_on_triangles() {
+        use crate::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+
+        let mesh = Mesh::<2>::unit_square_tri(6);
+        let space = H1Space::new(mesh, 1);
+        let bilin: [&dyn BilinearIntegrator; 1] = [&DiffusionIntegrator { kappa: 1.0 }];
+        let lin: [&dyn LinearIntegrator; 1] = [&DomainSourceIntegrator::new(|_| 1.0)];
+        let quad_order = 3u8;
+        let ref_elem = ref_elem_vol_for_space(&space, ElementType::Tri3, 1);
+        let quad = ref_elem.quadrature(quad_order);
+
+        let mut serial_coo = CooMatrix::<f64>::new(space.n_dofs(), space.n_dofs());
+        let mut scratch = ElementScratch::new();
+        for e in space.mesh().elem_iter() {
+            accumulate_volume_bilinear_element(
+                &space, e, &bilin, &quad, quad_order, &mut serial_coo, &mut scratch, &*ref_elem);
+        }
+        let serial_mat: CsrMatrix<f64> = serial_coo.into_csr();
+        let mut serial_rhs = vec![0.0_f64; space.n_dofs()];
+        let mut scratch_rhs = ElementScratch::new();
+        for e in space.mesh().elem_iter() {
+            accumulate_volume_linear_element(
+                &space, e, &lin, &quad, quad_order, &mut serial_rhs, &mut scratch_rhs);
+        }
+
+        for threads in [1usize, 2, 3, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let par_mat: CsrMatrix<f64> = pool.install(|| {
+                assemble_bilinear_volume_parallel(&space, &bilin, &quad, quad_order, &*ref_elem)
+            });
+            let par_rhs =
+                pool.install(|| assemble_linear_volume_parallel(&space, &lin, &quad, quad_order));
+
+            assert_eq!(par_mat.row_ptr, serial_mat.row_ptr, "row_ptr (threads = {threads})");
+            assert_eq!(par_mat.col_idx, serial_mat.col_idx, "col_idx (threads = {threads})");
+            for k in 0..serial_mat.values.len() {
+                assert_eq!(
+                    par_mat.values[k].to_bits(), serial_mat.values[k].to_bits(),
+                    "matrix entry {k} (threads = {threads}): parallel {} vs serial {}",
+                    par_mat.values[k], serial_mat.values[k]
+                );
+            }
+            assert_eq!(par_rhs.len(), serial_rhs.len());
+            for i in 0..serial_rhs.len() {
+                assert_eq!(
+                    par_rhs[i].to_bits(), serial_rhs[i].to_bits(),
+                    "rhs dof {i} (threads = {threads}): parallel {} vs serial {}",
+                    par_rhs[i], serial_rhs[i]
+                );
+            }
+        }
+        assert!(serial_rhs.iter().any(|&v| v.abs() > 1e-12), "empty tri rhs");
+        assert!(serial_mat.values.iter().any(|&v| v != 0.0), "empty tri matrix");
     }
 
     /// D11 regression: tri-P0 standard assembly integrals must not be doubled.

@@ -618,6 +618,396 @@ fn norm2(v: &[f64]) -> f64 {
     dot(v, v).sqrt()
 }
 
+/// CSR mat-vec `y = A x`, accumulated strictly in column-index order.
+///
+/// MFEM's `SparseMatrix::Mult` walks each row's entries in storage order, so
+/// this keeps the same association (a reordered sum would change the last bits
+/// and could shift GMRES' iteration count).
+fn spmv_ordered(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+    for i in 0..a.nrows {
+        let mut sum = 0.0_f64;
+        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
+            sum += a.values[p] * x[a.col_idx[p] as usize];
+        }
+        y[i] = sum;
+    }
+}
+
+/// MFEM `IterativeSolver::PrintLevel` flags that change what GMRES writes to
+/// `mfem::out` (`linalg/solvers.hpp`).
+///
+/// MFEM's `errors` flag is deliberately absent: it only selects `mfem::err`
+/// reporting for `MFEM_VERIFY`, which aborts regardless of the print level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GmresPrintOptions {
+    /// Non-fatal problems (and `GMRES: Number of iterations: N`).
+    warnings: bool,
+    /// One `   Pass : ...  ||B r|| = ...` line per iteration (plus the
+    /// `Iteration : 0` opening line and any `Restarting...` line).
+    iterations: bool,
+    /// `GMRES: Number of iterations: N` after the last iteration.
+    summary: bool,
+    /// Print only the first and the last iteration.
+    first_and_last: bool,
+}
+
+impl GmresPrintOptions {
+    /// MFEM `FromLegacyPrintLevel` (`solvers.cpp:119`): `-1` none, `0`
+    /// errors+warnings, `1` +iterations, `2` errors+warnings+summary, `3`
+    /// errors+warnings+first_and_last; unknown levels degrade to level 0
+    /// (MFEM additionally emits an `MFEM_WARNING`, not reproduced here).
+    fn from_legacy(level: i32) -> Self {
+        let warnings = level >= 0;
+        match level {
+            1 => Self { warnings, iterations: true, summary: false, first_and_last: false },
+            2 => Self { warnings, iterations: false, summary: true, first_and_last: false },
+            3 => Self { warnings, iterations: false, summary: false, first_and_last: true },
+            _ => Self { warnings, iterations: false, summary: false, first_and_last: false },
+        }
+    }
+}
+
+/// MFEM `GMRESSolver` configuration: the settings ex22 applies through
+/// `SetKDim` / `SetMaxIter` / `SetRelTol` / `SetAbsTol` / `SetPrintLevel`,
+/// plus `Solver::iterative_mode` (MFEM default **true** — the incoming `x` is
+/// the initial guess, so the first step is `r = M(b − A x)`).
+#[derive(Debug, Clone, Copy)]
+pub struct MfemGmresConfig {
+    /// `SetKDim`: iterations between restarts (MFEM default 50).
+    pub kdim: usize,
+    /// `SetMaxIter`.
+    pub max_iter: usize,
+    /// `SetRelTol`: relative tolerance on the **preconditioned** residual.
+    pub rel_tol: f64,
+    /// `SetAbsTol`.
+    pub abs_tol: f64,
+    /// `SetPrintLevel` legacy level (`-1`/`0`/`1`/`2`/`3`).
+    pub print_level: i32,
+    /// MFEM `Solver::iterative_mode` (default true).
+    pub iterative_mode: bool,
+}
+
+impl Default for MfemGmresConfig {
+    /// MFEM `GMRESSolver` defaults: `m = 50`, `max_iter = 10` is the
+    /// `IterativeSolver` value but every consumer sets it, `rel_tol = abs_tol
+    /// = 0.0`, `iterative_mode = true`, print level 0 (errors+warnings).
+    fn default() -> Self {
+        Self {
+            kdim: 50,
+            max_iter: 1000,
+            rel_tol: 1e-12,
+            abs_tol: 0.0,
+            print_level: 0,
+            iterative_mode: true,
+        }
+    }
+}
+
+/// `out = a - b` (MFEM `subtract(x, y, z)`).
+fn subtract(a: &[f64], b: &[f64], out: &mut [f64]) {
+    for i in 0..out.len() {
+        out[i] = a[i] - b[i];
+    }
+}
+
+/// MFEM `Update(x, k, H, s, v)` (`solvers.cpp`): back-substitute the
+/// triangular system and add the correction `Σ_j y_j v_j` to `x`.
+fn gmres_update(x: &mut [f64], k: usize, h: &[Vec<f64>], s: &[f64], v: &[Vec<f64>]) {
+    let n = x.len();
+    let mut y = s.to_vec();
+    for i in (0..=k).rev() {
+        y[i] /= h[i][i];
+        for j in (0..i).rev() {
+            y[j] -= h[j][i] * y[i];
+        }
+    }
+    for j in 0..=k {
+        let yj = y[j];
+        let vj = &v[j];
+        for t in 0..n {
+            x[t] += yj * vj[t];
+        }
+    }
+}
+
+/// MFEM `GeneratePlaneRotation` (`solvers.cpp`).
+fn generate_plane_rotation(dx: f64, dy: f64, cs: &mut f64, sn: &mut f64) {
+    if dy == 0.0 {
+        *cs = 1.0;
+        *sn = 0.0;
+    } else if dy.abs() > dx.abs() {
+        let temp = dx / dy;
+        *sn = 1.0 / (1.0 + temp * temp).sqrt();
+        *cs = temp * *sn;
+    } else {
+        let temp = dy / dx;
+        *cs = 1.0 / (1.0 + temp * temp).sqrt();
+        *sn = temp * *cs;
+    }
+}
+
+/// MFEM `ApplyPlaneRotation` (`solvers.cpp`).
+fn apply_plane_rotation(dx: &mut f64, dy: &mut f64, cs: f64, sn: f64) {
+    let temp = cs * *dx + sn * *dy;
+    *dy = -sn * *dx + cs * *dy;
+    *dx = temp;
+}
+
+/// MFEM `GMRESSolver::Mult` — **the faithful port** (`linalg/solvers.cpp`,
+/// 4.10), added for D767 beside [`right_preconditioned_gmres`].
+///
+/// The two differ in three observable ways:
+///
+/// 1. **Stopping rule.** MFEM forms `r = M(b − A x)`, `β = ‖r‖`,
+///    `final_norm = max(rel_tol·β, abs_tol)` and stops when the
+///    Givens-rotated residual estimate `|s(i+1)|` — the norm of
+///    `M(b − A x_k)`, *not* of `b − A x_k` — drops below `final_norm`.
+///    [`right_preconditioned_gmres`] instead requires the **true** residual
+///    `‖b − A x‖ ≤ rtol·‖b‖`.  On a strongly preconditioned system the two
+///    disagree by orders of magnitude: ex22 `-p 2 -o 1 -m data/inline-tri.mesh`
+///    prints 266 iterations here and 1000 (never converging) there, while the
+///    computed solution agrees to print precision.
+/// 2. **Arnoldi order.** `w = M·A·vᵢ` (operator first, preconditioner second),
+///    matching MFEM's `oper->Mult(v[i], r); prec->Mult(r, w);`.
+/// 3. **Console output.** MFEM's `   Pass : %2d   Iteration : %3d  ||B r|| = %g`
+///    lines, the `Iteration : 0` opening line, `Restarting...`, the
+///    `GMRES: Number of iterations: N` summary and `GMRES: No convergence!`.
+///
+/// Returns `Ok` with `converged = false` when the iteration budget is spent
+/// (MFEM only prints the trailer); `Err` is reserved for bad inputs and for
+/// MFEM's `MFEM_VERIFY(IsFinite ...)` aborts.
+pub fn mfem_gmres<P>(
+    a: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: MfemGmresConfig,
+    precond: Option<&P>,
+) -> Result<SolveResult, SolverError>
+where
+    P: Fn(&[f64], &mut [f64]),
+{
+    use crate::iterative::fmt_g;
+
+    let n = a.nrows;
+    if b.len() != n || x.len() != n {
+        return Err(SolverError::DimensionMismatch { rows: n, cols: a.ncols, rhs: b.len() });
+    }
+    if cfg.kdim == 0 {
+        return Err(SolverError::Linlvo("GMRES: SetKDim(0) has no residual space".to_string()));
+    }
+    let m = cfg.kdim;
+    let print = GmresPrintOptions::from_legacy(cfg.print_level);
+
+    let mut r = vec![0.0_f64; n];
+    let mut w = vec![0.0_f64; n];
+
+    // MFEM: `if (iterative_mode) oper->Mult(x, r); else x = 0.0;`
+    if cfg.iterative_mode {
+        spmv_ordered(a, x, &mut r);
+    } else {
+        x.fill(0.0);
+    }
+    // MFEM: with a preconditioner `r = M(b − A x)` (or `r = M b`).
+    match precond {
+        Some(p) => {
+            if cfg.iterative_mode {
+                subtract(b, &r, &mut w);
+                p(&w, &mut r);
+            } else {
+                p(b, &mut r);
+            }
+        }
+        None => {
+            if cfg.iterative_mode {
+                subtract(b, &r, &mut w);
+                r.copy_from_slice(&w);
+            } else {
+                r.copy_from_slice(b);
+            }
+        }
+    }
+    let mut beta = norm2(&r);
+    let mut final_norm = (cfg.rel_tol * beta).max(cfg.abs_tol);
+
+    let mut final_iter;
+    let mut converged;
+    if beta <= final_norm {
+        // `goto finish` from MFEM's opening check.
+        final_norm = beta;
+        final_iter = 0;
+        converged = true;
+        if (print.iterations && converged) || print.first_and_last {
+            println!(
+                "   Pass : {:>2}   Iteration : {:>3}  ||B r|| = {}",
+                1,
+                final_iter,
+                fmt_g(final_norm)
+            );
+        }
+        if print.summary || (print.warnings && !converged) {
+            println!("GMRES: Number of iterations: {final_iter}");
+        }
+        if print.warnings && !converged {
+            println!("GMRES: No convergence!");
+        }
+        return Ok(SolveResult { converged, iterations: final_iter, final_residual: final_norm });
+    }
+
+    converged = false;
+    final_iter = 0;
+
+    if print.iterations || print.first_and_last {
+        let tail = if print.first_and_last { " ..." } else { "" };
+        println!("   Pass : {:>2}   Iteration : {:>3}  ||B r|| = {}{tail}", 1, 0, fmt_g(beta));
+    }
+
+    let mut v: Vec<Vec<f64>> = vec![vec![0.0_f64; n]; m + 1];
+    let mut h = vec![vec![0.0_f64; m]; m + 1];
+    let mut s = vec![0.0_f64; m + 1];
+    let mut cs = vec![0.0_f64; m + 1];
+    let mut sn = vec![0.0_f64; m + 1];
+
+    let mut j = 1usize;
+    'outer: while j <= cfg.max_iter {
+        // v0 = (1/β)·r — MFEM `v[0]->Set(1.0/beta, r)` (multiply, not divide).
+        {
+            let inv_beta = 1.0 / beta;
+            let v0 = &mut v[0];
+            for t in 0..n {
+                v0[t] = inv_beta * r[t];
+            }
+        }
+        for si in s.iter_mut() {
+            *si = 0.0;
+        }
+        s[0] = beta;
+
+        let mut i = 0usize;
+        while i < m && j <= cfg.max_iter {
+            // w = M A vᵢ  (MFEM: oper->Mult first, then prec->Mult)
+            spmv_ordered(a, &v[i], &mut r);
+            match precond {
+                Some(p) => p(&r, &mut w),
+                None => w.copy_from_slice(&r),
+            }
+
+            for k in 0..=i {
+                let hki = dot(&w, &v[k]);
+                h[k][i] = hki;
+                let vk = &v[k];
+                for t in 0..n {
+                    w[t] -= hki * vk[t];
+                }
+            }
+            h[i + 1][i] = norm2(&w);
+            // MFEM `MFEM_VERIFY(IsFinite(H(i+1,i)))` aborts here.
+            if !h[i + 1][i].is_finite() {
+                return Err(SolverError::Linlvo(format!(
+                    "GMRES: Norm(w) = {:.3e} at iteration {}",
+                    h[i + 1][i], j
+                )));
+            }
+            {
+                let inv = 1.0 / h[i + 1][i];
+                let vnext = &mut v[i + 1];
+                for t in 0..n {
+                    vnext[t] = inv * w[t];
+                }
+            }
+
+            for k in 0..i {
+                let (mut a, mut c) = (h[k][i], h[k + 1][i]);
+                apply_plane_rotation(&mut a, &mut c, cs[k], sn[k]);
+                h[k][i] = a;
+                h[k + 1][i] = c;
+            }
+            generate_plane_rotation(h[i][i], h[i + 1][i], &mut cs[i], &mut sn[i]);
+            {
+                let (mut a, mut c) = (h[i][i], h[i + 1][i]);
+                apply_plane_rotation(&mut a, &mut c, cs[i], sn[i]);
+                h[i][i] = a;
+                h[i + 1][i] = c;
+            }
+            {
+                let (mut a, mut c) = (s[i], s[i + 1]);
+                apply_plane_rotation(&mut a, &mut c, cs[i], sn[i]);
+                s[i] = a;
+                s[i + 1] = c;
+            }
+
+            let resid = s[i + 1].abs();
+            // MFEM `MFEM_VERIFY(IsFinite(resid))`.
+            if !resid.is_finite() {
+                return Err(SolverError::Linlvo(format!("GMRES: resid = {resid}")));
+            }
+            if resid <= final_norm {
+                gmres_update(x, i, &h, &s, &v);
+                final_norm = resid;
+                final_iter = j;
+                converged = true;
+                break 'outer;
+            }
+            if print.iterations {
+                let pass = (j - 1) / m + 1;
+                println!(
+                    "   Pass : {pass:>2}   Iteration : {j:>3}  ||B r|| = {}",
+                    fmt_g(resid)
+                );
+            }
+            i += 1;
+            j += 1;
+        }
+
+        if print.iterations && j <= cfg.max_iter {
+            println!("Restarting...");
+        }
+
+        gmres_update(x, i - 1, &h, &s, &v);
+
+        spmv_ordered(a, x, &mut r);
+        match precond {
+            Some(p) => {
+                subtract(b, &r, &mut w);
+                p(&w, &mut r);
+            }
+            None => {
+                // MFEM `subtract(b, r, r)` — elementwise `b[i] - r[i]`.
+                subtract(b, &r, &mut w);
+                r.copy_from_slice(&w);
+            }
+        }
+        beta = norm2(&r);
+        if beta <= final_norm {
+            final_norm = beta;
+            final_iter = j;
+            converged = true;
+            break 'outer;
+        }
+    }
+
+    if !converged {
+        // MFEM's fall-through of `for (j = 1; j <= max_iter; )`.
+        final_norm = beta;
+        final_iter = cfg.max_iter;
+    }
+    // MFEM's `finish:` label — `pass` uses the current `j`.
+    let pass = (j - 1) / m + 1;
+    if (print.iterations && converged) || print.first_and_last {
+        println!(
+            "   Pass : {pass:>2}   Iteration : {final_iter:>3}  ||B r|| = {}",
+            fmt_g(final_norm)
+        );
+    }
+    if print.summary || (print.warnings && !converged) {
+        println!("GMRES: Number of iterations: {final_iter}");
+    }
+    if print.warnings && !converged {
+        println!("GMRES: No convergence!");
+    }
+
+    Ok(SolveResult { converged, iterations: final_iter, final_residual: final_norm })
+}
+
 fn block_matrix_to_csr(a: &BlockMatrix) -> CsrMatrix<f64> {
     let mut coo = CooMatrix::<f64>::new(a.total_rows(), a.total_cols());
     let mut row_offset = 0usize;

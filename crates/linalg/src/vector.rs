@@ -12,9 +12,10 @@ use rayon::prelude::*;
 /// FMA instructions per iteration — matching the theoretical throughput of
 /// modern x86 and ARM cores.
 ///
-/// For the `parallel` feature and `n >= 4096`, the first half of the slice is
-/// handled by Rayon and the second half serially, then the two partial sums are
-/// added.  (This is simpler and avoids per-chunk task overhead for short vectors.)
+/// This is the **serial** primitive: its association (8 parallel accumulators
+/// combined at the end, in slice-index order) is a pure function of `len`.
+/// [`dot_f64_parallel`] reuses it as the per-block kernel so that a parallel
+/// call and a serial call agree on every block's partial sum.
 #[inline]
 fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len();
@@ -75,6 +76,44 @@ fn axpy_f64(alpha: f64, x: &[f64], y: &mut [f64]) {
 /// Shorter vectors have thread-spawn overhead that exceeds the compute savings.
 #[cfg(feature = "parallel")]
 const PAR_VEC_MIN: usize = 4_096;
+
+/// Fixed block length of the parallel reduction in [`dot_f64_parallel`].
+///
+/// The block boundaries depend only on the vector length — never on the Rayon
+/// thread count or on the work-stealing schedule.
+#[cfg(feature = "parallel")]
+const DOT_REDUCTION_BLOCK: usize = 4_096;
+
+/// Parallel dot product with a **bitwise reproducible** result.
+///
+/// Rayon's `par_iter().sum()` splits the range according to the number of
+/// threads and to whatever the work-stealing splitter decides at run time, and
+/// combines the partial sums in that (thread-count- and schedule-dependent)
+/// tree shape.  Floating-point addition is not associative, so the same input
+/// produced different last bits from run to run — D754: `mfem_ex26_geom_mg`'s
+/// `sol.gf` took 5 distinct sha256 values in 5 runs (6653 of 274627 entries
+/// differing, max relative 2.1e-14), while `RAYON_NUM_THREADS=1` was stable.
+///
+/// This helper keeps the parallelism but makes the *association* a pure
+/// function of `len`: the range is cut into fixed [`DOT_REDUCTION_BLOCK`]-sized
+/// chunks whose boundaries depend only on `len`, each chunk is reduced by the
+/// serial 8-unrolled [`dot_f64`] on whichever worker picks it up, and the chunk
+/// partials are combined serially in chunk-index order.  The result is
+/// therefore identical for any thread count, any schedule and any run.
+///
+/// The same pattern (and the same block length) is used by
+/// `fem_parallel::ParVector`'s `deterministic_dot` (D746).
+#[cfg(feature = "parallel")]
+#[inline]
+fn dot_f64_parallel(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+    let partials: Vec<f64> = a
+        .par_chunks(DOT_REDUCTION_BLOCK)
+        .zip(b.par_chunks(DOT_REDUCTION_BLOCK))
+        .map(|(xa, xb)| dot_f64(xa, xb))
+        .collect();
+    partials.iter().sum()
+}
 
 /// A heap-allocated column vector with BLAS-like operations.
 #[derive(Debug, Clone)]
@@ -179,7 +218,10 @@ impl<T: Scalar> Vector<T> {
     /// Euclidean dot product `x · y`.
     ///
     /// Uses an 8-unrolled loop for `f64` to enable AVX2 auto-vectorisation.
-    /// With the `parallel` feature and `n ≥ 4096`, Rayon parallelises the reduction.
+    /// With the `parallel` feature and `n ≥ 4096`, Rayon parallelises the
+    /// reduction — through [`dot_f64_parallel`], whose association depends only
+    /// on `n`, so the result is bitwise reproducible across thread counts,
+    /// schedules and runs (D754/D766).
     pub fn dot(&self, other: &Self) -> T {
         assert_eq!(self.len(), other.len(), "dot: length mismatch");
 
@@ -194,7 +236,7 @@ impl<T: Scalar> Vector<T> {
 
             #[cfg(feature = "parallel")]
             let result = if self.data.len() >= PAR_VEC_MIN {
-                a.par_iter().zip(b.par_iter()).map(|(&ai, &bi)| ai * bi).sum::<f64>()
+                dot_f64_parallel(a, b)
             } else {
                 dot_f64(a, b)
             };
@@ -212,6 +254,9 @@ impl<T: Scalar> Vector<T> {
     }
 
     /// Euclidean norm `‖x‖₂`.
+    ///
+    /// Bitwise reproducible under the same conditions as [`Vector::dot`]
+    /// (it *is* `sqrt(dot(x, x))`).
     pub fn norm(&self) -> T {
         self.dot(self).sqrt()
     }
