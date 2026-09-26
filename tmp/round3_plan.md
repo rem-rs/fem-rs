@@ -4624,6 +4624,22 @@ D805-1+D805-2）→ `f5a7e657`（Lane B：D807-1 部分）。
 | ex9 / pex9 | stdout 与改动前**逐字节相同** |
 | D805 探针 | `tmp/d805/cmp.py` 全 `[MAT*]` 逐条目 ≤ 2.1e-12（见上表） |
 
+### 主会话收尾 · 十 crate 全靶里的一颗红 = round 73 同族 flake（**同文件两测试共用同一临时文件名**，已修）
+- 首次十 crate 全靶跑出 **336 targets / 4280 / 1 failed / 121 ign**，唯一红是
+  `crates/io/tests/mobius_klein_nodes.rs::mobius_default_matches_cpp_structure`，
+  panic 在解析器（`dimension line` ⇒ 读到**被截断**的文件），单跑 **13/13 绿**。
+- **根因 = round 73 已裁定的那一类**：同一 binary 内的测试跑在并行线程上，两个测试共用
+  `CARGO_TARGET_TMPDIR` 里的同一个文件名 ⇒ 写/读对竞争。该文件的 **klein 那一对被 round 73 修过**
+  （`klein-bottle` → `klein-bottle-artifact`，注释就在现场），但**同文件的 mobius 两对没跟上**
+  （⑰ 同族未全量收口）：`mobius-strip.mesh` 被 `mobius_default_matches_cpp_structure`(221) 与
+  `mobius_default_matches_cpp_artifact`(539) 共用；`mobius-dm.mesh` 被
+  `mobius_discont_uses_l2_t1_collection`(284) 与 `mobius_discont_matches_cpp_artifact`(561) 共用。
+- **修法**：artifact 侧改名 `mobius-strip-artifact.mesh` / `mobius-dm-artifact.mesh`
+  （沿用 klein 的命名约定），并在两处写下"为什么不能共名"的注释。单跑 13/13 绿；全靶重跑见门表。
+- **教训**：㉒ 的普查不能只看"是否有两个测试共名"——要**逐文件生成 (测试, 文件名) 表**；
+  round 73 只修了点名的那一对，漏了同文件的兄弟。本轮把 `crates/io/tests/` 全部扫过
+  （`nodes_2d_writer.rs`/`nodes_writer.rs`/`curved_hex_nodes.rs` 无同文件共名）。
+
 ## 第七十五轮（round 75）：D782 二维 serendipity 语义端口 + D799-2/3 DG 面几何 + D800-2 embedded 曲面通量 + D808-1 非法 WGSL + 并行/D808-3
 
 **开局 HEAD = round 74 末笔 `a3520623`（已推送）；树净。** 五路并行（四路后台代理 + L5 主会话亲自），

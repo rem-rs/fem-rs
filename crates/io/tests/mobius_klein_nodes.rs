@@ -536,7 +536,14 @@ fn assert_matches_cpp_fixture(ours_path: &std::path::Path, fixture: &str) {
 #[test]
 fn mobius_default_matches_cpp_artifact() {
     let mesh = mobius_mesh(8, 2, 3, 2, 0.5);
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mobius-strip.mesh");
+    // Distinct filename per test — the same reason `klein_default_matches_cpp_artifact`
+    // documents: cargo runs one binary's tests on parallel threads, so sharing
+    // `mobius-strip.mesh` with `mobius_default_matches_cpp_structure` in the same
+    // `CARGO_TARGET_TMPDIR` races on the write/read pair (observed as a single
+    // red in the full `--tests` gate that passes in isolation — the reader sees
+    // a truncated file and panics with "dimension line").  Round 73 fixed the
+    // klein pair only; round 76 swept the family (discipline ⑰).
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mobius-strip-artifact.mesh");
     write_mfem_file_3d_nodes(&path, &mesh, NodesSpace::Continuous).expect("write");
     assert_matches_cpp_fixture(&path, "mobius_strip_cpp_default.mesh");
 }
@@ -558,7 +565,7 @@ fn klein_default_matches_cpp_artifact() {
 #[test]
 fn mobius_discont_matches_cpp_artifact() {
     let mesh = mobius_mesh(8, 2, 3, 2, 0.5);
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mobius-dm.mesh");
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mobius-dm-artifact.mesh");
     write_mfem_file_3d_nodes(&path, &mesh, NodesSpace::Discontinuous).expect("write");
     assert_matches_cpp_fixture(&path, "mobius_strip_cpp_dm.mesh");
 }
