@@ -4470,6 +4470,49 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十轮（round 80）：D814-2 折叠几何表细化传播（Lane A）+ D813-4 一维读入 + D813-5 金字塔 L2 前提翻转（Lane B）+ D814-4 金字塔块序（Lane C）+ D815-1 单纯形体项规则（主会话）——四路并行全交付
+
+**开局 HEAD = round 79 末笔（已推送）；树净；C: 93%（75G）。** 按 ㉛ 主树文件互斥三路代理 + 主会话一路：
+Lane A = `crates/mesh/**`（D814-2）；Lane B = `crates/io/**`（D813-4 + D813-5 余项）；
+Lane C = `crates/parallel/** + crates/space/**`（D814-4）；主会话 = `crates/assembly/src/dg/**`（D815-1）。
+**协调实录**：Lane A 一次 E0753 编译红（`curved_hex.rs` 残留 `//!`），主会话定位后即时通知、Lane A 即修（㉝ 生效一轮闭环）；三路报告全数交付，无失联。
+
+### Lane A（D814-2）· **关闭** —— 折叠 `L2_T1_3D_P1` 表细化传播
+- **红**：`refine_uniform_3d` 后几何表整表丢弃（直边平均回退）：r1 几何 3024/5184 条 >1e-9（max **1.0**——MFEM 折叠缝 ±1 vs 平均 ±2/3、0；登记的 ±1/3 为中间档），r2 27072/41472；顶点表 max 0.9999995 / 1.16666625。
+- **修法（MFEM 语义：子单元继承父 nodes）**：`curved_hex.rs` 新增 `l2_p1_hex_geometry`（不连续 order-1 hex 表识别）、`build_refined_l2_p1_hex_geometry`（每子单元对父 8 dof 三线性插值 `origin+0.5·child`；element-major fresh ids **不共享/不平均/不去重**——折叠语义原样保持）、`set_vertices_from_nodes`（MFEM `SetVerticesFromNodes`→`GetNodalValues` 均值规则）；`amr_inner.rs` 检测 L2 表 + `mfem_ids` 规范顶点编号扩展到 L2 + 三路互斥分支（L2 / order≥2 / 无表）。
+- **绿**：r1 几何+顶点 **0.0 逐位一致**（5184+648 条）；r2 **1.11e-16**（1 ulp，0 条 >1e-13）；细化两次后 max|x|=1.0（直边版只到 2/3）。pin = `d814_l2_p1_hex_uniform_refine.rs`（6 个 `.txt` fixture）；d813 登记残差测试翻转为 `d813_cube_refined_folded_geometry_matches_mfem`。
+- **回归**：fem-mesh **39 靶/506/0**（基线 505+1）；`d812_order1_geometry_nodes` 11/11、ledger 3/3（只跑未改）。
+- **遗留（登记 D816-1/D816-2）**：2-D 折叠表（periodic-hexagon/square，ex9 触发路径）细化传播未查；Tet4/Prism6/Pyramid5 的 order-1 L2 表仍丢表（本债务只覆盖 Hex8）。
+
+### Lane B（D813-4 + D813-5 余项）· **关闭** —— 一维读入 + 金字塔 L2（**前提翻转**）
+- **D813-4**：reader 开 `dim 1..=3`（`dim==1` 分支装入 D724 的 `Mesh<1>`；边界 POINT code 0 两向支持）；writer 核心提取为泛型 `write_mfem_mesh_nodes::<D>`（`validate_mesh_for_write` 迁移即删）+ 新公开 `write_mfem_nodes_1d(.., NodesSpace)`。**验收 = round-77 逐字节协议**：`periodic-segment.mesh` 读→写 == MFEM `Mesh::Save(out,16)` 重存**逐字节**；直线+边界 POINT == `Make1D` 重存逐字节。
+- **D813-5 余项前提翻转（㉖ 又一例）**：round-39 D335 的"MFEM 拒绝金字塔 L2"实为 `GetDofToQuad(**TENSOR**)` abort——**元素存在且正常**（fe_coll.cpp:2344 构造 `L2_FuentesPyramidElement(p, btype)`；探针 p=1..3 dof 8/27/64 全成功）。⇒ 走真实编号分支：`mfem_l2_slots(Pyramid5, p)` 委托 D325 已钉的 `pyramid_l2` 移植（closed/GLL = `L2_T1_*` 选择），p=1..3 逐槽 pin 对 MFEM `GetNodes()`；`l2_geometry_slots` **故意无**金字塔臂（mesh 侧 Bergot 格 dof 数不同 = D306），writer 按真实原因响亮拒绝（拒绝 parity 钉死）。顺带补 `Line2` L2 槽表（升序 GLL；p≤2 与等距格重合、p≥3 双向拒绝——单测钉死）。
+- **回归**：fem-io **44 靶/339/0**（主会话亲验复跑一致）；ledger 重生成 diff 恰 3 行全可解释（两个 dim=1 read_err→ok、inline-segment skip→ok）；依赖方 `cargo check` 全绿。
+- **遗留（登记 D816-3）**：`H1_1D_P*` 读取与 `Line2` 连续 H1 编号写出（现警告/响亮拒绝）；`L2_T1_1D_P3+` 双向拒绝（格分离，单测钉死语义）；dim=1 NURBS 沿用 2/3-D NURBS 既有局限。
+
+### Lane C（D814-4）· **关闭** —— 金字塔 NDk 面块序
+- **裁决**：MFEM `ND_FuentesPyramidElement` 槽序 = edges(8k) → **base quad**(2k(k−1)) → 4 apex tris → interior（fe_nd.cpp 构造序 + octahedron p=1..3 探针槽位 dump 双证）⇒ **space 侧本就正确，parallel 侧错**。`nd_face_blocks_for_elem` 把 4 tri 排在 quad 前 ⇒ DP 的 `off` 游标按错序切块（k=2：tri(0,1,4) 读到 quad 的 x 槽、quad 块读到 tri2+tri3）；登记的"off 算术切错槽"实为块序错、算术本身没错。受影响 = 锚局部路径；round-78 绝对槽/pair 通道不受影响（登记判断成立）。
+- **修复**：`dof_partition.rs` 单点（Pyramid5 分支 quad 先、4 tri 按 `PYRAMID_TRI_FACES` 序）+ 文档更正；space 零改动。
+- **红→绿**：`d814_pyramid_nd_face_block_order_par.rs`（octahedron 双金字塔共享 base quad，ND2/ND3，np=2）：修前 3 测全 panic（`dof_partition.rs:1822` "face (1,2,3) has no canonical position"——恰为 base quad 的 3-最小键）；修后泛函 rel 1.6e-15/5.6e-16、跨 rank 质量阵**逐位一致**（k=2 2168/2168、k=3 17856/17856 条 0 分歧）、owned 守恒（56、168=serial）。
+- **回归**：fem-parallel + fem-space **86 靶/940/0**（基线 937+3）；`d807_d122r2`/`d807r77`/`d122_nd2_rt1`/`d412` 钉全绿。
+
+### 主会话（D815-1）· **关闭** —— 单纯形 Pk DG 体项规则（oracle 先行）
+- **oracle**：`tmp/d815/probe/`（gen/dump 分体）：`{DIFV,DIF} × {tri 2×2, tet 1×1×1} × {直,曲} × p=1..3` = **24 矩阵** + `[VRULE]`（Pk 规则 `o+o−2`：TRI 0/2/4 阶 = 1/3/6 点、TET = 1/4/14 点；面 2·max）。fixture 追踪于 `tests/data/d815r80_*.txt`。
+- **红**（调用方 `2·order` 过积分）：12/24 红——**曲面全红**（非多项式被积函数，过积分积出不同矩阵：曲 tri p=1 差 1.8e-2/条目、p=3 差 77%）、**p=3 直网格也红**（4 次被积函数 vs 3 点规则）。
+- **修**：`accumulate_dg_volume_element` 的 Pk 臂 `2p−2`（`Tri3|Tet4`；`saturating_sub` 护 p=1→0）；顺带补 `ref_elem_face` 的 `(Tri3,2)/(Tri3,3)` 臂（tet order-2/3 的三角面此前直接 panic）。
+- **绿**：**24/24，worst rel 2.6e-14**。量化噪声（测试 ATOL_REL=1e-13 已注明）：fem-rs 的 order-6 三角规则 = MFEM 同一条 WV 12 点规则、**枚举序不同**（逐点比对核实），曲面 tet p=3 的 5 个抵消重条目差 ≤2.9e-14 = 纯求和序噪声。
+- **额外**：`DIF_*` 全矩阵 = **2-D 三角边与 3-D 四面体面的 DG 项首次矩阵级对拍**（含曲面 tet p=3 面，全绿——D805-4 规范组合路径首次过矩阵级验证）。
+- **回归**：fem-assembly **115 靶/1274/0**；ex14/ex27 锚点逐字节/IDENTICAL 不动。
+
+### 大门（round 80 冻结树，主树跑 ㉗）
+十 crate 口径：`--lib`(debug) **10 靶/2656/0/5**（基线 2654 + Lane B 两个源内单测，账目吻合）；`--tests`(release) **343 靶/4342/0/29**（基线 338/4329/0/28 + 恰 5 新靶：A1/B2/C1/主1）；`--doc` **10 靶/9/0/95**（= 基线）；examples **rc=0/0 非 vendor 警告**；pro **rc=0**；fem-py **rc=0**。锚点：ex14 311 行逐字节、ex27 rs0+dbc25 IDENTICAL、DG 钉家族（d805r76/r78、d814r79、d815r80）全绿。
+
+### 新债（round 80 登记）
+- **D816-1**：2-D 折叠 `L2_T1_2D_P1` 表（periodic-hexagon/square）细化传播未查——d813 只有盒级证据，ex9 会触发该路径。
+- **D816-2**：Tet4/Prism6/Pyramid5 的 order-1 L2 表细化仍丢表（D814-2 只覆盖 Hex8）。
+- **D816-3**：`H1_1D_P*` 读取与 `Line2` 连续 H1 编号写出（现警告/响亮拒绝；读侧顶点可恢复、几何表丢弃）。
+- （round 79 的 D815-1 本轮关闭；D815-2/D815-3 维持开放；D815-4 为口径备忘）
+
 ## 第七十九轮（round 79）：D814-1 关闭（= D805-4b）——hex DG **矩阵级**对拍 + 两处潜伏核心缺陷（`find_face_elem` 属主启发式、`face_point_geom_3d_quad` 定向换角）+ dg.rs 体项 Qk 规则（主会话单路）
 
 **开局 HEAD = round 78 末笔 `9f906c20`（已推送）；树净；C: 100% 满（13G 空闲，gate 前清 target/debug，⑨）。**
