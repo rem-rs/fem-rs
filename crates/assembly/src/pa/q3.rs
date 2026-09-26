@@ -57,28 +57,38 @@ pub fn build_hex_q3_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
     let n_elems = mesh.n_elements();
     let mut pd = PaData::new(n_elems, 64, 3);
     let hex8_ref = hex_vertices();
+    // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+    // mesh's own order-`g` isoparametric map; a straight mesh keeps the
+    // `[0,1]³` trilinear vertex map bit for bit.
+    let curved = mesh.geom_order() >= 2;
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let v: Vec<[f64;3]> = (0..8).map(|i|{let c=mesh.node_coords(nodes[i]);[c[0],c[1],c[2]]}).collect();
         for (qz,&qz_pt) in GL4_PTS.iter().enumerate() { for (qy,&qy_pt) in GL4_PTS.iter().enumerate() { for (qx,&qx_pt) in GL4_PTS.iter().enumerate() {
             let qi = qz*16 + qy*4 + qx;
-            let mut jac=[[0.0;3];3];
-            for i in 0..8{
-                let[xi,et,zt]=hex8_ref[i];
-                let (fx,dfx)=if xi==1.0{(qx_pt,1.0)}else{(1.0-qx_pt,-1.0)};
-                let (fy,dfy)=if et==1.0{(qy_pt,1.0)}else{(1.0-qy_pt,-1.0)};
-                let (fz,dfz)=if zt==1.0{(qz_pt,1.0)}else{(1.0-qz_pt,-1.0)};
-                let d_xi=dfx*fy*fz;let d_et=fx*dfy*fz;let d_zt=fx*fy*dfz;
-                for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}
-            }
+            let (jac, xp) = if curved {
+                super::curved::curved_jacobian(mesh, e as u32, &[qx_pt, qy_pt, qz_pt])
+                    .expect("geom_order >= 2 hex geometry table")
+            } else {
+                let mut jac=[[0.0;3];3];
+                for i in 0..8{
+                    let[xi,et,zt]=hex8_ref[i];
+                    let (fx,dfx)=if xi==1.0{(qx_pt,1.0)}else{(1.0-qx_pt,-1.0)};
+                    let (fy,dfy)=if et==1.0{(qy_pt,1.0)}else{(1.0-qy_pt,-1.0)};
+                    let (fz,dfz)=if zt==1.0{(qz_pt,1.0)}else{(1.0-qz_pt,-1.0)};
+                    let d_xi=dfx*fy*fz;let d_et=fx*dfy*fz;let d_zt=fx*fy*dfz;
+                    for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}
+                }
+                let mut xp=[0.0;3];for i in 0..8{
+                    let[xi,et,zt]=hex8_ref[i];
+                    let phi=(if xi==1.0{qx_pt}else{1.0-qx_pt})*(if et==1.0{qy_pt}else{1.0-qy_pt})*(if zt==1.0{qz_pt}else{1.0-qz_pt});
+                    for d in 0..3{xp[d]+=phi*v[i][d];}
+                }
+                (jac, xp)
+            };
             let d=jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])-jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])+jac[0][2]*(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0]);
             let det_j=d.abs();let inv=1.0/d;
             let jit=|i:usize,j:usize|->f64{match(i,j){(0,0)=>(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])*inv,(0,1)=>(jac[0][2]*jac[2][1]-jac[0][1]*jac[2][2])*inv,(0,2)=>(jac[0][1]*jac[1][2]-jac[0][2]*jac[1][1])*inv,(1,0)=>(jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*inv,(1,1)=>(jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*inv,(1,2)=>(jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*inv,(2,0)=>(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*inv,(2,1)=>(jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*inv,(2,2)=>(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*inv,_=>0.0}};
-            let mut xp=[0.0;3];for i in 0..8{
-                let[xi,et,zt]=hex8_ref[i];
-                let phi=(if xi==1.0{qx_pt}else{1.0-qx_pt})*(if et==1.0{qy_pt}else{1.0-qy_pt})*(if zt==1.0{qz_pt}else{1.0-qz_pt});
-                for d in 0..3{xp[d]+=phi*v[i][d];}
-            }
             let qd=pd.elem_qp_mut(e,qi);
             for a in 0..3{for b in 0..3{qd[a*3+b]=jit(a,b);}}qd[9]=det_j;qd[10]=kappa(&xp);
         }}}

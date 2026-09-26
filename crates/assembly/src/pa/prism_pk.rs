@@ -264,9 +264,9 @@ pub const PA_GEOM: usize = 6;
 /// curved prism's PA and assembly integrate the same map at the same
 /// quadrature points.
 ///
-/// `element_jacobian_at` hands back `J[i][j] = ∂x_i/∂ξ_j` (rows physical); the
-/// PA data build works in `∂x_d/∂ξ_c` (rows reference, the convention
-/// [`invert_3x3`] and [`ref_metric`] are written in), hence the transpose.
+/// The transpose and the straight-mesh gating live in
+/// [`super::curved::curved_jacobian`], shared with the hex/quad kernels
+/// (D808-4).
 fn curved_prism_jacobian<M: MeshTopology>(
     mesh: &M,
     e: u32,
@@ -274,17 +274,7 @@ fn curved_prism_jacobian<M: MeshTopology>(
     eta: f64,
     zeta: f64,
 ) -> Option<([[f64; 3]; 3], [f64; 3])> {
-    if mesh.geom_order() < 2 {
-        return None;
-    }
-    let (j, xp) = fem_mesh::element_jacobian_at(mesh, e, &[xi, eta, zeta], 3);
-    let mut jac = [[0.0_f64; 3]; 3];
-    for c in 0..3 {
-        for d in 0..3 {
-            jac[c][d] = j[(d, c)];
-        }
-    }
-    Some((jac, [xp[0], xp[1], xp[2]]))
+    super::curved::curved_jacobian(mesh, e, &[xi, eta, zeta])
 }
 
 // ─── PA data build ─────────────────────────────────────────────────────────

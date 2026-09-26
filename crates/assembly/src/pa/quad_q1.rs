@@ -22,28 +22,57 @@ fn quad_ab(n: usize) -> (usize, usize) {
 pub fn build_quad_q1_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) -> f64) -> PaData {
     let n_elems = mesh.n_elements();
     let mut pd = PaData::new(n_elems, 4, 2);
+    // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+    // mesh's own order-`g` isoparametric map; a straight mesh keeps the
+    // bilinear vertex map bit for bit.
+    //
+    // Frame note: this kernel is the one PA arm that works in the `[-1,1]²`
+    // reference frame (`GL_PTS`, and `l0`/`l1`'s derivatives are the `-1/2`/
+    // `+1/2` pair of that frame), while the mesh's geometry is parameterised on
+    // `[0,1]²`.  D797-2 showed the two frames are interchangeable for an
+    // *affine* map — the `ξ = 2t − 1` factor cancels between
+    // `weight × detJ` and `J⁻ᵀ × ∇_ξ`.  That cancellation needs both factors to
+    // come from the same frame, so the curved branch maps the quadrature point
+    // to `[0,1]²`, evaluates there, and halves the Jacobian back:
+    // `∂x/∂ξ₋₁ = ½·∂x/∂ξ₀₁`.  The `detJ` then pairs with the `[-1,1]` weights
+    // (which sum to 2) exactly as the pre-fix code did.
+    let curved = mesh.geom_order() >= 2;
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let x: Vec<[f64; 2]> = (0..4).map(|i| { let c = mesh.node_coords(nodes[i]); [c[0], c[1]] }).collect();
         for (qy, &qy_pt) in GL_PTS.iter().enumerate() {
             for (qx, &qx_pt) in GL_PTS.iter().enumerate() {
                 let qi = qy * 2 + qx;
-                let mut jac = [[0.0; 2]; 2];
-                for n in 0..4 {
-                    let (a,b) = quad_ab(n);
-                    let (pa,pb) = (if a==0{l0(qx_pt)}else{l1(qx_pt)}, if b==0{l0(qy_pt)}else{l1(qy_pt)});
-                    let (da,db) = (if a==0{d0(qx_pt)}else{d1(qx_pt)}, if b==0{d0(qy_pt)}else{d1(qy_pt)});
-                    jac[0][0] += da*pb*x[n][0]; jac[0][1] += da*pb*x[n][1];
-                    jac[1][0] += pa*db*x[n][0]; jac[1][1] += pa*db*x[n][1];
-                }
+                let (jac, xp) = if curved {
+                    let (mut j, xp) = super::curved::curved_jacobian(
+                        mesh, e as u32, &[0.5 * (qx_pt + 1.0), 0.5 * (qy_pt + 1.0)],
+                    )
+                    .expect("geom_order >= 2 quad geometry table");
+                    for c in 0..2 {
+                        for d in 0..2 {
+                            j[c][d] *= 0.5;
+                        }
+                    }
+                    (j, xp)
+                } else {
+                    let mut jac = [[0.0; 2]; 2];
+                    for n in 0..4 {
+                        let (a,b) = quad_ab(n);
+                        let (pa,pb) = (if a==0{l0(qx_pt)}else{l1(qx_pt)}, if b==0{l0(qy_pt)}else{l1(qy_pt)});
+                        let (da,db) = (if a==0{d0(qx_pt)}else{d1(qx_pt)}, if b==0{d0(qy_pt)}else{d1(qy_pt)});
+                        jac[0][0] += da*pb*x[n][0]; jac[0][1] += da*pb*x[n][1];
+                        jac[1][0] += pa*db*x[n][0]; jac[1][1] += pa*db*x[n][1];
+                    }
+                    let mut xp = [0.0;2];
+                    for n in 0..4 {
+                        let (a,b)=quad_ab(n); let phi=(if a==0{l0(qx_pt)}else{l1(qx_pt)})*(if b==0{l0(qy_pt)}else{l1(qy_pt)});
+                        for d in 0..2{xp[d]+=phi*x[n][d];}
+                    }
+                    (jac, xp)
+                };
                 let det_j = (jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0]).abs();
                 let inv = 1.0/(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0]);
                 let jit = [jac[1][1]*inv, -jac[0][1]*inv, -jac[1][0]*inv, jac[0][0]*inv];
-                let mut xp = [0.0;2];
-                for n in 0..4 {
-                    let (a,b)=quad_ab(n); let phi=(if a==0{l0(qx_pt)}else{l1(qx_pt)})*(if b==0{l0(qy_pt)}else{l1(qy_pt)});
-                    for d in 0..2{xp[d]+=phi*x[n][d];}
-                }
                 let qd = pd.elem_qp_mut(e, qi);
                 qd[0..4].copy_from_slice(&jit); qd[4]=det_j; qd[5]=kappa(&xp);
             }

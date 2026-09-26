@@ -101,19 +101,40 @@ pub fn build_quad_qk_pa_data<M: MeshTopology>(
             })
             .collect();
 
+        // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+        // mesh's own order-`g` isoparametric map — the same one the assembled
+        // path integrates — while a straight mesh keeps the `[0,1]²` bilinear
+        // vertex map bit for bit.
+        let curved = mesh.geom_order() >= 2;
+
         for (qy, &qy_pt) in qpts.iter().enumerate() {
             for (qx, &qx_pt) in qpts.iter().enumerate() {
                 let qi = qy * nq + qx;
 
-                // Jacobian of the bilinear quad map on [0,1]²
-                let dphi = geo_dphi(qx_pt, qy_pt);
-                let mut jac = [[0.0; 2]; 2];
-                for i in 0..4 {
-                    for d in 0..2 {
-                        jac[0][d] += dphi[i][0] * v[i][d];
-                        jac[1][d] += dphi[i][1] * v[i][d];
+                let (jac, xp) = if curved {
+                    super::curved::curved_jacobian(mesh, e as u32, &[qx_pt, qy_pt])
+                        .expect("geom_order >= 2 quad geometry table")
+                } else {
+                    // Jacobian of the bilinear quad map on [0,1]²
+                    let dphi = geo_dphi(qx_pt, qy_pt);
+                    let mut jac = [[0.0; 2]; 2];
+                    for i in 0..4 {
+                        for d in 0..2 {
+                            jac[0][d] += dphi[i][0] * v[i][d];
+                            jac[1][d] += dphi[i][1] * v[i][d];
+                        }
                     }
-                }
+
+                    // Physical point for kappa
+                    let phi = geo_phi(qx_pt, qy_pt);
+                    let mut xp = [0.0; 2];
+                    for i in 0..4 {
+                        for d in 0..2 {
+                            xp[d] += phi[i] * v[i][d];
+                        }
+                    }
+                    (jac, xp)
+                };
 
                 let d = jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0];
                 let det_j = d.abs();
@@ -122,15 +143,6 @@ pub fn build_quad_qk_pa_data<M: MeshTopology>(
                     [jac[1][1] * inv, -jac[0][1] * inv],
                     [-jac[1][0] * inv, jac[0][0] * inv],
                 ];
-
-                // Physical point for kappa
-                let phi = geo_phi(qx_pt, qy_pt);
-                let mut xp = [0.0; 2];
-                for i in 0..4 {
-                    for d in 0..2 {
-                        xp[d] += phi[i] * v[i][d];
-                    }
-                }
 
                 let qd = pd.elem_qp_mut(e, qi);
                 for a in 0..2 {

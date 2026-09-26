@@ -36,6 +36,11 @@ pub fn build_hex_q1_pa_data<M: MeshTopology>(
     let dim = 3;
     let mut pd = PaData::new(n_elems, nqp, dim);
 
+    // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+    // mesh's own order-`g` isoparametric map; a straight mesh keeps the
+    // `[0,1]³` trilinear vertex map bit for bit.
+    let curved = mesh.geom_order() >= 2;
+
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let x: Vec<[f64; 3]> = (0..8).map(|i| { let c = mesh.node_coords(nodes[i]); [c[0], c[1], c[2]] }).collect();
@@ -45,20 +50,33 @@ pub fn build_hex_q1_pa_data<M: MeshTopology>(
                 for (qx_idx, &qx) in GL_PTS.iter().enumerate() {
                     let qi = q * 4 + qy_idx * 2 + qx_idx;
 
-                    let mut jac = [[0.0_f64; 3]; 3];
-                    for n in 0..8 {
-                        let (a, b, c) = hex_abc(n);
-                        let (l0_x, l1_x, d0_x, d1_x) = (l0(qx), l1(qx), d0(qx), d1(qx));
-                        let (l0_y, l1_y, d0_y, d1_y) = (l0(qy), l1(qy), d0(qy), d1(qy));
-                        let (l0_z, l1_z, d0_z, d1_z) = (l0(qz), l1(qz), d0(qz), d1(qz));
-                        let (phi_a, phi_b, phi_c) = (if a==0{l0_x}else{l1_x}, if b==0{l0_y}else{l1_y}, if c==0{l0_z}else{l1_z});
-                        let (da, db, dc) = (if a==0{d0_x}else{d1_x}, if b==0{d0_y}else{d1_y}, if c==0{d0_z}else{d1_z});
-                        for d in 0..3 {
-                            jac[0][d] += da * phi_b * phi_c * x[n][d];
-                            jac[1][d] += phi_a * db * phi_c * x[n][d];
-                            jac[2][d] += phi_a * phi_b * dc * x[n][d];
+                    let (jac, xp) = if curved {
+                        super::curved::curved_jacobian(mesh, e as u32, &[qx, qy, qz])
+                            .expect("geom_order >= 2 hex geometry table")
+                    } else {
+                        let mut jac = [[0.0_f64; 3]; 3];
+                        for n in 0..8 {
+                            let (a, b, c) = hex_abc(n);
+                            let (l0_x, l1_x, d0_x, d1_x) = (l0(qx), l1(qx), d0(qx), d1(qx));
+                            let (l0_y, l1_y, d0_y, d1_y) = (l0(qy), l1(qy), d0(qy), d1(qy));
+                            let (l0_z, l1_z, d0_z, d1_z) = (l0(qz), l1(qz), d0(qz), d1(qz));
+                            let (phi_a, phi_b, phi_c) = (if a==0{l0_x}else{l1_x}, if b==0{l0_y}else{l1_y}, if c==0{l0_z}else{l1_z});
+                            let (da, db, dc) = (if a==0{d0_x}else{d1_x}, if b==0{d0_y}else{d1_y}, if c==0{d0_z}else{d1_z});
+                            for d in 0..3 {
+                                jac[0][d] += da * phi_b * phi_c * x[n][d];
+                                jac[1][d] += phi_a * db * phi_c * x[n][d];
+                                jac[2][d] += phi_a * phi_b * dc * x[n][d];
+                            }
                         }
-                    }
+
+                        let mut xp = [0.0; 3];
+                        for n in 0..8 {
+                            let (a, b, c) = hex_abc(n);
+                            let phi = (if a==0{l0(qx)}else{l1(qx)})*(if b==0{l0(qy)}else{l1(qy)})*(if c==0{l0(qz)}else{l1(qz)});
+                            for d in 0..3 { xp[d] += phi * x[n][d]; }
+                        }
+                        (jac, xp)
+                    };
 
                     let d = jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])
                           - jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])
@@ -70,13 +88,6 @@ pub fn build_hex_q1_pa_data<M: MeshTopology>(
                         [(jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*inv, (jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*inv, (jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*inv],
                         [(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*inv, (jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*inv, (jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*inv],
                     ];
-
-                    let mut xp = [0.0; 3];
-                    for n in 0..8 {
-                        let (a, b, c) = hex_abc(n);
-                        let phi = (if a==0{l0(qx)}else{l1(qx)})*(if b==0{l0(qy)}else{l1(qy)})*(if c==0{l0(qz)}else{l1(qz)});
-                        for d in 0..3 { xp[d] += phi * x[n][d]; }
-                    }
 
                     let qd = pd.elem_qp_mut(e, qi);
                     for i in 0..3 { for j in 0..3 { qd[i*3+j] = jit[i][j]; } }

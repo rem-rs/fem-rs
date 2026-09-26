@@ -21,6 +21,7 @@ mod tet4;
 mod hex_qk;
 mod quad_qk;
 mod prism_pk;
+mod curved;
 pub mod types;
 
 pub use hex_q1::{build_hex_q1_pa_data, pa_apply_hex_q1, pa_apply_mass_hex_q1};

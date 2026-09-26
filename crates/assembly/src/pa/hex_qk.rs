@@ -82,28 +82,52 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
             })
             .collect();
 
+        // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+        // mesh's own order-`g` isoparametric map — the same one the assembled
+        // path integrates — while a straight mesh keeps the `[0,1]` trilinear
+        // vertex map bit for bit.
+        let curved = mesh.geom_order() >= 2;
+
         for (qz, &qz_pt) in qpts.iter().enumerate() {
             for (qy, &qy_pt) in qpts.iter().enumerate() {
                 for (qx, &qx_pt) in qpts.iter().enumerate() {
                     let qi = qz * nq * nq + qy * nq + qx;
 
-                    // Jacobian using trilinear hex mapping
-                    let mut jac = [[0.0; 3]; 3];
-                    for i in 0..8 {
-                        let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
-                        // D721: `[0,1]` trilinear nodal factors.
-                        let (fx, dfx) = if xi == 1.0 { (qx_pt, 1.0) } else { (1.0 - qx_pt, -1.0) };
-                        let (fy, dfy) = if et == 1.0 { (qy_pt, 1.0) } else { (1.0 - qy_pt, -1.0) };
-                        let (fz, dfz) = if zt == 1.0 { (qz_pt, 1.0) } else { (1.0 - qz_pt, -1.0) };
-                        let d_xi = dfx * fy * fz;
-                        let d_et = fx * dfy * fz;
-                        let d_zt = fx * fy * dfz;
-                        for d in 0..3 {
-                            jac[0][d] += d_xi * v[i][d];
-                            jac[1][d] += d_et * v[i][d];
-                            jac[2][d] += d_zt * v[i][d];
+                    let (jac, xp) = if curved {
+                        super::curved::curved_jacobian(mesh, e as u32, &[qx_pt, qy_pt, qz_pt])
+                            .expect("geom_order >= 2 hex geometry table")
+                    } else {
+                        // Jacobian using trilinear hex mapping
+                        let mut jac = [[0.0; 3]; 3];
+                        for i in 0..8 {
+                            let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
+                            // D721: `[0,1]` trilinear nodal factors.
+                            let (fx, dfx) = if xi == 1.0 { (qx_pt, 1.0) } else { (1.0 - qx_pt, -1.0) };
+                            let (fy, dfy) = if et == 1.0 { (qy_pt, 1.0) } else { (1.0 - qy_pt, -1.0) };
+                            let (fz, dfz) = if zt == 1.0 { (qz_pt, 1.0) } else { (1.0 - qz_pt, -1.0) };
+                            let d_xi = dfx * fy * fz;
+                            let d_et = fx * dfy * fz;
+                            let d_zt = fx * fy * dfz;
+                            for d in 0..3 {
+                                jac[0][d] += d_xi * v[i][d];
+                                jac[1][d] += d_et * v[i][d];
+                                jac[2][d] += d_zt * v[i][d];
+                            }
                         }
-                    }
+
+                        // Physical point x(qp) for kappa evaluation (trilinear for uniform hex)
+                        let mut xp = [0.0; 3];
+                        for i in 0..8 {
+                            let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
+                            let phi = (if xi == 1.0 { qx_pt } else { 1.0 - qx_pt })
+                                * (if et == 1.0 { qy_pt } else { 1.0 - qy_pt })
+                                * (if zt == 1.0 { qz_pt } else { 1.0 - qz_pt });
+                            for d in 0..3 {
+                                xp[d] += phi * v[i][d];
+                            }
+                        }
+                        (jac, xp)
+                    };
 
                     let d = jac[0][0] * (jac[1][1] * jac[2][2] - jac[1][2] * jac[2][1])
                         - jac[0][1] * (jac[1][0] * jac[2][2] - jac[1][2] * jac[2][0])
@@ -128,18 +152,6 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
                             (jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0]) * inv,
                         ],
                     ];
-
-                    // Physical point x(qp) for kappa evaluation (trilinear for uniform hex)
-                    let mut xp = [0.0; 3];
-                    for i in 0..8 {
-                        let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
-                        let phi = (if xi == 1.0 { qx_pt } else { 1.0 - qx_pt })
-                            * (if et == 1.0 { qy_pt } else { 1.0 - qy_pt })
-                            * (if zt == 1.0 { qz_pt } else { 1.0 - qz_pt });
-                        for d in 0..3 {
-                            xp[d] += phi * v[i][d];
-                        }
-                    }
 
                     let qd = pd.elem_qp_mut(e, qi);
                     for a in 0..3 {

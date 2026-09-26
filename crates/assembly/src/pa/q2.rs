@@ -62,6 +62,11 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
     let mut pd = PaData::new(n_elems, nqp, dim);
     let ref_nodes = hex_vertices();
 
+    // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+    // mesh's own order-`g` isoparametric map; a straight mesh keeps the
+    // `[0,1]³` trilinear vertex map bit for bit.
+    let curved = mesh.geom_order() >= 2;
+
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let v: Vec<[f64; 3]> = (0..8).map(|i| { let c = mesh.node_coords(nodes[i]); [c[0], c[1], c[2]] }).collect();
@@ -71,24 +76,40 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                 for (qx, &qx_pt) in GL3_PTS.iter().enumerate() {
                     let qi = qz * 9 + qy * 3 + qx;
 
-                    // Jacobian J using Q1 (trilinear) mapping from 8 vertices
-                    let mut jac = [[0.0_f64; 3]; 3];
-                    for i in 0..8 {
-                        let [xi, et, zt] = ref_nodes[i];
-                        // D721: [0,1] trilinear nodal factors (`ox·oy·oz`
-                        // form, MFEM `TriLinear3DFiniteElement`).
-                        let (fx, dfx) = if xi == 1.0 { (qx_pt, 1.0) } else { (1.0 - qx_pt, -1.0) };
-                        let (fy, dfy) = if et == 1.0 { (qy_pt, 1.0) } else { (1.0 - qy_pt, -1.0) };
-                        let (fz, dfz) = if zt == 1.0 { (qz_pt, 1.0) } else { (1.0 - qz_pt, -1.0) };
-                        let d_xi = dfx * fy * fz;
-                        let d_et = fx * dfy * fz;
-                        let d_zt = fx * fy * dfz;
-                        for d in 0..3 {
-                            jac[0][d] += d_xi * v[i][d];
-                            jac[1][d] += d_et * v[i][d];
-                            jac[2][d] += d_zt * v[i][d];
+                    let (jac, xp) = if curved {
+                        super::curved::curved_jacobian(mesh, e as u32, &[qx_pt, qy_pt, qz_pt])
+                            .expect("geom_order >= 2 hex geometry table")
+                    } else {
+                        // Jacobian J using Q1 (trilinear) mapping from 8 vertices
+                        let mut jac = [[0.0_f64; 3]; 3];
+                        for i in 0..8 {
+                            let [xi, et, zt] = ref_nodes[i];
+                            // D721: [0,1] trilinear nodal factors (`ox·oy·oz`
+                            // form, MFEM `TriLinear3DFiniteElement`).
+                            let (fx, dfx) = if xi == 1.0 { (qx_pt, 1.0) } else { (1.0 - qx_pt, -1.0) };
+                            let (fy, dfy) = if et == 1.0 { (qy_pt, 1.0) } else { (1.0 - qy_pt, -1.0) };
+                            let (fz, dfz) = if zt == 1.0 { (qz_pt, 1.0) } else { (1.0 - qz_pt, -1.0) };
+                            let d_xi = dfx * fy * fz;
+                            let d_et = fx * dfy * fz;
+                            let d_zt = fx * fy * dfz;
+                            for d in 0..3 {
+                                jac[0][d] += d_xi * v[i][d];
+                                jac[1][d] += d_et * v[i][d];
+                                jac[2][d] += d_zt * v[i][d];
+                            }
                         }
-                    }
+
+                        // Physical point for κ (Q1 mapping)
+                        let mut xp = [0.0; 3];
+                        for i in 0..8 {
+                            let [xi, et, zt] = ref_nodes[i];
+                            let phi = (if xi == 1.0 { qx_pt } else { 1.0 - qx_pt })
+                                * (if et == 1.0 { qy_pt } else { 1.0 - qy_pt })
+                                * (if zt == 1.0 { qz_pt } else { 1.0 - qz_pt });
+                            for d in 0..3 { xp[d] += phi * v[i][d]; }
+                        }
+                        (jac, xp)
+                    };
 
                     let d = jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])
                           - jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])
@@ -100,16 +121,6 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                         [(jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*inv, (jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*inv, (jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*inv],
                         [(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*inv, (jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*inv, (jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*inv],
                     ];
-
-                    // Physical point for κ (Q1 mapping)
-                    let mut xp = [0.0; 3];
-                    for i in 0..8 {
-                        let [xi, et, zt] = ref_nodes[i];
-                        let phi = (if xi == 1.0 { qx_pt } else { 1.0 - qx_pt })
-                            * (if et == 1.0 { qy_pt } else { 1.0 - qy_pt })
-                            * (if zt == 1.0 { qz_pt } else { 1.0 - qz_pt });
-                        for d in 0..3 { xp[d] += phi * v[i][d]; }
-                    }
 
                     let qd = pd.elem_qp_mut(e, qi);
                     for i in 0..3 { for j in 0..3 { qd[i*3+j] = jit[i][j]; } }
@@ -200,6 +211,10 @@ pub fn build_quad_q2_pa_data<M: MeshTopology>(
 ) -> PaData {
     let n_elems = mesh.n_elements();
     let mut pd = PaData::new(n_elems, 9, 2);
+    // D808-4 (D783's recipe): a curved mesh (`geom_order >= 2`) takes the
+    // mesh's own order-`g` isoparametric map; a straight mesh keeps the
+    // bilinear vertex map bit for bit.
+    let curved = mesh.geom_order() >= 2;
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let v: Vec<[f64; 2]> = (0..4).map(|i| { let c = mesh.node_coords(nodes[i]); [c[0], c[1]] }).collect();
@@ -216,25 +231,31 @@ pub fn build_quad_q2_pa_data<M: MeshTopology>(
         for (qy, &qy_pt) in GL3_PTS.iter().enumerate() {
             for (qx, &qx_pt) in GL3_PTS.iter().enumerate() {
                 let qi = qy * 3 + qx;
-                let mut jac = [[0.0; 2]; 2];
-                for n in 0..9 {
-                    let (ix, iy) = QUAD_Q2_MAP[n];
-                    let lx = [l0(qx_pt), l1(qx_pt), l2(qx_pt)];
-                    let ly = [l0(qy_pt), l1(qy_pt), l2(qy_pt)];
-                    let dx = [d0(qx_pt), d1(qx_pt), d2(qx_pt)];
-                    let dy = [d0(qy_pt), d1(qy_pt), d2(qy_pt)];
-                    jac[0][0] += dx[ix]*ly[iy]*x[n][0]; jac[0][1] += dx[ix]*ly[iy]*x[n][1];
-                    jac[1][0] += lx[ix]*dy[iy]*x[n][0]; jac[1][1] += lx[ix]*dy[iy]*x[n][1];
-                }
+                let (jac, xp) = if curved {
+                    super::curved::curved_jacobian(mesh, e as u32, &[qx_pt, qy_pt])
+                        .expect("geom_order >= 2 quad geometry table")
+                } else {
+                    let mut jac = [[0.0; 2]; 2];
+                    for n in 0..9 {
+                        let (ix, iy) = QUAD_Q2_MAP[n];
+                        let lx = [l0(qx_pt), l1(qx_pt), l2(qx_pt)];
+                        let ly = [l0(qy_pt), l1(qy_pt), l2(qy_pt)];
+                        let dx = [d0(qx_pt), d1(qx_pt), d2(qx_pt)];
+                        let dy = [d0(qy_pt), d1(qy_pt), d2(qy_pt)];
+                        jac[0][0] += dx[ix]*ly[iy]*x[n][0]; jac[0][1] += dx[ix]*ly[iy]*x[n][1];
+                        jac[1][0] += lx[ix]*dy[iy]*x[n][0]; jac[1][1] += lx[ix]*dy[iy]*x[n][1];
+                    }
+                    let mut xp = [0.0;2];
+                    for n in 0..9 {
+                        let (ix,iy)=QUAD_Q2_MAP[n];
+                        let phi=[l0(qx_pt),l1(qx_pt),l2(qx_pt)][ix]*[l0(qy_pt),l1(qy_pt),l2(qy_pt)][iy];
+                        for d in 0..2{xp[d]+=phi*x[n][d];}
+                    }
+                    (jac, xp)
+                };
                 let det_j = (jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0]).abs();
                 let inv = 1.0/(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0]);
                 let jit = [jac[1][1]*inv, -jac[0][1]*inv, -jac[1][0]*inv, jac[0][0]*inv];
-                let mut xp = [0.0;2];
-                for n in 0..9 {
-                    let (ix,iy)=QUAD_Q2_MAP[n];
-                    let phi=[l0(qx_pt),l1(qx_pt),l2(qx_pt)][ix]*[l0(qy_pt),l1(qy_pt),l2(qy_pt)][iy];
-                    for d in 0..2{xp[d]+=phi*x[n][d];}
-                }
                 let qd = pd.elem_qp_mut(e, qi);
                 qd[0..4].copy_from_slice(&jit); qd[4]=det_j; qd[5]=kappa(&xp);
             }
