@@ -1623,7 +1623,27 @@ fn write_boundary_section<W: Write, const D: usize>(
 /// The mesh is validated (D126) *before* the file is created, so a rejected
 /// mesh leaves no empty file behind.
 pub fn write_mfem_file(path: impl AsRef<std::path::Path>, mesh_d: &Mesh<2>) -> FemResult<()> {
-    write_mfem_bytes_to(path, &mut |w: &mut Vec<u8>| write_mfem(w, mesh_d, None))
+    write_mfem_file_nodes(path, mesh_d, NodesSpace::Continuous)
+}
+
+/// [`write_mfem_file`] with an explicit continuity for the `nodes` section
+/// (MFEM `Mesh::SetCurvature`'s `discont` argument) — the 2-D counterpart of
+/// [`write_mfem_file_3d_nodes`].
+///
+/// Needed by any mesh whose high-order geometry is **discontinuous**: a
+/// `Mesh::MakePeriodic`-stitched mesh keeps the pre-merge geometry snapshot
+/// (MFEM's `SetCurvature(·, true)` semantics), so one geometry DOF is reached
+/// from two elements with different coordinates and the *continuous* writer
+/// correctly refuses it (`geometry dof N is shared by two elements with
+/// different coordinates`).  MFEM writes such a mesh's `nodes` field as an
+/// `L2_T1_<dim>D_P<p>` field, which is what `NodesSpace::Discontinuous`
+/// selects.  See D805-3 (`tests/d805r76_ex27_refined_mesh.rs`).
+pub fn write_mfem_file_nodes(
+    path: impl AsRef<std::path::Path>,
+    mesh_d: &Mesh<2>,
+    space: NodesSpace,
+) -> FemResult<()> {
+    write_mfem_bytes_to(path, &mut |w: &mut Vec<u8>| write_mfem_nodes(w, mesh_d, None, space))
 }
 
 /// Write a 3D mesh to MFEM `.mesh` file on disk.

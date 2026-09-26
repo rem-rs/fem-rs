@@ -145,8 +145,26 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
 
     verify_bc(a, &space, mesh, &x);
 
-    // C++ step 14: save refined.mesh + sol.gf (MFEM-native formats)
-    let _ = fem_io::mfem::write_mfem_file("refined.mesh", mesh);
+    // C++ step 14: save refined.mesh + sol.gf (MFEM-native formats).
+    //
+    // D805-3: `refined.mesh` was silently absent.  Two causes, both fixed here:
+    //   * `let _ =` swallowed the error, and
+    //   * the writer was asked for a **continuous** `nodes` section, while this
+    //     mesh's geometry is discontinuous — `gen_mesh` runs `make_periodic`
+    //     after `set_curvature(3)` and the geometry keeps the pre-merge
+    //     snapshot, so one geometry DOF is reached from two elements with
+    //     different coordinates.  MFEM's ex27 calls `SetCurvature(3, true)`
+    //     (`ex27.cpp:627`, `discont = true`) and `Mesh::Printer` writes that as
+    //     an `L2_T1_2D_P3` field, i.e. `NodesSpace::Discontinuous`.
+    // The error still goes to **stderr**, never stdout (stdout is byte-compared
+    // with the C++ gold).
+    if let Err(e) = fem_io::mfem::write_mfem_file_nodes(
+        "refined.mesh",
+        mesh,
+        fem_io::mfem::NodesSpace::Discontinuous,
+    ) {
+        eprintln!("warning: refined.mesh not written: {e}");
+    }
     let _ = fem_io::mfem::write_mfem_gf_file("sol.gf", 2, &x, "H1", a.order as u8, 1, 8);
 }
 
@@ -208,7 +226,17 @@ fn solve_dg(a: &Args, mesh: &Mesh<2>) {
 
     verify_bc(a, &space, mesh, &x);
 
-    let _ = fem_io::mfem::write_mfem_file("refined.mesh", mesh);
+    // D805-3: same as the H1 path — this mesh's geometry is discontinuous
+    // (`set_curvature(3)` + `make_periodic`), so the `nodes` section must be
+    // written as MFEM's `L2_T1_2D_P3` field; the error goes to stderr, never
+    // stdout.
+    if let Err(e) = fem_io::mfem::write_mfem_file_nodes(
+        "refined.mesh",
+        mesh,
+        fem_io::mfem::NodesSpace::Discontinuous,
+    ) {
+        eprintln!("warning: refined.mesh not written: {e}");
+    }
     let _ = fem_io::mfem::write_mfem_gf_file("sol.gf", 2, &x, "L2", a.order as u8, 1, 8);
 }
 
