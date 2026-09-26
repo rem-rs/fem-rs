@@ -4541,13 +4541,20 @@ D805-1+D805-2）→ `f5a7e657`（Lane B：D807-1 部分）。
 - 门：fem-io **37 targets / 308 / 0 / 3 ign**（本轮前 306/0/3）。
 
 ### Lane A（代理，主会话收编）· **D805-1 + D805-2 关闭**：DG 面项逐条目 = MFEM 4.10
-- **D805-1（罚项）**：MFEM `DGElasticityIntegrator`（`bilininteg.cpp:4087-4245`）
-  `jmatcoef = kappa·(nor·nor)·wLM`，内部面 `wLM = (ipw/2)·((λ₁+2μ₁)/W₁ + (λ₂+2μ₂)/W₂)`、
+- **D805-1（罚项）**：MFEM `DGElasticityIntegrator`（`bilininteg.cpp:4087-4245`）  `jmatcoef = kappa·(nor·nor)·wLM`，内部面 `wLM = (ipw/2)·((λ₁+2μ₁)/W₁ + (λ₂+2μ₂)/W₂)`、
   边界面 `ipw·(λ+2μ)/W`，用**未归一化** `nor = CalcOrtho(Trans.Jacobian())` 与
   `Weight()` = 带符号 det J。fem-rs 取 `λ,μ` 平均并除以 `|nor|` ⇒ 任何 `|nor|² ≠ W` 的单元都不同，
   曲面 41%。**顺带**：MFEM 体项默认阶 = `trial+test+OrderW()` 而面项是 `2·max(order)`，
   fem-rs 一个参数两用 ⇒ 新增 `mfem_elasticity_volume_rule(geom_order, elem_order, et, dim)`
   在装配器内部选体项规则（**公开签名不变、直网格选到同一规则故直网格不动**，曲面网格移向 C++ 默认）。
+  ⚠️ **该说法的验证边界（HYPOTHESIS 级，未验的部分显式记录）**：已验证的是
+  **2-D 直网格与 2-D/曲面夹具**——即 `npoints = ceil((order+1)/2)` 对 2-D quad/simplex 下
+  `2·OrderGrad` 与 MFEM 的 `p+p+OrderW` 落到**同一个规则**（D805 夹具 g=3/p=1：两边都是 4 点/维，
+  `MATELAV` 因此从 1.115e+00 落到 2.187e-12 = MFEM 默认规则）。**函数里那套
+  `(g−1)(d−1)+(p−1)` / `g(d−1)+(p−1)` 的 `order` 是"2·OrderGrad"读法，与 MFEM 字面的
+  `trial+test+OrderW` 在 3-D 并不恒等**（3-D 直 hex 上两者给出的点数可以不同），而
+  `assemble_sip_elasticity` 的**全部调用方都是 2-D**（ex17/pex17 是 `beam-tri`，测试夹具也是 2-D）
+  ⇒ 当前树上该说法成立，但**将来接 3-D 调用方之前必须重新对拍**，不要把它当已证的一般结论。
 - **D805-2（对流面项）**：旧实现是**守恒型**迎风 `−∫⟦v⟧F̂`，与**任何** MFEM 积分器都不逐条目等价
   （夹具 48/256 错），而注释声称 `NonconservativeDGTraceIntegrator` 等价。新
   `crates/assembly/src/dg/dg_trace.rs` 逐行移植 `DGTraceIntegrator`（`bilininteg.cpp:3480-3610`）
