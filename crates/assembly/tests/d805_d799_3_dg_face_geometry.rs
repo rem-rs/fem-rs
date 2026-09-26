@@ -185,10 +185,14 @@ fn dg_face_geometry_dump() {
         .collect();
     print_mat("RS_MATDIFIF", &difif);
 
-    // ── [RS_MATADV]: `assemble_dg_interior_faces` + upwind advection ────────
-    let dg_adv = DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]) };
+    // ── [RS_MATADV]: `assemble_dg_interior_faces` + NonconservativeDGTrace ──
+    // D805-2/round 76: the rule order is MFEM's `DGTraceIntegrator` default
+    // `min(OrderW1,OrderW2) + 2*max(o1,o2)` (+1 for Pk) = 5 + 2*1 = 7 on this
+    // curved fixture (4 points), NOT the old `quad_order = 2` (2 points); the
+    // gold `tmp/d805/cpp_truth.txt` was produced with MFEM's default.
+    let dg_adv = DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]), alpha: -1.0 };
     let mut coo = fem_linalg::CooMatrix::<f64>::new(space.n_dofs(), space.n_dofs());
-    assemble_dg_interior_faces(&mut coo, &m, &space, &ifl, 1, 2, &dg_adv);
+    assemble_dg_interior_faces(&mut coo, &m, &space, &ifl, 1, 7, &dg_adv);
     print_mat("RS_MATADV", &dense(&coo.into_csr()));
 
     // ── [RS_MATELA] / [RS_MATELAV]: DG elasticity with/without interior faces

@@ -46,6 +46,15 @@ pub struct DgFaceQpData<'a> {
     /// *number* on a straight element (where `|nor|` is the chord length) and
     /// carries the curved face measure on a curved one.
     pub weight: f64,
+    /// The **bare** face quadrature weight (MFEM `ip.weight`): `Σ ipw = 1` on a
+    /// segment, `1/2` on a triangle.
+    ///
+    /// Needed as its own quantity because MFEM's `DGTraceIntegrator` scales the
+    /// contribution by `ip.weight` *before* the unnormalised `nor` enters
+    /// (`un = vu·nor` carries the `|nor|` factor), so folding `|nor|` into the
+    /// weight — `weight` above — is only *algebraically* equal, not
+    /// bit-identical.
+    pub ip_weight: f64,
     /// Basis function values on the left element; length `n_dofs_l`.
     pub phi_l: &'a [f64],
     /// Basis function values on the right element; length `n_dofs_r`.
@@ -60,6 +69,13 @@ pub struct DgFaceQpData<'a> {
     /// D799-3: the unit form of MFEM's `nor = CalcOrtho(Trans.Jacobian())`, so
     /// `weight·normal` is exactly MFEM's `ip.weight·nor`.
     pub normal: &'a [f64],
+    /// MFEM's `nor = CalcOrtho(Trans.Jacobian())` itself — the **unnormalised**
+    /// face normal pointing outward from the left element, `|nor| = h_face`.
+    ///
+    /// `DGTraceIntegrator` consumes this form directly (`un = vu·nor`); every
+    /// integrator whose MFEM original contracts the raw `nor` must use it to be
+    /// bit-faithful.
+    pub unor: &'a [f64],
     /// Physical coordinates of this quadrature point; length `dim`.
     pub x_phys: &'a [f64],
     /// Left element ID (for tag-dependent coefficients).
@@ -164,7 +180,7 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
             // `ip.weight·nor` with the unit normal folded out — identical on a
             // straight element (where `|nor|` *is* the chord length) and
             // isoparametric on a curved one.
-            let (eip_l, eip_r, jit_l, jit_r, xp, nor_unit, h_face) = if dim == 2 {
+            let (eip_l, eip_r, jit_l, jit_r, xp, nor_unit, nor_raw, h_face) = if dim == 2 {
                 let g1 = face_point_geom(mesh, el, face_nodes[0], face_nodes[1], xi_f[0]);
                 let g2 = face_point_geom(mesh, er, face_nodes[0], face_nodes[1], xi_f[0]);
                 let nrm = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
@@ -175,6 +191,7 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
                     g2.jit,
                     g1.xp.to_vec(),
                     vec![g1.nor[0] / nrm, g1.nor[1] / nrm],
+                    g1.nor.to_vec(),
                     nrm,
                 )
             } else {
@@ -197,6 +214,7 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
                     g2.jit,
                     g1.xp.to_vec(),
                     vec![g1.nor[0] / nrm, g1.nor[1] / nrm, g1.nor[2] / nrm],
+                    g1.nor.to_vec(),
                     nrm,
                 )
             };
@@ -215,11 +233,13 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
                 n_dofs_r: n_r,
                 dim,
                 weight: w_f,
+                ip_weight: face_weights[qi],
                 phi_l: &phi_l,
                 phi_r: &phi_r,
                 grad_phys_l: &gphys_l,
                 grad_phys_r: &gphys_r,
                 normal: &nor_unit,
+                unor: &nor_raw,
                 x_phys: &xp,
                 elem_l: el,
                 elem_r: er,
@@ -319,15 +339,27 @@ impl<C: ScalarCoeff> DgFaceIntegrator for SipDgDiffusion<C> {
 
 // ─── DGAdvectionIntegrator ────────────────────────────────────────────────────
 
-/// DG upwind advection integrator.
+/// DG advection integrator — MFEM ex9's operator.
 ///
 /// Implements both:
-/// - **Volume term** (via [`BilinearIntegrator`]): `∫ (b·∇u) v dx`
-/// - **Interior face term** (via [`DgFaceIntegrator`]): upwind numerical flux
-///   `-∫ [[v]] F̂ dS` where `F̂ = (b·n)⁺ u⁻ + (b·n)⁻ u⁺`
+/// - **Volume term** (via [`BilinearIntegrator`]): `-∫ (b·∇v)·u dx`, the
+///   transpose of MFEM's `ConvectionIntegrator` (ex9 uses `alpha = -1` for it).
+/// - **Interior face term** (via [`DgFaceIntegrator`]): MFEM's
+///   `NonconservativeDGTraceIntegrator(velocity, alpha)`, i.e. the transpose of
+///   `DGTraceIntegrator(velocity, -alpha, 0.5·alpha)` — see
+///   [`crate::dg::dg_trace`].  ex9/ex41 pass `alpha = -1.0`.
+///
+/// Unlike the boundary/periodic helpers this type has no `beta`: ex9's C++
+/// only ever constructs the one-argument alias, whose `beta` is fixed at
+/// `0.5·alpha`.  Use [`DgTraceIntegrator`](crate::dg::dg_trace::DgTraceIntegrator)
+/// / [`DgNonconservativeTraceIntegrator`](crate::dg::dg_trace::DgNonconservativeTraceIntegrator)
+/// directly when a free `(alpha, beta)` pair is needed.
 pub struct DGAdvectionIntegrator<V: VectorCoeff> {
     /// Convection velocity field.
     pub velocity: V,
+    /// MFEM's `NonconservativeDGTraceIntegrator` coefficient `alpha`
+    /// (`examples/ex9.cpp` default: `-1.0`).
+    pub alpha: f64,
 }
 
 // ── Volume term (BilinearIntegrator) — weak form ──────────────────────────
@@ -368,40 +400,22 @@ impl<V: VectorCoeff> BilinearIntegrator for DGAdvectionIntegrator<V> {
 }
 
 // ── Interior face term (DgFaceIntegrator) ───────────────────────────────────
+//
+// MFEM `NonconservativeDGTraceIntegrator(velocity, alpha)` =
+// `TransposeIntegrator(DGTraceIntegrator(velocity, -alpha, 0.5*alpha))`.
+// The block layout lives in `dg_trace::add_dgtrace_blocks`; this impl is the
+// MFEM-faithful entry point for ex9's face term (D805-2).
 
 impl<V: VectorCoeff> DgFaceIntegrator for DGAdvectionIntegrator<V> {
     fn add_to_face_matrix(&self, qp: &DgFaceQpData<'_>,
         k_ll: &mut [f64], k_lr: &mut [f64],
         k_rl: &mut [f64], k_rr: &mut [f64])
     {
-        let n_l = qp.n_dofs_l;
-        let n_r = qp.n_dofs_r;
-        let d = qp.dim;
-        let w = qp.weight;
-
-        // Evaluate velocity at this face quadrature point
-        let ctx = CoeffCtx::from_qp(qp.x_phys, d, qp.elem_l, 0, None, None);
-        let mut b = [0.0_f64; 3];
-        self.velocity.eval(&ctx, &mut b[..d]);
-
-        // Project velocity onto face normal: vn = b·n
-        let vn: f64 = (0..d).map(|i| b[i] * qp.normal[i]).sum();
-
-        let phi_l = qp.phi_l;
-        let phi_r = qp.phi_r;
-
-        // MFEM NonconservativeDGTraceIntegrator with α = -1:
-        // ∫_F (v·n) · u_upwind · ⟦w⟧ where ⟦w⟧ = w⁻ − w⁺
-        // Test=L (w⁻): +α · w · vn · u_upwind · φ⁻
-        // Test=R (w⁺): −α · w · vn · u_upwind · φ⁺
-        // α = -1 → el += -w·vn·φ_test·φ_upwind (for L), +w·vn·φ_test·φ_upwind (for R)
-        if vn >= 0.0 {
-            for i in 0..n_l { for j in 0..n_l { k_ll[i*n_l+j] += -w * vn * phi_l[i] * phi_l[j]; }}
-            for i in 0..n_r { for j in 0..n_l { k_rl[i*n_l+j] += w * vn * phi_r[i] * phi_l[j]; }}
-        } else {
-            for i in 0..n_l { for j in 0..n_r { k_lr[i*n_r+j] += -w * vn * phi_l[i] * phi_r[j]; }}
-            for i in 0..n_r { for j in 0..n_r { k_rr[i*n_r+j] += w * vn * phi_r[i] * phi_r[j]; }}
-        }
+        // The inner integrator of MFEM's alias: alpha_in = -alpha, beta_in = 0.5*alpha.
+        super::dg_trace::add_nonconservative_blocks(
+            &self.velocity, self.alpha, 0.5 * self.alpha, qp,
+            k_ll, k_lr, k_rl, k_rr,
+        );
     }
 }
 
@@ -498,11 +512,26 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
 
 /// Assemble both boundary K-matrix and RHS for advection (inflow/outflow).
 ///
-/// - **Outflow** (b·n ≥ 0): adds `-w * vn * φ_i * φ_j` to K (upwind takes interior value)
-/// - **Inflow** (b·n < 0): adds `w * vn * φ_i * g_D` to RHS (weak Dirichlet)
+/// - **K matrix**: MFEM's `NonconservativeDGTraceIntegrator(velocity, alpha)`
+///   restricted to a boundary face, i.e. the `ndofs2 == 0` arm of
+///   `DGTraceIntegrator::AssembleFaceMatrix`: a single block with
+///   `w = ip.weight·(a+b)`, `a = 0.5·(-alpha)·un`, `b = 0.5·alpha·|un|`,
+///   `un = velocity·nor` with the **unnormalised** `nor`.
 ///
-/// Returns `(k_boundary, rhs_boundary)` matching MFEM's `NonconservativeDGTraceIntegrator`
-/// + `BoundaryFlowIntegrator` applied on boundary faces.
+///   D805-2: the pre-fix version added `-w·vn·φᵢφⱼ` on the *outflow* side
+///   (`vn ≥ 0`) with `w = ipw·|nor|` — both the wrong side and the wrong sign
+///   versus MFEM, which is non-zero on *inflow* (`w = ipw·un` for `alpha = −1`)
+///   and exactly zero on outflow.  It used the unit normal too, so the
+///   coefficient was only algebraically equal.
+/// - **RHS**: the weak inflow Dirichlet data `∫_{b·n<0} (b·n)·g_D·φᵢ`, which is
+///   MFEM's `BoundaryFlowIntegrator` — a *different* integrator, left
+///   untouched here (its numbers feed ex9's frozen stdout, and it is not a
+///   `DGTrace` term).  `w_f = ipw·|nor|` and the unit normal are used, so
+///   `∫ w_f·vn·g·φ` is MFEM's `ipw·(b·nor)·g·φ`.
+///
+/// Returns `(k_boundary, rhs_boundary)`: the K part is what ex9's C++ obtains
+/// from `AddBdrFaceIntegrator(NonconservativeDGTraceIntegrator(velocity, alpha))`
+/// and the RHS part from `BoundaryFlowIntegrator(inflow, velocity, alpha)`.
 pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoeff>(
     space: &S,
     velocity: &V,
@@ -510,6 +539,7 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
     g_d: &dyn Fn(&[f64]) -> f64,
     order: u8,
     quad_order: u8,
+    alpha: f64,
 ) -> (CsrMatrix<f64>, Vec<f64>) {
     let mesh = space.mesh();
     let dim = mesh.dim() as usize;
@@ -543,12 +573,16 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
             // construction (`face_point_geom`'s own-edge orientation), the
             // reference point from `Loc1`, the physical point from
             // `Elem1->Transform`, and the `[0,1]` face rule (`Σw = 1`).
-            // `weight = ipw·|nor|` is MFEM's `ip.weight·nor` with the unit
-            // normal folded out — the same number on a straight element.
-            let (eip, xp, normal, h_face) = if dim == 2 {
+            let (eip, xp, nor_raw, normal, h_face) = if dim == 2 {
                 let g = face_point_geom(mesh, elem, fnodes[0], fnodes[1], xi_f[0]);
                 let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]).sqrt().max(1e-30);
-                (g.eip.to_vec(), g.xp.to_vec(), vec![g.nor[0] / nrm, g.nor[1] / nrm], nrm)
+                (
+                    g.eip.to_vec(),
+                    g.xp.to_vec(),
+                    vec![g.nor[0], g.nor[1]],
+                    vec![g.nor[0] / nrm, g.nor[1] / nrm],
+                    nrm,
+                )
             } else {
                 let g = face_point_geom_3d(
                     mesh, elem, fnodes[0], fnodes[1], fnodes[2],
@@ -561,11 +595,13 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
                 (
                     g.eip.to_vec(),
                     g.xp.to_vec(),
+                    vec![g.nor[0], g.nor[1], g.nor[2]],
                     vec![g.nor[0] / nrm, g.nor[1] / nrm, g.nor[2] / nrm],
                     nrm,
                 )
             };
-            let w_f = q_face.weights[qi] * h_face;
+            let ipw = q_face.weights[qi];
+            let w_f = ipw * h_face;
             ref_elem.eval_basis(&eip, &mut phi);
 
             let ctx = CoeffCtx::from_qp(&xp, dim, elem, mesh.face_tag(f), None, None);
@@ -573,15 +609,16 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
             velocity.eval(&ctx, &mut b[..dim]);
             let vn: f64 = (0..dim).map(|i| b[i] * normal[i]).sum();
 
-            if vn >= 0.0 {
-                // Outflow: K_bdr[i,j] += -w * vn * φ_i * φ_j  (upwind takes interior value)
-                for i in 0..n_dofs_e {
-                    for j in 0..n_dofs_e {
-                        k_elem[i * n_dofs_e + j] += -w_f * vn * phi[i] * phi[j];
-                    }
-                }
-            } else {
-                // Inflow: RHS[i] += w * vn * φ_i * g_D
+            // ── K: MFEM `NonconservativeDGTraceIntegrator(velocity, alpha)`,
+            // boundary arm — one block, `w = ipw*(a+b)` with the inner
+            // `alpha_in = -alpha`, `beta_in = 0.5*alpha` and the UNNORMALISED
+            // `nor` inside `un`.
+            let un: f64 = (0..dim).map(|i| b[i] * nor_raw[i]).sum();
+            let (w_plus, _) = super::dg_trace::dgtrace_weights(ipw, un, -alpha, 0.5 * alpha);
+            super::dg_trace::add_scalar_face_block(w_plus, &phi, &mut k_elem, n_dofs_e);
+
+            // ── RHS: MFEM `BoundaryFlowIntegrator` on the inflow part.
+            if vn < 0.0 {
                 let g_val = g_d(&xp);
                 for i in 0..n_dofs_e {
                     f_elem[i] += w_f * phi[i] * vn * g_val;
@@ -607,8 +644,16 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
 /// periodic boundary.  Each element's basis must be evaluated at its OWN face
 /// nodes so that `phys_to_ref` maps within the element's reference domain.
 ///
-/// The normal is computed from the LEFT element's face nodes, then the flux
-/// contribution is evaluated separately on each element using its own geometry.
+/// The face term is MFEM's `NonconservativeDGTraceIntegrator(velocity, alpha)`
+/// (see [`crate::dg::dg_trace`]): the face normal, the quadrature weight and the
+/// parameterisation are the **left** face's own — `Trans.Elem1No` in MFEM —
+/// exactly as if the two elements shared that face, and the transpose block
+/// layout comes from the shared `dg_trace` helper.
+///
+/// D805-2: the pre-fix version built the conservative upwind form
+/// `-∫⟦v⟧F̂` and negated the left face's outward normal (the interface normal
+/// "from left to right"), so it was neither MFEM's block layout nor MFEM's
+/// normal convention.
 pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoeff>(
     coo: &mut CooMatrix<f64>,
     mesh: &M,
@@ -617,6 +662,7 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
     order: u8,
     quad_order: u8,
     velocity: &V,
+    alpha: f64,
 ) {
     let dim = mesh.dim() as usize;
     let ref_face = ref_elem_face(ElementType::Line2, order);
@@ -647,36 +693,43 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
             // pair's two faces are *different* edges in the mesh tables, so each
             // element is composed through its own `Loc1`/`Elem1` map — the
             // pre-fix chord interpolation and physical-inverse map only agreed
-            // with MFEM on straight edges).  The convention for the interface
-            // normal is unchanged: it points from the left element *towards* the
-            // right one through the periodic seam, i.e. the **negated** outward
-            // normal of the left element (`face_point_geom`'s `nor` is always
-            // outward).
+            // with MFEM on straight edges).  MFEM's `DGTraceIntegrator` takes
+            // `nor` and the velocity from `Elem1`, i.e. from the **left** face
+            // (never from a negated left→right normal), so `un = velocity·nor`
+            // uses `g_l.nor` unnormalised.
             let g_l = face_point_geom(mesh, el_l, fn_l[0], fn_l[1], xi_f[0]);
             let g_r = face_point_geom(mesh, el_r, fn_r[0], fn_r[1], xi_f[0]);
-            let nrm = (g_l.nor[0] * g_l.nor[0] + g_l.nor[1] * g_l.nor[1]).sqrt().max(1e-30);
-            let normal_l = vec![-g_l.nor[0] / nrm, -g_l.nor[1] / nrm];
-            let w_f = q_face.weights[qi] * nrm;
             let xp_l = g_l.xp.to_vec();
 
             // Evaluate bases at each element's own composed reference point
             re_l.eval_basis(&g_l.eip, &mut phi_l);
             re_r.eval_basis(&g_r.eip, &mut phi_r);
 
-            // Velocity at left face QP
-            let ctx = CoeffCtx::from_qp(&xp_l, dim, el_l, 0, None, None);
-            let mut b = [0.0; 3];
-            velocity.eval(&ctx, &mut b[..dim]);
-            let vn: f64 = (0..dim).map(|i| b[i] * normal_l[i]).sum();
-
-            // Upwind flux (same as DGAdvectionIntegrator face term)
-            if vn >= 0.0 {
-                for i in 0..n_l { for j in 0..n_l { k_ll[i*n_l+j] += -w_f * vn * phi_l[i] * phi_l[j]; }}
-                for i in 0..n_r { for j in 0..n_l { k_rl[i*n_l+j] += w_f * vn * phi_r[i] * phi_l[j]; }}
-            } else {
-                for i in 0..n_l { for j in 0..n_r { k_lr[i*n_r+j] += -w_f * vn * phi_l[i] * phi_r[j]; }}
-                for i in 0..n_r { for j in 0..n_r { k_rr[i*n_r+j] += w_f * vn * phi_r[i] * phi_r[j]; }}
-            }
+            let qp = DgFaceQpData {
+                n_dofs_l: n_l,
+                n_dofs_r: n_r,
+                dim,
+                // `weight = ipw·|nor|` is MFEM's `ip.weight·nor` with the unit
+                // normal folded out; `DGTraceIntegrator` uses the split form.
+                weight: q_face.weights[qi]
+                    * (g_l.nor[0] * g_l.nor[0] + g_l.nor[1] * g_l.nor[1]).sqrt(),
+                ip_weight: q_face.weights[qi],
+                phi_l: &phi_l,
+                phi_r: &phi_r,
+                grad_phys_l: &[],
+                grad_phys_r: &[],
+                normal: &[],
+                unor: &g_l.nor,
+                x_phys: &xp_l,
+                elem_l: el_l,
+                elem_r: el_r,
+                elem_dofs_l: None,
+                elem_dofs_r: None,
+            };
+            super::dg_trace::add_nonconservative_blocks(
+                velocity, alpha, 0.5 * alpha, &qp,
+                &mut k_ll, &mut k_lr, &mut k_rl, &mut k_rr,
+            );
         }
 
         for (i, &gi) in dofs_l.iter().enumerate() {
@@ -909,7 +962,7 @@ mod tests {
 
         let vel = vec![1.0, 0.0];
 
-        let dg_adv = DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vel.clone()) };
+        let dg_adv = DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vel.clone()), alpha: -1.0 };
         let conv = ConvectionIntegrator { velocity: ConstantVectorCoeff(vel) };
         let mat_dg = Assembler::assemble_bilinear(&space, &[&dg_adv], 3);
         let mat_conv = Assembler::assemble_bilinear(&space, &[&conv], 3);
@@ -935,7 +988,7 @@ mod tests {
         let space = L2Space::new(mesh, 1);  // P1 L2
         let ifl = InteriorFaceList::build(space.mesh());
 
-        let dg_adv = DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]) };
+        let dg_adv = DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]), alpha: -1.0 };
         let n = space.n_dofs();
 
         let k_vol = crate::assembler::Assembler::assemble_bilinear(&space, &[&dg_adv], 2);
@@ -973,7 +1026,7 @@ mod tests {
         let n = space.n_dofs();
         let mut coo = CooMatrix::<f64>::new(n, n);
         assemble_dg_interior_faces(&mut coo, space.mesh(), &space, &ifl, 1, 1,
-            &DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]) });
+            &DGAdvectionIntegrator { velocity: ConstantVectorCoeff(vec![1.0, 0.0]), alpha: -1.0 });
         let k = coo.into_csr();
         let mut has_nonzero = false;
         for i in 0..n { for j in 0..n { if k.get(i, j).abs() > 1e-14 { has_nonzero = true; } } }

@@ -115,7 +115,7 @@ fn main() {
     // NonconservativeDGTraceIntegrator(u, -1) (pure advection: diff=sigma=
     // kappa=0).  ex9's C++ uses DG_FECollection(..., BasisType::GaussLobatto)
     // so the space must be GLL too.
-    let dg_adv = DGAdvectionIntegrator { velocity: vel_coeff };
+    let dg_adv = DGAdvectionIntegrator { velocity: vel_coeff, alpha: -1.0 };
     let k_vol = Assembler::assemble_bilinear(&space, &[&dg_adv], qo_adv);
 
     let faces = build_face_locs(space.mesh());
@@ -161,7 +161,7 @@ fn main() {
         })
     };
     let (_k_bdr_old, rhs_bc) = assemble_advection_boundary_full(
-        &space, &vel_bdr, &bc_tags, &inflow_g, args.order, qface);
+        &space, &vel_bdr, &bc_tags, &inflow_g, args.order, qface, -1.0);
 
     let k_adv = coo.into_csr();
 

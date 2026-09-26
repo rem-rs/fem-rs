@@ -146,7 +146,7 @@ fn main() {
             out[0] = 1.0;
             out[1] = 0.0;
         });
-        let dg_adv = DGAdvectionIntegrator { velocity: vel };
+        let dg_adv = DGAdvectionIntegrator { velocity: vel, alpha: -1.0 };
         let adv_local = Assembler::assemble_bilinear(
             ps.local_space(),
             &[&dg_adv],
@@ -210,7 +210,7 @@ fn main() {
             out[1] = 0.0;
         });
         let (_k_bdr, rhs_bc_local) = fem_assembly::dg::dg_advection::assemble_advection_boundary_full(
-            ps.local_space(), &vel_bdr, &bc_tags, &inflow_g, order, qo_adv,
+            ps.local_space(), &vel_bdr, &bc_tags, &inflow_g, order, qo_adv, -1.0,
         );
 
         // ── 3. Pack into ParCsrMatrix + ParVector ───────────────────────────

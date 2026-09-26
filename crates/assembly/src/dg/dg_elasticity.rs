@@ -27,12 +27,32 @@ impl DgElasticityAssembler {
     /// Volume: ∫ 2μ·ε(u):ε(v) + λ·div(u)·div(v) dx
     ///   = ∫ μ·(∇u:∇v + ∇u:∇v^T) + λ·I·div(u)·div(v) dx
     ///
-    /// Faces: stress-based SIP
-    ///   a(u,v) = −∫ {σ(u)·n}·⟦v⟧ − α∫ {σ(v)·n}·⟦u⟧ + ∫ (κ/h)⟦u⟧·⟦v⟧ ds
+    /// Faces: MFEM's `DGElasticityIntegrator`
+    ///   `elmat := -elmat + alpha·elmatᵀ + jmat` where the consistency and
+    ///   symmetry blocks are the block-diagonal `−A + alpha·Aᵀ` of the
+    ///   averaged stress flux and `jmat` is MFEM's penalty
+    ///   `jmatcoef = kappa·(nor·nor)·wLM` (see
+    ///   [`assemble_interior_face_stress`]).
     ///
     /// `dirichlet_attrs` = list of boundary attributes where Dirichlet BCs are
     /// enforced weakly (the parameter `dir_bdr` in MFEM ex17). Pass an empty
     /// slice for pure natural BC.
+    ///
+    /// # Quadrature (D805-1)
+    ///
+    /// `quad_order` is the **face** rule.  MFEM's `DGElasticityIntegrator`
+    /// default is `2·max(el1.GetOrder(), el2.GetOrder())` on the face geometry
+    /// (`fem/bilininteg.cpp:4122`), which is what callers pass — ex17 passes
+    /// `2·order`.
+    ///
+    /// The **volume** rule is MFEM's `ElasticityIntegrator` default,
+    /// `2·Trans.OrderGrad(&el)` (`fem/bilininteg.cpp:3247`; see
+    /// [`mfem_elasticity_volume_rule`]).  It is derived internally from the
+    /// mesh's geometry order and the element order, so it is *not* taken from
+    /// `quad_order`.  On a straight (order-1 geometry) mesh the two coincide:
+    /// MFEM's `2·OrderGrad` and the old `quad_order = 2p` select the same
+    /// Gauss-Legendre rule at every order (`n = p+1` points per axis either
+    /// way) — on a curved mesh they differ and MFEM's own rule is the right one.
     pub fn assemble_sip_elasticity<S: FESpace + Sync>(
         space: &S,
         ifl: &InteriorFaceList,
@@ -55,7 +75,7 @@ impl DgElasticityAssembler {
         let mut coo = CooMatrix::<f64>::new(n_total, n_total);
 
         // ── 1. Volume ──────────────────────────────────────────────────
-        assemble_volume(&mut coo, space, lambda_elem, mu_elem, dim, quad_order);
+        assemble_volume(&mut coo, space, lambda_elem, mu_elem, dim);
 
         // ── 2. Interior face stress SIP ────────────────────────────────
         let dirichlet_set: std::collections::HashSet<i32> =
@@ -118,16 +138,51 @@ impl DgElasticityAssembler {
 // μ·∂ⱼφ_a·∂ᵢφ_b (cross) + λ·∂ᵢφ_a·∂ⱼφ_b (div-div), matching
 // the decomposition used in `assemble_vol_coupling_per_elem`.
 
+/// MFEM's default quadrature order for `ElasticityIntegrator`'s volume term:
+/// `2 * Trans.OrderGrad(&el)` (`fem/bilininteg.cpp:3249-3252`).
+///
+/// `ElasticityIntegrator` does **not** override `GetDefaultIntegrationRule`
+/// (which is what would give the generic `p + p + Trans.OrderW()` rule that
+/// `VectorDivergenceIntegrator` and friends use): its own
+/// `AssembleElementMatrix` sees `GetIntegrationRule(el, Trans) == NULL` and
+/// falls back to `2*Trans.OrderGrad(&el)`, with
+/// `IsoparametricTransformation::OrderGrad` (`fem/eltrans.cpp:509-529`)
+/// returning
+///   * `(g-1)·(dim-1) + (p-1)` for a `Pk` (simplex) geometry map,
+///   * `g·(dim-1) + (p-1)`     for a `Qk` (tensor) geometry map,
+/// where `g` is the mesh's geometry order and `p` the element's own order.
+///
+/// On the D805 curved fixture (`g = 3`, `Qk`, `dim = 2`, `p = 1`) that is order
+/// 6 → the 4×4 Gauss-Legendre rule, which the probe confirms is exactly what
+/// a plain `ElasticityIntegrator` uses there (`[ORDER]` rows of
+/// `tmp/d805r76/cpp_truth_default.txt`).
+// MFEM: ElasticityIntegrator::AssembleElementMatrix + IsoparametricTransformation::OrderGrad
+pub fn mfem_elasticity_volume_rule(
+    geom_order: u8,
+    elem_order: u8,
+    et: ElementType,
+    dim: usize,
+) -> u8 {
+    let g = geom_order as i32;
+    let p = elem_order as i32;
+    let d = dim as i32;
+    let order = match et {
+        ElementType::Tri3 | ElementType::Tet4 => (g - 1) * (d - 1) + (p - 1),
+        _ => g * (d - 1) + (p - 1),
+    };
+    (2 * order).clamp(0, u8::MAX as i32) as u8
+}
+
 fn assemble_volume<S: FESpace>(
     coo: &mut CooMatrix<f64>,
     space: &S,
     lambda_elem: &[f64],
     mu_elem: &[f64],
     dim: usize,
-    quad_order: u8,
 ) {
     let mesh = space.mesh();
     let order = space.order();
+    let geom_order = mesh.geom_order();
 
     for e in mesh.elem_iter() {
         let ei = e as usize;
@@ -138,8 +193,11 @@ fn assemble_volume<S: FESpace>(
         }
 
         let et = mesh.element_type(e);
+        let elem_order = space.element_order(e);
         let re: Box<dyn ReferenceElement> = ref_elem_vol(et, order);
         let n_l = re.n_dofs();
+        // MFEM's `ElasticityIntegrator` volume rule (see the helper above).
+        let quad_order = mfem_elasticity_volume_rule(geom_order, elem_order, et, dim);
         let q = re.quadrature(quad_order);
 
         let dofs: Vec<usize> =
@@ -337,12 +395,12 @@ fn assemble_interior_face_stress<S: FESpace>(
         //   jmatcoef = kappa·(nor·nor)·(wL1+2wM1+wL2+2wM2)
         // and then `elmat := -elmat + alpha·elmatᵀ + jmat`.  The factors of
         // `Weight` cancel exactly as in `dg.rs`: `dshape_ps·nM` is
-        // `det(J)·w1·μ·(J⁻ᵀ∇φ)·nor = (ip.weight/2)·μ·∇ₓφ·nor`, and
-        // `jmatcoef` is `kappa·|nor|²·ip.weight/2·( (λ+2μ)/det₁ + (λ+2μ)/det₂ )`
-        // — which is exactly the `w_f·pen` term kept below with `w_f` the
-        // isoparametric face measure (`ipw·|nor|`) and `pen` the stress-based
-        // penalty `kappa(λ+2μ)/|nor|`.  Both are unchanged *numbers* on a
-        // straight element, where `|nor|` is the edge length.
+        // `det(J)·w1·μ·(J⁻ᵀ∇φ)·nor = (ip.weight/2)·μ·∇ₓφ·nor`, i.e. the
+        // averaged stress flux carried below by `w_f = ipw·|nor|` together with
+        // the unit normal; `jmatcoef` is
+        // `kappa·|nor|²·ip.weight/2·( (λ+2μ)/det₁ + (λ+2μ)/det₂ )` — MFEM's
+        // penalty, which the pre-round-76 `w_f·pen` term was **not** (see the
+        // `jmatcoef` block below).
         let g1 = face_point_geom(mesh, el, fa, fb, xi_f[0]);
         let g2 = face_point_geom(mesh, er, fa, fb, xi_f[0]);
         // Face size from the isoparametric edge (`nor`'s magnitude = |dX/dξ|;
@@ -358,10 +416,30 @@ fn assemble_interior_face_stress<S: FESpace>(
         xform_grads(&g1.jit, &gref_l, &mut gphys_l, n_l, dim);
         xform_grads(&g2.jit, &gref_r, &mut gphys_r, n_r, dim);
 
-        // SIP interior penalty with averaged Lame constants
-        let lam_face = 0.5 * (lam_l + lam_r);
-        let mu_face = 0.5 * (mu_l + mu_r);
-        let pen = kappa * (lam_face + 2.0 * mu_face) / h_f;
+        // D805-1: MFEM's penalty (the `jmat` of `AssembleBlock`), NOT an
+        // averaged Lame constant:
+        //
+        //   w      = ip.weight/2                       (interior face)
+        //   wLₖ    = (w / Weightₖ) · λₖ ,  wMₖ = (w / Weightₖ) · μₖ
+        //   wLM    = (wL₁ + 2·wM₁) + (wL₂ + 2·wM₂)
+        //   jmatcoef = kappa · (nor·nor) · wLM
+        //
+        // i.e. `kappa·|nor|²·ipw·(1/2)·((λ₁+2μ₁)/W₁ + (λ₂+2μ₂)/W₂)`: the **bare**
+        // face quadrature weight `ipw` enters once (through `w = ip.weight/2`),
+        // the two elements' `(λ+2μ)/Weight()` are **summed** (MFEM does not
+        // average them), and the face measure is carried by `nor·nor` — not by
+        // a `1/|nor|` on the coefficient.
+        //
+        // The pre-fix code instead used `w_f·pen` with `w_f = ipw·|nor|` and
+        // `pen = kappa·(λ+2μ)_avg/|nor|`, a different number on any element
+        // whose `|nor|²/Weight` ratio is not 1 (41.5% on the D805 fixture; it
+        // coincides on a uniform straight square mesh, where `|nor|² = W`).
+        //
+        // `nor·nor` is formed from the unnormalised `g1.nor` directly (MFEM's
+        // `nor*nor`), not from `h_f*h_f`, to stay bit-faithful.
+        let nor_dot_nor = g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1];
+        let jmatcoef = kappa * nor_dot_nor * q_face.weights[qi] * 0.5
+            * ((lam_l + 2.0 * mu_l) / g1.det_j + (lam_r + 2.0 * mu_r) / g2.det_j);
 
         // Precompute stress flux for each basis×component on both sides
         // sigma_n_L[a][l][i] = (σ_L(φ_a·e_l)·n)_i
@@ -393,8 +471,8 @@ fn assemble_interior_face_stress<S: FESpace>(
                         let col_off = b * dim + j;
                         let t1 = -0.5 * snl[b][j][i] * phi_l[a];
                         let t2 = 0.5 * alpha * snl[a][i][j] * phi_l[b];
-                        let t3 = pen * phi_l[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
-                        kll[row_off * stride_ll + col_off] += w_f * (t1 + t2 + t3);
+                        let t3 = jmatcoef * phi_l[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
+                        kll[row_off * stride_ll + col_off] += w_f * (t1 + t2) + t3;
                     }
                 }
             }
@@ -436,8 +514,8 @@ fn assemble_interior_face_stress<S: FESpace>(
                         let col_off = b * dim + j;
                         let t1 = -0.5 * snr[b][j][i] * phi_l[a];
                         let t2 = -0.5 * alpha * snl[a][i][j] * phi_r[b];
-                        let t3 = -pen * phi_l[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
-                        klr[row_off * stride_lr + col_off] += w_f * (t1 + t2 + t3);
+                        let t3 = -jmatcoef * phi_l[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
+                        klr[row_off * stride_lr + col_off] += w_f * (t1 + t2) + t3;
                     }
                 }
             }
@@ -457,8 +535,8 @@ fn assemble_interior_face_stress<S: FESpace>(
                         let col_off = b * dim + j;
                         let t1 = 0.5 * snl[b][j][i] * phi_r[a];
                         let t2 = 0.5 * alpha * snr[a][i][j] * phi_l[b];
-                        let t3 = -pen * phi_r[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
-                        krl[row_off * stride_rl + col_off] += w_f * (t1 + t2 + t3);
+                        let t3 = -jmatcoef * phi_r[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
+                        krl[row_off * stride_rl + col_off] += w_f * (t1 + t2) + t3;
                     }
                 }
             }
@@ -479,8 +557,8 @@ fn assemble_interior_face_stress<S: FESpace>(
                         let col_off = b * dim + j;
                         let t1 = 0.5 * snr[b][j][i] * phi_r[a];
                         let t2 = -0.5 * alpha * snr[a][i][j] * phi_r[b];
-                        let t3 = pen * phi_r[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
-                        krr[row_off * stride_rr + col_off] += w_f * (t1 + t2 + t3);
+                        let t3 = jmatcoef * phi_r[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
+                        krr[row_off * stride_rr + col_off] += w_f * (t1 + t2) + t3;
                     }
                 }
             }
@@ -551,10 +629,12 @@ fn assemble_boundary_face_stress<S: FESpace>(
         // D799-3: same isoparametric face route as the interior term.  MFEM's
         // `DGElasticityIntegrator` boundary case is the `ndofs2 == 0` arm of
         // `AssembleFaceMatrix`: `w = ip.weight` (no ½), `w1 = w/Weight₁`,
-        // `wLM = wL1 + 2wM1`, `jmatcoef = kappa·(nor·nor)·wLM`, so the
-        // consistency/symmetry terms carry no det(J) and the penalty is
-        // `kappa·|nor|²·ip.weight·(λ+2μ)/det₁` — again the `w_f·pen` kept below
-        // with the isoparametric face measure and `pen = kappa(λ+2μ)/|nor|`.
+        // `wLM = wL1 + 2wM1`, `jmatcoef = kappa·(nor·nor)·wLM`.  The
+        // consistency/symmetry terms carry the isoparametric face measure
+        // `w_f = ipw·|nor|` with the unit normal (MFEM's
+        // `nL₁ = (ipw/W₁)·λ·nor` against `dshape_ps = W·∇ₓφ` — the `W` cancels
+        // and the flux is the same number), and the penalty below is MFEM's
+        // `jmatcoef`, not the pre-round-76 `w_f·pen`.
         let g1 = face_point_geom(mesh, elem, fa, fb, xi_f[0]);
         let h_f = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
         let normal = [g1.nor[0] / h_f, g1.nor[1] / h_f];
@@ -564,7 +644,13 @@ fn assemble_boundary_face_stress<S: FESpace>(
         re.eval_grad_basis(&g1.eip, &mut gref);
         xform_grads(&g1.jit, &gref, &mut gphys, n, dim);
 
-        let pen = kappa * (lam + 2.0 * mu) / h_f;
+        // D805-1: MFEM's boundary penalty `jmatcoef = kappa·(nor·nor)·wLM` with
+        // `w = ip.weight` (the boundary arm does NOT halve `w`), so
+        // `kappa·|nor|²·ipw·(λ+2μ)/Weight₁`.  The pre-fix code used
+        // `w_f·pen = ipw·|nor|·kappa·(λ+2μ)/|nor| = ipw·kappa·(λ+2μ)`, which
+        // drops MFEM's `|nor|²/Weight` factor.
+        let nor_dot_nor = g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1];
+        let jmatcoef = kappa * nor_dot_nor * q_face.weights[qi] * (lam + 2.0 * mu) / g1.det_j;
 
         // Precompute stress flux for each basis×component
         let mut sn = vec![vec![vec![0.0_f64; dim]; dim]; n];
@@ -587,8 +673,8 @@ fn assemble_boundary_face_stress<S: FESpace>(
                         let col_off = b * dim + j;
                         let t1 = -sn[b][j][i] * phi[a];
                         let t2 = alpha * sn[a][i][j] * phi[b];
-                        let t3 = pen * phi[a] * phi[b] * if i == j { 1.0 } else { 0.0 };
-                        kbd[row_off * stride + col_off] += w_f * (t1 + t2 + t3);
+                        let t3 = jmatcoef * phi[a] * phi[b] * if i == j { 1.0 } else { 0.0 };
+                        kbd[row_off * stride + col_off] += w_f * (t1 + t2) + t3;
                     }
                 }
             }
