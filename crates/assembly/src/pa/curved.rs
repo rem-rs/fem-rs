@@ -43,6 +43,44 @@ pub(crate) fn curved_jacobian<const D: usize, M: MeshTopology + ?Sized>(
     Some((jac, x))
 }
 
+/// Determinant and inverse of a 3×3 Jacobian whose **rows** are `∂x/∂ξ_c`
+/// (`curved_jacobian`'s convention: row `c` is the physical vector `∂x/∂ξ_c`).
+///
+/// Returns `(det, Jinv)` with `Jinv[r][c] = ∂ξ_r/∂x_c` (the plain matrix
+/// inverse) — exactly the `∇_phys = Jinv·∇_ref` transform the simplex PA
+/// kernels store (`prism_pk`'s reference metric takes these columns as the
+/// physical gradients of the reference coordinates).  The pre-D770 prism code
+/// clamped to `max(det, 1e-30)` and took `|det|`, which quietly produced `1e30`
+/// entries for inverted prisms instead of the negative-signed operator the
+/// assembled path assembles (D679's signed convention).
+///
+/// D808-4-r78: moved here from `prism_pk` (its only home until then) so that
+/// [`super::tet4`]'s curved branch and `prism_pk` share one inversion.
+pub(crate) fn invert_3x3(j: &[[f64; 3]; 3]) -> (f64, [[f64; 3]; 3]) {
+    let det = j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
+        - j[0][1] * (j[1][0] * j[2][2] - j[1][2] * j[2][0])
+        + j[0][2] * (j[1][0] * j[2][1] - j[1][1] * j[2][0]);
+    let inv = 1.0 / det;
+    let c = [
+        [
+            (j[1][1] * j[2][2] - j[1][2] * j[2][1]) * inv,
+            (j[0][2] * j[2][1] - j[0][1] * j[2][2]) * inv,
+            (j[0][1] * j[1][2] - j[0][2] * j[1][1]) * inv,
+        ],
+        [
+            (j[1][2] * j[2][0] - j[1][0] * j[2][2]) * inv,
+            (j[0][0] * j[2][2] - j[0][2] * j[2][0]) * inv,
+            (j[0][2] * j[1][0] - j[0][0] * j[1][2]) * inv,
+        ],
+        [
+            (j[1][0] * j[2][1] - j[1][1] * j[2][0]) * inv,
+            (j[0][1] * j[2][0] - j[0][0] * j[2][1]) * inv,
+            (j[0][0] * j[1][1] - j[0][1] * j[1][0]) * inv,
+        ],
+    ];
+    (det, c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

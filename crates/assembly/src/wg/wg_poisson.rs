@@ -4,8 +4,13 @@
 //!
 //! Bilinear form: a_h(u,v) = (kappa * grad_w u, grad_w v) + s(u,v)
 //! where grad_w is the weak gradient and s is a face stabilizer.
+//!
+//! The face stabilizer's geometry (measure, physical point, element reference
+//! point) comes from the family's shared isoparametric face path
+//! (`super::wg_face_point` / `super::wg_face_measure`, i.e.
+//! `dg_base::face_point_geom`); see [`super`] for what the pre-D810-1 chord
+//! route got wrong.
 
-use std::collections::HashMap;
 use nalgebra::DMatrix;
 use fem_element::{
     ReferenceElement, lagrange::{TriPk, TetPk},
@@ -15,8 +20,12 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
+use super::{wg_boundary_face_map, wg_face_measure, wg_face_point, wg_face_rule};
+
 // ─── Local helpers (mirrored from crate internals) ─────────────────────────
 
+/// Element Jacobian from the element's **vertices** (the volume path's
+/// geometry — the D808-4-class residual registered in [`super`]).
 fn local_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
     let x0 = mesh.node_coords(nodes[0]);
     let mut jac = DMatrix::zeros(dim, dim);
@@ -26,66 +35,6 @@ fn local_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f
     let det = jac.determinant();
     (jac, det)
 }
-
-fn local_phys_to_ref(jac: &DMatrix<f64>, x0: &[f64], xp: &[f64], dim: usize) -> Vec<f64> {
-    let ji = jac.clone().try_inverse().unwrap_or(DMatrix::identity(dim, dim));
-    let mut xi = vec![0.0; dim];
-    for i in 0..dim { for j in 0..dim { xi[i] += ji[(i, j)] * (xp[j] - x0[j]); }}
-    xi
-}
-
-fn face_geom_2d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> f64 {
-    let c0 = mesh.node_coords(nodes[0]);
-    let c1 = mesh.node_coords(nodes[1]);
-    let dx = c1[0] - c0[0]; let dy = c1[1] - c0[1];
-    (dx*dx + dy*dy).sqrt()
-}
-
-fn face_geom_3d<M: MeshTopology>(mesh: &M, nodes: &[u32]) -> f64 {
-    let c0 = mesh.node_coords(nodes[0]);
-    let c1 = mesh.node_coords(nodes[1]);
-    let c2 = mesh.node_coords(nodes[2]);
-    let u1 = [c1[0]-c0[0], c1[1]-c0[1], c1[2]-c0[2]];
-    let u2 = [c2[0]-c0[0], c2[1]-c0[1], c2[2]-c0[2]];
-    let nx = u1[1]*u2[2] - u1[2]*u2[1];
-    let ny = u1[2]*u2[0] - u1[0]*u2[2];
-    let nz = u1[0]*u2[1] - u1[1]*u2[0];
-    (nx*nx + ny*ny + nz*nz).sqrt() / 2.0
-}
-
-fn build_face_elem_map<M: MeshTopology>(mesh: &M) -> HashMap<u32, u32> {
-    use std::collections::HashMap;
-    let mut map = HashMap::new();
-    let n_bfaces = mesh.n_boundary_faces() as u32;
-    for e in 0..mesh.n_elements() as u32 {
-        let ns = mesh.element_nodes(e);
-        let npe = ns.len();
-        let dim = mesh.dim();
-        // Build all faces of this element and check if they match a boundary face
-        for fi in 0..npe {
-            let (a, b, c) = match dim {
-                2 => (ns[fi], ns[(fi+1)%npe], u32::MAX),
-                3 => { if npe == 4 { (ns[TET_FACES[fi][0]], ns[TET_FACES[fi][1]], ns[TET_FACES[fi][2]]) }
-                       else if npe == 8 { let f = HEX_FACES[fi]; (ns[f[0]], ns[f[1]], ns[f[2]]) }
-                       else { continue; }}
-                _ => continue,
-            };
-            for f in 0..n_bfaces {
-                let bns = mesh.face_nodes(f);
-                let matches = match dim {
-                    2 => bns.len() == 2 && ((bns[0]==a&&bns[1]==b)||(bns[0]==b&&bns[1]==a)),
-                    3 => bns.len() == 3 && bns.contains(&a) && bns.contains(&b) && bns.contains(&c),
-                    _ => false,
-                };
-                if matches { map.insert(f, e); }
-            }
-        }
-    }
-    map
-}
-
-const TET_FACES: [[usize; 3]; 4] = [[1,2,3],[0,2,3],[0,1,3],[0,1,2]];
-const HEX_FACES: [[usize; 4]; 6] = [[0,1,2,3],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]];
 
 // ─── Weak gradient matrix ──────────────────────────────────────────────────
 
@@ -174,17 +123,15 @@ pub fn assemble_wg_poisson<S: FESpace>(space: &S, quad_order: u8, penalty: f64) 
     // Face penalty (simplified: h^{-1} * penalty * ∫_F [u][v])
     let interior_faces = crate::InteriorFaceList::build(mesh);
     for f in &interior_faces.faces {
-        let h = if dim == 2 { face_geom_2d(mesh, &f.face_nodes) }
-                else { face_geom_3d(mesh, &f.face_nodes) };
+        let h = wg_face_measure(mesh, f.elem_left, &f.face_nodes, quad_order);
         let alpha = penalty / h.max(1e-14);
         add_face_penalty(&mut coo, mesh, space, f.elem_left, f.elem_right, &f.face_nodes, alpha, quad_order);
     }
-    let fe_map = build_face_elem_map(mesh);
+    let fe_map = wg_boundary_face_map(mesh);
     for bf in mesh.face_iter() {
         if let Some(&el) = fe_map.get(&bf) {
             let fnodes: Vec<u32> = mesh.face_nodes(bf).to_vec();
-            let h = if dim == 2 { face_geom_2d(mesh, &fnodes) }
-                    else { face_geom_3d(mesh, &fnodes) };
+            let h = wg_face_measure(mesh, el, &fnodes, quad_order);
             let alpha = penalty / h.max(1e-14);
             add_face_penalty(&mut coo, mesh, space, el, el, &fnodes, alpha, quad_order);
         }
@@ -202,31 +149,24 @@ fn add_face_penalty<M: MeshTopology, S: FESpace<Mesh=M>>(
     let ref_e: Box<dyn ReferenceElement> = if dim == 2 { Box::new(TriPk::new(order)) }
                                            else { Box::new(TetPk::new(order)) };
     let ne = ref_e.n_dofs();
-    let qf = tri_rule(qo);
+    let qf = wg_face_rule(dim, qo);
     let dofs_l: Vec<usize> = space.element_dofs(el).iter().map(|&d| d as usize).collect();
     let dofs_r: Vec<usize> = space.element_dofs(er).iter().map(|&d| d as usize).collect();
 
     for (qi, xi) in qf.points.iter().enumerate() {
-        let w = qf.weights[qi] * (if dim == 2 { face_geom_2d(mesh, fnodes) } else { face_geom_3d(mesh, fnodes) });
-        let xp = if dim == 2 { let c = mesh.node_coords(fnodes[0]); let d = mesh.node_coords(fnodes[1]);
-                [c[0]+xi[0]*(d[0]-c[0]), c[1]+xi[0]*(d[1]-c[1]), 0.0] }
-               else { let c0=mesh.node_coords(fnodes[0]);let c1=mesh.node_coords(fnodes[1]);let c2=mesh.node_coords(fnodes[2]);
-                [c0[0]+xi[0]*(c1[0]-c0[0])+xi[1]*(c2[0]-c0[0]),
-                 c0[1]+xi[0]*(c1[1]-c0[1])+xi[1]*(c2[1]-c0[1]),
-                 c0[2]+xi[0]*(c1[2]-c0[2])+xi[1]*(c2[2]-c0[2])] };
-        let nl = mesh.element_nodes(el);
-        let (jl, _) = local_jac(mesh, nl, dim);
-        let xil = local_phys_to_ref(&jl, mesh.node_coords(nl[0]), &xp[..dim], dim);
-        let mut pl = vec![0.0; ne]; ref_e.eval_basis(&xil, &mut pl);
+        // D810-1: the QP's measure is `ipw·|nor|` of the element's own
+        // isoparametric face, and the basis is evaluated at the composed
+        // reference point (`eip`) — no corner interpolation, no inversion.
+        let g = wg_face_point(mesh, el, fnodes, xi);
+        let w = qf.weights[qi] * g.nor_mag();
+        let mut pl = vec![0.0; ne]; ref_e.eval_basis(&g.eip, &mut pl);
         for i in 0..ne { for j in 0..ne {
             let v = alpha * w * pl[i] * pl[j];
             if v.abs() > 1e-30 { coo.add(dofs_l[i], dofs_l[j], v); }
         }}
         if el != er {
-            let nr = mesh.element_nodes(er);
-            let (jr, _) = local_jac(mesh, nr, dim);
-            let xir = local_phys_to_ref(&jr, mesh.node_coords(nr[0]), &xp[..dim], dim);
-            let mut pr = vec![0.0; ne]; ref_e.eval_basis(&xir, &mut pr);
+            let gr = wg_face_point(mesh, er, fnodes, xi);
+            let mut pr = vec![0.0; ne]; ref_e.eval_basis(&gr.eip, &mut pr);
             for i in 0..ne { for j in 0..ne {
                 let v = alpha * w * pr[i] * pr[j];
                 if v.abs() > 1e-30 { coo.add(dofs_r[i], dofs_r[j], v); }

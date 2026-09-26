@@ -74,6 +74,8 @@ use fem_element::lagrange::H1TriPk;
 use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
+use super::curved::invert_3x3;
+
 // ─── 1D Lagrange basis (Gauss-Lobatto nodes on [0,1]) ─────────────────────
 
 /// The closed Gauss-Lobatto points on `[0,1]` — the 1-D factor of
@@ -199,37 +201,6 @@ impl PrismGeom {
         }
         j
     }
-}
-
-/// Determinant and inverse of a 3×3 Jacobian whose rows are `∂x/∂ξ_c`.
-///
-/// Returns `(det, Jinv)` with `Jinv[r][c] = ∂ξ_r/∂x_c` (the true inverse; the
-/// old code clamped to `max(det, 1e-30)` and took `|det|`, which quietly
-/// produced `1e30` entries for inverted prisms instead of the negative-signed
-/// operator the assembled path assembles — D679's signed convention).
-fn invert_3x3(j: &[[f64; 3]; 3]) -> (f64, [[f64; 3]; 3]) {
-    let det = j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
-        - j[0][1] * (j[1][0] * j[2][2] - j[1][2] * j[2][0])
-        + j[0][2] * (j[1][0] * j[2][1] - j[1][1] * j[2][0]);
-    let inv = 1.0 / det;
-    let c = [
-        [
-            (j[1][1] * j[2][2] - j[1][2] * j[2][1]) * inv,
-            (j[0][2] * j[2][1] - j[0][1] * j[2][2]) * inv,
-            (j[0][1] * j[1][2] - j[0][2] * j[1][1]) * inv,
-        ],
-        [
-            (j[1][2] * j[2][0] - j[1][0] * j[2][2]) * inv,
-            (j[0][0] * j[2][2] - j[0][2] * j[2][0]) * inv,
-            (j[0][2] * j[1][0] - j[0][0] * j[1][2]) * inv,
-        ],
-        [
-            (j[1][0] * j[2][1] - j[1][1] * j[2][0]) * inv,
-            (j[0][1] * j[2][0] - j[0][0] * j[2][1]) * inv,
-            (j[0][0] * j[1][1] - j[0][1] * j[1][0]) * inv,
-        ],
-    ];
-    (det, c)
 }
 
 /// Symmetric components of `J⁻ᵀ·J⁻¹` (reference metric), in the storage order
