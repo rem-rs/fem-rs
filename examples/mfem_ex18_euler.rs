@@ -23,7 +23,7 @@ use fem_assembly::dg::{DgHyperbolicConservationLaws, EulerFlux, RusanovFlux};
 use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
 use fem_element::lagrange::QuadL2GL;
 use fem_element::reference::ReferenceElement;
-use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
+use fem_io::mfem::{read_mfem_file, write_mfem_file_nodes, write_mfem_gf_file, NodesSpace};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::refine_uniform;
 use fem_mesh::topology::MeshTopology;
@@ -448,7 +448,14 @@ fn main() {
     let mut sol = project_initial(&u0, &mesh, order, n_eq);
 
     // MFEM: mesh->Print(ofs)
-    write_mfem_file("euler-mesh.mesh", &mesh)
+    //
+    // D812-1: the mesh is a refined `periodic-square.mesh`, whose `nodes` field
+    // is a *discontinuous* order-1 field (`L2_T1_2D_P1`) — the periodic
+    // identification folds the vertex table, so the element geometry is not the
+    // shared vertex coordinates.  MFEM keeps `Nodes` across refinement and
+    // prints it; the writer needs the same continuity to accept it
+    // (`crates/io/src/mfem.rs::nodes_dof_values`, D805-3's `NodesSpace`).
+    write_mfem_file_nodes("euler-mesh.mesh", &mesh, NodesSpace::Discontinuous)
         .expect("cannot write euler-mesh.mesh");
     // Write individual equation components in MFEM FiniteElementSpace format
     let dp = make_ref_elem(&mesh, order).n_dofs();
@@ -513,8 +520,8 @@ fn main() {
     }
     println!("time step: {:6}, time: {:.6e}", ti, t);
 
-    // MFEM: mesh->Print(ofs)
-    write_mfem_file("euler-mesh-final.mesh", &mesh)
+    // MFEM: mesh->Print(ofs) — discontinuous nodes, see the initial write above.
+    write_mfem_file_nodes("euler-mesh-final.mesh", &mesh, NodesSpace::Discontinuous)
         .expect("cannot write euler-mesh-final.mesh");
     let dp = make_ref_elem(&mesh, order).n_dofs();
     let n_elems = mesh.n_elements();
