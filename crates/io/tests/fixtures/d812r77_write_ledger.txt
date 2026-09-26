@@ -77,7 +77,7 @@ hexagon.mesh	ok	18f3a7ba5c38c70b1ff1853142f7c4be7fc61a6592af6ed5268d3a763bb58e2d
 inline-hex.mesh	ok	78ecd264b08b3b6e9fd05864cf779d3de0d49343b98495bf69b79d9d1cc3ad47	5039	312	0	1	0	-
 inline-pyramid.mesh	ok	db7f08ce7f6ecc032fb971640dc45667b22699ae1551ed36bb4e8c565648defa	1804	134	0	1	0	-
 inline-quad.mesh	ok	cd7554e71a1ac830d741fb0ddf699d6fd9e246166294d450df5b968188357ccb	820	84	0	1	0	-
-inline-segment.mesh	skip_1d		0	0	0	1	0	read-only 1-D container
+inline-segment.mesh	ok	c2b2a5bf542becb8ea6aeed5846d6d9c54c19e7c76e471f56f608bc8cb851e24	321	38	0	1	0	-
 inline-tet.mesh	ok	66d8d071d178b480f3f76539d94f449336d889272d45d4b68b9355a70418cc6f	10453	728	0	1	0	-
 inline-tri.mesh	ok	17013d3b21c8ddb48d635f81b20d403270629664a90f0d0d48fc35ca52dccbf9	968	100	0	1	0	-
 inline-wedge.mesh	ok	9f5d212fcdac03cfd4910522614d0c1e76f64a3b78be56d054254fdbe0679840	6425	408	0	1	0	-
@@ -91,14 +91,14 @@ nc3-nurbs.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
 octahedron.mesh	ok	f36c4ddc85f9dc701d1197b22e9a22e7fbb7eda7edf474052b51bb9f75a09645	406	43	0	1	0	-
 periodic-cube.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
 periodic-hexagon.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
-periodic-segment.mesh	read_err		0	0	0	1	0	dim1 (no 1-D reader)
+periodic-segment.mesh	ok	55c38228bf60a548f26694552be95239c429d2ff64315a4e933e92ab4d3a01ba	405	45	1	1	1	-
 periodic-square.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
 pipe-nurbs-2d.mesh	ok	a133ab697f24ad362445d04f2d15d3b486bc2fb2455ca1b7b54163a08ff814c9	319	36	0	1	0	-
 pipe-nurbs-log.mesh	ok	9f50c80904353fe2bfad7a860b06dcdcc3c1ed38b2cf56eb26b5b03daaa26546	470	47	0	1	0	-
 pipe-nurbs.mesh	ok	9f50c80904353fe2bfad7a860b06dcdcc3c1ed38b2cf56eb26b5b03daaa26546	470	47	0	1	0	-
 ref-prism.mesh	ok	d364aadf93d19b3219c3f4470c2dc234294f7a1cc4dae3bd2820d3e468dadf1d	367	39	0	1	0	-
 rt-2d-q3.mesh	ok	f5beb5070f9670deac8d4c9d2b53824126f45f6d699cd12bbad304360b51ed7e	15439	774	1	3	1	-
-segment-nurbs.mesh	read_err		0	0	0	1	0	dim1 (no 1-D reader)
+segment-nurbs.mesh	ok	77bbc478087645a2e8d46ce03757eea2cabcfe377d13004b193a59a1fff99679	283	32	0	1	0	-
 solid-cht.mesh	ok	3f65d675c6ba1ebb63c160d798bcde3e6f0d52ee49ebbbaffa743fab5a603c0a	788	85	0	1	0	-
 square-disc-nurbs-patch.mesh	read_err		0	0	0	1	0	nurbs_patch_mesh
 square-disc-nurbs.mesh	ok	cf62bcf07992f8e01a0fbcddf6647f7d8c97a4924f609e872a57973dff626028	511	47	0	1	0	-

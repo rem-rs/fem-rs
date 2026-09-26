@@ -32,7 +32,9 @@
 //! d812r77_mesh_write_ledger` — never regenerate to silence a failure without
 //! first explaining the diff.
 
-use fem_io::mfem::{read_mfem, read_mfem_file, write_mfem_nodes, NodesSpace};
+use fem_io::mfem::{
+    read_mfem, read_mfem_file, write_mfem_nodes, write_mfem_nodes_1d, NodesSpace,
+};
 use fem_mesh::simplex::Mesh;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -181,15 +183,27 @@ fn measure(path: &Path) -> Row {
             };
         }
     };
-    // 1-D containers have no `.mesh` writer (D724: the segment container is
-    // read-only); record them so they cannot appear silently later.
-    let (geometry, geom_order, rendered) = match (&file.mesh2d, &file.mesh3d) {
-        (Some(m), _) => (m.geometry.is_some(), m.geom_order(), render(m, None)),
-        (None, Some(m)) => {
+    // 1-D containers are written through their own D813-4 entry point
+    // (`write_mfem_nodes_1d`); the *discontinuous* space is the faithful one
+    // for the folded `L2_T1_1D_P*` fixtures, and a table-free mesh ignores the
+    // choice (`nodes_dof_values` returns `Ok(None)` either way).
+    let (geometry, geom_order, rendered) = match (&file.mesh2d, &file.mesh3d, &file.mesh1d) {
+        (Some(m), _, _) => (m.geometry.is_some(), m.geom_order(), render(m, None)),
+        (None, Some(m), _) => {
             let scratch = Mesh::<2>::unit_square_tri(1);
             (m.geometry.is_some(), m.geom_order(), render(&scratch, Some(m)))
         }
-        (None, None) => {
+        (None, None, Some(m)) => {
+            let mut buf: Vec<u8> = Vec::new();
+            (
+                m.geometry.is_some(),
+                m.geom_order(),
+                write_mfem_nodes_1d(&mut buf, m, NodesSpace::Discontinuous)
+                    .map(|()| buf)
+                    .map_err(|e| e.to_string()),
+            )
+        }
+        (None, None, None) => {
             return Row {
                 status: "skip_1d".into(),
                 note: "read-only 1-D container".into(),
@@ -346,12 +360,45 @@ fn d812r77_order1_geometry_round_trips() {
         let first = match read_mfem_file(&path) {
             Ok(f) => f,
             Err(e) => {
-                // `periodic-segment.mesh` is 1-D and the reader has no dim=1
-                // path yet; that is a *read* limitation, not D812-1's.
-                eprintln!("d812r77: {name} is not readable ({e}), skipped");
-                continue;
+                // All four fixtures read since D813-4 gave the reader a dim=1
+                // branch; a read error is a regression, not a limitation.
+                panic!("d812r77: {name} is not readable ({e})");
             }
         };
+        // 1-D container: the dedicated D813-4 write path (the round-77 ledger
+        // skipped this fixture before the dim=1 reader existed).
+        if let Some(m1) = &first.mesh1d {
+            let probe_geo = m1
+                .geometry
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: the 1-D container lost the geometry table"));
+            let (order, npe) = (probe_geo.order, probe_geo.nodes_per_elem);
+            let (conn, coords) = (probe_geo.conn.clone(), probe_geo.coords.clone());
+            let mut buf: Vec<u8> = Vec::new();
+            write_mfem_nodes_1d(&mut buf, m1, NodesSpace::Discontinuous)
+                .unwrap_or_else(|e| panic!("{name}: the 1-D writer refused ({e})"));
+            let text = String::from_utf8_lossy(&buf).to_string();
+            assert!(
+                text.lines().any(|l| l.trim() == "nodes"),
+                "{name}: the written file has no `nodes` section — the order-{order} \
+                 ({npe} nodes/elem) geometry table was dropped"
+            );
+            let back = read_mfem(std::io::Cursor::new(buf.clone())).expect("read back");
+            let m1b = back.mesh1d.unwrap_or_else(|| panic!("{name}: 1-D container lost"));
+            let g = m1b
+                .geometry
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: geometry table lost on the round trip"));
+            assert_eq!(g.order, order, "{name}: geometry order");
+            assert_eq!(g.nodes_per_elem, npe, "{name}: nodes per element");
+            assert_eq!(g.conn, conn, "{name}: geometry connectivity");
+            assert_eq!(
+                g.coords.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                coords.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{name}: geometry coordinates"
+            );
+            continue;
+        }
         let (m2, m3) = (first.mesh2d.clone(), first.mesh3d.clone());
         let Some(probe_geo) = m2
             .as_ref()

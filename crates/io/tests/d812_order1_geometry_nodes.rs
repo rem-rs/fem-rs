@@ -47,7 +47,9 @@
 //! Set `D812_DUMP_DIR=<dir>` to have every rendered file dropped on disk for an
 //! external diff (that is how the oracles below were captured).
 
-use fem_io::mfem::{read_mfem, read_mfem_file, write_mfem_nodes, NodesSpace};
+use fem_io::mfem::{
+    read_mfem, read_mfem_file, write_mfem_nodes, write_mfem_nodes_1d, NodesSpace,
+};
 use fem_mesh::simplex::{GeometryData, Mesh};
 use fem_mesh::MeshTopology;
 use std::path::{Path, PathBuf};
@@ -665,28 +667,34 @@ fn d812_gf_values_match_mfem_at_the_stream_precision() {
     }
 }
 
-// ─── the 1-D fixture has no write path at all ───────────────────────────────
+// ─── the 1-D fixture's write path (gap closed by D813-4) ────────────────────
 
 #[test]
-fn d812_periodic_segment_has_no_mesh_write_path() {
+fn d812_periodic_segment_write_path_is_closed() {
     // `data/periodic-segment.mesh` is listed with the other `periodic-*`
-    // fixtures, but it is a `dimension 1` file: `read_mfem` refuses `dim = 1`
-    // outright (the `Mesh<1>` container, `MfemFile::mesh1d`, is only filled by
-    // the INLINE reader, D724), so its `L2_T1_1D_P1` geometry never reaches the
-    // writer — there is no `Mesh<1>` `.mesh` writer to fix.  Pinned so the gap
-    // cannot change silently in either direction.
+    // fixtures, but it is a `dimension 1` file: `read_mfem` refused `dim = 1`
+    // outright (the `Mesh<1>` container, `MfemFile::mesh1d`, was only filled
+    // by the INLINE reader, D724), so its `L2_T1_1D_P1` geometry never reached
+    // the writer — the gap this test pinned in D812-1.  **D813-4 closed it**:
+    // the file now reads into `Mesh<1>` and its folded table round-trips
+    // through `write_mfem_nodes_1d` byte for byte against MFEM's own re-save
+    // (the full sweep lives in `crates/io/tests/d813_segment_l2_nodes.rs`);
+    // this stays as the D812 ledger's positive pin so the closed gap cannot
+    // silently reopen in either direction.
     let path = data_dir().join("periodic-segment.mesh");
     let text = std::fs::read_to_string(&path).expect("fixture");
     assert!(
         text.contains("L2_T1_1D_P1"),
         "fixture is expected to carry a 1-D L2 P1 geometry field"
     );
-    let err = match read_mfem_file(&path) {
-        Ok(_) => panic!("a 1-D `.mesh` file must not have a reader"),
-        Err(e) => e,
-    };
+    let file = read_mfem_file(&path).expect("a 1-D `.mesh` file has a reader (D813-4)");
+    let mesh = file.mesh1d.expect("the 1-D container is filled");
     assert!(
-        err.to_string().contains("dim=1 unsupported"),
-        "unexpected diagnostic: {err}"
+        mesh.geometry.is_some(),
+        "the folded L2_T1_1D_P1 table must reach the mesh"
     );
+    let mut buf: Vec<u8> = Vec::new();
+    write_mfem_nodes_1d(&mut buf, &mesh, NodesSpace::Discontinuous)
+        .expect("the 1-D write path exists");
+    assert!(!buf.is_empty());
 }

@@ -3,8 +3,9 @@
 //! Also provides `.gf` GridFunction reader/writer (a minimal subset of the
 //! MFEM GF format: dimension, space type, order, vdim, and DOF values).
 //!
-//! Supports linear elements in 2D and 3D:
-//! Segment, Triangle, Quadrilateral, Tetrahedron, Hexahedron, Wedge, Pyramid.
+//! Supports linear elements in 1D, 2D and 3D:
+//! Segment (1-D, D813-4), Triangle, Quadrilateral, Tetrahedron, Hexahedron,
+//! Wedge, Pyramid.
 //! Format reference: https://mfem.org/mesh-format/
 
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ use crate::data_collection::format_g;
 
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
     Some(match code {
+        0 => ElementType::Point1,
         1 => ElementType::Line2,
         2 => ElementType::Tri3,
         3 => ElementType::Quad4,
@@ -45,6 +47,7 @@ fn mfem_elem_type(code: u32) -> Option<ElementType> {
 /// Reverse mapping: `ElementType` → MFEM element type code.
 fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
     Some(match et {
+        ElementType::Point1   => 0,
         ElementType::Line2    => 1,
         ElementType::Tri3     => 2,
         ElementType::Quad4    => 3,
@@ -63,7 +66,8 @@ fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
     })
 }
 
-/// Parsed MFEM mesh data (supports both 2D and 3D).
+/// Parsed MFEM mesh data (supports 1D, 2D and 3D files; D813-4 added the 1-D
+/// branch, filling [`MfemFile::mesh1d`]).
 pub struct MfemFile {
     /// 1-D mesh container (D724): filled by the INLINE reader's
     /// `type = segment` arm (MFEM `ReadInlineMesh` → `Make1D`).
@@ -93,7 +97,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     // skip section keyword, then read value
     read_line(&mut r)?;  // "dimension"
     let dim = read_uint(&mut r)?;
-    if dim != 2 && dim != 3 {
+    if dim == 0 || dim > 3 {
         return Err(FemError::Mesh(format!("MFEM: dim={dim} unsupported")));
     }
 
@@ -594,6 +598,51 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     };
     let face_types_opt = if use_mixed_faces { Some(bdr_types) } else { None };
 
+    if dim == 1 {
+        // D813-4: the `dimension 1` branch — a `.mesh` file of `Segment`
+        // elements (`data/periodic-segment.mesh`).  MFEM's loader finalizes a
+        // 1-D mesh with `FinalizeTopology` only: no orientation pass touches
+        // the segments and no refinement marking happens (`MarkForRefinement`
+        // handles Dim == 2/3 only, `mesh/mesh.cpp:3115`), so the element table
+        // is kept verbatim in the file's order — which is what the byte oracle
+        // pins.  (fem-rs's `check_element_orientation` is a no-op for D = 1
+        // for the same reason.)  The container is the same `Mesh<1>` the
+        // INLINE reader's `type = segment` arm fills (D724); boundary `POINT`
+        // elements (MFEM geometry code 0, one vertex each — `Make1D` writes
+        // two of them) land in the face tables.
+        let mesh = Mesh {
+            coords,
+            conn: flat_elem,
+            elem_tags,
+            elem_type: uniform_type.unwrap_or(ElementType::Line2),
+            face_conn: flat_face,
+            face_tags: face_tags.into_iter().map(|t| t as fem_mesh::BoundaryTag).collect(),
+            face_type: face_type_from_file,
+            elem_types: if use_mixed { Some(elem_types) } else { None },
+            vertex_parents: vec![],
+            elem_offsets: elem_offsets_opt,
+            face_types: face_types_opt,
+            face_offsets: face_offsets_opt,
+            face_to_elem: None,
+            edge_conn: vec![], edge_to_elem: vec![],
+            nc_vertex_view: None,
+            geometry,
+        };
+        // A *continuous* (`H1_1D_P*`) `nodes` section has no reader-side
+        // geometry builder yet: the vertex table above was already recovered
+        // from the section's first NV dofs, but the curved 1-D geometry is
+        // dropped (MFEM keeps it).  The discontinuous (`L2_T1_1D_P*`) tables
+        // `data/periodic-segment.mesh` carries are handled in full.
+        if mesh.geometry.is_none() && h1_nodes.is_some() {
+            eprintln!(
+                "warning (D813-4): the H1 `nodes` section of a 1-D mesh is not supported \
+                 yet — the vertex coordinates were recovered, but the curved geometry \
+                 table is dropped"
+            );
+        }
+        return Ok(MfemFile { mesh1d: Some(mesh), mesh2d: None, mesh3d: None });
+    }
+
     if dim == 2 {
         let mesh = Mesh {
             coords,
@@ -928,21 +977,6 @@ fn check_boundary_tables<const D: usize>(mesh: &Mesh<D>) -> FemResult<Vec<usize>
     Ok(counts)
 }
 
-/// D126: validate both the element and the boundary tables of the mesh that is
-/// about to be written.  Called by [`write_mfem`] (before it emits anything)
-/// and by the `write_mfem_file*` helpers (before they create the file, so a
-/// rejected mesh leaves no empty file behind).
-fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
-    if let Some(m3) = mesh_3d {
-        check_element_tables(m3)?;
-        check_boundary_tables(m3)?;
-    } else {
-        check_element_tables(mesh_d)?;
-        check_boundary_tables(mesh_d)?;
-    }
-    Ok(())
-}
-
 /// Write a `Mesh` to MFEM `.mesh` v1.0 format.
 ///
 /// Supports 2D and 3D meshes with uniform or mixed element types.
@@ -997,18 +1031,49 @@ pub fn write_mfem_nodes<W: Write>(
     mesh_3d: Option<&Mesh<3>>,
     space: NodesSpace,
 ) -> FemResult<()> {
+    match mesh_3d {
+        Some(m3) => write_mfem_mesh_nodes::<_, 3>(writer, m3, space),
+        None => write_mfem_mesh_nodes::<_, 2>(writer, mesh_d, space),
+    }
+}
+
+/// Write a **1-D** mesh to MFEM `.mesh` v1.0 format (D813-4).
+///
+/// The 2-D/3-D writer's signature has no `Mesh<1>` slot (its `mesh_d`
+/// parameter is part of the public API and its `Mesh<3>` overload passes a
+/// 2-D placeholder through), so the 1-D format gets its own entry point over
+/// the same generic engine [`write_mfem_mesh_nodes`] — same byte layout,
+/// `dimension 1`, and — the point of D813-4 — a folded `L2_T1_1D_P*` geometry
+/// table round-trips through this function byte for byte against MFEM's own
+/// `Mesh::Save(out, 16)` re-save of `data/periodic-segment.mesh`.  Boundary
+/// `POINT` records (MFEM geometry code 0, one vertex — what `Make1D` writes)
+/// are emitted like any other boundary section.
+pub fn write_mfem_nodes_1d<W: Write>(
+    writer: &mut W,
+    mesh: &Mesh<1>,
+    space: NodesSpace,
+) -> FemResult<()> {
+    write_mfem_mesh_nodes::<_, 1>(writer, mesh, space)
+}
+
+/// The dimension-generic body of the `.mesh` writer: `D` is the *coordinate*
+/// count of the mesh container (1/2/3), while the `dimension` line follows
+/// [`Mesh::topological_dim`] so a `Dim = 2, spaceDim = 3` surface stays
+/// faithful.
+fn write_mfem_mesh_nodes<W: Write, const D: usize>(
+    writer: &mut W,
+    mesh: &Mesh<D>,
+    space: NodesSpace,
+) -> FemResult<()> {
     // D126: never write a mesh whose element/face tables contradict each other.
     // This runs before a single byte is emitted so a failure cannot leave a
-    // half-written (or silently corrupt) `.mesh` behind.
-    validate_mesh_for_write(mesh_d, mesh_3d)?;
+    // half-written (or silently corrupt) `.mesh` behind.  (The boundary half
+    // of the check runs below, where its per-face node counts are needed.)
+    check_element_tables(mesh)?;
     // The `nodes` payload is resolved before anything is emitted: a mesh whose
     // high-order geometry has no faithful MFEM numbering must fail *without*
     // leaving a file behind that silently drops the curvature.
-    let nodes: Option<(u8, usize, Vec<f64>)> = if let Some(m3) = mesh_3d {
-        nodes_dof_values(m3, space)?
-    } else {
-        nodes_dof_values(mesh_d, space)?
-    };
+    let nodes: Option<(u8, usize, Vec<f64>)> = nodes_dof_values(mesh, space)?;
     // D663/D676: no write-time tet normalization.  MFEM `Mesh::Printer` writes
     // the element and boundary tables in **storage order** and the only place
     // `MarkTetMeshForRefinement` runs is `Mesh::Finalize(refine = true)` — the
@@ -1020,41 +1085,26 @@ pub fn write_mfem_nodes<W: Write>(
     // refined meshes (MFEM's `UniformRefinement` children are *not* marked —
     // probe `(b2)`) and for trimmer cut faces (`Mesh::Finalize()` defaults to
     // `refine = false`).
-    let (dim, coords, conn, elem_tags, elem_type, elem_types_opt)
-        = if let Some(m3) = mesh_3d {
-            (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type, &m3.elem_types)
-        } else {
-            (2, &mesh_d.coords, &mesh_d.conn, &mesh_d.elem_tags, &mesh_d.elem_type,
-             &mesh_d.elem_types)
-        };
+    let dim = D;
+    let coords = &mesh.coords;
+    let conn = &mesh.conn;
+    let elem_tags = &mesh.elem_tags;
+    let elem_type = &mesh.elem_type;
+    let elem_types_opt = &mesh.elem_types;
     // The `dimension` line is the *topological* dimension (MFEM's `Dim`), not
     // the coordinate count: a surface mesh is a `Mesh<3>` of `Quad4` elements
     // (`topological_dim() == 2`) whose `nodes` section carries the space
     // dimension separately in `VDim` (`Mesh::Printer` writes `Dim = 2` and
     // `spaceDim` only through the section).  For every volume mesh
     // `topological_dim() == dim`, so nothing changes there.
-    let topo = if let Some(m3) = mesh_3d {
-        m3.topological_dim() as usize
-    } else {
-        mesh_d.topological_dim() as usize
-    };
+    let topo = mesh.topological_dim() as usize;
     let n_nodes = coords.len() / dim;
-    let n_elems = if dim == 3 {
-        mesh_3d.map_or(conn.len() / elem_type.nodes_per_element(), |m| m.n_elems())
-    } else if let Some(ref offsets) = mesh_d.elem_offsets {
-        offsets.len() - 1
-    } else {
-        conn.len() / elem_type.nodes_per_element()
-    };
+    let n_elems = mesh.n_elems();
     // D126: the number of boundary faces and each face's node count come from
     // the mesh's own face tables (`face_type_at`), validated up front by
-    // `validate_mesh_for_write`.  The per-face counts are returned by the
+    // `check_boundary_tables`.  The per-face counts are returned by the
     // check, so the write loop below cannot walk off the connectivity.
-    let face_nv: Vec<usize> = if let Some(m3) = mesh_3d {
-        check_boundary_tables(m3)?
-    } else {
-        check_boundary_tables(mesh_d)?
-    };
+    let face_nv: Vec<usize> = check_boundary_tables(mesh)?;
 
     writeln!(writer, "MFEM mesh v1.0\n")?;
     // `Mesh::Printer` always prefixes the serial conforming format with the
@@ -1086,11 +1136,7 @@ pub fn write_mfem_nodes<W: Write>(
     let npe = elem_type.nodes_per_element();
     if let Some(ref etypes) = elem_types_opt {
         // Mixed element types - use elem_offsets if available, else uniform stride
-        let offsets = if dim == 3 {
-            mesh_3d.and_then(|m| m.elem_offsets.as_ref())
-        } else {
-            mesh_d.elem_offsets.as_ref()
-        };
+        let offsets = mesh.elem_offsets.as_ref();
         for ei in 0..n_elems {
             let et = &etypes[ei];
             let code = elem_type_to_mfem_code(*et).ok_or_else(|| {
@@ -1124,11 +1170,7 @@ pub fn write_mfem_nodes<W: Write>(
     //
     // Each record is `<attr> <mfem geometry code> <n1> ... <nn>`, with the code
     // and the node count taken from the face's own geometric type (D126).
-    if let Some(m3) = mesh_3d {
-        write_boundary_section(writer, m3, &face_nv)?;
-    } else {
-        write_boundary_section(writer, mesh_d, &face_nv)?;
-    }
+    write_boundary_section(writer, mesh, &face_nv)?;
 
     // Vertices section
     //
@@ -1509,11 +1551,29 @@ fn nodes_dof_values<const D: usize>(
             );
             let (factory, mfem) = match (factory, mfem) {
                 (Some(f), Some(m)) => (f, m),
+                // The only (None, Some) combination: pyramids.  MFEM's own
+                // L2 pyramid numbering (`L2_FuentesPyramidElement`) is known
+                // and pinned (see `mfem_l2_slots`), but the *mesh-side*
+                // geometry element for pyramids is the Bergot family with a
+                // different dof count — `(p+1)(p+2)(2p+3)/6` vs `(p+1)³` —
+                // so an `L2_T1_3D_P*` pyramid table cannot be mapped onto the
+                // slots the assembler evaluates the geometry with (D306;
+                // the round-39 D335 premise "MFEM rejects the element" was
+                // `GetDofToQuad(TENSOR)`'s abort, not a numbering gap).
+                (None, Some(_)) => {
+                    return Err(FemError::Mesh(format!(
+                        "write_mfem: the discontinuous `nodes` numbering of {et:?} is known \
+                         (MFEM's L2 Fuentes pyramid), but the mesh-side geometry lattice is \
+                         the Bergot family with a different dof count, so an L2 pyramid table \
+                         cannot be mapped onto the mesh's slots (D306); no `nodes` section \
+                         was written"
+                    )))
+                }
                 _ => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful discontinuous `nodes` numbering for \
-                         {et:?} (only Hex8, Quad4, Tri3, Tet4 and Prism6 are implemented — see \
-                         `mfem_l2_slots`); no `nodes` section was written"
+                         {et:?} (only Line2, Hex8, Quad4, Tri3, Tet4 and Prism6 are \
+                         implemented — see `mfem_l2_slots`); no `nodes` section was written"
                     )))
                 }
             };
@@ -1555,7 +1615,10 @@ fn nodes_dof_values<const D: usize>(
 /// (`element_jacobian` / `CurvedMesh` both go through the `lagrange::factory`
 /// element of the mesh's type and geometric order).
 ///
-/// All of them place their DOFs on the **closed Gauss-Lobatto** points:
+/// All of them place their DOFs on the **closed Gauss-Lobatto** points, with
+/// one exception: the `Line2` arm is the assembler's equispaced `SegPk` (the
+/// two lattices coincide at p = 1, the only order where an `L2_T1_1D_P*` table
+/// can be permuted onto it — see the arm's own comment):
 /// `QuadQk`/`HexQk` tensor GLL, `H1TriPk` the `w`-normalised barycentric GLL
 /// nodes of `H1_TriangleElement`.
 fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
@@ -1569,6 +1632,16 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
         ElementType::Tri3 => fem_element::lagrange::H1TriPk::new(p).dof_coords(),
         ElementType::Prism6 => fem_element::lagrange::PrismPk::new(p).dof_coords(),
         ElementType::Tet4 => fem_element::lagrange::factory::H1TetPk::new(p).dof_coords(),
+        // D813-4: the assembler's 1-D element (`factory::ref_elem(Seg, p)`).
+        // Unlike the families above it is **equispaced**, not Gauss-Lobatto —
+        // the two lattices coincide at p <= 2 ({0,1} and {0,½,1} are both
+        // equispaced), which covers the only 1-D curved table any oracle
+        // needs (`data/periodic-segment.mesh`, P1); it is also the only case
+        // where MFEM's `L2_T1_1D_P*` table can be permuted onto these slots:
+        // from p = 3 on the file's Gauss-Lobatto lattice is genuinely a
+        // different point set, and both the reader (D153 warning) and the
+        // writer refuse loudly instead of re-ordering across families.
+        ElementType::Line2 => fem_element::lagrange::factory::SegPk::new(p).dof_coords(),
         _ => return None,
     })
 }
@@ -1600,14 +1673,44 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
 ///   The point set coincides with `PrismPk`'s GLL lattice (both build on
 ///   `Poly_1D`'s `BasisType::GaussLobatto` closed points — classical
 ///   Gauss-Lobatto-Legendre, `p = 3`: `{0, 0.276393…, 0.723607…, 1}`).
-/// * every other family (pyramids) is left out: its L2 ordering has not been
-///   verified against MFEM here.
+/// * `L2_SegmentElement` (`fe_l2.cpp`) is a `NodalTensorFiniteElement` with
+///   the `L2_DOF_MAP` left empty, so its `(p+1)` nodes are the collection's
+///   closed Gauss-Lobatto points of the segment **in ascending order** — the
+///   1-D lexicographic order (probe-verified against MFEM 4.10's
+///   `GetNodes()` for `p = 1..3`).
+/// * `L2_FuentesPyramidElement` (`fe_l2.cpp:926`, the `L2_FECollection`
+///   default `pyr_type = 1`): `(p+1)³` nodes
+///   `(op[i](1 − a·op[k]), op[j](1 − a·op[k]), a·op[k])` at
+///   `o = k(p+1)² + j(p+1) + i`, with `op` the closed Gauss-Lobatto points
+///   (`VerifyOpen` maps the collection's closed basis type onto them) and
+///   `a` the largest Gauss-Legendre node of the order-`p` rule — the z-forced-
+///   open adjustment MFEM applies whenever a closed basis is requested, since
+///   the Fuentes basis is *not independent* on closed interpolation points.
+///   This is a real numbering of a real MFEM element: the round-39 premise
+///   ("MFEM itself rejects the element", D335) was `GetDofToQuad(TENSOR)`'s
+///   abort — the TENSOR *mode* is unsupported, the element, its nodes and the
+///   FULL dof-to-quad path all work (probe `$HOME/work/d80b/pyr_probe`).
+///   Ported through `fem_element::lagrange::pyramid_l2`'s probe-verified node
+///   table (D325) — but note [`l2_geometry_slots`] deliberately has **no**
+///   pyramid arm: the mesh-side geometry element for pyramids is the Bergot
+///   family with a *different dof count* (D306), so an `L2_T1_3D_P*` pyramid
+///   table cannot be mapped onto the mesh's slots and every direction refuses
+///   loudly rather than mis-numbering.
 fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
     use fem_element::lagrange::factory::{HexQk, QuadQk};
     if p == 0 {
         return None;
     }
     Some(match et {
+        ElementType::Line2 => {
+            // `L2_SegmentElement`: ascending closed Gauss-Lobatto points.
+            let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+                .0
+                .iter()
+                .map(|&x| 0.5 * (x + 1.0))
+                .collect();
+            (0..=p).map(|i| vec![gll[i]]).collect()
+        }
         ElementType::Quad4 => QuadQk::new_lex(p).dof_coords(),
         ElementType::Hex8 => HexQk::new_lex(p).dof_coords(),
         ElementType::Tri3 => {
@@ -1668,6 +1771,15 @@ fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
                 }
             }
             slots
+        }
+        ElementType::Pyramid5 => {
+            // `L2_FuentesPyramidElement(p, GaussLobatto)`: the closed-btype
+            // arm of `pyramid_l2::l2_fuentes_pyramid_nodes` — the same table
+            // the D325 probe pinned against MFEM's own `GetNodes()`.
+            fem_element::lagrange::pyramid_l2::l2_fuentes_pyramid_nodes(p, true)
+                .into_iter()
+                .map(|c| vec![c[0], c[1], c[2]])
+                .collect()
         }
         _ => return None,
     })
@@ -6173,6 +6285,159 @@ elements\n1\n1 5 1 2 3 4 5 6 7 8\n\nboundary\n6\n1 3 1 2 3 4\n1 3 5 6 7 8\n1 3 1
                 lex_slot_permutation(&mesh_slots, &got).is_some(),
                 "p={p}: the tet L2 ordering and the H1TetPk lattice must be the \
                  same point set"
+            );
+            tables += 1;
+        }
+        assert_eq!(tables, 3, "p = 1, 2, 3");
+    }
+
+    /// D813-4 — the `Line2` `L2_T1_1D_P*` arm, pinned node by node against
+    /// MFEM 4.10's `L2_SegmentElement(p, GaussLobatto).GetNodes()` for
+    /// `p = 1..3` (`tests/fixtures/d814_mfem_l2seg_nodes_p1to3.txt`, written
+    /// by `$HOME/work/d80b/seg_dump.cpp`).  `L2_SegmentElement` is a tensor
+    /// element with an empty dof map, so the nodes are the collection's closed
+    /// Gauss-Lobatto points in ascending order.
+    ///
+    /// The mesh-side lattice is the assembler's `SegPk`, which is **equispaced**
+    /// — the same point set as Gauss-Lobatto only at `p = 1`.  That is exactly
+    /// why `data/periodic-segment.mesh` (P1) round-trips byte for byte while
+    /// `p ≥ 2` files refuse loudly in both directions: a permutation between
+    /// the two lattices must not exist.
+    #[test]
+    fn d814_segment_l2_nodes_match_mfem_in_order() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/d814_mfem_l2seg_nodes_p1to3.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("d814 segment oracle").replace("\r\n", "\n");
+
+        let mut tables = 0usize;
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        while let Some(header) = lines.next() {
+            let h: Vec<&str> = header.split_whitespace().collect();
+            assert_eq!(h[0], "p", "bad header: {header:?}");
+            assert_eq!(h[2], "dof", "bad header: {header:?}");
+            assert_eq!(h[4], "geom", "bad header: {header:?}");
+            let p: usize = h[1].parse().expect("p");
+            let ndof: usize = h[3].parse().expect("dof");
+            assert_eq!(h[5], "1", "geometry code 1 (SEGMENT)");
+            let want: Vec<Vec<f64>> = (0..ndof)
+                .map(|k| {
+                    let row = lines.next().expect("node row");
+                    let t: Vec<&str> = row.split_whitespace().collect();
+                    assert_eq!(t[0], "i", "bad node row: {row:?}");
+                    assert_eq!(
+                        t[1].parse::<usize>().expect("index"),
+                        k,
+                        "p={p}: node rows must be in order"
+                    );
+                    vec![t[2].parse::<f64>().expect("coord")]
+                })
+                .collect();
+            assert_eq!(ndof, p + 1, "p={p}: node count");
+
+            let got = mfem_l2_slots(ElementType::Line2, p)
+                .unwrap_or_else(|| panic!("p={p}: no Line2 arm in mfem_l2_slots"));
+            assert_eq!(got.len(), ndof, "p={p}: count");
+            for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.len(), 1, "p={p} node {k}: 1 component");
+                assert!(
+                    (g[0] - w[0]).abs() <= 1e-15,
+                    "p={p} node {k}: {:?} vs MFEM {:?}",
+                    g,
+                    w
+                );
+            }
+
+            // p = 1, 2: the closed Gauss-Lobatto points {0, 1} / {0, ½, 1}
+            // *are* equispaced, so the file's table can be permuted onto the
+            // mesh's slots (the D813-4 oracle depends on p = 1).  p >= 3: the
+            // lattices are different point sets — the permutation must *not*
+            // exist, and both directions refuse loudly.
+            let mesh_slots = l2_geometry_slots(ElementType::Line2, p)
+                .unwrap_or_else(|| panic!("p={p}: no Line2 arm in l2_geometry_slots"));
+            assert_eq!(mesh_slots.len(), ndof, "p={p}: mesh-side count");
+            assert_eq!(
+                lex_slot_permutation(&mesh_slots, &got).is_some(),
+                p <= 2,
+                "p={p}: the L2 segment lattice and the equispaced SegPk lattice \
+                 must coincide exactly at p <= 2 and never otherwise"
+            );
+            tables += 1;
+        }
+        assert_eq!(tables, 3, "p = 1, 2, 3");
+    }
+
+    /// D813-5 — the `Pyramid5` `L2_T1_3D_P*` arm, pinned node by node against
+    /// MFEM 4.10's `L2_FuentesPyramidElement(p, GaussLobatto).GetNodes()` for
+    /// `p = 1..3` (`tests/fixtures/d814_mfem_l2pyr_nodes_p1to3.txt`, written
+    /// by `$HOME/work/d80b/pyr_dump.cpp`).
+    ///
+    /// This settles the round-39 premise (D325/D335, "MFEM itself rejects the
+    /// element"): the rejection on record is `FiniteElement::GetDofToQuad`'s
+    /// MFEM_ABORT for the **TENSOR mode** (`$HOME/work/d325/dginv2_out.txt`) —
+    /// the element itself, its node table and the FULL dof-to-quad path all
+    /// work (`$HOME/work/d80b/pyr_probe.cpp`).  The arm therefore carries the
+    /// real Fuentes numbering (through `pyramid_l2`'s probe-verified node
+    /// table, D325) instead of a fabricated one — but
+    /// [`l2_geometry_slots`] deliberately has **no** pyramid arm: the
+    /// mesh-side geometry element is the Bergot family with a different dof
+    /// count (D306), so the tables can never be mapped onto each other and
+    /// the writer refuses with that reason.
+    #[test]
+    fn d814_pyramid_l2_nodes_match_mfem_in_order() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/d814_mfem_l2pyr_nodes_p1to3.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("d814 pyramid oracle").replace("\r\n", "\n");
+
+        let mut tables = 0usize;
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        while let Some(header) = lines.next() {
+            let h: Vec<&str> = header.split_whitespace().collect();
+            assert_eq!(h[0], "p", "bad header: {header:?}");
+            assert_eq!(h[2], "dof", "bad header: {header:?}");
+            assert_eq!(h[4], "geom", "bad header: {header:?}");
+            let p: usize = h[1].parse().expect("p");
+            let ndof: usize = h[3].parse().expect("dof");
+            assert_eq!(h[5], "7", "geometry code 7 (PYRAMID)");
+            let want: Vec<Vec<f64>> = (0..ndof)
+                .map(|k| {
+                    let row = lines.next().expect("node row");
+                    let t: Vec<&str> = row.split_whitespace().collect();
+                    assert_eq!(t[0], "i", "bad node row: {row:?}");
+                    assert_eq!(
+                        t[1].parse::<usize>().expect("index"),
+                        k,
+                        "p={p}: node rows must be in order"
+                    );
+                    t[2..5].iter().map(|s| s.parse::<f64>().expect("coord")).collect()
+                })
+                .collect();
+            assert_eq!(ndof, (p + 1) * (p + 1) * (p + 1), "p={p}: Fuentes node count");
+
+            let got = mfem_l2_slots(ElementType::Pyramid5, p)
+                .unwrap_or_else(|| panic!("p={p}: no Pyramid5 arm in mfem_l2_slots"));
+            assert_eq!(got.len(), ndof, "p={p}: count");
+            for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.len(), 3, "p={p} node {k}: 3 components");
+                for d in 0..3 {
+                    assert!(
+                        (g[d] - w[d]).abs() <= 1e-15,
+                        "p={p} node {k} component {d}: {g:?} vs MFEM {w:?}"
+                    );
+                }
+            }
+
+            // The honest half of the closure: MFEM's numbering is known, the
+            // mesh-side lattice is not representable (Bergot vs Fuentes dof
+            // counts, D306) — no permutation can exist, so a pyramid L2 table
+            // cannot reach the writer's slot machinery.
+            assert!(
+                l2_geometry_slots(ElementType::Pyramid5, p).is_none(),
+                "p={p}: l2_geometry_slots must stay without a pyramid arm (the Bergot \
+                 mesh-side lattice has a different dof count — D306)"
             );
             tables += 1;
         }
