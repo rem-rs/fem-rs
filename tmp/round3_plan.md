@@ -4470,6 +4470,153 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十七轮（round 77）：D812-1 `.mesh` 写者 `nodes` 发射规则（头号①）+ D807-2 tet NDk 逐面点对变换通道（头号②）+ D812-2 重定基（"4× 说"被驳）+ ex18 连带修复 + D807-1 残余重登记
+
+**开局 HEAD = round 76 末笔 `7d571bff`（`git ls-remote` 实证与本地一致）；树净。** 派单为两路后台代理，
+**两路都跑完并交了报告**（与 round 74 环境墙、round 75 四路完成、round 76 两路未提交未报告都不同），
+且按 ㉗ **一律在主树跑、按文件互斥划分**（Lane A = `crates/parallel/**` + `crates/space/**`；
+Lane B = `crates/io/**` + 两个 ex9 示例；主会话自办 `crates/io/tests/d812r77_*` 全量金标账 +
+`examples/mfem_ex18_euler.rs` 连带修复），**不用 `git worktree`** ⇒ 直接免掉 round 76 的夹具缺失
+（㉗）与 cherry-pick 代价；代价是编译互相可见（㉕ 的常态）。
+
+提交链（fem-rs main）：`19709aa9`（D812-1 + D812-2，Lane B 主体 + 主会话金标账）→ `9660980d`（ex18，主会话）→ `226babf2`（D807-2，Lane A）
+
+### 纪律新增（round 77 实测）
+- **㉙ 登记的"数字"必须能用一条命令复现**（否则它不是证据）。本轮 D812-1/D812-2 的两组数字
+  （`ex9.mesh` 411 行/8428 B；`.gf` 9836 vs 39891 B）**都不对应任何一次真实运行**：序列 ex9 在
+  mesh 写出处 abort（rc=101），`.gf` 从未产生；而所谓"ex9 stdout 锚"实际是 `-m data/periodic-square.mesh`
+  档的日志（`tmp/ledger/logs/mfem_ex9_dg_advection.log` 的 Options 头是权威），C++ 侧却在
+  periodic-hexagon 上跑 ⇒ **两侧不同配置的比较把真实差异掩盖了**。⇒ 派单/登记前先自己跑一遍，
+  并把命令写进条目；对照必须**同配置**（与 ⑯"对照物本身也要审"配对）。
+- **㉚ "会动所有写路径"的改动，先交一份全量金标账**。D812-1 动了唯一的 `.mesh` 写者 ⇒ 主会话先建
+  `crates/io/tests/d812r77_mesh_write_ledger.rs`（106 份 `data/*.mesh` 的 status/digest/bytes/lines/
+  geometry/nodes/拒绝原因，无几何表者逐字节钉死）+ 一次**消费方枚举**（同时提到 `periodic-*` 且调
+  网格写者的文件 = 恰好 ex9/ex18）⇒ 爆炸半径从"担心"变成"两个文件"。**枚举 + 全量账**比事后回归便宜。
+- **㉛ 主树并行两路（文件互斥）优于 worktree**：㉗ 的夹具缺失、cherry-pick、worktree 清理全部消失；
+  代价只是 ㉕（能看到对方半成品编译失败）。round 74/75/76 的 worktree 模式可退休，**除非需要隔离
+  一个高风险的原子切换**。
+
+### Lane B（D812-1 + D812-2）· **D812-1 关闭**
+- **根因**：`nodes_dof_values` 用 `geom_order() > 1` 决定是否写 `nodes`；MFEM 的规则是
+  `Nodes != NULL`（`mesh/mesh.cpp:12551`），而**唯一**丢弃 `Nodes` 的是 `SetCurvature(order <= 0)`
+  （`:7214`）。⇒ order-1 几何表被当直网格写。**premise 更正（⑥）**：四份 `periodic-*.mesh` 的**折叠**
+  表对**连续**写者是**响亮拒绝**（D805-3 的连续性检查，`geometry dof N is shared by two elements
+  with different coordinates`）——**静默丢失的只有 Discontinuous 臂**（旧 `order <= 1 ⇒ Ok(None)`
+  先于两族分支返回）。且 `make_periodic` 网格在**两侧都是** L2 表：MFEM 的
+  `Mesh::MakePeriodic` 自己先 `SetCurvature(nodal_order, discont=true)` 再重编号
+  （`mesh/mesh.cpp:6205`，本轮主会话**读源独立确认**，Lane B 另有 `MakePeriodic` 探针
+  `input nodes=0 → straight nodes=1 fec=L2_T1_2D_P1`）。
+- **实现**：门改为"几何表存在"（`geometry.is_none() ⇒ Ok(None)`），并新增 order-0 表的显式拒绝；
+  连续/不连续两臂的 order-1 编号沿用既有映射（无需新代码）。
+- **验收（全部逐字节 = MFEM 自己的输出）**：`write_mfem_nodes(.., Discontinuous)` 对
+  `periodic-hexagon`/`-square`/`-cube` 与 `$HOME/work/r31_save`（`Mesh::Save(out,16)`）重存
+  **1402/1402、1109/1109、6392/6392 字节，`diff` 空**；连续臂 = MFEM `SetCurvature(1,false)` 重存
+  （探针 `tmp/d77b/probe/d812_probe.cpp`）；order-1 **Tri3/Prism6** 亦逐字节（`beam-tri`/`beam-wedge`）。
+  读→写→读回环 geometry 表逐位相同。**Tet4 order-1 仍拒**（仓内无已验证的 MFEM L2 tet 编号，登记 D813-5）。
+- **静默→响亮的不对称性**已钉进测试：连续写者仍**响亮拒绝**折叠表 ⇒ 每个写 `periodic-*` 网格的示例
+  都必须显式给 `NodesSpace`。
+- **爆炸半径 = ex9 + ex18（枚举确认）**：`ex9`（默认 periodic-hexagon）pre-fix 在 mesh 写出处
+  **abort**（rc=101，早于时间步进）⇒ 已改 `write_mfem_file_nodes(.., Discontinuous)`；`ex18`
+  （默认 periodic-square，refine 1）pre-fix **静默写错**（元素几何被换成折叠顶点表），修后**响亮拒绝**
+  ⇒ 主会话同样改两个写出点，C++ 对照（`$HOME/work/d76main/ex18_cpp`，`-tf 0.05`）：**213 行两侧**、
+  结构 token 全同、worst 数值相对差 **9.0e-09**（MFEM 按 8 位有效数字打印）；rc=0，`euler-*.gf` 恢复写出。
+- **全量金标账（主会话）**：`crates/io/tests/d812r77_mesh_write_ledger.rs` + fixture 钉 106 份
+  `data/*.mesh`；`status` 里另记录语料现状（NC mesh / NURBS NC-patch / dim=1 读不了；ragged 混合表
+  写不了 = D627；三份 periodic 的 `disc_geo` 连续性拒绝）。**无几何表者必须逐字节不变**的论证 =
+  D812-1 的 diff **只有一个行为 hunk**（门），`geometry == None` 时新旧门在同一点返回 `Ok(None)`。
+  配套 `d812r77_order1_geometry_round_trips`（pre-fix 红："the order-1 geometry table was dropped"）
+  与 `d812r77_premise_probe.rs`（premise 记录，env 门控）。
+
+### Lane B（D812-2）· **关闭（重定基）**
+- **注册的两组数字不存在**（见纪律 ㉙）。实测：`ex9.mesh` **993 行两侧**、`.gf` **3077 行两侧**、尺寸差 **4%**。
+- **两处真 `crates/io` 偏差已修**：① `.gf` 值在 `precision < 16` 走 `{:.prec$e}`（永远科学计数），
+  而 MFEM `GridFunction::Save → Vector::Print(os,1) → os << v` 用流 **defaultfloat `%g`**
+  （oracle `d812_mfem_gf_prec{8,16}.txt` 20 值中 11 个是定点：`0.5`/`1234.5678`/`1e-05`/`-0`）⇒
+  改 crate 内 `format_g`，顺带删死代码 `c_printf_g16` 与孤儿 doc 块；② 示例传 FEC 名 `L2`
+  （渲染 `L2_2D_P3`）而 MFEM 写 `L2_T1_2D_P3`（空间确是 GLL）+ 精度 7 → **8**（= C++ 流精度）。
+- **残差 = 包围盒，不是初值**（主会话的"projection vs interpolation"假设**被驳回**）：
+  MFEM `ProjectCoefficient` 的默认路径就是**节点求值**（`fem/gridfunc.cpp:2450`），且
+  `postproc::grid_function::project_coefficient` **就是** `space.interpolate`
+  （`crates/assembly/src/postproc/grid_function.rs:358`）⇒ 原"1:1 改投影"是 **no-op**。真因：
+  `ex9.cpp` 用 `mesh.GetBoundingBox(bb, max(order,1))`，在 `Nodes != NULL` 时按 `GlobGeometryRefiner`
+  采样**几何**取极值（折叠周期网格 ⇒ `[-1,1]×[-0.866,0.866]`），而示例用读入器的 pre-refinement
+  **顶点**极值（`[-0.5,0.75]×[-0.866,0.433]`）；`bbox_ic_check.py` 用同一个 IC 公式在两种盒子上
+  复现**两侧**的首值（`8.820222e-16` vs `1.353448e-29`）。⇒ 新债 **D813-3**（缺曲面几何版
+  `GetBoundingBox(min,max,ref)`），并依赖 **D813-2**（读入器折叠顶点表约定）。
+- **ex9 stdout 现与 C++ oracle 逐字节相同**（`diff` 0 行），仅两处**具名豁免**：`--mesh` 路径回声、
+  stderr 的 wall-clock `Done. Total time:` 行（C++ ex9 两者都不打印该行，round 62 起即豁免）。
+  `--implicit-slope` 行已补（C++ 的 `-imp-state/--implicit-state` 的**false** 拼写）、`time:` 走 `fmt_g`。
+
+### Lane A（D807-2）· **关闭**
+- **缺口位置**：元件侧变换**本就正确**（`FaceDofBlock.s`，D37/D790-3），缺的是**并行通道**——
+  DP 的 `sign_corrections` 是逐 dof 标量 ⇒ 对 2×2 结构上盲。修前同一面在两个 rank 的局部遍历里
+  建出**同一批全局 id 的不同基**：装配出的共享面块按 `RᵀAR` 移动（k=2 相对 **6.7e-1**、k=3 **1.087**），
+  跨 rank 全局条目 63/736（k=2）、441/3825（k=3）不一致。
+- **实现**：space 侧新 `FacePairTransform { slot, s, s_inv }`（`hcurl.rs:668`）+ 
+  `HCurlSpace::element_face_pair_transforms(e)`（`:1761`，**hex/2-D/k=1 为空** ⇒ 那些路径不可能动）+
+  `FESpace` 默认空体（`fe_space.rs:120`，pro 层零改动）；DP 侧 Pass B 记**锚单元**的非恒等块
+  （滤到当前锚面、跳过恒等）、新 `dual/primal_dof_transform`，`permute_csr`/`permute_csr_scaled`/
+  `permute_vec` 全走它（标量 = 同一代码的 `(d,±1)` 特例，逐位不变），`permute_csr_scaled` **搬进**
+  `par_assembler.rs` 并删掉 `par_vector_assembler.rs` 的私有副本（单一实现，标量/矢量路径不可能分叉）；
+  `par_l2zz{,_3d}` 在标量逆会错时**响亮拒绝**。
+- **组合（最容易错的一处）**：`A_global = s⁻ᵀ·A_canon·s⁻¹`，写成 `(source, target)` 形式时
+  **矩阵两侧用同一张系数表** `s⁻¹[source][target]`。转置列侧在标量通道里**看不见**（±1 自逆），
+  在这里就是 3.4e-2 的残差 —— 第一版正是如此，主会话提示"列侧方向"后才归零。
+- **实测**（两 tet 共面 `{0,1,4}`、apex `(1,1,2)`、两侧取不同 pivot 使锚块真非标量）：
+  k=2 serial `1.25000000000000089e0`、np1 rel 1.8e-16、np2 rel **3.6e-16**（标量控制 6.729e-1）；
+  k=3 serial `1.14474395380104532e0`、np1 3.9e-16、np2 **5.8e-16**（控制 1.087）；
+  跨 rank 全局条目 **0/736、0/3825**；np1 无通道（断言）。
+- **登记更正**：非对称夹具的锚块**既非旋转也非切向交换**，而是精确的 `[[-1,0],[-1,1]]`（仍非标量）；
+  且 `element_signs` 并非"缺访问器"（`element_face_blocks` 本就公开）——缺的是通道维度。
+
+### Lane A（D807-1 残余）· **未落地（本轮决定，重登记 D813-1）**
+`par_partition.rs`/`partition.rs` **一字未改**，层与其钉子仍是实测真值：np2 **222/246**、
+np4 **222/222/246/234**、np1 252。**不切的两个理由（都在 `tmp/d77a/README.md`，附完整配方）**：
+1. `EntityOwnership` **不只在本地构造**——它**编码进 submesh 线格式**
+   （`mesh_serde.rs:161` 编码 / `:466` 解码，flag bit 16），非 root rank 是**重建**出来的 ⇒
+   发布锚单元 `(ElementType, 全局顶点表)` 必须同步 encode/decode，而 `ElementType` 在树里
+   **没有**数字转换（要新引入 type tag）。只改 `EntityOwnership::new` 的发布会在线路 rank 上
+   **静默为空**——正是纪律禁止的失败形态。
+2. 切法是**逐网格全有或全无**：提取侧不知空间阶 ⇒ 不存在"仍拉锚"的**空间无关**谓词；hex-only 帧
+   （`hex_face_slots`+`match_face_dof` 可证面局部）会在每个 tet/prism/pyramid 的非本地锚面上
+   **panic**，一刀切则破九空间 `GetTrueVSize` 钉。
+- **残余量化**（在 1-node 闭包上，`d807_one_layer_is_not_anchor_closed`）：**facet-anchor miss
+  np2 `[9, 70]`、np4 `[42, 51, 89, 72]`；edge-owner miss ≈ 0**（owner 侧已被 round-76 通道覆盖，
+  这解释了为何 round-75 那个 np4 `exchange_ghost_edge_ids` panic 不再出现）。
+- **下一轮配方（顺序）**：① `FullEntityTables` 增 `anchor_elems`（循环按 `e` 升序 ⇒ 首插即最小 gid），
+  `restrict_to` 过滤到本地 facet 的锚，`EntityOwnership` 增 `facet_anchor_element(gid)`；② `mesh_serde`
+  用**新 flag bit**（32）encode/decode + 引入 `ElementType` 数值 tag；③ space 侧由锚的 `(type, verts)`
+  建面帧（hex 面、tet k=2 面可证**面局部**；**k≥3 的 tet 面需把 `tet_face_slots` 重写为无 apex 重心式**
+  ——数学上无 apex，现码读 `verts[0..3]`；prism/pyramid 三角面同形）；④ DP 用帧替代"锚必须本地"。
+
+### 主会话其它交付
+- `examples/mfem_ex18_euler.rs`（D812-1 爆炸半径，见上）。
+- `crates/io/tests/d812r77_{mesh_write_ledger,premise_probe}.rs` + fixture（见上）。
+- **回归重跑（含两路在飞改动）**：ex14 体 **311 行/ARF 0.956044 逐字节**；**ex27 十档 10/10 IDENTICAL**
+  且 `refined.mesh` 与 round-76 金标 **TOPOLOGY-IDENTICAL**、nodes `max-rel-diff=4.29234e-08`（与
+  round 76 记录**逐位相同**）；**pex3 四锚点逐位**（2.70053050699196e-2/87、3.05558571614408e-4/1、
+  2.70053057745987e-2/95、2.70053059872530e-2/193）；**pex9 mass 3.638126e2 → 3.638348e2**（= round 76
+  `tmp/d76main/afterA/pex9_r1.out`，本轮 2 worker 跑亦同）；`d807_d122r2_ghost_layer_par` 8/0/0 且
+  九空间 owned 仍逐位 = `GetTrueVSize`。
+- **MFEM oracle 复核（⑯）**：`/home/quan/work/d77/ex9a/`（新编新跑，993 行/16862 B `L2_T1_2D_P1`）、
+  `$HOME/work/d77/oracle/*.mfem.mesh`（`r31_save` 重存）、`$HOME/work/d77/ex18cpp/`；
+  ⚠️ round-76 的 `$HOME/work/d76main/ex9cpp/` 副本已被一次 `-r 0` 运行**覆盖**（其 `ex9.mesh` 只有 12 元）
+  ⇒ 不能用（这是 ㉙ 的又一实例）。
+
+### 大门（round 77 冻结树）
+| 门 | 结果 |
+|---|---|
+| 十 crate `--lib`（debug） | **10 targets / 2648 passed / 0 failed / 5 ignored**（= round 76 逐项相同） |
+| 十 crate `--tests`（release） | **330 targets / 4291 passed / 0 failed / 26 ignored**（round-76 全靶 326+10 靶 / 4281 / 0 / 121，含 doc-tests） |
+| 十 crate `--doc`（release） | **10 targets / 9 passed / 0 failed / 95 ignored** ⇒ 与上合并 = **340 靶 / 4300 passed / 0 failed / 121 ignored**（round-76 = 336 靶 / 4281 / 0 / 121：**+4 靶恰为本轮 4 个新测试文件**、ignored 不变） |
+| `-p fem-io --no-fail-fast` | **323 / 0 / 3 ign**（38 targets；round-76 基线 308/0/3，+15 = `d812_order1_geometry_nodes` 11 + `d812r77_mesh_write_ledger` 3 + `d812r77_premise_probe` 1） |
+| `-p fem-mesh --no-fail-fast` | **497 / 0 / 9 ign** |
+| `-p fem-space --no-fail-fast` | **592 / 0 / 3 ign**（基线逐项相同） |
+| `-p fem-parallel --no-fail-fast` | **341 / 0 / 13 ign**（round-76 334/0/14 → 新 d807r77 4 测 + 相关） |
+| examples `--release --keep-going` | **0 错误、0 非 vendor 警告** |
+| pro 层 `cargo check -p pro-bench-tests -p pro-cad` | **rc=0** |
+| fem-py `cargo build -p fem-py` | **rc=0** |
+
 ## 第七十六轮（round 76）：D805-1/D805-2 DG 面项逐条目 = MFEM + D808-4 曲面 PA 核几何 + D805-3 ex27 refined.mesh + D807-1 部分（提取侧发布实体所有权）
 
 **开局 HEAD = round 75 末笔 `2952d058`（已推送）；树净。** 派单为两路后台代理
