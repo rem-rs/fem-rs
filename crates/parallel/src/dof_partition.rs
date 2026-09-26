@@ -237,6 +237,11 @@ struct NdFaceBlock {
     n_dofs: usize,
 }
 
+/// The exact identity 2×2 pair transform — an element whose own face basis *is*
+/// the canonical one; the scalar sign channel is already the correct (unit)
+/// map, so no pair record is needed (D807-2).
+const IDENTITY_PAIR: [[f64; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
+
 /// Face blocks of one 3-D NDk (`k ≥ 2`) element in `HCurlSpace`'s slot order,
 /// mirroring `crates/space/src/hcurl.rs`: `TET_FACES` order for tetrahedra,
 /// MFEM `FaceVert` block order for hexahedra (`HEX_ND_BLOCK_TO_QUAD_FACE` =
@@ -335,6 +340,49 @@ pub struct DofPartition {
     /// `val *= sign_correction(row) * sign_correction(col)` (matrix) or
     /// `val *= sign_correction(i)` (vector) during permutation.
     pub(crate) sign_corrections: Vec<f64>,
+    /// D807-2: shared-face DOF pairs whose space↔global relation is a genuine
+    /// 2×2 matrix instead of a scalar sign — see [`DofPairTransform`].
+    ///
+    /// Empty for every space whose shared-face relation *is* a signed
+    /// permutation (hex NDk, RT/HDiv, 2-D, ND1, H¹, L²), which is why those
+    /// paths stay bit-identical: the pair channel is only consulted for the
+    /// dofs it actually names.
+    pair_transforms: Vec<DofPairTransform>,
+    /// `dm dof → (index into `pair_transforms`, component)`.
+    pair_of_dof: HashMap<u32, (u32, u8)>,
+}
+
+/// D807-2: one shared-face DOF pair of the canonical (face-creating element)
+/// basis whose relation to the DOF partition's global basis (the
+/// **minimum-global-element-id** anchor element's own basis) is a 2×2 matrix —
+/// tet / prism / pyramid `NDk` (k ≥ 2) triangular faces.
+///
+/// `dm_dofs` are the two space (DofManager-layout) DOF ids in canonical
+/// component order; `s` maps the canonical pair onto the element's own basis
+/// (`u_local = s·u_canonical`, the anchor element's
+/// [`fem_space::hcurl::FaceDofBlock`]), so the global (anchor-basis) values of
+/// the pair are `u_global = s·u_canonical`.  The permutation therefore applies
+/// the **dual** `s⁻ᵀ` to rows / load vectors and `s⁻¹` to columns (the primal
+/// solution maps by `s`), exactly as the scalar channel applies `±1` to both.
+#[derive(Debug, Clone, Copy)]
+pub struct DofPairTransform {
+    /// The two space (DofManager-layout) DOF ids, canonical component order.
+    pub dm_dofs: [u32; 2],
+    /// `u_local(anchor) = s·u_canonical` — the anchor element's face block.
+    pub s: [[f64; 2]; 2],
+    /// `s⁻¹` (validated non-singular at construction).
+    pub s_inv: [[f64; 2]; 2],
+}
+
+/// Up to two `(DM dof, coefficient)` terms of one dof's 1- or 2-dimensional
+/// transform: `Σ_{i<n} coeff_i · value(dof_i)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DofTransform2 {
+    /// The `(target DM dof, coefficient)` terms (the second is unused when
+    /// `n == 1`).
+    pub terms: [(u32, f64); 2],
+    /// Number of live terms (1 for the scalar channel, 2 for a pair).
+    pub n: usize,
 }
 
 impl DofPartition {
@@ -363,6 +411,8 @@ impl DofPartition {
             dm_to_partition: Vec::new(), // identity for P1
             partition_to_dm: Vec::new(),
             sign_corrections: Vec::new(),
+            pair_transforms: Vec::new(),
+            pair_of_dof: HashMap::new(),
         }
     }
 
@@ -411,6 +461,8 @@ impl DofPartition {
             dm_to_partition: Vec::new(), // identity: element order == partition order
             partition_to_dm: Vec::new(),
             sign_corrections: Vec::new(),
+            pair_transforms: Vec::new(),
+            pair_of_dof: HashMap::new(),
         }
     }
 
@@ -491,6 +543,8 @@ impl DofPartition {
             dm_to_partition,
             partition_to_dm,
             sign_corrections: Vec::new(),
+            pair_transforms: Vec::new(),
+            pair_of_dof: HashMap::new(),
         }
     }
 
@@ -1095,6 +1149,8 @@ impl DofPartition {
             dm_to_partition,
             partition_to_dm,
             sign_corrections: Vec::new(), // P2 H1 DOFs are sign-invariant
+            pair_transforms: Vec::new(),
+            pair_of_dof: HashMap::new(),
         }
     }
 
@@ -1257,6 +1313,11 @@ impl DofPartition {
         // canonical face basis into the global (minimum-global-element) one.
         // See Step 2c.
         let mut nd_face_sign: HashMap<u32, f64> = HashMap::new();
+        // D807-2: the 2×2 shared-face pair channel (see [`DofPairTransform`]) —
+        // the anchor element's own face blocks, which the scalar sign table
+        // above cannot express (it is `+1.0` at every tri-face slot).
+        let mut pair_transforms: Vec<DofPairTransform> = Vec::new();
+        let mut pair_of_dof: HashMap<u32, (u32, u8)> = HashMap::new();
         if nd_faces_active {
             // Pass A: per-face canonical data (min global elem id, owner).
             for e in mesh.elem_iter() {
@@ -1344,6 +1405,44 @@ impl DofPartition {
                                 "from_edge_space: face DOF sign {s} is not ±1"
                             );
                             nd_face_sign.insert(d, s);
+                        }
+                        // D807-2: record the anchor element's genuine 2×2 face
+                        // pair transforms.  `element_signs` above is identically
+                        // `+1.0` at every tri-face slot (measured: the space-side
+                        // D807/D790-3 registration), so a space whose face basis
+                        // differs from the anchor's by a full matrix — MFEM's
+                        // `ND_DofTransformation::T(ori)` on triangular faces,
+                        // which also *mixes* the pair — would otherwise pass
+                        // through the permutation untransformed.  The pair's two
+                        // DOF ids are the element's own slots `slot`, `slot + 1`
+                        // (== the block's `canon_dofs`), canonical component
+                        // order, and `s` maps the canonical pair onto the
+                        // anchor's own (= the global) pair: `u_global =
+                        // s · u_canonical`.
+                        for t in space.element_face_pair_transforms(e) {
+                            // An exact identity needs no channel: the scalar sign
+                            // is already the correct (unit) transform.
+                            if t.s == IDENTITY_PAIR {
+                                continue;
+                            }
+                            let i0 = t.slot as usize;
+                            let dm = [dofs[i0], dofs[i0 + 1]];
+                            // `element_face_pair_transforms` lists *every* face
+                            // block of the element; keep only the pairs of the
+                            // face this anchor iteration is about (a block of
+                            // another face belongs to that face's own anchor
+                            // branch).
+                            if nd_face_key.get(&dm[0]) != Some(&key) {
+                                continue;
+                            }
+                            let pi = pair_transforms.len() as u32;
+                            pair_transforms.push(DofPairTransform {
+                                dm_dofs: dm,
+                                s: t.s,
+                                s_inv: t.s_inv,
+                            });
+                            pair_of_dof.insert(dm[0], (pi, 0));
+                            pair_of_dof.insert(dm[1], (pi, 1));
                         }
                     } else {
                         for &d in slots {
@@ -1802,6 +1901,8 @@ impl DofPartition {
             dm_to_partition,
             partition_to_dm,
             sign_corrections: sign_corr,
+            pair_transforms,
+            pair_of_dof,
         }
     }
 
@@ -2231,6 +2332,8 @@ impl DofPartition {
             dm_to_partition,
             partition_to_dm,
             sign_corrections: sign_corr,
+            pair_transforms: Vec::new(),
+            pair_of_dof: HashMap::new(),
         }
     }
 
@@ -2281,6 +2384,82 @@ impl DofPartition {
             1.0
         } else {
             self.sign_corrections[dm_local_id as usize]
+        }
+    }
+
+    /// D807-2: `true` when at least one DOF's space↔global relation is a genuine
+    /// 2×2 matrix instead of the scalar sign — i.e. when callers must use
+    /// [`Self::dual_dof_transform`] / [`Self::primal_dof_transform`] rather than
+    /// the scalar [`Self::sign_correction`] product.
+    ///
+    /// `false` for every space whose shared-face relation is a signed
+    /// permutation (hex NDk, RT/H(div), 2-D, ND1, H¹, L²), which is why those
+    /// assembly paths are unchanged by construction.
+    #[inline]
+    pub fn needs_pair_transform(&self) -> bool {
+        !self.pair_transforms.is_empty()
+    }
+
+    /// D807-2: the shared-face DOF pairs carried by this partition (empty unless
+    /// [`Self::needs_pair_transform`]).
+    #[inline]
+    pub fn pair_transforms(&self) -> &[DofPairTransform] {
+        &self.pair_transforms
+    }
+
+    /// D807-2: `(pair index, component)` of a DofManager-local DOF that belongs
+    /// to a 2×2 shared-face pair.
+    #[inline]
+    pub fn pair_of_dof(&self, dm_local_id: u32) -> Option<(u32, u8)> {
+        self.pair_of_dof.get(&dm_local_id).copied()
+    }
+
+    /// D807-2: the **dual** transform of `d` — the terms the permutation
+    /// applies to a load vector entry and to a matrix **row or column**:
+    /// `Σ_i terms[i].1 · A[terms[i].0]`.
+    ///
+    /// The dual of `u_global = s·u_canonical` is `s⁻ᵀ`; written in
+    /// (source component, target component) form both sides of the matrix
+    /// congruence `A_global = s⁻ᵀ·A_canonical·s⁻¹` use the *same* coefficient
+    /// table `s⁻¹[source][target]` — which is why rows and columns share this
+    /// method.  It reduces to the historical scalar channel because `±1` is its
+    /// own inverse (the scalar `sign_correction` is the anchor element's own
+    /// `element_signs` entry); for a general 2×2 the two facts are *not*
+    /// interchangeable and a transposed column side is a silent 3e-2-level
+    /// error (measured: `tmp/d77a/`).
+    ///
+    /// A pair's two terms share the pair's two target DM dof ids (one per
+    /// component), so callers must **accumulate**, not assign.
+    #[inline]
+    pub fn dual_dof_transform(&self, d: u32) -> DofTransform2 {
+        match self.pair_of_dof(d) {
+            Some((pi, a)) => {
+                let p = &self.pair_transforms[pi as usize];
+                let row = p.s_inv[a as usize];
+                DofTransform2 { terms: [(p.dm_dofs[0], row[0]), (p.dm_dofs[1], row[1])], n: 2 }
+            }
+            None => DofTransform2 { terms: [(d, self.sign_correction(d)), (d, 0.0)], n: 1 },
+        }
+    }
+
+    /// D807-2: the **primal** transform of `d` — the map a *solution* vector
+    /// takes when it is carried from the DM (canonical) layout into the
+    /// partition (global anchor) layout: `u_global = s·u_canonical`, i.e. the
+    /// coefficient of `(source c → target t)` is `s[t][c]` (the transpose of
+    /// [`Self::dual_dof_transform`]'s table).  Inverting the permutation to
+    /// recover DM-layout values needs this, not the dual (the two coincide only
+    /// for the signed-permutation families, where `s = s⁻ᵀ`).
+    #[inline]
+    pub fn primal_dof_transform(&self, d: u32) -> DofTransform2 {
+        match self.pair_of_dof(d) {
+            Some((pi, a)) => {
+                let p = &self.pair_transforms[pi as usize];
+                DofTransform2 {
+                    terms: [(p.dm_dofs[0], p.s[0][a as usize]), (p.dm_dofs[1], p.s[1][a as usize])],
+                    n: 2,
+                }
+            }
+            None => DofTransform2 { terms: [(d, self.sign_correction(d)), (d, 0.0)], n: 1 },
         }
     }
 

@@ -348,29 +348,43 @@ pub(crate) fn finalize_boundary_matrix<S: FESpace>(
 }
 
 /// Permute a CSR matrix from DofManager ordering to partition [owned|ghost] ordering.
+///
+/// The scalar part applies `d_i·d_j` (`sign_corrections`), and the
+/// [`DofPartition::needs_pair_transform`] part applies the 2×2 congruence
+/// `A ← s⁻ᵀ·A·s⁻¹` of every shared-face DOF pair (D807-2) — both sides go
+/// through [`DofPartition::dual_dof_transform`], whose coefficient table
+/// `s⁻¹[source][target]` is shared by the row and the column side.  For the
+/// signed-permutation families (hex NDk, RT/HDiv, 2-D, ND1, H¹, L²) that
+/// reduces to the historical `val·d_row·d_col` bit for bit: the pair channel is
+/// empty there, so each transform has exactly one term, `(dof, ±1)`.
 pub fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> {
+    permute_csr_scaled(mat, dof_part, 1.0)
+}
+
+/// [`permute_csr`] with an overall factor on every entry — the
+/// `add_bilinear` / `add_boundary_bilinear` accumulation paths apply their
+/// factor here, because a [`crate::par_csr::ParCsrMatrix`] has no `scale`.
+pub(crate) fn permute_csr_scaled(
+    mat: &CsrMatrix<f64>,
+    dof_part: &DofPartition,
+    factor: f64,
+) -> CsrMatrix<f64> {
     let n = dof_part.n_total_dofs();
     let mut coo = CooMatrix::<f64>::new(n, n);
-    let needs_sign = dof_part.needs_sign_correction();
 
     for row in 0..mat.nrows {
-        let new_row = dof_part.permute_dof(row as u32) as usize;
-        let sr = if needs_sign {
-            dof_part.sign_correction(row as u32)
-        } else {
-            1.0
-        };
+        let rt = dof_part.dual_dof_transform(row as u32);
         for k in mat.row_ptr[row]..mat.row_ptr[row + 1] {
             let col = mat.col_idx[k] as usize;
-            let new_col = dof_part.permute_dof(col as u32) as usize;
-            let sc = if needs_sign {
-                dof_part.sign_correction(col as u32)
-            } else {
-                1.0
-            };
-            let val = mat.values[k] * sr * sc;
-            if val != 0.0 {
-                coo.add(new_row, new_col, val);
+            let ct = dof_part.dual_dof_transform(col as u32);
+            for &(r_dof, r_coef) in &rt.terms[..rt.n] {
+                let new_row = dof_part.permute_dof(r_dof) as usize;
+                for &(c_dof, c_coef) in &ct.terms[..ct.n] {
+                    let val = mat.values[k] * r_coef * c_coef * factor;
+                    if val != 0.0 {
+                        coo.add(new_row, dof_part.permute_dof(c_dof) as usize, val);
+                    }
+                }
             }
         }
     }
@@ -378,19 +392,20 @@ pub fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f
     coo.into_csr()
 }
 
-/// Permute a vector from DofManager ordering to partition [owned|ghost] ordering.
+/// Permute a vector from DofManager ordering to partition [owned|ghost] ordering,
+/// with the same scalar / 2×2 dual transforms as [`permute_csr`] (D807-2).
+///
+/// A shared-face pair's two canonical components both contribute to the pair's
+/// two target slots, so the accumulation is a `+=` (it is an assignment in
+/// disguise for the one-term scalar case, which stays bit-identical).
 pub fn permute_vec(vec: &[f64], dof_part: &DofPartition) -> Vec<f64> {
     let n = dof_part.n_total_dofs();
     let mut out = vec![0.0; n];
-    let needs_sign = dof_part.needs_sign_correction();
     for (i, &v) in vec.iter().enumerate() {
-        let new_i = dof_part.permute_dof(i as u32) as usize;
-        let si = if needs_sign {
-            dof_part.sign_correction(i as u32)
-        } else {
-            1.0
-        };
-        out[new_i] = v * si;
+        let t = dof_part.dual_dof_transform(i as u32);
+        for &(dof, coef) in &t.terms[..t.n] {
+            out[dof_part.permute_dof(dof) as usize] += v * coef;
+        }
     }
     out
 }

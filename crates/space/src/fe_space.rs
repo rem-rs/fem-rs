@@ -104,6 +104,23 @@ pub trait FESpace: Send + Sync {
         &[] // default: no shared-face DOF pairs
     }
 
+    /// D807-2: the element's shared-face DOF **pair transforms** — one per face
+    /// point pair, keyed by the element-local slot of the pair's first DOF, with
+    /// the precomputed inverse (`u_local = s·u_canonical`).
+    ///
+    /// This is the accessor the parallel DOF partition consumes: its scalar
+    /// [`Self::element_signs`] channel is the diagonal special case and is
+    /// identically `+1.0` at every triangular-face slot, so a rank whose
+    /// canonical (face-creating element) basis differs from the DP's global
+    /// (minimum-global-element-id) one by a genuine 2×2 has no scalar to read.
+    /// The default (`&[]`, no allocation) is exact for every space whose
+    /// shared-face relation *is* a signed permutation — H¹, L², RT/HDiv, 2-D
+    /// Nédélec, hex NDk, k = 1 — i.e. everywhere the pair channel must stay
+    /// inert.
+    fn element_face_pair_transforms(&self, _elem: u32) -> Vec<crate::hcurl::FacePairTransform> {
+        Vec::new()
+    }
+
     /// If this is an L² (DG) space, the node placement of its discontinuous
     /// Lagrange basis ([`crate::L2Basis::GaussLegendre`] or
     /// [`crate::L2Basis::GaussLobatto`]).  Returns `None` for all other

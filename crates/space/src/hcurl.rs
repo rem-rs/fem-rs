@@ -649,6 +649,32 @@ pub struct FaceDofBlock {
 /// Identity 2×2 block (the face-creating element's own convention).
 const ID2: [[f64; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
 
+/// One shared-face DOF **pair transform** of one element, in the form the
+/// parallel DOF partition consumes it (D807-2).
+///
+/// This is the DP-facing view of one [`FaceDofBlock`]: the block's
+/// element-local slot, the 2×2 map from the space's canonical (face-creating
+/// element) pair onto the element's own pair (`u_local = s·u_canonical`), and
+/// the precomputed, validated inverse.
+///
+/// The DP's global face basis is the **minimum-global-element-id** element's
+/// own basis, so the transform it has to apply for the element `a` that anchors
+/// a facet is exactly this element's block: `u_global = s·u_canonical`, hence
+/// the dual (row/load) maps are `s⁻ᵀ` and `s⁻¹`.  The scalar
+/// [`HCurlSpace::element_signs`] array is the diagonal (signed-permutation)
+/// special case and is identically `+1.0` at every tri-face slot — which is why
+/// the DP cannot express this relation with a scalar and needs the pair channel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FacePairTransform {
+    /// Element-local slot of the pair's first DOF: the pair occupies slots
+    /// `slot` and `slot + 1` of `FESpace::element_dofs(elem)`.
+    pub slot: u32,
+    /// `u_local = s · u_canonical`.
+    pub s: [[f64; 2]; 2],
+    /// `s⁻¹` (panics on a singular pair, i.e. a degenerate face frame).
+    pub s_inv: [[f64; 2]; 2],
+}
+
 /// Match one element-local face DOF point against the anchor's point list —
 /// the shared-face physical point, with a symmetric barycentric GL set the
 /// correspondence is a permutation.
@@ -1717,6 +1743,32 @@ impl<M: MeshTopology> HCurlSpace<M> {
         &self.elem_face_blocks[e as usize]
     }
 
+    /// D807-2: the element's per-face-point-pair 2×2 transforms, keyed by the
+    /// element-local slot of the pair's first DOF — the accessor the parallel
+    /// DOF partition consumes (see [`FacePairTransform`]).
+    ///
+    /// One entry per face point pair of every shared triangular face of the
+    /// element (tet / prism / pyramid `NDk`, k ≥ 2), in element slot order;
+    /// empty for every element whose shared-face relation is a signed
+    /// permutation — 2-D spaces, hex quad faces, prism/pyramid quad faces and
+    /// k = 1 — where [`Self::element_signs`] is the exact description (which is
+    /// why the pair channel stays empty, and bit-identical, on those).
+    ///
+    /// The pair's two DOF ids are `Self::element_dofs(e)[slot]` and `[slot + 1]`
+    /// (equal to the block's `canon_dofs`), so this accessor needs no `DofId`
+    /// plumbing: it pairs each transform with the element slot that has to be
+    /// mixed.
+    pub fn element_face_pair_transforms(&self, e: u32) -> Vec<FacePairTransform> {
+        self.elem_face_blocks[e as usize]
+            .iter()
+            .map(|b| FacePairTransform {
+                slot: b.slot as u32,
+                s: b.s,
+                s_inv: Self::inv2(b.s),
+            })
+            .collect()
+    }
+
     /// Inverse of a 2×2 matrix (D602 helper).
     fn inv2(m: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
         let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
@@ -2331,6 +2383,10 @@ impl<M: MeshTopology> FESpace for HCurlSpace<M> {
     // method does not recurse into itself.
     fn element_face_blocks(&self, elem: u32) -> &[FaceDofBlock] {
         HCurlSpace::element_face_blocks(self, elem)
+    }
+
+    fn element_face_pair_transforms(&self, elem: u32) -> Vec<FacePairTransform> {
+        HCurlSpace::element_face_pair_transforms(self, elem)
     }
 }
 

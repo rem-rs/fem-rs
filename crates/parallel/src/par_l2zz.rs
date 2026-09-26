@@ -389,6 +389,20 @@ pub fn l2_zz_estimator_parallel(
     // coefficients.
     let mut x_dm = vec![0.0_f64; n_rt_dofs];
     let needs_sign = dp.needs_sign_correction();
+    // D807-2 refusal: this recovery inverts the permutation with the scalar sign
+    // alone (`x_dm = S·x_p` per DOF).  A shared-face DOF pair whose space↔global
+    // relation is a genuine 2×2 matrix (tet / prism / pyramid NDk, k ≥ 2) cannot
+    // be inverted by a per-DOF scalar, and silently doing so would produce a
+    // plausible-looking but basis-mismatched flux.  Every space this estimator
+    // serves (RT0/RT1 on 2-D meshes) has an empty pair channel; the assert is
+    // what keeps that an invariant rather than an accident.
+    assert!(
+        !dp.needs_pair_transform(),
+        "par_l2zz: the DOF partition carries {} 2×2 shared-face pair transform(s) \
+         (D807-2); this estimator inverts the permutation with the scalar sign \
+         channel only, which cannot express them",
+        dp.pair_transforms().len()
+    );
     for pid in 0..n_total_dofs {
         let dm = dp.unpermute_dof(pid as u32) as usize;
         let s = if needs_sign {

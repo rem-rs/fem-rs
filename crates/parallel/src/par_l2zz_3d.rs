@@ -247,6 +247,17 @@ where
     // ── 4. Per-element L1 distance ─────────────────────────────────────────
     // Convert solution from parallel ordering back to local (dm) ordering.
     let mut x_local = vec![0.0_f64; n_smooth_total];
+    // D807-2 refusal: inverting the permutation with the scalar sign alone is
+    // only valid when every shared-face relation is a signed permutation.  A
+    // 2×2 pair transform (tet / prism / pyramid NDk, k ≥ 2) cannot be inverted
+    // per DOF; this estimator's spaces (RT0/RT1) never carry one, and the
+    // assert keeps that an invariant instead of an accident.
+    assert!(
+        !smooth_dp.needs_pair_transform(),
+        "par_l2zz_3d: the DOF partition carries {} 2×2 shared-face pair \
+         transform(s) (D807-2), which the scalar sign recovery cannot invert",
+        smooth_dp.pair_transforms().len()
+    );
     for dm in 0..n_smooth_total as u32 {
         let pid = smooth_dp.permute_dof(dm) as usize;
         let s = if smooth_dp.needs_sign_correction() {

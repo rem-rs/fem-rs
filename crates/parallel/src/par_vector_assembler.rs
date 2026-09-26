@@ -4,7 +4,6 @@
 //! one-layer ghost-element overlap in the local mesh so that each rank's owned
 //! DOF rows receive the full assembled contributions without any inter-rank exchange.
 
-use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 use fem_assembly::vector_assembler::VectorAssembler;
@@ -16,7 +15,11 @@ use fem_assembly::boundary::vector_boundary::{
 use crate::par_csr::ParCsrMatrix;
 use crate::par_space::ParallelFESpace;
 use crate::par_vector::ParVector;
-use crate::dof_partition::DofPartition;
+// The DofManager → partition permutation lives in `par_assembler` (single
+// implementation, so the vector and scalar assembly paths can never disagree):
+// it applies the scalar sign channel *and* the 2×2 shared-face pair transforms
+// of `DofPartition` (D807-2).
+use crate::par_assembler::{permute_csr, permute_csr_scaled, permute_vec};
 
 /// Parallel assembly driver for vector FE spaces (H(curl), H(div)).
 ///
@@ -257,56 +260,10 @@ fn add_blocks_into(a: &mut ParCsrMatrix, b: &ParCsrMatrix) {
     *o = o.axpby(1.0, b.offd_block(), 1.0);
 }
 
-/// Permute a CSR matrix from local space ordering to partition [owned|ghost] ordering.
-///
-/// For H(curl)/H(div) spaces, also applies the sign correction `d_i * d_j`
-/// stored in [`DofPartition::sign_corrections`] so that the matrix is
-/// expressed in the globally consistent edge-orientation basis.
-fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> {
-    permute_csr_scaled(mat, dof_part, 1.0)
-}
-
-/// [`permute_csr`] with an overall factor applied to every entry — used by the
-/// `add_bilinear` / `add_boundary_bilinear` accumulation paths so the factor
-/// never has to be applied to a `ParCsrMatrix` (which has no `scale`).
-fn permute_csr_scaled(
-    mat: &CsrMatrix<f64>,
-    dof_part: &DofPartition,
-    factor: f64,
-) -> CsrMatrix<f64> {
-    let n = dof_part.n_total_dofs();
-    let mut coo = CooMatrix::<f64>::new(n, n);
-
-    for row in 0..mat.nrows {
-        let new_row = dof_part.permute_dof(row as u32) as usize;
-        let d_row = dof_part.sign_correction(row as u32);
-        for k in mat.row_ptr[row]..mat.row_ptr[row + 1] {
-            let col = mat.col_idx[k] as usize;
-            let new_col = dof_part.permute_dof(col as u32) as usize;
-            let d_col = dof_part.sign_correction(col as u32);
-            let val = mat.values[k] * d_row * d_col * factor;
-            if val != 0.0 {
-                coo.add(new_row, new_col, val);
-            }
-        }
-    }
-
-    coo.into_csr()
-}
-
-/// Permute a vector from local space ordering to partition [owned|ghost] ordering.
-///
-/// For H(curl)/H(div) spaces, also applies the sign correction `d_i`
-/// so that the vector is in the globally consistent edge-orientation basis.
-fn permute_vec(vec: &[f64], dof_part: &DofPartition) -> Vec<f64> {
-    let n = dof_part.n_total_dofs();
-    let mut out = vec![0.0; n];
-    for (i, &v) in vec.iter().enumerate() {
-        let new_i = dof_part.permute_dof(i as u32) as usize;
-        out[new_i] = v * dof_part.sign_correction(i as u32);
-    }
-    out
-}
+// The DofManager → partition permutation lives in `par_assembler` (single
+// implementation, so the vector and scalar assembly paths can never disagree):
+// it applies the scalar sign channel *and* the 2×2 shared-face pair transforms
+// of `DofPartition` (D807-2).
 
 #[cfg(test)]
 mod tests {
