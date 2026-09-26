@@ -246,8 +246,10 @@ const IDENTITY_PAIR: [[f64; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
 /// mirroring `crates/space/src/hcurl.rs`: `TET_FACES` order for tetrahedra,
 /// MFEM `FaceVert` block order for hexahedra (`HEX_ND_BLOCK_TO_QUAD_FACE` =
 /// `[0, 2, 5, 3, 4, 1]` into `HEX_QUAD_FACES`), `PRISM_TRI_FACES` +
-/// `PRISM_QUAD_FACES` and `PYRAMID_TRI_FACES` + `PYRAMID_QUAD_FACE` order
-/// otherwise.  DOFs per face: `k(k−1)` on a triangle, `2k(k−1)` on a
+/// `PRISM_QUAD_FACES` for prisms, and for pyramids the **base quad first, then
+/// the four apex triangles** (`PYRAMID_TRI_FACES` order) — MFEM
+/// `ND_FuentesPyramidElement`'s slot order (`edges → base quad → apex tris →
+/// interior`, D814-4).  DOFs per face: `k(k−1)` on a triangle, `2k(k−1)` on a
 /// quadrilateral.  `None` when the element carries no face block (2-D, `k = 1`,
 /// unsupported type) — such elements have only edge + element-private DOFs.
 fn nd_face_blocks_for_elem(et: fem_mesh::ElementType, k: usize) -> Option<Vec<NdFaceBlock>> {
@@ -284,12 +286,19 @@ fn nd_face_blocks_for_elem(et: fem_mesh::ElementType, k: usize) -> Option<Vec<Nd
             NdFaceBlock { verts: &[1, 2, 5, 4], n_dofs: ndf_quad },
             NdFaceBlock { verts: &[0, 2, 5, 3], n_dofs: ndf_quad },
         ],
+        // D814-4: base quad first, then the four apex triangles — HCurlSpace's
+        // pyramid slot table (hcurl `PYRAMID_QUAD_FACE` then `PYRAMID_TRI_FACES`)
+        // and MFEM `ND_FuentesPyramidElement` both order the blocks this way; the
+        // pre-D814 apex-tris-first order sliced every pyramid face block at the
+        // wrong `off` (the quad block read the last two tri blocks, the first two
+        // tri blocks read the quad, …) and keyed each face's DOFs to the wrong
+        // face.
         ElementType::Pyramid5 => vec![
+            NdFaceBlock { verts: &[0, 1, 2, 3], n_dofs: ndf_quad },
             NdFaceBlock { verts: &[0, 1, 4], n_dofs: ndf },
             NdFaceBlock { verts: &[1, 2, 4], n_dofs: ndf },
             NdFaceBlock { verts: &[2, 3, 4], n_dofs: ndf },
             NdFaceBlock { verts: &[3, 0, 4], n_dofs: ndf },
-            NdFaceBlock { verts: &[0, 1, 2, 3], n_dofs: ndf_quad },
         ],
         _ => return None,
     };
