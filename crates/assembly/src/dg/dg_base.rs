@@ -83,6 +83,12 @@ pub fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Line2, 2) => Box::new(SegP2),
         (ElementType::Line2, 3) => Box::new(SegP3),
         (ElementType::Tri3, 1)  => Box::new(TriP1),
+        // D815-1: higher-order triangular faces (the tetrahedron's faces in an
+        // order-2/3 DG space).  The face element is consumed only for its
+        // quadrature rule (`IntRules.Get(TRIANGLE, 2·max(o₁,o₂))`); TriP2/P3
+        // carry exactly MFEM's triangle rules at those orders.
+        (ElementType::Tri3, 2)  => Box::new(fem_element::lagrange::TriP2),
+        (ElementType::Tri3, 3)  => Box::new(fem_element::lagrange::TriP3),
         (ElementType::Quad4, o) if o >= 1 => Box::new(QuadL2GL::new(o as usize)),
         _ => panic!("ref_elem_face: unsupported ({et:?}, order={order})"),
     }

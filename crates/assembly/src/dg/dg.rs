@@ -253,7 +253,7 @@ fn accumulate_dg_volume_element<S: FESpace>(
     let elem_type = mesh.element_type(e);
     let re = ref_elem_vol(elem_type, order);
     let n  = re.n_dofs();
-    // D814-1: MFEM's `DiffusionIntegrator` volume rule
+    // D814-1 + D815-1: MFEM's `DiffusionIntegrator::GetRule`
     // (`DiffusionIntegrator::GetRule`, fem/bilininteg.cpp:1347) is
     //   Qk (tensor) spaces:  o + o + dim − 1
     //   Pk (simplex) spaces: o + o − 2
@@ -262,11 +262,14 @@ fn accumulate_dg_volume_element<S: FESpace>(
     // and the caller's `2p` select the *same* Gauss points, so Q1..Q3 quad
     // meshes assemble bit-identically to before.  In 3-D they diverge (hex p=1:
     // order 4 → 3³ points vs order 2 → 2³), so the tensor families must use
-    // MFEM's own formula.  The simplex formula (`2o−2`, i.e. one centroid point
-    // at p=1) changes simplex values away from the caller's over-integration;
-    // without a simplex DG volume oracle that arm keeps the caller's rule.
+    // MFEM's own formula.  D815-1: the simplex formula `2o−2` (ONE centroid
+    // point at p = 1) — the caller's rule over-integrates: algebraically
+    // invisible on straight elements, but on curved ones it integrates a
+    // different matrix (the MFEM oracle `tmp/d815/`: curved tri p=1 entries
+    // off by 1.8e-2 entry-wise, curved tri p=3 by 77% relative).
     let vol_quad_order = match elem_type {
         ElementType::Quad4 | ElementType::Hex8 => 2 * order + dim as u8 - 1,
+        ElementType::Tri3 | ElementType::Tet4 => (2 * order).saturating_sub(2),
         _ => quad_order,
     };
     let q  = re.quadrature(vol_quad_order);
