@@ -4470,6 +4470,108 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十九轮（round 79）：D814-1 关闭（= D805-4b）——hex DG **矩阵级**对拍 + 两处潜伏核心缺陷（`find_face_elem` 属主启发式、`face_point_geom_3d_quad` 定向换角）+ dg.rs 体项 Qk 规则（主会话单路）
+
+**开局 HEAD = round 78 末笔 `9f906c20`（已推送）；树净；C: 100% 满（13G 空闲，gate 前清 target/debug，⑨）。**
+单路主会话：`crates/assembly/src/dg/**` + `crates/assembly/src/interior_faces.rs`，
+oracle 全部来自 `$HOME/mfem410_ser` 探针实跑（⑯ 对照物自审：把探针按 gen/dump 分体重跑、
+把三条积分器求积阶公式从 bilininteg.cpp 源码逐条抄录并让探针的 `[RULE]`/`[VRULE]` 行交叉验证）。
+
+### oracle：`tmp/d814/d814_probe.cpp`（gen/dump 分体）+ 15 矩阵金标
+- 夹具 = `MakeCartesian3D(2,2,1,HEXAHEDRON)` + `SetCurvature(2,false)` + 弯折
+  `(X,Y,Z) ↦ (X(1+0.15Y(1−Y)), Y+0.15XY(1−Y), Z(1+0.1X(1−X)))`（每分量非线性 ⇒ 全部单元的
+  order-2 等参映射 ≠ 角点三线性）；4 hex / 16 边界 quad 面 / 4 内部 quad 面；
+  追踪副本 = `tests/data/d814r79_curved_hex_mesh.txt`（探针 `gen` 写盘、`dump` 读回——
+  **分体是刻意的**：本 MFEM 构建对 in-memory 新建 hex 网格报内部面的 `faces_info[].Elem2No = −1`
+  （内面在面表里的下标不是"边界面在前"，`FaceIsInterior` 才是判据；新生成网格的
+  `GetFaceElements` 内面配对全丢），读回网格拓扑从零构建则健康，且顺带钉死 Rust 侧同一几何文件）。
+- 15 矩阵 = DIFV/DIFIF/DIFB/DIF（`DGDiffusionIntegrator` 族）、ADV/ADV2/ADVB
+  （`NonconservativeDGTrace`/`DGTrace` 族）、DIFIFO2/ADVO2（order-2 规则齿）、
+  ELAV/ELIF/ELBD/ELA/ELZIF/ELZBD（`DGElasticityIntegrator` 族）；
+  `[RULE]` 行 = MFEM 自己的 `GetRule` 实测点数（面 dif=4=2×2、adv=16=4×4、ela=4；
+  o2: dif=9=3×3、adv=25=5×5；体 dif_o1=27=3³、dif_o2=64、ela_o1=125=5³），
+  与源码公式逐一吻合：`DGDiffusion` 面 = `2·max(o₁,o₂)`、`DGTrace` 面 =
+  `Elem1->OrderW()+2·max(o₁,o₂)`（本夹具 OrderW=5）、`DGElast` 面 = `2·max`、
+  `Diffusion` 体(Qk) = `o+o+dim−1`、`Elasticity` 体 = `2·Trans.OrderGrad`。
+- 金标 = `tests/data/d814r79_hex_dg_matrices_mfem.txt`（971 KB，verbatim）；
+  比较器 `tmp/d814/cmp814.py`；容差沿用 round-76（`1e-12·|b| + 1e-14·max|A|`）。
+
+### 修复清单（5 源文件，公开 API 零变化）
+1. **补臂**（登记项）：`dg_base::ref_elem_face` 补 `Quad4`（`QuadL2GL` = MFEM
+   `L2_FECollection` 默认 GL 开点，`[0,1]²` 张量规则）；`ref_elem_vol` 补 `Hex8`
+   （`HexL2GL`）；`interior_faces.rs` 自己的 `local_faces` 补 `(8,3)` 臂
+   （**同名家族第三例**：D805-4 只修了 `build_face_elem_map` 的那份拷贝，
+   `InteriorFaceList::build` 在 hex 网格上一直 panic）。
+2. **面型按面节点数分派**（登记项）：新 `face_type_of(face_nodes)`（2→Line2/3→Tri3/4→Quad4），
+   替换 `dim==2 ? Line2 : Tri3` 的 5 处：`assemble_dg_interior_faces`、
+   `assemble_advection_boundary`、`assemble_advection_boundary_full`、
+   `dg.rs::assemble_interior_face`、`dg.rs::assemble_boundary_face_with_elem`；
+   `assemble_periodic_flux` 从 2-D 硬编码（`Line2` + `face_point_geom`）扩出 3-D 臂
+   （两侧各自 `face_point_geom_3d_face` + 左侧 nor，MFEM `Elem1` 语义）；
+   `dg.rs` 两个面函数与 `dg_elasticity` 两个 stress 面函数的 per-QP 算术改为 dim 无关
+   （新 `dg_base::FaceGeom` 枚举统一 2-D/3-D 面几何视图，单一真源）。
+3. **`find_face_elem` 属主启发式（潜伏核心缺陷，本轮新发现）**："包含 ≥2 个面节点"对
+   2 节点边恰好是精确判据，对 quad 面（4 节点）**全网第一个元素就命中 2 个** ⇒
+   `assemble_advection_boundary*` 的每个 3-D 边界项都落到**错误元素**（探针 red：
+   `face_point_geom_3d_quad: element 0 has no node 5`）。改"包含**全部**面节点"
+   （边界面的属主唯一，精确）。
+4. **`face_point_geom_3d_quad` 定向修复（潜伏核心缺陷，D805-4 引入）**：旧码在
+   `nref` 指向元素内侧时**交换最后两个角点的角色**——那改变的是**参数化**而非符号。
+   MFEM 真值（`GetLocalQuadToHexTransformation`，mesh.cpp:889 + `quad_t::Orient[8][4]`
+   + `hex_t::FaceVert[6][4]` + `AddQuadFaceElement` 的 Elem1Inf=64·lf+0）：
+   **两个邻元都恒用规范角点 `(a,b,c,d)` 在同一 `ξ` 做双线性插值**（Orient 只是把点矩阵
+   列重排成规范角点序），元素相关的只有 `nor` 的**符号**。修复 = 删角色交换、
+   保留符号修正（`nor` 指向元素内侧时取反，语义同 tri 臂）。实测内面两侧同一 `ξ` 的
+   物理点差从 **2.5e-1 → ≤1.1e-16**（`d814r79_diag_physical_point_match` 诊断钉）。
+   D805-4 的 34 面金标为什么没抓住：MFEM 写出的**边界**节环全部外向（swap 分支死）——
+   该分支只在内部面的第二元素上触发。
+5. **`dg.rs` 体项 Qk 规则**（登记的"矩阵级对拍"强制项）：`accumulate_dg_volume_element`
+   对 `Quad4|Hex8` 内部推导 MFEM `DiffusionIntegrator::GetRule`（Qk = `o+o+dim−1`；
+   hex p=1：order 4 → 3³ 点，而调用方的面规则阶 2 → 2³ 点，3-D 起**分叉**；2-D 时
+   `2p+dim−1` 与 `2p` 选**同一组** Gauss 点 ⇒ 四边形网格逐位不变）。**单纯形 Pk 公式
+   （`o+o−2`）未应用**——无单纯形 DG 体项 oracle，仍用调用方阶（过积分；直网格代数等价）
+   ⇒ 登记新债 D815-1。
+
+### 对拍结果（主会话亲跑 `cmp814.py`，前 → 后）
+- **15/15 矩阵全绿**，worst 相对差 = **1.8e-15**（ELAV；其余 4.7e-16…1.2e-15——两侧同积
+  不同序的求和 ulp）：`ADV 6.6e-16 / ADV2 6.6e-16 / ADVB 8.0e-16 / ADVO2 5.4e-16 /
+  DIF 5.4e-16 / DIFB 1.2e-15 / DIFIF 9.0e-16 / DIFIFO2 1.0e-15 / DIFV 4.7e-16 /
+  ELA 1.1e-15 / ELAV 1.8e-15 / ELBD 1.1e-15 / ELIF 8.5e-16 / ELZBD 1.2e-15 / ELZIF 8.5e-16`。
+- red 证据 `tmp/d814/prefix_cmp.txt`（修复途中：标量内面矩阵 20–130% 条目错、
+  ADV 418/1024、DIFIF 154/1024、DIFIFO2 242 项；未修复前的最初两轮连**跑都跑不到**
+  ——`local_faces: unsupported (npe=8, dim=3)` 与 `element 0 has no node 5` 两个 panic）。
+- **ELA 族的布局前提更正（㉖ 又一例）**：round-76 的 ELA 金标是把 MFEM 的
+  element-local `comp·ndofs+dof` **预映射**成 fem-rs `dof·dim+comp` 后钉进测试字符串的；
+  本轮直接用 verbatim dump 对拍才暴露：MFEM `Ordering::byNODES` 全局 vdof =
+  `comp·n_scalar + dof`，必须在**比较器侧**置换（`bynodes_to_dof_major`）。ELAV
+  （纯体项、与面无关）在置换前红 869 条、置换后绿——证明红因是布局而非库。
+
+### 反回归（主会话亲跑）
+- `d805r78_hex_dg_face` 2/2（quad 臂改后 306 点面几何金标不动）、`d805r76` 3/3、
+  `d805_d799_3` 3/3、fem-assembly 全量 **114 靶 / 1273 / 0 / 3 ign**；
+- ex14 `-m data/star.mesh -r -1 -o 1`：**311 行逐字节**（对侧 323 行 = 12 行 MFEM 选项头），
+  ARF **0.956044**；ex27 双档（`-rs 0 -no-vis`、`-dbc 2.5 -rs 2 -no-vis`）对
+  `$HOME/work/d804/gold/` **IDENTICAL / IDENTICAL**。
+- 大门（十 crate 口径 = round 77/78 的显式 `-p` 集）：`--lib`(debug) **10 靶/2654/0/5 ign**
+  （= round 78 逐项）；`--tests`(release) **338 靶/4329/0/28 ign**（= r78 的 337/4328/0/26
+  + 本轮 1 靶/1 通过/2 忽略，账目吻合）；`--doc` **10 靶/9/0/95**（= r78）；examples
+  **rc=0 / 0 非 vendor 警告**（28 条全在 vendor/linger，按 `-->` 行归属 ④）；pro **rc=0**；
+  fem-py **rc=0**（首轮 rc=101 = **C 盘满的环境性失败**（"No space left on device"），
+  清 `target/debug` 后过——⑨ 的又一实例）。
+
+### 新债（round 79 登记）
+- **D815-1**：`dg.rs` 体项对**单纯形 Pk** 空间未走 MFEM `DiffusionIntegrator::GetRule`
+  的 `o+o−2` 公式（p=1 = 1 质心点）；现用调用方阶（过积分、直网格代数等价、曲面未验）。
+  修法 = 先造单纯形 DG 体项 oracle 再改（D810-1 先例）。
+- **D815-2**：`dg_hyperbolic` 无 3-D 面路径（2-D tri/quad only）；ex18 3-D 未启用
+  （本轮 D814-1 范围外的族，几何 helper 已就绪）。
+- **D815-3**：`assemble_periodic_flux` 的 3-D 臂已落地但**无 3-D periodic 对拍**
+  （2-D 周期缝由 ex27/ex9 金标覆盖；3-D 需要 periodic-cube 级示例对拍）。
+- **D815-4（口径备忘）**：`--workspace --lib` = **18 靶/3004/0/5**（含 core/python/wasm/
+  rmetis/regression/linger），与"十 crate"口径（10/2654/0/5）并存——基线对比必须同名令。
+  另：本 MFEM 构建 in-memory 新建网格的内部面 `faces_info` 配对丢失（gen/dump 分体规避），
+  对 MFEM 侧 fixture 生成是一个 trip hazard（与 D814-5 同类）。
+
 ## 第七十八轮（round 78）：D813-1 ghost 层砍到单层节点闭包（头号①）+ D813-2/D813-3/D813-5 ex9 数值残差闭合（头号②）+ D808-4 残余 + D810-1（头号③）+ D805-4 hex DG 面（主会话）
 
 **开局 HEAD = round 77 末笔 `f42add7e`（已推送）；树净；C: 89%（~111G 空闲）。**
