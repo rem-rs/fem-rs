@@ -312,43 +312,37 @@ fn d813_periodic_hexagon_box_is_mfem_s_not_the_vertex_box() {
     assert!((rlo[0] + 1.0).abs() < 1e-14 && (rhi[1] - 0.86602540378443871).abs() < 1e-14);
 }
 
-/// **Registered residual (D813-3 sweep).**  The oracle's 3-D folded rows with
-/// `refine = 2` do *not* reproduce: `periodic-cube.mesh` refined twice gives
-/// `+/-1/3` here against MFEM's `+/-1`.  `+/-1/3` is the **unrefined vertex
-/// box** of that mesh, so the divergence is in `refine_uniform_3d`'s handling
-/// of the folded per-element (`L2_T1_3D_P1`) table — the *unrefined* 3-D rows
-/// (5/5) and every 2-D row, refined or not (20/20), match MFEM exactly.
+/// **Former registered residual (D813-3 sweep), fixed in round 80 (D814-2).**
+/// The oracle's 3-D folded rows with `refine = 2` used to give `+/-1/3` here
+/// against MFEM's `+/-1` — `+/-1/3` is the **unrefined vertex box** of that
+/// mesh, because `refine_uniform_3d` dropped the folded per-element
+/// (`L2_T1_3D_P1`) table outright and the refined mesh was straight-sided
+/// (measured pre-fix against the MFEM oracle: 3024/5184 geometry entries
+/// wrong after one refinement, max |diff| 1.0, 27072/41472 after two; the
+/// full red/green record lives in `d814_l2_p1_hex_uniform_refine.rs`).
 ///
-/// This test pins the measured gap so the debt cannot silently change shape;
-/// it is **not** an endorsement of the value.  The refined 3-D folded geometry
-/// is out of this lane's scope (`bbox` is correct: it reports what the mesh it
-/// is handed actually contains).
+/// The refinement now transports the parent table per child and closes with
+/// MFEM's `UpdateNodes` → `SetVerticesFromNodes` vertex rebuild, so the
+/// refined folded geometry reaches the same `±1` extremes MFEM does — the
+/// box is the geometry-dof extrema at every refinement depth.
 #[test]
-fn d813_cube_refined_folded_geometry_is_a_registered_residual() {
+fn d813_cube_refined_folded_geometry_matches_mfem() {
     let mut m = read3(&data_dir().join("periodic-cube.mesh"));
     assert!(m.geometry.is_some(), "the unrefined cube carries the folded table");
     let (lo, hi) = m.get_bounding_box(1);
     assert!((lo[0] + 1.0).abs() < 1e-14 && (hi[0] - 1.0).abs() < 1e-14, "{lo:?} {hi:?}");
 
-    for _ in 0..2 {
+    for step in 1..=2 {
         m = refine_uniform_3d(&m);
+        assert!(m.geometry.is_some(), "step {step}: the folded table must survive");
+        let (lo, hi) = m.get_bounding_box(1);
+        for d in 0..3 {
+            assert!(
+                (lo[d] + 1.0).abs() < 1e-14 && (hi[d] - 1.0).abs() < 1e-14,
+                "step {step}: refined folded box must be MFEM's ±1: lo={lo:?} hi={hi:?}"
+            );
+        }
     }
-    let (lo, hi) = m.get_bounding_box(1);
-    let one_third = 1.0 / 3.0;
-    for d in 0..3 {
-        // `refine_uniform_3d` keeps *a* table (or none) but loses the folding:
-        // the extremes collapse to the unrefined vertex box.  The mesh file's
-        // own coordinates are the rounded `0.333333`, hence the loose bound.
-        assert!(
-            (lo[d] + one_third).abs() < 1e-5 && (hi[d] - one_third).abs() < 1e-5,
-            "registered residual changed — re-measure: lo={lo:?} hi={hi:?}"
-        );
-    }
-    eprintln!(
-        "registered residual: periodic-cube refine=2 box = (+/-1/3) vs MFEM (+/-1); \
-         geometry present = {}",
-        m.geometry.is_some()
-    );
 }
 
 // ─── 4. the `Nodes == NULL` arm is untouched ────────────────────────────────

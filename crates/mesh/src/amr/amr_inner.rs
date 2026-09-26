@@ -5445,6 +5445,14 @@ impl MfemHexRefineIds {
 /// - Inserting centroids on each of its 6 faces,
 /// - Inserting the element centroid.
 ///
+/// A carried `nodes` geometry table rides along (MFEM `UniformRefinement` with
+/// `Nodes != NULL`): an order-`p ≥ 2` continuous table takes the
+/// [`HexQkGeometry`](super::curved_hex::HexQkGeometry) transport; a folded
+/// *discontinuous* order-1 (`L2_T1_3D_P1`) table takes
+/// [`build_refined_l2_p1_hex_geometry`](super::curved_hex::build_refined_l2_p1_hex_geometry),
+/// followed by the `SetVerticesFromNodes` vertex rebuild (D814-2).  A
+/// straight-sided mesh keeps the plain vertex averaging.
+///
 /// Unmarked neighbours sharing a refined face acquire hanging-edge midpoints;
 /// those midpoints are constrained by linear interpolation along their parent edge.
 ///
@@ -5496,6 +5504,11 @@ pub fn refine_nonconforming_hex(
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
     let geo = super::curved_hex::HexQkGeometry::new(mesh);
+    // D814-2: a *discontinuous* order-1 (`L2_T1_3D_P1`) table — the folded
+    // per-element geometry of a periodic mesh — rides the same refinement, but
+    // its transport and its `SetVerticesFromNodes` vertex rebuild are its own
+    // (see `curved_hex::build_refined_l2_p1_hex_geometry`).
+    let l2_geo = super::curved_hex::l2_p1_hex_geometry(mesh);
     // MFEM's canonical new-vertex numbering (`oedge + E` / `oface + F` /
     // `oelem + C`, see `MfemHexRefineIds`).  Reproduced where a written file
     // pins it down — a *curved* mesh under *uniform* refinement keeps its
@@ -5503,7 +5516,7 @@ pub fn refine_nonconforming_hex(
     // Straight-sided meshes keep the historical first-touch numbering (the
     // straight-refinement regression outputs pin it), and partial refinement
     // would leave holes in the dense id space, so neither switches.
-    let mfem_ids = if geo.is_some() && marked_set.len() == n_elems {
+    let mfem_ids = if (geo.is_some() || l2_geo.is_some()) && marked_set.len() == n_elems {
         Some(MfemHexRefineIds::build(mesh))
     } else {
         None
@@ -5860,7 +5873,17 @@ pub fn refine_nonconforming_hex(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
-    if geo.is_some() {
+    if let Some(l2) = l2_geo {
+        // D814-2: transport the folded per-element table (every fine element
+        // keeps its own 8 corner dofs — no averaging, no deduplication), then
+        // MFEM's closing `UpdateNodes` → `SetVerticesFromNodes`: the fine
+        // `vertices` are the mean over the element references of the refined
+        // folded values (the `vertices` block is a compatibility table, the
+        // geometry lives in the `nodes` grid function).
+        let table = super::curved_hex::build_refined_l2_p1_hex_geometry(l2, &fine_parent);
+        new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
+        new_mesh.geometry = Some(table);
+    } else if geo.is_some() {
         new_mesh.geometry =
             super::curved_hex::build_refined_hex_geometry(mesh, &new_mesh, &fine_parent);
     }

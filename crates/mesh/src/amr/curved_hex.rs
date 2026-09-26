@@ -40,6 +40,16 @@
 //!   an entity share the dof — exactly MFEM's first-touch-wins
 //!   (`GridFunction::Update`'s `mark` array).
 //!
+//! **Order-1 discontinuous geometry** (`L2_T1_3D_P1` — the per-element folded
+//! table of `data/periodic-cube.mesh` and `Mesh::make_periodic`) is the
+//! degenerate end of the same mechanism, with two differences (D814-2):
+//! the refined table stays *fully discontinuous* (every fine element owns its
+//! own 8 corner dofs — [`build_refined_l2_p1_hex_geometry`]), and the refined
+//! `vertices` are replaced wholesale by the mean over the element references
+//! of those folded values (MFEM `Mesh::UpdateNodes` →
+//! `SetVerticesFromNodes` → `GridFunction::GetNodalValues` —
+//! [`set_vertices_from_nodes`]).
+//!
 //! The positional layout of the `(p+1)³` geometry dofs is **not** hard-coded:
 //! it is `HexQk::new(p).dof_coords()` (crates/element), the same table
 //! `DofManager::build_q2_hex` / `build_pk_hex` (crates/space) and `fem-io`'s
@@ -431,4 +441,157 @@ pub(crate) fn build_refined_hex_geometry(
         coords: geo_coords,
         n_nodes: next_dof as usize,
     })
+}
+
+/// The mesh's geometry as a **discontinuous order-1 hex** table — the
+/// `L2_T1_3D_P1` layout the MFEM reader produces for a folded periodic mesh
+/// (`data/periodic-cube.mesh`) and `Mesh::make_periodic`: 8 dofs per element
+/// in element-major rows of *fresh, unshared* dof ids, the row slot order
+/// being the mesh's own reference-hex slot order (`HexQk::new(1)`, i.e.
+/// [`MFEM_HEX_VERTS`]).
+///
+/// A *continuous* order-1 table does not match: its dofs are the vertices
+/// (shared ids, `n_nodes == n_vertices`), and the plain vertex averaging the
+/// refinement kernels already do is its exact transport.
+pub(crate) fn l2_p1_hex_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
+    if mesh.elem_type != ElementType::Hex8 {
+        return None;
+    }
+    let geo = mesh.geometry.as_ref()?;
+    if geo.order != 1 || geo.nodes_per_elem != 8 {
+        return None;
+    }
+    let n = mesh.n_elems() * 8;
+    if geo.conn.len() != n || geo.n_nodes != n {
+        return None;
+    }
+    for (e, row) in geo.conn.chunks_exact(8).enumerate() {
+        for (i, &d) in row.iter().enumerate() {
+            if d as usize != e * 8 + i {
+                return None; // shared dof: not the discontinuous layout
+            }
+        }
+    }
+    Some(geo)
+}
+
+/// Reference coordinates ([0,1]³) of the 8 slots of the mesh's own order-1 hex
+/// lattice, straight from the element (`HexQk::new(1)` — the same table
+/// [`MFEM_HEX_VERTS`] documents, read back so the element and this module
+/// cannot drift apart).
+fn hex_p1_slot_refs() -> [[f64; 3]; 8] {
+    let mut refs = [[0.0_f64; 3]; 8];
+    for (r, c) in refs
+        .iter_mut()
+        .zip(ElementType::Hex8.ref_elem(1).dof_coords())
+    {
+        *r = [c[0], c[1], c[2]];
+    }
+    refs
+}
+
+/// Build the refined mesh's **order-1 discontinuous** [`GeometryData`] from
+/// the parent's `L2_T1_3D_P1` table (D814-2).
+///
+/// MFEM refines the `nodes` grid function through its refinement operator,
+/// which for every fine element evaluates the *parent element's own* shape
+/// functions at the fine element's dof reference points mapped into the
+/// parent frame (`parent_ref = origin + 0.5·child_ref`, `origin ∈ {0,0.5}³`,
+/// no mirroring).  For a trilinear parent that is the trilinear interpolation
+/// of the parent's 8 corner dofs; for an unrefined element ([`IDENTITY`]
+/// child) it reads the parent dofs back exactly.  Because the space is
+/// discontinuous the fine table stays fully discontinuous: fine element `fe`
+/// owns the fresh dof ids `8·fe .. 8·fe + 7` (the reader's element-major
+/// layout), **no dof sharing across the fine mesh** — a folded shared face
+/// keeps a different coordinate on each side, which is the whole point of the
+/// representation.
+pub(crate) fn build_refined_l2_p1_hex_geometry(
+    parent_geo: &GeometryData,
+    fine_parent: &[(ElemId, u8)],
+) -> GeometryData {
+    const DPE: usize = 8;
+    let refs = hex_p1_slot_refs();
+    let n_fine = fine_parent.len();
+    let mut conn = Vec::with_capacity(n_fine * DPE);
+    let mut coords = Vec::with_capacity(n_fine * DPE * 3);
+    for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
+        // Fine-ref → parent-ref affine map (see `build_refined_hex_geometry`):
+        // `child` is the MFEM hex corner index of the child's own corner, so
+        // the octant origin is `0.5 · MFEM_HEX_VERTS[child]`.
+        let (origin, scale) = if child == IDENTITY {
+            ([0.0_f64; 3], 1.0_f64)
+        } else {
+            let v = MFEM_HEX_VERTS[child as usize];
+            ([0.5 * v[0], 0.5 * v[1], 0.5 * v[2]], 0.5)
+        };
+        for (o, r) in refs.iter().enumerate() {
+            // Parent-frame reference point of this fine dof, then the
+            // trilinear interpolation of the parent element's 8 corner dofs
+            // (accumulated in parent slot order, like MFEM's interpolation
+            // matrix applied to the coarse element vector).
+            let xi = [
+                origin[0] + scale * r[0],
+                origin[1] + scale * r[1],
+                origin[2] + scale * r[2],
+            ];
+            let mut xyz = [0.0_f64; 3];
+            for (j, cj) in refs.iter().enumerate() {
+                let dof = parent_geo.conn[pe as usize * DPE + j] as usize;
+                let mut w = 1.0_f64;
+                for d in 0..3 {
+                    w *= if cj[d] > 0.5 { xi[d] } else { 1.0 - xi[d] };
+                }
+                for k in 0..3 {
+                    xyz[k] += w * parent_geo.coords[dof * 3 + k];
+                }
+            }
+            conn.push((fe * DPE + o) as NodeId);
+            coords.extend_from_slice(&xyz);
+        }
+    }
+    GeometryData {
+        order: 1,
+        nodes_per_elem: DPE,
+        conn,
+        n_nodes: n_fine * DPE,
+        coords,
+    }
+}
+
+/// MFEM `Mesh::SetVerticesFromNodes` (`mesh/mesh.cpp:7246`) →
+/// `GridFunction::GetNodalValues(Vector&, vdim)` (`fem/gridfunc.cpp:1889`):
+/// every vertex becomes the **arithmetic mean over every element reference**
+/// of the per-element geometry value at that vertex slot, accumulated
+/// element-major in the element's own local vertex order and divided once at
+/// the end (`nval(i) /= overlap[i]` — a true division).  For a folded
+/// discontinuous table the copies at one vertex legitimately differ (that is
+/// the fold), so the mean is a *compatibility* value — the geometry itself is
+/// carried by the table, unchanged.
+///
+/// A vertex referenced by no element keeps 0.0 here (MFEM divides 0 by 0 and
+/// stores NaN; every vertex of a refined mesh is referenced).
+pub(crate) fn set_vertices_from_nodes(mesh: &Mesh<3>, geo: &GeometryData) -> Vec<f64> {
+    let n = mesh.n_nodes();
+    let mut coords = vec![0.0_f64; n * 3];
+    let mut overlap = vec![0_usize; n];
+    for fe in 0..mesh.n_elems() {
+        let ns = mesh.elem_nodes(fe as ElemId);
+        for (k, &v) in ns.iter().enumerate() {
+            // Slot `k` of the element's connectivity is slot `k` of its
+            // geometry row (both follow the mesh's own slot order).
+            let dof = geo.conn[fe * geo.nodes_per_elem + k] as usize;
+            for c in 0..3 {
+                coords[v as usize * 3 + c] += geo.coords[dof * 3 + c];
+            }
+            overlap[v as usize] += 1;
+        }
+    }
+    for (v, &ov) in overlap.iter().enumerate() {
+        if ov > 0 {
+            for c in 0..3 {
+                coords[v * 3 + c] /= ov as f64;
+            }
+        }
+    }
+    coords
 }
