@@ -4470,6 +4470,178 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十八轮（round 78）：D813-1 ghost 层砍到单层节点闭包（头号①）+ D813-2/D813-3/D813-5 ex9 数值残差闭合（头号②）+ D808-4 残余 + D810-1（头号③）+ D805-4 hex DG 面（主会话）
+
+**开局 HEAD = round 77 末笔 `f42add7e`（已推送）；树净；C: 89%（~111G 空闲）。**
+派单三路后台代理（文件互斥、全在主树，㉛）：
+Lane A = `crates/parallel/** + crates/space/**`（D813-1）；
+Lane B = `crates/io/** + crates/mesh/** + examples/mfem_ex9_dg_advection.rs`（D813-2/-3/-5）；
+Lane C = `crates/assembly/src/{pa,wg}/**`（D808-4 残余 + D810-1）；
+主会话自办 `crates/assembly/src/dg/**` 的 D805-4。
+**三路代理全部跑完并交了完整报告**（连续第二轮无失联/无未提交终止；round 77 起的
+「主树 + 文件互斥 + 证据目录」模式继续有效）。**协调成本实录**：
+① 本轮出现过一次**跨路文件所有权事故**——主会话先动手做了 D813-5（`crates/io/src/mfem.rs`
+的 Tet4 臂）才意识到 `crates/io/**` 是 Lane B 的领地，随即把已写的两个 Tet4 臂 + 三个 MFEM
+oracle fixture + 探针**整体移交** Lane B（Lane B 重新推导后采纳并补齐测试）⇒ 派单后主会话
+**先核对领地再动手**；② Lane A 一度把 `fem-space` 编译红留给别的路（hcurl.rs:730 类型错），
+提醒后改为**每次编辑后保编译**；③ Lane A 的 cut 中途红过三根钉（通道 100% 拒绝），主会话
+独立复跑取证 + 给出诊断方向，Lane A 用 `[d813dbg]` 分阶段埋点定位（工具化埋点 → 定位 →
+删除埋点，是本轮最有效的一次协作）。
+
+提交链（fem-rs main）：Lane B → Lane C → Lane A → 主会话（D805-4）→ docs，五笔（hash 见工作树行；本节先入 plan、与提交同批）
+
+### Lane A（D813-1）· **关闭** —— ghost 层从锚闭包砍到**单层节点闭包**
+- **机制**：提取侧对每个发布 facet 额外发布其**规范锚单元的 `(ElementType, 全局顶点表)`**
+  （`partition.rs::EntityOwnership::facet_anchor_element`；`restrict_to` 直接从全网读），
+  **submesh 线格式新增 flag bit 32**（`[n][gid, type tag, n_verts, verts…]`，复用文件已有的
+  ElementType tag 对，decode 校验 `n_verts == nodes_per_element`，附 wire 往返测试）；
+  **删除 step 3b2(a)（锚闭包）**——层 = 单节点层 + 非协调悬挂边规则。
+  面规范基由**空间**从 facet 自身重建：`HCurlSpace::facet_slots_against_published_anchor`
+  （`OFF_FACET_SENTINEL` 离面哨兵 + 双射守卫 ⇒ 非面局部族**拒绝**而非静默错基；
+  `FESpace` 默认 `None` ⇒ pro 层零改动）；DP 的 NDk Pass B 消费通道（pair 按**锚的**分量序、
+  第二载体不一致即响亮 `assert_eq!`）；**HDiv/RT 的 `from_face_space` 同样改接发布锚**
+  （`min_gid_order`/`pos` 经 `fem_space::hdiv::{quad_orientation, tri_orientation,
+  transform_grid, tri_face_grid_transform}`）。
+- **实测层**（`tmp/d78a/layer_dump.txt`，`data/cylinder-hex.mesh`）＝登记验收表逐项：
+  np1 252/364 不动；np2 **180 (126+54) / 204 (126+78)** 元、**268 (205+63) / 347 (159+188)** 点
+  （修前 222/246）；np4 **126/144/166/126** 元、220/247/313/248 点（修前 222/222/246/234）。
+- **途中抓到的两个通道 bug**（临时 `[d813dbg]` 阶段埋点定位，已删）：①
+  `HCurlSpace` 的 `quad_face_anchor`/`face_anchor` 以**局部**子网格节点 id 为键，而 DP 传的是
+  **全局** facet 顶点 ⇒ 通道 100% 拒绝（`channel_ok=0 refused=9/70`）——改用 facet 的
+  local-id 顶点表查 creator；② tri 族 helper 返回**逐点**切向对而块表**逐槽**——全 hex 网格上
+  不可见，被新 oracle 的 tet/prism 夹具抓住。**RT 单独红过一轮**：ND 绿后 RT0/1/2 仍差
+  4.6e-4…9.5e-3（`from_face_space` 还在读本地遍历），接发布锚后归零。
+- **验收**：`-p fem-parallel` **23 targets / 342 / 0 / 13 ign**（基线 341/0/13，+1 = wire 往返测试）；
+  九个指名 target 全绿（d807_d122r2 8/0/0 **已重钉单层闭包数字**、d807r77 4/0/0、d122r73_d3
+  2/0/0、d122_nd2_rt1 8/0/0、d412 2/0/0、d706 3/0/0、d124 7/0/0、d504 4/0/0、d697 2/0/0）；
+  `-p fem-space` **62 targets / 595 / 0 / 3**（基线 592/0/3，+3 = 新 oracle：通道的
+  anchor_slot/sign/pair 对锚单元自身 `element_dofs`/`element_signs`/`element_face_pair_transforms`
+  在翘曲 hex 块及其 6-tet/2-prism 切分上 k=2,3 逐项比对 + 载体无关性 + 拒绝方向）；
+  九空间 per-rank owned 逐位 = `GetTrueVSize()`（np1/2/4）；`entities=None` 与 np1 逐位不变；
+  pex3 四锚点逐位（2.70053050699196e-2/87、3.05558571614408e-4/1、2.70053057745987e-2/95、
+  2.70053059872530e-2/193）；pro check rc=0。
+- **登记更正（㉖ 又两例）**：① round-77 配方的 blocker ②（"提取侧不知空间阶 ⇒ 切法全有或全无"）
+  **不再是问题**——由空间按族供帧，提取侧只发顶点，无需空间无关谓词；② round-77 "只有 hex 面与
+  k=2 tet 面面局部"的说法**低估了**——夹具上每族（hex、tet k≥3、prism tri+quad）都与锚自身记录
+  吻合到 1e-12，"无 apex 重心重写"并不为正确性所需；**真正提供保证的是哨兵 + 双射守卫**。
+  报告未修（既有、与本通道无关）：`nd_face_blocks_for_elem` 金字塔行把四个 apex 三角排在
+  base quad 之前而 `HCurlSpace` 先填 base quad 的块序错位。
+
+### Lane B（D813-2 + D813-3 + D813-5）· **关闭** —— ex9 数值残差闭合（主会话亲验）
+- **端到端**（主会话独立重建重跑）：`ex9-init.gf` **39891 B = oracle 字节数，`diff` 0 行
+  （逐字节相同）**；`ex9-final.gf` 40582 vs 40589 B、**最大绝对差 1.0e-08**（解的尺度 1.0；
+  427 个差值只在第 8 位有效数字上——两侧同为 200 步 RK4 × rtol 1e-9 的 4 次 CG 质量求解，
+  属时间积分漂移）；`ex9.mesh` 993 行、1536 个 nodes 值在第 8 位全部相同；**stdout 仍 0 diff**
+  （两条具名豁免）。修前整个解错（3072 个值全部 |Δ| = 1.0）。round-77 的 ex9 数值残差就此闭合。
+- **D813-3**：`crates/mesh` 新增 `mfem_geometry_refiner_points(et, times)`（MFEM
+  `GlobGeometryRefiner::Refine` 七族参考点阵、MFEM 序）与 `Mesh::get_bounding_box(ref)`
+  （= MFEM `GetBoundingBox` 两臂：无几何 ⇒ `bounding_box()` **逐位不动**，有几何 ⇒ 按点阵对
+  等参几何取极值）；ex9 改为**细化后**经新 API 取盒（= `ex9.cpp:232-241` 的顺序）。
+  验收：曲面几何 7 族 × ref 1..5 全部 ≤1e-14（35/35）、折叠周期 25/25 行、无几何臂逐位相同；
+  42 张 MFEM 表逐元钉死。**两个陷阱**：MFEM 棱柱 refiner 域是 `(tri_x, tri_y, layer)` 而
+  crate `PrismPk` 是**挤出优先**（漏置换会让 ⅔ 楔点阵落到单元外）；金字塔 `if (Type==0)` 分支
+  对默认类型是死代码。
+- **D813-2**：**登记前提被驳（㉖）**——MFEM 读入器顶点表规则是**对每个引用单元取算术平均**，
+  不是 "last-wins"（新探针 `[VERTEX]/[ELEMVERT]`：12/12、9/9、27/27、144/144 个顶点全部等于
+  均值，而 first- 与 last-wins 都不等）；round-77 的 "last-wins" oracle 是 H1 `SetCurvature`
+  重存——走 `ProjectCoefficient` 覆盖共享 dof，与 `Mesh::Loader → SetVerticesFromNodes →
+  GetNodalValues` 是**两条路径**。L2 `nodes` 读侧改为按 MFEM 序累加、一次终除（48 顶点逐位）；
+  round-77 那条断言 first-wins 分叉的测试改写为
+  `d812_reader_folded_vertex_table_is_the_mean_not_a_copy`。
+- **D813-5**（主会话移交）：Tet4 臂（`l2_geometry_slots` = `H1TetPk`、`mfem_l2_slots` =
+  MFEM `L2_TetrahedronElement` 循环 `fe_l2.cpp:695`）由 Lane B **重新推导**后采纳；crate 内
+  单测对 `GetNodes()` p=1,2,3 逐元钉死；`beam-tet` P1/P2 读→写与 MFEM 自身文件**逐字节相同**；
+  `nodes_writer.rs` 那条"tet 必须被拒"的旧断言随臂生效而反转（tet 转正、拒绝档改金字塔），
+  不连续写者把 `index out of bounds` panic 改为 `FemError` 守卫。
+- **验收**：`-p fem-io` 42 targets **331/0/3**（r77 323/0/3@38）；`-p fem-mesh` 38 targets
+  **505/0/9**（r77 497/0/9@35）；ex27 **10/10** stdout 逐字节 + `refined.mesh` 结构逐 token 同
+  （8192/8192 nodes 第 8 位全同）；round-77 写者 oracle 不动（d812 11/11、d812r77 ledger 3/3）。
+  examples 构建 0 错误 0 非 vendor 警告（顺手清了 `d496_mesh_info.rs` 一条既有非 vendor 警告）。
+- **新债**：`refine_uniform_3d` **丢**折叠 `L2_T1_3D_P1` 表（`periodic-cube.mesh` 细化两次
+  ±1/3 vs MFEM ±1），已钉测试；盒不是责任方。
+
+### Lane C（D808-4 残余 + D810-1）· **关闭**（主会话亲跑其 10 测全绿）
+- **D808-4 残余**（`pa::build_tet4_pa_data` 单质心 QP）：数据布局改**按阶规则**——
+  `geom_order ≥ 2` ⇒ `tet_rule(2p+1)` 多点 + 逐 QP `(J⁻ᵀ, |det J|, κ(x_q))`（经
+  `pa/curved.rs::curved_jacobian` + 新 `invert_3x3`，自 `prism_pk` 迁入成单一来源）；
+  直网格 `nqp = 1` **逐字不动**（apply 侧 `nqp == 1` 用除法保位）。**曲面夹具 PA vs 装配
+  2.437e-2 → 5.137e-16**；直网格 3 夹具 762 行 bit dump 与修前**0 差异**。
+- **D810-1**（`wg` 族弦长面路径）：三模块整条面路径交 `dg_base::face_point_geom`/`_3d`
+  ——新家族共享 helper（`wg_face_rule` = MFEM 面规则、`WgFacePoint`、`wg_face_point`、
+  `wg_face_measure`、`wg_boundary_face_map` 委托 `dg_base::build_face_elem_map`）；
+  **删**三份私有 `face_geom_2d/3d`/`local_phys_to_ref`/`build_face_elem_map`/TET_FACES/HEX_FACES
+  拷贝（仅剩体路径的 `local_jac`）；顺带修 stokes/maxwell 边界稳定项**双计**（`el == er` 时
+  两侧各加一次）。**oracle 先行**（按登记要求）：MFEM 无 WG miniapp（全树 grep 证实）⇒ 造
+  **MFEM `FaceElementTransformations` 逐面逐 QP 逐侧真值探针**（`nor = CalcOrtho`、
+  `eip = Loc1/Loc2`、`x = Elem->Transform`、`W = Elem->Weight`，点取 wg 自己规则的点）：
+  等参路径 vs MFEM = |nor| 2.2e-15、方向 2.5e-15、**eip 精确 0**、x 4.4e-16、W 1.7e-15
+  （tri 3.7e-16/1.3e-15/0/2.2e-16/8.9e-16）；vs 修前弦长路径 = 曲面 1.053e0/1.179e0、
+  3-D 直网格恰为 **2×**（弦长面测度本来就是参考测度的一半）。散度恒等式经面路径：
+  弦长 2.784e-1/1.062e0 → **1.218e-15/9.918e-16**。wg Poisson 面块 vs 独立等参装配：
+  2-D **0**、3-D 1.019e-16。
+- **登记更正（㉖ 又三例）**：① D810-1 的第三样"参考点反解"**是惰性的**——单纯形面上
+  `local_phys_to_ref` 的仿射反解 + 角点插值 `xp` 恰好**恒等于** MFEM 的 `Loc1` 复合
+  （仿射组合恒等式，实测 4.0e-16）；真缺陷只有测度与物理点（quad 面上反解才真是缺陷）。
+  ② "直网格逐位不动"对 D810-1 **不可能成立**——修前 3-D 测度本身就是错值 ⇒ 换成更强的钉：
+  3-D 直网格恰 2×、2-D/3-D 面块 vs 独立等参装配 0/1e-16、`K(penalty=0)` 体块不动。
+  ③ **新 trip hazard**：`MakeCartesian3D` 的 `Finalize(true)` 会**旋转 tet 局部顶点序**
+  （`7 0 3 1` vs crate `0 1 3 7`）⇒ 顶点/体积一致**不等于**几何一致（oracle 夹具必须显式写
+  connectivity，修后 bitwise）。
+- **验收**：`-p fem-assembly --lib` **726/0/5**、`--tests` **113 targets / 1272 / 0 / 10**
+  （+4 targets = 本轮新测试文件）；examples 0 错误 0 非 vendor 警告。残余登记：wg **体**路径
+  仍走顶点几何（`local_jac`）；wg 无 WG 方法真值、无消费方。
+
+### 主会话（D805-4）· **关闭**（面几何 + 面→元素半；矩阵级余项重登记 D805-4b）
+- **缺陷**：`build_face_elem_map` 的 `local_faces` 无 `(8,3)` 臂 ⇒ hex 网格上**整张映射为空**
+  （DG 边界面项静默全丢）；`face_point_geom_3d` 只认 Tet4（其余 panic）。
+- **实现**（全在 `crates/assembly/src/dg/`，无既有签名改动）：`(8,3)` 臂 = `Hex8` 六个四边形面
+  （键排序故只需集合）；新 `face_point_geom_3d_quad`（三角臂的四边形兄弟：同一契约——参考复合、
+  复合面 Jacobian、`CalcOrtho` 叉积——但面映射是 **双线性** 的）；新 `face_point_geom_3d_face`
+  按面节点数分派；`dg_advection` 四处 3-D 调用点改走分派器。
+- **两个测量出来的陷阱**：① **(1,1) 角是环的第三个顶点 `c`**——第一版把 `c` 当 `ξ₂` 方向、
+  `d` 当 (1,1)（转置约定），`beam-hex` 的 z+ 面 `nor` 差 **1.8**（z− 面因对称恰好掩盖）；
+  ② **网格存的面环有正反两种绕向**（`beam-hex.mesh` z− 面反、z+ 面正）而 MFEM 的 `ξ` 在
+  **规范**参考方形里 ⇒ 参考级定向修正（`(rb−ra)×(rd−ra)` 指向元内时交换末两角），保持原点与
+  `ξ₁` 方向。
+- **验收**（`d805r78_hex_dg_face`，夹具 = `SetCurvature(2)` 翘曲 8-hex 梁 + 306 行
+  `[FQP]` MFEM 真值 dump，全部入库）：面对元映射 34/34 全定位且与 MFEM `GetFaceElements`
+  一致；面对几何 **306 点：`eip1`/`x1`/`W1` 逐位相同（0.000e0）、`nor` worst 1.998e-15**。
+  无 tet 回归：`d795` 3/3、`d804` 4/4、`d805_d799_3` 3/3、`d805r76` 2/2。
+- **重登记 D805-4b**（矩阵级）：`ref_elem_face` 无 QuadFace 族、`assemble_dg_interior_faces`
+  的面型是 `dim==2 ? Line2 : Tri3`（3-D tet 假设）、各 `DgFaceIntegrator` 同面参数化 ⇒
+  hex DG 矩阵级对拍（round-76 `d805_probe`+`cmp.py` 配方延到 3-D hex 夹具）仍未做——
+  面几何与面→元素查找这两处"链路无支持"的根已拔，积分器层待续。
+
+### 大门（round 78 冻结树）
+| 门 | 结果 |
+|---|---|
+| 十 crate `--tests`（release） | **337 targets / 4328 passed / 0 failed / 26 ignored**（r77 = 330/4291/0/26：+7 靶 = 本轮 7 个新测试文件） |
+| 十 crate `--doc`（release） | **10 targets / 9 / 0 / 95 ign** ⇒ 与上合并 **347 靶 / 4337 / 0 / 121 ign**（r77 = 340/4300/0/121；ignored 不变） |
+| 十 crate `--lib`（debug） | **10 targets / 2654 / 0 / 5 ign**（r77 = 2648/0/5；+6 = 新 lib 单测） |
+| examples `--release --keep-going` | **rc=0、0 错误、0 非 vendor 警告** |
+| pro 层 `cargo check -p pro-bench-tests -p pro-cad` | **rc=0** |
+| fem-py `cargo build -p fem-py` | **rc=0** |
+
+### 锚点（主会话亲验，逐位/逐字节不动）
+- **pex3 四锚点**：`-o1 np1` 2.70053050699196e-2/87 it、`-o2 np1` 3.05558571614408e-4/1 it、
+  np2 2.70053057745987e-2/95 it、np4 2.70053059872530e-2/193 it。
+- **ex14**：体 311 行 / ARF 0.956044（对金标去 12 行 Options 头后 **diff 0**）。
+- **ex27**：`-rs 2` 与 `-dbc 2.5 -rs 2` 两档 stdout **0 diff**；`refined.mesh`
+  TOPOLOGY-IDENTICAL、nodes max-rel-diff **4.29234e-08**（与 round 76/77 逐位同）。
+- **ex9**：`ex9-init.gf` **逐字节 = C++**（39891 B）；`ex9-final.gf` max|Δ| 1.0e-08；stdout 0 diff。
+
+### 纪律新增（round 78 实测）
+- **㉜ 主会话先核对领地再动手**：本轮主会话做 D813-5 做到一半才发现 `crates/io/**` 是 Lane B
+  的派单领地（round-77 是主会话自己的领地，惯性）。发现后立即停手、把半成品 + oracle + 探针
+  **打包移交**（Lane B 重新推导后采纳）——半成品移交比回滚便宜，但**顺序应是派单时就在派单
+  文本里写死"主会话本轮领地 = …"**。
+- **㉝ 跨路编译红是协作事件不是事故**：Lane A 的 `fem-space` 编译红阻塞了下游三路的构建。
+  提醒一次即改为"每次编辑后保编译"；多路主树模式的隐含义务是**树要持续可编译**，红树超过
+  一个编辑周期就发协调消息。
+- **㉞ 分阶段埋点是定位跨模块数值错的最快路径**：Lane A 的通道 100% 拒绝最初像"锚帧构建"
+  的深层问题，`[d813dbg]` 阶段打印（`refuse!` 带 stage）一轮就定位到 creator-key 的 id 域
+  错配——比读代码推理快一个量级。**埋点必须随修复删除**（本轮做到了）。
+
 ## 第七十七轮（round 77）：D812-1 `.mesh` 写者 `nodes` 发射规则（头号①）+ D807-2 tet NDk 逐面点对变换通道（头号②）+ D812-2 重定基（"4× 说"被驳）+ ex18 连带修复 + D807-1 残余重登记
 
 **开局 HEAD = round 76 末笔 `7d571bff`（`git ls-remote` 实证与本地一致）；树净。** 派单为两路后台代理，
