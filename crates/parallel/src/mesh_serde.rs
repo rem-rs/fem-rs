@@ -28,10 +28,11 @@
 //! [face_types   : u32 × n_faces]     // if bit1
 //! ```
 
+use std::collections::HashMap;
 use fem_core::{ElemId, NodeId, Rank};
 use fem_mesh::{ElementType, Mesh};
 
-use crate::MeshPartition;
+use crate::{EntityOwnership, MeshPartition};
 
 // ── ElementType ↔ u32 ────────────────────────────────────────────────────────
 
@@ -150,6 +151,19 @@ pub fn encode_submesh<const D: usize>(
             mix_flags |= 8;
             ext_tail += (n_elems + 1) * 4;
         }
+    }
+    // D807-1: the extraction's traversal-independent ownership/anchor channel
+    // must travel with the sub-mesh — a non-root rank never sees the full mesh,
+    // so it cannot recompute it.  Layout: three u32 counts (nodes, edges,
+    // facets) followed by `[gid, owner]`, `[a, b, owner]` and
+    // `[v0, v1, v2, v3, owner, anchor]` records (the last vertex of a triangle
+    // is the `u32::MAX` pad of `par_partition::FacetKey`).
+    if let Some(ent) = &partition.entities {
+        mix_flags |= 16;
+        ext_tail += 12
+            + ent.node_owner_table().len() * 8
+            + ent.edge_owner_table().len() * 12
+            + ent.facet_table().len() * 24;
     }
     let wire_format: u32 = if mix_flags & 8 != 0 {
         3
@@ -276,6 +290,44 @@ pub fn encode_submesh<const D: usize>(
                 buf.extend_from_slice(&x.to_le_bytes());
             }
         }
+        if mix_flags & 16 != 0 {
+            let ent = partition.entities.as_ref().unwrap();
+            buf.extend_from_slice(&(ent.node_owner_table().len() as u32).to_le_bytes());
+            buf.extend_from_slice(&(ent.edge_owner_table().len() as u32).to_le_bytes());
+            buf.extend_from_slice(&(ent.facet_table().len() as u32).to_le_bytes());
+            for &(gid, owner) in ent.node_owner_table() {
+                buf.extend_from_slice(&gid.to_le_bytes());
+                buf.extend_from_slice(&owner.to_le_bytes());
+            }
+            // Sorted for a deterministic payload (the maps iterate randomly).
+            let mut edges: Vec<((u32, u32), i32)> = ent
+                .edge_owner_table()
+                .iter()
+                .map(|(&k, &v)| (k, v))
+                .collect();
+            edges.sort_unstable();
+            for ((a, b), owner) in edges {
+                buf.extend_from_slice(&a.to_le_bytes());
+                buf.extend_from_slice(&b.to_le_bytes());
+                buf.extend_from_slice(&owner.to_le_bytes());
+            }
+            let mut facets: Vec<(Vec<u32>, (i32, u32))> = ent
+                .facet_table()
+                .iter()
+                .map(|(k, &v)| (k.clone(), v))
+                .collect();
+            facets.sort();
+            for (key, (owner, anchor)) in facets {
+                buf.extend_from_slice(&key[0].to_le_bytes());
+                buf.extend_from_slice(&key[1].to_le_bytes());
+                buf.extend_from_slice(&key[2].to_le_bytes());
+                buf.extend_from_slice(
+                    &(key.get(3).copied().unwrap_or(u32::MAX)).to_le_bytes(),
+                );
+                buf.extend_from_slice(&owner.to_le_bytes());
+                buf.extend_from_slice(&anchor.to_le_bytes());
+            }
+        }
     }
 
     debug_assert_eq!(buf.len(), total);
@@ -319,6 +371,10 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
     };
     let total_part_nodes = n_owned + n_ghost;
 
+    // D807-1: mix_flags word (only present from wire format 2 on) — hoisted so
+    // the ownership-channel block after the match sees it.
+    let mut mix_flags_in_wire: u32 = 0;
+
     // Read arrays sequentially from the buffer.
     let mut offset = HEADER_SIZE;
 
@@ -341,6 +397,7 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
         0 => {}
         2 | 3 => {
             let mix_flags = read_u32_at(buf, &mut offset)?;
+            mix_flags_in_wire = mix_flags;
             if mix_flags & 1 != 0 {
                 let mut eo = Vec::with_capacity(n_elems + 1);
                 for _ in 0..=n_elems {
@@ -405,6 +462,42 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
         }
     }
 
+    // D807-1 ownership/anchor channel (see `encode_submesh`).
+    let mut entities = None;
+    if mix_flags_in_wire & 16 != 0 {
+        let n_node_owners = read_u32_at(buf, &mut offset)? as usize;
+        let n_edge_owners = read_u32_at(buf, &mut offset)? as usize;
+        let n_facets = read_u32_at(buf, &mut offset)? as usize;
+        let mut node_owner = Vec::with_capacity(n_node_owners);
+        for _ in 0..n_node_owners {
+            let gid = read_u32_at(buf, &mut offset)?;
+            let owner = read_i32_at(buf, &mut offset)?;
+            node_owner.push((gid, owner));
+        }
+        let mut edge_owner = HashMap::with_capacity(n_edge_owners);
+        for _ in 0..n_edge_owners {
+            let a = read_u32_at(buf, &mut offset)?;
+            let b = read_u32_at(buf, &mut offset)?;
+            let owner = read_i32_at(buf, &mut offset)?;
+            edge_owner.insert((a, b), owner);
+        }
+        let mut facet = HashMap::with_capacity(n_facets);
+        for _ in 0..n_facets {
+            let v0 = read_u32_at(buf, &mut offset)?;
+            let v1 = read_u32_at(buf, &mut offset)?;
+            let v2 = read_u32_at(buf, &mut offset)?;
+            let v3 = read_u32_at(buf, &mut offset)?;
+            let owner = read_i32_at(buf, &mut offset)?;
+            let anchor = read_u32_at(buf, &mut offset)?;
+            let mut key = vec![v0, v1, v2];
+            if v3 != u32::MAX {
+                key.push(v3);
+            }
+            facet.insert(key, (owner, anchor));
+        }
+        entities = Some(EntityOwnership::new(node_owner, edge_owner, facet));
+    }
+
     if offset != buf.len() {
         return Err(format!(
             "submesh buffer size mismatch: consumed {offset} bytes, buffer length {}",
@@ -419,6 +512,7 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
         global_elem_ids, elem_owner,
     );
     partition.node_id_identity = header.node_id_identity != 0;
+    partition.entities = entities;
 
     Ok((mesh, partition))
 }
@@ -462,6 +556,17 @@ fn read_u32_vec(buf: &[u8], offset: &mut usize, count: usize) -> Result<Vec<u32>
     }
     let slice: &[u32] = bytemuck::cast_slice(&buf[*offset..end]);
     let v = slice.to_vec();
+    *offset = end;
+    Ok(v)
+}
+
+#[inline]
+fn read_i32_at(buf: &[u8], offset: &mut usize) -> Result<i32, String> {
+    let end = *offset + 4;
+    if end > buf.len() {
+        return Err(format!("buffer underflow at i32 read: need {end}, have {}", buf.len()));
+    }
+    let v = i32::from_le_bytes(buf[*offset..end].try_into().unwrap());
     *offset = end;
     Ok(v)
 }

@@ -197,6 +197,7 @@ pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector::ParComplexVector;
 pub use partition::MeshPartition;
+pub use partition::EntityOwnership;
 pub use shared_entities::{SharedEntities, SharedEntity};
 
 #[cfg(feature = "hdf5")]

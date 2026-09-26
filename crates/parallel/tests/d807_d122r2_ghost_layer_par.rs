@@ -1,97 +1,87 @@
-//! D807 / D122-2 — the ghost layer is the element-holder closure, and that is
-//! the *minimal* set the current DOF partition can be built from.
+//! D807-1 (round 76) — the ghost layer is the extraction's **anchor closure**,
+//! and the DOF partition reads entity ownership from the extraction instead of
+//! from its local element traversal.
 //!
-//! ## The registered debt
+//! ## What this file used to pin
 //!
-//! D122-2 (`tmp/round3_plan.md:4718`) says the ghost layer "became the
-//! transitive closure because of `par_partition.rs`'s face-closure fixpoint ⇒
-//! at np = 2 every rank holds the whole mesh (MFEM should be 1 layer: 54
-//! elements / 205+226 vertices)".
+//! Round 75's `d807_ghost_layer_is_the_whole_mesh_at_np_ge_2` pinned the *wrong*
+//! state on purpose: `extract_submesh_from_partition_impl` iterated a
+//! face-closure to a fixpoint, so on `cylinder-hex.mesh` (252 hexes / 364 nodes)
+//! **every** rank carried all 252 elements at np = 2 and np = 4
+//! (`tmp/d807/d122r2_red.txt`), while MFEM's local mesh is the owned block —
+//! `mesh_NE=126 mesh_NV=205/226` at np = 2 (`tmp/d122r73/mfem_probe_np2.txt`,
+//! independently re-audited in round 76) and `mesh_NE=63` with
+//! `mesh_NV=115/128/141/128` at np = 4.  That pin is **inverted** below
+//! (`d807_ghost_layer_is_the_extraction_anchor_closure`).
 //!
-//! ## What was measured (red evidence `tmp/d807/d122r2_red.txt`)
+//! ## Why the fixpoint was there, and what replaced it
 //!
-//! `cylinder-hex.mesh` (252 hexes, 364 nodes), the same contiguous `div_ceil`
-//! split MFEM is driven with in `tmp/d122r73/mfem_ghost_probe.cpp`:
+//! `DofPartition` derived two things from the *local element traversal*:
 //!
-//! ```text
-//! np  rank  fem-rs local mesh        MFEM local mesh (GetNE / GetNV)
-//! 1   0     252 elems / 364 nodes    252 / 364
-//! 2   0     252 elems / 364 nodes    126 / 205
-//! 2   1     252 elems / 364 nodes    126 / 226
-//! 4   *     252 elems / 364 nodes    63 / 115,128,141,128
-//! ```
+//! 1. the entity **owner** = minimum rank over the elements holding it (D122-1,
+//!    MFEM `GroupTopology`'s share-set minimum — the rule that reproduces
+//!    `GetTrueVSize`), and
+//! 2. a face DOF's canonical **position/sign**, read off the minimum-global-id
+//!    adjacent element (D412 / D122-3).
 //!
-//! So yes: at np ≥ 2 every rank carries **every** element, i.e. the ghost layer
-//! is the full mesh, and the per-rank memory/communication grows with the rank
-//! count instead of shrinking.  The `DofPartition` follows (np = 2, rank 0:
-//! ND1 525 owned + **444** ghost = 969 = the whole mesh; MFEM's `TrueVSize` for
-//! that rank is 525 and its face-neighbour layer is a separate array).
+//! A traversal can only answer (1) if it holds *every* holder of every entity it
+//! carries, and (2) if the facet's canonical anchor is local — together the
+//! *entity-holder closure*, which for a face-connected mesh is the whole mesh.
+//! The extraction, however, holds the **full** mesh and the full element
+//! partition vector, so it can answer (1) exactly and (2)'s anchor for every
+//! entity of the local mesh: that is [`fem_parallel::EntityOwnership`] on the
+//! returned `MeshPartition` (nodes through `MeshPartition::node_owner`, edges and
+//! facets through the channel).
 //!
-//! ## Why the fixpoint cannot simply be replaced by one layer
+//! What remains for the ghost layer is only the anchor: to read a shared facet's
+//! DOF position/sign the DP must have the facet's minimum-global-id holder
+//! **local**.  So the layer is the least set containing the owned block and the
+//! one-node layer (which the *assembly* needs — every element holding an owned
+//! DOF's entity must be local, and all holders of an entity are node neighbours
+//! of an owned element) that is closed under "the anchor of every facet a local
+//! element carries is local".
 //!
-//! Replacing step 3b2's fixpoint with a **single round over the owned set**
-//! (the literal D122-2 target, measured on this tree) does shrink the layer —
-//! np = 2 becomes 180 / 204 elements (126 + 54 / 126 + 78) — but it makes the
-//! np = 4 run **panic** inside `DofPartition`:
+//! ## Measured (`d807r76_dump_ghost_layer`, archived in `tmp/d807r76/dump_after.txt`)
 //!
-//! ```text
-//! exchange_ghost_edge_ids: rank 3 requested edge (64,113) dof 0 but this rank
-//! does not own it   (tmp/d807/d122r2_onelayer_red.txt)
-//! ```
+//! | np | rank | MFEM `GetNE`/`GetNV` | fem-rs layer (after) | fem-rs layer (before) |
+//! |---|---|---|---|---|
+//! | 1 | 0 | 252 / 364 | 252 / 364 | 252 / 364 |
+//! | 2 | 0 | 126 / 205 | **222** | 252 / 364 |
+//! | 2 | 1 | 126 / 226 | **246** | 252 / 364 |
+//! | 4 | 0 | 63 / 115 | **222** | 252 |
+//! | 4 | 1 | 63 / 128 | **222** | 252 |
+//! | 4 | 2 | 63 / 141 | **246** | 252 |
+//! | 4 | 3 | 63 / 128 | **234** | 252 |
 //!
-//! The mechanism, measured (`d807_smallest_correct_ghost_layer_is_the_entity_holder_closure`
-//! and `tmp/d807/diag2.txt`):
+//! The residual against MFEM is the one-node layer the *assembly* needs (54 / 78
+//! elements at np = 2, 63 / 81 / 103 / 63 at np = 4) plus the facet anchors (42 /
+//! 42, 96 / 78 / 80 / 108).  MFEM does not need either in `GetNE()` because its
+//! face-neighbour elements live in a *separate* array (`face_nbr_elements` /
+//! `face_nbr_vertices`) — `GetNE()` never counts them.
 //!
-//! * edge `(64,113)` is held by elements 62 (rank 0), 64 (rank 1) and 162/163
-//!   (rank 2) — MM the minimum element owner is rank 0;
-//! * rank 3 owns elements 189..251 and has element 64 as a 1-layer ghost, so
-//!   it sees **only** holder rank 1 and claims owner 1;
-//! * rank 1 sees holders 62 and 64, so *its* minimum is rank 0 — the request
-//!   lands on rank 1, which does not own the edge, and the exchange panics.
+//! ## The one-layer target (180 / 204 at np = 2) is **blocked**, with numbers
 //!
-//! Two DP rules read the local element traversal and therefore require the
-//! traversal to contain **every element holding an entity it carries**:
-//!
-//! 1. the entity owner is the minimum rank over the holders (D122-1, MFEM's
-//!    `GroupTopology` share-set minimum) — the rule that reproduces MFEM's
-//!    `GetTrueVSize` split; and
-//! 2. a face DOF's canonical position and sign are read off the
-//!    **minimum-global-id** adjacent element (D412 / D122-3), which must be
-//!    local for the position table `nd_face_pos` / sign `nd_face_sign` to exist
-//!    (the same panic class the pex34 np4 fixpoint was added for).
-//!
-//! The fixpoint is exactly the least set closed under "co-holders of the
-//! entities I carry" (the elements sharing a face/edge with a local element),
-//! and for the face-connected `cylinder-hex.mesh` that is the whole mesh —
-//! `d807_smallest_correct_ghost_layer_is_the_entity_holder_closure` computes it
-//! from the serial mesh and asserts it equals 252.  **So the fixpoint is not an
-//! over-iteration of the loop; it is the minimal ghost layer the current rules
-//! admit.**  Trimming it requires an ownership/anchor channel that does not
-//! read the local traversal — e.g. the extraction (which holds the full mesh and
-//! the full partition vector) publishing a global entity→owner map plus the
-//! canonical face anchor, or a holder→owner resolution round in the ghost-ID
-//! exchange — not a smaller closure.  That redesign is D807-1.
-//!
-//! ## What this file pins
-//!
-//! * `d807_dump_ghost_layer` — the per-rank table (elements, nodes, and the
-//!   nine joule spaces' owned/ghost/total split) used as the red evidence.
-//! * `d807_smallest_correct_ghost_layer_is_the_entity_holder_closure` — the
-//!   serial counterexample that shows a one-layer node closure is *not*
-//!   holder-closed (so `exchange_ghost_edge_ids` would route to a non-owner),
-//!   and that the entity-holder closure of every rank is the whole mesh.
-//! * `d807_local_mesh_is_entity_holder_closed` — the invariant holds on the
-//!   real extraction at np = 1/2/4 (the reason the current code is green).
-//! * `d807_nine_space_owned_counts_match_mfem` — D790-2: the per-rank **owned**
-//!   counts (`GetTrueVSize` counterpart) still equal MFEM bit for bit for all
-//!   nine spaces at np = 1/2/4, and are unchanged by the ghost layer, because
-//!   only entities carried by an *owned* element can be owned and the owner
-//!   rank sees all of their holders (the lemma in this file's last test).
+//! The rejected round-75 experiment (a single face round over the owned set)
+//! measured exactly the one-node layer, 180 / 204 elements at np = 2
+//! (`tmp/d807/d122r2_onelayer_red.txt`), and that is NOT a layer the DP can work
+//! on with the current space-side rules: `d807_one_layer_is_not_anchor_closed`
+//! below measures **9 / 70 facets per rank at np = 2** (42 / 51 / 89 / 72 at
+//! np = 4) whose canonical anchor is *not* in the one-layer node closure.  The
+//! *owner* side **is** now covered by the channel — which is why the np = 4
+//! `exchange_ghost_edge_ids` panic of `tmp/d807/d122r2_onelayer_red.txt` is gone
+//! (the same test asserts the counterexample still holds and that the published
+//! owner corrects it) — but the *anchor* side needs the anchor element itself:
+//! its face block fixes the position/sign of every shared face DOF.  Reaching
+//! 180/204 therefore needs one more channel — the anchor's per-facet block table
+//! (a fetch from the anchor's owner, or a globally consistent creator key inside
+//! `crates/space`) — registered as **D811-2**; the anchor closure is its minimal
+//! *local* surrogate.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use fem_mesh::Mesh;
+use fem_mesh::topology::MeshTopology;
+use fem_mesh::{ElementType, Mesh};
 use fem_parallel::dof_partition::DofPartition;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
@@ -103,30 +93,54 @@ use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 /// MFEM oracle (`tmp/d122r73/mfem_probe_np{1,2,4}.txt`, probe
 /// `tmp/d122r73/mfem_ghost_probe.cpp`, same contiguous `div_ceil` partition):
 /// per rank `(GetNV, GetNE)`.  MFEM's local mesh carries the **owned** elements
-/// only — the face neighbours live in a separate array (`GetNFaceNeighbors()`,
-/// `GetFaceNbrVSize()`) — so `GetNE()` is the owned count and `GetNV()` the
-/// vertex count of the owned elements.
+/// only — the face neighbours live in a separate array — so `GetNE()` is the
+/// owned count and `GetNV()` the vertex count of the owned elements.  Verified
+/// against the mesh's own vertex sets in round 76: the owned block's vertex set
+/// is exactly `GetNV`.
 const MFEM_NV_NE: [[(usize, usize); 4]; 3] = [
     [(364, 252), (0, 0), (0, 0), (0, 0)],
     [(205, 126), (226, 126), (0, 0), (0, 0)],
     [(115, 63), (128, 63), (141, 63), (128, 63)],
 ];
 
-/// The twelve edges of a hexahedron, in the local vertex indexing the mesh
-/// uses (`crates/parallel/src/dof_partition.rs::edges_for_elem`'s hex row).
+/// MFEM 4.10's **rank-owned** node count per rank — the `H1` order-1
+/// `GetTrueVSize()` (`ltdof_size`) from `tmp/d122r73/mfem_probe_np{1,2,4}.txt`.
+/// It is *not* `GetNV()`: at np = 2 rank 1 MFEM owns 159 vertices but carries
+/// 226 locally, because `ParMesh` keeps the neighbours' vertices in
+/// `face_nbr_vertices`.  Row index = np/2.
+const MFEM_H1O1_OWNED: [[usize; 4]; 3] = [
+    [364, 0, 0, 0],
+    [205, 159, 0, 0],
+    [115, 90, 87, 72],
+];
+
+/// The twelve edges of a hexahedron, in the local vertex indexing used by
+/// `crates/parallel/src/par_partition.rs::local_edges`'s hex row (and by
+/// `crates/space/src/hcurl.rs`).
 const HEX_EDGES: [(usize, usize); 12] = [
     (0, 1),
     (1, 2),
-    (2, 3),
-    (3, 0),
+    (3, 2),
+    (0, 3),
     (4, 5),
     (5, 6),
-    (6, 7),
-    (7, 4),
+    (7, 6),
+    (4, 7),
     (0, 4),
     (1, 5),
     (2, 6),
     (3, 7),
+];
+
+/// The six facets of a hexahedron (`par_partition.rs::local_facets`'s hex row).
+/// Only the corner *sets* matter for the facet key (sorted global ids).
+const HEX_FACES: [[usize; 4]; 6] = [
+    [3, 2, 1, 0],
+    [0, 1, 5, 4],
+    [1, 2, 6, 5],
+    [2, 3, 7, 6],
+    [3, 0, 4, 7],
+    [4, 5, 6, 7],
 ];
 
 fn cyl_hex() -> Mesh<3> {
@@ -218,12 +232,31 @@ struct RankRow {
     rank: usize,
     local_elems: usize,
     local_nodes: usize,
+    /// Global ids of the local elements (owned + ghost layer), sorted.
+    local_elem_gids: Vec<u32>,
     owned_elems: usize,
     ghost_elems: usize,
     owned_nodes: usize,
     ghost_nodes: usize,
+    /// The extraction's published entity owners: `((a, b), owner)` for edges,
+    /// `(sorted vertices, (owner, anchor))` for facets.
+    edge_owner: Vec<((u32, u32), i32)>,
+    facet: Vec<(Vec<u32>, (i32, u32))>,
+    /// Node owners as published: `(global node id, owner)`.
+    node_owner: Vec<(u32, i32)>,
     /// (family, owned, ghost, total, mfem true size) per space.
     spaces: Vec<(&'static str, usize, usize, usize, usize)>,
+}
+
+impl RankRow {
+    fn facet_entry(&self, key: &[u32]) -> (i32, u32) {
+        *self
+            .facet
+            .iter()
+            .find(|(k, _)| k.as_slice() == key)
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("facet {key:?} not published by rank {}", self.rank))
+    }
 }
 
 fn probe(mesh: &Mesh<3>, n_ranks: usize) -> Vec<RankRow> {
@@ -262,14 +295,49 @@ fn probe(mesh: &Mesh<3>, n_ranks: usize) -> Vec<RankRow> {
         probe_space!(Fam::RT2, HDivSpace::new(lm.clone(), 2));
         probe_space!(Fam::L2o1, L2Space::new(lm.clone(), 1));
 
+        // The single-rank fast path (`partition_mesh` with `size() == 1`) clones
+        // the mesh through `MeshPartition::new_serial`, which publishes no
+        // channel: at one rank every entity is owned by rank 0 and every facet's
+        // anchor is its only holder, so the traversal fallback answers exactly
+        // the same thing (that is the "np = 1 must not move" guarantee).
+        let (mut edge_owner, mut facet) = match part.entities.as_ref() {
+            Some(ent) => {
+                let mut eo: Vec<((u32, u32), i32)> =
+                    ent.edge_owner_table().iter().map(|(&k, &v)| (k, v)).collect();
+                eo.sort_unstable();
+                let mut fc: Vec<(Vec<u32>, (i32, u32))> =
+                    ent.facet_table().iter().map(|(k, &v)| (k.clone(), v)).collect();
+                fc.sort();
+                (eo, fc)
+            }
+            None => {
+                assert_eq!(n_ranks, 1, "np > 1 must publish the channel");
+                (Vec::new(), Vec::new())
+            }
+        };
+        edge_owner.shrink_to_fit();
+        facet.shrink_to_fit();
+        let mut node_owner: Vec<(u32, i32)> = (0..part.n_owned_nodes + part.n_ghost_nodes)
+            .map(|lid| (part.global_node(lid as u32), part.node_owner(lid as u32)))
+            .collect();
+        node_owner.sort_unstable();
+        let mut local_elem_gids: Vec<u32> = (0..part.n_owned_elems + part.n_ghost_elems)
+            .map(|e| part.global_elem(e as u32))
+            .collect();
+        local_elem_gids.sort_unstable();
+
         let row = RankRow {
             rank,
             local_elems: lm.n_elems(),
             local_nodes: lm.n_nodes(),
+            local_elem_gids,
             owned_elems: part.n_owned_elems,
             ghost_elems: part.n_ghost_elems,
             owned_nodes: part.n_owned_nodes,
             ghost_nodes: part.n_ghost_nodes,
+            edge_owner,
+            facet,
+            node_owner,
             spaces,
         };
         rows_rank.lock().unwrap().push(row);
@@ -288,20 +356,64 @@ fn contiguous_partition(ne: usize, np: usize) -> Vec<i32> {
     (0..ne).map(|e| (e / chunk) as i32).collect()
 }
 
-/// Every element that holds the hex edge `(u, v)`, over the **whole** mesh.
-fn edge_holders(mesh: &Mesh<3>, u: u32, v: u32) -> Vec<u32> {
-    (0..mesh.n_elems() as u32)
-        .filter(|&e| {
-            let ns = mesh.elem_nodes(e);
-            HEX_EDGES
-                .iter()
-                .any(|&(a, b)| (ns[a], ns[b]) == (u, v) || (ns[a], ns[b]) == (v, u))
-        })
-        .collect()
+/// The sorted global vertex ids of hex `ns`'s facet `f`.
+fn hex_facet_key(ns: &[u32], f: usize) -> Vec<u32> {
+    let mut g: Vec<u32> = HEX_FACES[f].iter().map(|&i| ns[i]).collect();
+    g.sort_unstable();
+    g
 }
 
-/// The one-layer **node** closure of `owned` — step 3b of
-/// `extract_submesh_from_partition_impl` (D122-2's literal target).
+/// Model of the extraction's `FullEntityTables` over the **whole** mesh: the
+/// minimum rank over the holders of every node/edge/facet (MFEM
+/// `GroupTopology`'s share-set minimum) and every facet's minimum
+/// global-element-id anchor.
+struct Truth {
+    node_owner: Vec<i32>,
+    edge_owner: HashMap<(u32, u32), i32>,
+    facet: HashMap<Vec<u32>, (i32, u32)>,
+}
+
+impl Truth {
+    fn build(mesh: &Mesh<3>, part: &[i32]) -> Self {
+        let mut node_owner = vec![i32::MAX; mesh.n_nodes()];
+        let mut edge_owner: HashMap<(u32, u32), i32> = HashMap::new();
+        let mut facet: HashMap<Vec<u32>, (i32, u32)> = HashMap::new();
+        for (e, &rank) in part.iter().enumerate() {
+            let e = e as u32;
+            assert_eq!(mesh.element_type(e), ElementType::Hex8, "hex-only fixture");
+            let ns = mesh.elem_nodes(e);
+            for &n in ns {
+                node_owner[n as usize] = node_owner[n as usize].min(rank);
+            }
+            for &(a, b) in HEX_EDGES.iter() {
+                let (ga, gb) = (ns[a], ns[b]);
+                let key = (ga.min(gb), ga.max(gb));
+                edge_owner
+                    .entry(key)
+                    .and_modify(|r: &mut i32| *r = (*r).min(rank))
+                    .or_insert(rank);
+            }
+            for f in 0..6 {
+                facet
+                    .entry(hex_facet_key(ns, f))
+                    .and_modify(|v: &mut (i32, u32)| {
+                        v.0 = v.0.min(rank);
+                        v.1 = v.1.min(e);
+                    })
+                    .or_insert((rank, e));
+            }
+        }
+        for o in node_owner.iter_mut() {
+            if *o == i32::MAX {
+                *o = 0;
+            }
+        }
+        Truth { node_owner, edge_owner, facet }
+    }
+}
+
+/// `extract_submesh_from_partition_impl` step 3b — the one-node-layer closure of
+/// the owned block (the **rejected** 180/204 target at np = 2).
 fn node_closure(mesh: &Mesh<3>, owned: &HashSet<u32>) -> BTreeSet<u32> {
     let mut set: BTreeSet<u32> = owned.iter().copied().collect();
     let owned_nodes: HashSet<u32> = owned
@@ -319,9 +431,8 @@ fn node_closure(mesh: &Mesh<3>, owned: &HashSet<u32>) -> BTreeSet<u32> {
     set
 }
 
-/// `extract_submesh_from_partition_impl`'s face-closure fixpoint (step 3b2) —
-/// iterate "shares ≥ D nodes (or a hanging edge) with a local element" over
-/// `owned ∪ ghost` to a fixpoint.
+/// The **entity-holder** closure (the old step 3b2 fixpoint): add every element
+/// sharing a facet with a local element, to a fixpoint.
 fn entity_holder_closure(mesh: &Mesh<3>, owned: &HashSet<u32>) -> BTreeSet<u32> {
     let mut set: BTreeSet<u32> = node_closure(mesh, owned);
     loop {
@@ -347,26 +458,55 @@ fn entity_holder_closure(mesh: &Mesh<3>, owned: &HashSet<u32>) -> BTreeSet<u32> 
     set
 }
 
-/// The minimum element owner over the elements of `set` that hold hex edge
-/// `(u, v)` — the owner the DP computes from a traversal restricted to `set`.
+/// The **anchor** closure (the new step 3b2): from the one-node layer, add the
+/// canonical (minimum-global-element-id) holder of every facet carried by a local
+/// element, to a fixpoint.
+fn anchor_closure(mesh: &Mesh<3>, owned: &HashSet<u32>, truth: &Truth) -> BTreeSet<u32> {
+    let mut set = node_closure(mesh, owned);
+    loop {
+        let mut added = false;
+        for e in set.iter().copied().collect::<Vec<u32>>() {
+            let ns = mesh.elem_nodes(e);
+            for f in 0..6 {
+                if set.insert(truth.facet[&hex_facet_key(ns, f)].1) {
+                    added = true;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    set
+}
+
+/// The minimum element owner over the elements of `set` holding hex edge
+/// `(u, v)` — the owner a **traversal-derived** rule computes from `set`.
 fn min_owner_over_set(mesh: &Mesh<3>, part: &[i32], set: &BTreeSet<u32>, u: u32, v: u32) -> i32 {
-    edge_holders(mesh, u, v)
-        .into_iter()
-        .filter(|e| set.contains(e))
-        .map(|e| part[e as usize])
-        .min()
-        .expect("the entity must be carried by at least one element of the set")
+    let mut best = i32::MAX;
+    for e in 0..mesh.n_elems() as u32 {
+        if !set.contains(&e) {
+            continue;
+        }
+        let ns = mesh.elem_nodes(e);
+        if HEX_EDGES
+            .iter()
+            .any(|&(a, b)| (ns[a], ns[b]) == (u, v) || (ns[a], ns[b]) == (v, u))
+        {
+            best = best.min(part[e as usize]);
+        }
+    }
+    assert_ne!(best, i32::MAX, "the set must carry the edge");
+    best
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-/// The red-evidence table: per rank, the local mesh size and the nine spaces'
-/// owned/ghost/total split next to MFEM's `GetTrueVSize` for that rank.
-///
-/// `--nocapture` prints it; the numbers are archived in
-/// `tmp/d807/d122r2_red.txt`.
+/// The per-rank table: local mesh size and the nine spaces' owned/ghost/total
+/// split next to MFEM's `GetTrueVSize`.  `--nocapture` prints it; the numbers are
+/// archived in `tmp/d807r76/dump_after.txt`.
 #[test]
-fn d807_dump_ghost_layer() {
+fn d807r76_dump_ghost_layer() {
     for n_ranks in [1usize, 2, 4] {
         let rows = probe(&cyl_hex(), n_ranks);
         println!("=== np={n_ranks} ===");
@@ -388,162 +528,319 @@ fn d807_dump_ghost_layer() {
     }
 }
 
-/// D122-2's core measurement: at np ≥ 2 every rank's local mesh is the whole
-/// mesh, while MFEM's local mesh is the owned block only.
+/// **The inverted D122-2 / D807-1 pin.**  The round-75
+/// `d807_ghost_layer_is_the_whole_mesh_at_np_ge_2` asserted
+/// `local_elems == 252` on every rank (the registration of the defect).  The
+/// layer is now the extraction's *anchor closure*: strictly smaller than the
+/// mesh, exactly equal to the independently recomputed closure, and the per-rank
+/// **owned** block is exactly MFEM's `GetNE()` / `GetNV()`.
 #[test]
-fn d807_ghost_layer_is_the_whole_mesh_at_np_ge_2() {
+fn d807_ghost_layer_is_the_extraction_anchor_closure() {
     let mesh = cyl_hex();
     assert_eq!(mesh.n_elems(), 252);
     assert_eq!(mesh.n_nodes(), 364);
+    let mfem_idx = |np: usize| np / 2; // MFEM_NV_NE's rows are indexed by np/2
     for n_ranks in [2usize, 4] {
-        let chunk = mesh.n_elems().div_ceil(n_ranks);
+        let part = contiguous_partition(mesh.n_elems(), n_ranks);
+        let truth = Truth::build(&mesh, &part);
         let rows = probe(&mesh, n_ranks);
         for r in &rows {
+            let owned: HashSet<u32> = (0..mesh.n_elems() as u32)
+                .filter(|&e| part[e as usize] == r.rank as i32)
+                .collect();
+            let predicted = anchor_closure(&mesh, &owned, &truth);
+            // (a) three *different* MFEM quantities, each against its own truth:
+            //   * MFEM's `GetNE()` is the owned element block;
+            //   * MFEM's `GetNV()` is the LOCAL vertex count (owned + ghost —
+            //     `ParMesh` keeps a full local mesh, with the neighbouring
+            //     ranks' vertices in `face_nbr_vertices`), so it pairs with the
+            //     local node count, NOT with the rank-owned one;
+            //   * the rank-**owned** node count is the H1 order-1 `TrueVSize`
+            //     (`ltdof_size`), i.e. those two coincide only at np = 1 and
+            //     for rank 0 at np = 2 / 4 when the owned block happens to touch
+            //     no ghost vertex.
+            // Asserting `owned_nodes == GetNV()` is wrong by construction (it
+            // fails at np = 2 rank 1: 159 owned vs 226 local) — that conflation
+            // is what this split pins down.
             assert_eq!(
-                r.owned_elems, chunk,
-                "np={n_ranks} rank {}: the contiguous block owns {chunk} elements",
+                r.owned_elems,
+                MFEM_NV_NE[mfem_idx(n_ranks)][r.rank].1,
+                "np={n_ranks} rank {}: the owned block must be MFEM's GetNE()",
                 r.rank
             );
             assert_eq!(
+                r.owned_nodes,
+                MFEM_H1O1_OWNED[mfem_idx(n_ranks)][r.rank],
+                "np={n_ranks} rank {}: the rank-owned node count must be MFEM's \
+                 H1 order-1 TrueVSize",
+                r.rank
+            );
+            // The local node set must be *exactly* the node set of the local
+            // (anchor-closure) elements — the extraction must not carry a node
+            // that no local element touches.
+            let closure_nodes: HashSet<u32> = predicted
+                .iter()
+                .flat_map(|&e| mesh.elem_nodes(e).iter().copied())
+                .collect();
+            assert_eq!(
+                r.local_nodes,
+                closure_nodes.len(),
+                "np={n_ranks} rank {}: local node count must be the anchor closure's \
+                 node set",
+                r.rank
+            );
+            // NOT asserted: `local_nodes == MFEM GetNV()`.  It does not hold and
+            // must not be papered over — at np = 2 the anchor closure is 222
+            // elements carrying 332 nodes, while MFEM's local sub-mesh is 126
+            // elements / 205 nodes.  Reaching MFEM's local mesh needs the facet
+            // position/sign to be published as well (then the anchor *element*
+            // no longer has to be local), which would cut the layer to the
+            // 1-node closure (180/204 elements, 268/347 nodes at np = 2).  See
+            // the D807-1 residual in `tmp/round3_plan.md`.
+            // (b) the layer is exactly the anchor closure.
+            assert_eq!(
                 r.local_elems,
-                mesh.n_elems(),
-                "np={n_ranks} rank {}: the local mesh carries {} of {} elements — \
-                 D122-2's registration: the face-closure fixpoint makes every rank \
-                 hold the whole mesh (MFEM's GetNE() is {} there)",
+                predicted.len(),
+                "np={n_ranks} rank {}: local mesh {} elements != the anchor closure {}",
                 r.rank,
                 r.local_elems,
-                mesh.n_elems(),
-                MFEM_NV_NE[n_ranks / 2][r.rank].1
+                predicted.len()
+            );
+            assert_eq!(
+                r.local_elem_gids,
+                predicted.iter().copied().collect::<Vec<u32>>(),
+                "np={n_ranks} rank {}: the layer is not the predicted element set",
+                r.rank
+            );
+            // (c) strictly smaller than the mesh (the defect) and a superset of
+            // the assembly's one-node layer.
+            assert!(
+                r.local_elems < mesh.n_elems(),
+                "np={n_ranks} rank {}: the layer is still the whole mesh",
+                r.rank
+            );
+            assert!(r.local_elems > r.owned_elems);
+            assert!(
+                r.local_elems >= node_closure(&mesh, &owned).len(),
+                "the one-node layer (assembly precondition) must be contained"
             );
         }
     }
 }
 
-/// The one-layer node closure is **not** holder-closed, so a DP that reads the
-/// owner (or the face anchor) off the local traversal cannot be built on it:
-/// the counterexample is the np = 4 panic's own edge.
-///
-/// The same test computes the closure the current code actually computes (the
-/// entity-holder fixpoint) and shows it is the whole mesh for every rank — i.e.
-/// the fixpoint is the *minimal* admissible layer, not an over-iteration.
+/// The old fixpoint was the **entity-holder** closure; the layer is now the
+/// (smaller) **anchor** closure.  Both are computed here for np = 2/4: the
+/// reduction is real, and the holder closure is *not* the minimal admissible
+/// layer — the claim the round-75 README made.
 #[test]
-fn d807_smallest_correct_ghost_layer_is_the_entity_holder_closure() {
+fn d807_holder_closure_is_not_minimal_the_anchor_closure_is() {
     let mesh = cyl_hex();
-    let np = 4usize;
-    let chunk = mesh.n_elems().div_ceil(np);
-    let part = contiguous_partition(mesh.n_elems(), np);
-
-    // The np = 4 panic's edge: held by element 62 (rank 0) and element 64
-    // (rank 1), so the minimum element owner is rank 0.
-    let holders = edge_holders(&mesh, 64, 113);
-    assert_eq!(
-        holders,
-        vec![62, 64],
-        "edge (64,113) holders — the panic's `requested edge (64,113) dof 0`"
-    );
-    let true_min = holders.iter().map(|&e| part[e as usize]).min().unwrap();
-    assert_eq!(true_min, 0);
-
-    let mut violations = 0usize;
-    for rank in 0..np as i32 {
-        let owned: HashSet<u32> = (0..mesh.n_elems() as u32)
-            .filter(|&e| part[e as usize] == rank)
-            .collect();
-        let one_layer = node_closure(&mesh, &owned);
-
-        // Every entity carried by the one-layer set must have the same minimum
-        // owner whether it is computed over the layer or over the whole mesh.
-        for e in one_layer.iter() {
-            let ns = mesh.elem_nodes(*e);
-            for &(a, b) in HEX_EDGES.iter() {
-                let (u, v) = (ns[a], ns[b]);
-                let local_min = min_owner_over_set(&mesh, &part, &one_layer, u, v);
-                let global_min = edge_holders(&mesh, u, v)
-                    .into_iter()
-                    .map(|h| part[h as usize])
-                    .min()
-                    .unwrap();
-                if local_min != global_min {
-                    if rank == 3 && (u, v) == (64, 113) {
-                        // The measured mechanism: rank 3 sees only element 64
-                        // (rank 1) of the four holders, so it claims owner 1
-                        // while the global minimum is rank 0 — the request
-                        // `exchange_ghost_edge_ids` sent to rank 1, which does
-                        // not own the edge (tmp/d807/d122r2_onelayer_red.txt).
-                        assert_eq!((local_min, global_min), (1, 0));
-                    }
-                    violations += 1;
-                }
-            }
-        }
-    }
-    assert!(
-        violations > 0,
-        "a one-layer node closure must violate the holder-closure invariant at \
-         np = 4 — if this ever stops holding the D122-2 reduction becomes viable"
-    );
-
-    // The current fixpoint is exactly the entity-holder closure and equals the
-    // whole mesh for every rank: the minimal admissible layer *is* the mesh.
-    for rank in 0..np as i32 {
-        let owned: HashSet<u32> = (0..mesh.n_elems() as u32)
-            .filter(|&e| part[e as usize] == rank)
-            .collect();
-        let closure = entity_holder_closure(&mesh, &owned);
-        assert_eq!(
-            closure.len(),
-            mesh.n_elems(),
-            "np = 4 rank {rank}: the entity-holder closure has {} of {} elements \
-             (owned {chunk} + one-layer node closure {})",
-            closure.len(),
-            mesh.n_elems(),
-            node_closure(&mesh, &owned).len()
-        );
-    }
-}
-
-/// The invariant the DP relies on, checked on the **real** extraction: for every
-/// element of the local mesh, every other element holding one of its edges is
-/// also local.  With the closure this is trivially true (the whole mesh is
-/// local); the test is the guard that will have to keep holding when D807-1
-/// replaces the local-traversal rules.
-#[test]
-fn d807_local_mesh_is_entity_holder_closed() {
-    let mesh = cyl_hex();
-    for n_ranks in [1usize, 2, 4] {
+    for n_ranks in [2usize, 4] {
         let part = contiguous_partition(mesh.n_elems(), n_ranks);
+        let truth = Truth::build(&mesh, &part);
         for rank in 0..n_ranks as i32 {
             let owned: HashSet<u32> = (0..mesh.n_elems() as u32)
                 .filter(|&e| part[e as usize] == rank)
                 .collect();
-            let local = entity_holder_closure(&mesh, &owned);
-            for e in local.iter() {
+            let holder = entity_holder_closure(&mesh, &owned);
+            let anchor = anchor_closure(&mesh, &owned, &truth);
+            assert_eq!(
+                holder.len(),
+                mesh.n_elems(),
+                "np={n_ranks} rank {rank}: the entity-holder closure is the whole mesh"
+            );
+            assert!(
+                anchor.len() < holder.len(),
+                "np={n_ranks} rank {rank}: the anchor closure ({} elements) must be \
+                 strictly smaller than the holder closure ({})",
+                anchor.len(),
+                holder.len()
+            );
+        }
+    }
+}
+
+/// **Why 180/204 (the one-node layer) is not reachable yet.**  A rank that
+/// carries a facet through a ghost whose co-holder is one hop further out names a
+/// *different* anchor than the facet's global one, and the DP reads the face
+/// DOF's position/sign off that anchor (D412 / D122-3).  Measured: 9 / 70 facets
+/// per rank at np = 2 (42 / 51 / 89 / 72 at np = 4) lose their anchor under the
+/// one-node layer, and 21 / 165 edges (104 / 118 / 211 / 174) lose their minimum
+/// holder — the mechanism of the np = 4 `exchange_ghost_edge_ids` panic in
+/// `tmp/d807/d122r2_onelayer_red.txt`, which the extraction's owner channel now
+/// corrects (asserted at the end of this test).
+#[test]
+fn d807_one_layer_is_not_anchor_closed() {
+    let mesh = cyl_hex();
+    let cases: [(usize, (usize, usize)); 2] = [(2, (9, 70)), (4, (42, 51))];
+    for (np, want_facet_misses) in cases {
+        let part = contiguous_partition(mesh.n_elems(), np);
+        let truth = Truth::build(&mesh, &part);
+        let mut facet_misses = Vec::new();
+        let mut edge_misses = Vec::new();
+        for rank in 0..np as i32 {
+            let owned: HashSet<u32> = (0..mesh.n_elems() as u32)
+                .filter(|&e| part[e as usize] == rank)
+                .collect();
+            let one_layer = node_closure(&mesh, &owned);
+            let mut fm = 0usize;
+            let mut em = 0usize;
+            for e in one_layer.iter() {
                 let ns = mesh.elem_nodes(*e);
-                for &(a, b) in HEX_EDGES.iter() {
-                    for h in edge_holders(&mesh, ns[a], ns[b]) {
-                        assert!(
-                            local.contains(&h),
-                            "np={n_ranks} rank {rank}: element {h} holds an edge of \
-                             local element {e} but is not local — the owner/anchor \
-                             rules would read a wrong minimum"
-                        );
+                for f in 0..6 {
+                    if !one_layer.contains(&truth.facet[&hex_facet_key(ns, f)].1) {
+                        fm += 1;
                     }
+                }
+                for &(a, b) in HEX_EDGES.iter() {
+                    let (u, v) = (ns[a], ns[b]);
+                    let key = (u.min(v), u.max(v));
+                    if min_owner_over_set(&mesh, &part, &one_layer, key.0, key.1)
+                        != truth.edge_owner[&key]
+                    {
+                        em += 1;
+                    }
+                }
+            }
+            facet_misses.push(fm);
+            edge_misses.push(em);
+        }
+        println!("np={np}: one-layer facet-anchor misses {facet_misses:?}, edge-owner misses {edge_misses:?}");
+        assert!(
+            facet_misses[0] > 0 && facet_misses[1] > 0,
+            "np={np}: {facet_misses:?}"
+        );
+        assert_eq!(
+            (facet_misses[0], facet_misses[1]),
+            want_facet_misses,
+            "np={np}: measured facet-anchor misses changed"
+        );
+    }
+
+    // The np = 4 counterexample itself: edge (64,113) is held by elements 62
+    // (rank 0) and 64 (rank 1), so the share-set minimum is rank 0.  Rank 3's
+    // one-node layer sees only element 64 and names rank 1 — the old panic.  The
+    // extraction publishes rank 0, which is what the DP now uses.
+    let np = 4usize;
+    let part = contiguous_partition(mesh.n_elems(), np);
+    let truth = Truth::build(&mesh, &part);
+    let holders: Vec<u32> = (0..mesh.n_elems() as u32)
+        .filter(|&e| {
+            let ns = mesh.elem_nodes(e);
+            HEX_EDGES
+                .iter()
+                .any(|&(a, b)| (ns[a], ns[b]) == (64, 113) || (ns[a], ns[b]) == (113, 64))
+        })
+        .collect();
+    assert_eq!(holders, vec![62, 64]);
+    assert_eq!(truth.edge_owner[&(64, 113)], 0, "share-set minimum");
+    let owned3: HashSet<u32> = (0..mesh.n_elems() as u32)
+        .filter(|&e| part[e as usize] == 3)
+        .collect();
+    let one_layer3 = node_closure(&mesh, &owned3);
+    assert_eq!(
+        min_owner_over_set(&mesh, &part, &one_layer3, 64, 113),
+        1,
+        "the one-node layer names rank 1 for edge (64,113) — the panic's mechanism"
+    );
+    // ... and the real rank-3 extraction publishes the correct owner.
+    let rows = probe(&mesh, np);
+    assert_eq!(
+        rows[3].edge_owner.iter().find(|(k, _)| *k == (64, 113)).map(|(_, o)| *o),
+        Some(0),
+        "the extraction's channel must publish the share-set minimum (D807-1)"
+    );
+}
+
+/// **The new invariant** (replaces `d807_local_mesh_is_entity_holder_closed`):
+/// the real extraction's local mesh is *anchor-closed* — for every element of the
+/// layer, every facet it carries has its canonical (minimum-global-element-id)
+/// holder in the layer.  That, plus the extraction-published owner, is all
+/// `DofPartition` needs; the entity-holder closure is no longer required.
+#[test]
+fn d807_local_mesh_is_anchor_closed() {
+    let mesh = cyl_hex();
+    for n_ranks in [2usize, 4] {
+        let rows = probe(&mesh, n_ranks);
+        for r in &rows {
+            let local: HashSet<u32> = r.local_elem_gids.iter().copied().collect();
+            for &e in &r.local_elem_gids {
+                let ns = mesh.elem_nodes(e);
+                for f in 0..6 {
+                    let key = hex_facet_key(ns, f);
+                    let (_, anchor) = r.facet_entry(&key);
+                    assert!(
+                        local.contains(&anchor),
+                        "np={n_ranks} rank {}: facet {key:?} of local element {e} has \
+                         anchor {anchor}, which is not in the local mesh",
+                        r.rank
+                    );
                 }
             }
         }
     }
 }
 
+/// **The extraction-published owner IS the share-set minimum** (D807-1's
+/// acceptance): for every node, edge and facet of every rank's local mesh the
+/// published owner equals the minimum rank over the *mesh-wide* holders, and the
+/// published facet anchor equals the minimum global element id among them.
+/// Since every rank compares against the same mesh-wide truth, this also pins the
+/// cross-rank agreement that the traversal used to derive silently.
+#[test]
+fn d807r76_published_owner_is_the_share_set_minimum() {
+    let mesh = cyl_hex();
+    // np = 1 takes the serial fast path (no channel); there every owner is rank 0
+    // by construction and `d807_np1_is_untouched` pins that instead.
+    for n_ranks in [2usize, 4] {
+        let part = contiguous_partition(mesh.n_elems(), n_ranks);
+        let truth = Truth::build(&mesh, &part);
+        let rows = probe(&mesh, n_ranks);
+        let mut seen: HashMap<Vec<u32>, (i32, u32)> = HashMap::new();
+        for r in &rows {
+            assert!(!r.node_owner.is_empty());
+            for &(n, owner) in &r.node_owner {
+                assert_eq!(
+                    owner, truth.node_owner[n as usize],
+                    "np={n_ranks} rank {}: node {n} owner {owner} != share-set minimum {}",
+                    r.rank, truth.node_owner[n as usize]
+                );
+            }
+            for &((a, b), owner) in &r.edge_owner {
+                assert_eq!(
+                    owner, truth.edge_owner[&(a, b)],
+                    "np={n_ranks} rank {}: edge ({a},{b}) owner {owner} != share-set \
+                     minimum {}",
+                    r.rank, truth.edge_owner[&(a, b)]
+                );
+            }
+            for (key, value) in &r.facet {
+                let (owner, anchor) = *value;
+                let t = truth.facet[key];
+                assert_eq!(
+                    (owner, anchor),
+                    t,
+                    "np={n_ranks} rank {}: facet {key:?} published ({owner},{anchor}) != \
+                     (share-set minimum, minimum global element id) {t:?}",
+                    r.rank
+                );
+                if let Some(prev) = seen.insert(key.clone(), t) {
+                    assert_eq!(prev, t, "ranks disagree on facet {key:?}");
+                }
+            }
+        }
+        assert!(!seen.is_empty());
+    }
+}
+
 /// D790-2: the per-rank **owned** DOF split (`GetTrueVSize` counterpart) equals
-/// MFEM bit for bit for all nine spaces at np = 1/2/4.
-///
-/// This is ghost-layer independent: only entities carried by an *owned* element
-/// can be owned, and a rank that holds an entity through an owned element sees
-/// every other holder of it (all holders share that entity's vertices, hence are
-/// node-neighbours of the owned element) — so its "minimum over local holders"
-/// is the global minimum.  The lemma's premise is what the counterexample test
-/// above violates when the traversal includes elements the rank does *not* own;
-/// for *owning* a DOF the premise holds for any ghost layer.
+/// MFEM bit for bit for all nine spaces at np = 1/2/4, and it is ghost-layer
+/// independent: only entities carried by an *owned* element can be owned, and a
+/// rank that holds an entity through an owned element sees every holder of it
+/// (they share the entity's vertices, hence are node neighbours of the owned
+/// element) — the lemma behind the assembly's one-node layer.  The ownership
+/// *rule* no longer depends on that lemma at all (the extraction publishes the
+/// mesh-wide minimum), which is what let the layer shrink.
 #[test]
 fn d807_nine_space_owned_counts_match_mfem() {
     let mesh = cyl_hex();
@@ -573,8 +870,11 @@ fn d807_nine_space_owned_counts_match_mfem() {
     }
 }
 
-/// np = 1 carries no ghost at all and matches MFEM's `GetTrueVSize` /
-/// `GetNE` / `GetNV` exactly — the "np = 1 must not move" guard.
+/// np = 1 carries no ghost at all, matches MFEM's `GetTrueVSize` / `GetNE` /
+/// `GetNV` exactly, and the channel is inert: every published owner is rank 0 and
+/// every anchor is a local element.  (`no output line may move` for np = 1 is
+/// enforced by the caller's byte comparison of this dump against
+/// `tmp/d807/d790r2_owned_table.txt`.)
 #[test]
 fn d807_np1_is_untouched() {
     let rows = probe(&cyl_hex(), 1);
@@ -582,6 +882,10 @@ fn d807_np1_is_untouched() {
     let r = &rows[0];
     assert_eq!((r.local_elems, r.owned_elems, r.ghost_elems), (252, 252, 0));
     assert_eq!((r.local_nodes, r.owned_nodes, r.ghost_nodes), (364, 364, 0));
+    assert!(r.node_owner.iter().all(|&(_, o)| o == 0));
+    // The serial fast path publishes no channel: `probe` yields empty tables.
+    assert!(r.edge_owner.is_empty());
+    assert!(r.facet.is_empty());
     for (f, owned, ghost, total, tv) in &r.spaces {
         assert_eq!(*ghost, 0, "{f}: np = 1 must have no ghost DOFs");
         assert_eq!(owned, total, "{f}: np = 1 owned must equal total");

@@ -609,15 +609,25 @@ impl DofPartition {
             let gb = partition.global_node(local_b);
             let owner_a = partition.node_owner(local_a);
             let owner_b = partition.node_owner(local_b);
-            // D122-1: min *element* owner over the local elements holding the
-            // edge; the endpoint rule is the fallback for an edge no local
-            // element carries (unreachable for a DofManager edge DOF, which
-            // exists only because some element has it).
-            let edge_owner = edge_min_elem_owner
-                .get(&EdgeKey::new(local_a, local_b))
-                .copied()
-                .unwrap_or_else(|| owner_a.min(owner_b));
             let (gna, gnb) = (ga.min(gb), ga.max(gb));
+            // D122-1 / D807-1: min *element* owner over the elements holding the
+            // edge.  The extraction publishes it directly (minimum rank over the
+            // mesh-wide holders = MFEM's share-set minimum); the local-traversal
+            // minimum is kept as the fallback for partitions that carry no
+            // channel (serial wrapper, AMR rebuilds), and the endpoint rule as
+            // the last resort for an edge no local element carries (unreachable
+            // for a DofManager edge DOF, which exists only because some element
+            // has it).
+            let edge_owner = partition
+                .entities
+                .as_ref()
+                .and_then(|t| t.edge_owner(gna, gnb))
+                .or_else(|| {
+                    edge_min_elem_owner
+                        .get(&EdgeKey::new(local_a, local_b))
+                        .copied()
+                })
+                .unwrap_or_else(|| owner_a.min(owner_b));
 
             // The DofManager's edge-DOF order is "near the first *local*
             // endpoint" — but local node ids are renumbered per-rank after
@@ -754,17 +764,24 @@ impl DofPartition {
                 sorted_g.sort_unstable();
                 let mut face_key = [u32::MAX; 4];
                 face_key[..sorted_g.len()].copy_from_slice(&sorted_g);
-                // D122-1: min element owner over the local elements holding
-                // the face; the vertex-min rule is the fallback for a face no
-                // local element carries (unreachable for a DofManager face
-                // DOF, which exists only because some element has it).
-                let owner = face_min_elem_owner.get(&fi).copied().unwrap_or_else(|| {
-                    verts
-                        .iter()
-                        .map(|&v| partition.node_owner(v))
-                        .min()
-                        .expect("from_dof_manager: empty face vertex list")
-                });
+                // D122-1 / D807-1: the face's owner is the minimum rank over the
+                // elements holding it, published by the extraction; the
+                // traversal minimum is the fallback for a partition without a
+                // channel, and the vertex-min rule the last resort for a face no
+                // local element carries (unreachable for a DofManager face DOF,
+                // which exists only because some element has it).
+                let owner = partition
+                    .entities
+                    .as_ref()
+                    .and_then(|t| t.facet_owner(&sorted_g))
+                    .or_else(|| face_min_elem_owner.get(&fi).copied())
+                    .unwrap_or_else(|| {
+                        verts
+                            .iter()
+                            .map(|&v| partition.node_owner(v))
+                            .min()
+                            .expect("from_dof_manager: empty face vertex list")
+                    });
                 let pos = face_dof_positions(
                     dof_manager, &global_node, verts, dofs,
                 );
@@ -1224,6 +1241,14 @@ impl DofPartition {
             && order >= 2
             && space_type == fem_space::fe_space::SpaceType::HCurl;
         // Per face: (min global elem gid, min adjacent-element owner).
+        //
+        // D807-1: both come from the extraction's entity channel when it is
+        // present (minimum global element id among the face's mesh-wide holders
+        // and the minimum rank over those holders), so the anchor is the *same*
+        // element on every rank that carries the facet — the property the local
+        // traversal could only provide while the ghost layer was the whole mesh.
+        // The traversal minimum stays the fallback for partitions without a
+        // channel (serial wrapper, AMR rebuilds).
         let mut nd_face_data: HashMap<(u32, u32, u32), (u32, Rank)> = HashMap::new();
         // Face DOF id → (global face key, position within the face).
         let mut nd_face_key: HashMap<u32, (u32, u32, u32)> = HashMap::new();
@@ -1254,12 +1279,20 @@ impl DofPartition {
                         .collect();
                     g.sort_unstable();
                     let key = (g[0], g[1], g[2]);
-                    let entry = nd_face_data.entry(key).or_insert((gid, owner));
-                    if gid < entry.0 {
-                        entry.0 = gid;
+                    // D807-1: the channel's (owner, anchor) is rank-independent;
+                    // without it fall back to this rank's local minimum.
+                    let (a_gid, a_owner) = match partition.entities.as_ref()
+                        .and_then(|t| t.facet(&g))
+                    {
+                        Some((owner, anchor)) => (anchor, owner),
+                        None => (gid, owner),
+                    };
+                    let entry = nd_face_data.entry(key).or_insert((a_gid, a_owner));
+                    if a_gid < entry.0 {
+                        entry.0 = a_gid;
                     }
-                    if owner < entry.1 {
-                        entry.1 = owner;
+                    if a_owner < entry.1 {
+                        entry.1 = a_owner;
                     }
                 }
             }
@@ -1506,14 +1539,18 @@ impl DofPartition {
                     .map(|&lid| partition.node_owner(lid))
                     .unwrap_or(Rank::MAX)
             };
-            // D122-1: the min-element-owner rule (Step 1b); the endpoint rule
-            // is only a fallback for an edge no local element carries (which
-            // cannot happen for an edge that came from `dof_to_edge`, itself
-            // built from the local element traversal).
+            // D122-1 / D807-1: the min-element-owner rule (Step 1b) as published
+            // by the extraction for the whole mesh; without the channel the local
+            // traversal minimum, and the endpoint rule only as a fallback for an
+            // edge no local element carries (which cannot happen for an edge that
+            // came from `dof_to_edge`, itself built from the local element
+            // traversal).
             let edge_key = (ga.min(gb), ga.max(gb));
-            let edge_owner = edge_min_elem_owner
-                .get(&edge_key)
-                .copied()
+            let edge_owner = partition
+                .entities
+                .as_ref()
+                .and_then(|t| t.edge_owner(edge_key.0, edge_key.1))
+                .or_else(|| edge_min_elem_owner.get(&edge_key).copied())
                 .unwrap_or_else(|| owner_a.min(owner_b));
 
             let info = EdgeDofInfo {
@@ -1941,8 +1978,7 @@ impl DofPartition {
                     entry.first_order = verts_global.clone();
                     dof_to_face.insert(dof_id, key);
                     // First-seen position — kept only as the fallback for
-                    // faces whose min-global-id element is not local (should
-                    // not happen with the face-closure ghost layer); the
+                    // faces whose min-global-id element is not local; the
                     // canonical pass below overwrites it.
                     dof_to_pos.insert(dof_id, pos as u32);
                 }
@@ -1961,6 +1997,22 @@ impl DofPartition {
             }
         }
 
+        // D807-1: the canonical anchor element and the facet's owner are the
+        // extraction's rank-independent values (minimum global element id /
+        // minimum rank over the face's mesh-wide holders).  With them the anchor
+        // no longer depends on the local traversal — the second pass below then
+        // fills `min_gid_order` / `dof_to_pos` from that one element.
+        if let Some(tables) = partition.entities.as_ref() {
+            for info in face_info.values_mut() {
+                let mut g = info.first_order.clone();
+                g.sort_unstable();
+                if let Some((owner, anchor)) = tables.facet(&g) {
+                    info.min_elem_owner = owner;
+                    info.min_gid_elem = anchor;
+                }
+            }
+        }
+
         // D412: the position within the face must be cross-rank consistent.
         // The first-seen element's slot order is NOT — across a partition
         // boundary the two ranks' local traversals first-see different
@@ -1969,8 +2021,9 @@ impl DofPartition {
         // `(face, first-seen pos)` missed the owner's map for RTk with `k ≥ 1`
         // (RT0 escaped: one DOF per face, position ≡ 0).  Overwrite with the
         // position inside the **minimum-global-id adjacent element's** face
-        // block — the same canonical element the sign corrections use, local
-        // on every rank thanks to the face-closure ghost layer.
+        // block — the same canonical element the sign corrections use, local on
+        // every rank that carries the facet: the ghost layer is closed under
+        // "the anchor of every carried facet" (D807-1, `par_partition`).
         for e in mesh.elem_iter() {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);

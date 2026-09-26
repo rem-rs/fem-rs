@@ -32,8 +32,197 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use fem_core::{ElemId, FaceId, NodeId, Rank};
 use fem_mesh::{ElementType, Mesh, topology::MeshTopology};
 
-use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
+use crate::{Comm, EntityOwnership, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
+
+// ── entity tables (D807-1) ────────────────────────────────────────────────────
+
+/// Sorted, `u32::MAX`-padded facet key: the facet's global vertex ids ascending.
+///
+/// A triangle pads index 3 with `u32::MAX`, so a 3- and a 4-vertex facet can
+/// never collide, and the key is `Copy` (no per-facet allocation — the mesh is
+/// walked per target rank, so the tables must stay cheap).
+pub(crate) type FacetKey = [u32; 4];
+
+/// Facet key of a vertex list (sorted on the fly; longer lists are not facets).
+pub(crate) fn facet_key(sorted: &[u32]) -> Option<FacetKey> {
+    match sorted.len() {
+        3 => Some([sorted[0], sorted[1], sorted[2], u32::MAX]),
+        4 => Some([sorted[0], sorted[1], sorted[2], sorted[3]]),
+        _ => None,
+    }
+}
+
+/// Local edge table of one element type, as index pairs into the element's node
+/// list.  The tables agree with `crates/space`'s `edges_for_elem` (MFEM order);
+/// only the *vertex sets* matter for the keys, but keeping the same order makes
+/// cross-checking with the DOF maps direct.
+fn local_edges(et: ElementType) -> &'static [(usize, usize)] {
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => &[(0, 1), (1, 2), (0, 2)],
+        ElementType::Quad4 | ElementType::Quad8 => &[(0, 1), (1, 2), (2, 3), (3, 0)],
+        ElementType::Tet4 | ElementType::Tet10 => {
+            &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        }
+        ElementType::Hex8 | ElementType::Hex20 => &[
+            (0, 1), (1, 2), (3, 2), (0, 3),
+            (4, 5), (5, 6), (7, 6), (4, 7),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ],
+        ElementType::Prism6 => &[
+            (0, 1), (1, 2), (0, 2),
+            (3, 4), (4, 5), (3, 5),
+            (0, 3), (1, 4), (2, 5),
+        ],
+        ElementType::Pyramid5 => &[
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (0, 4), (1, 4), (2, 4), (3, 4),
+        ],
+        _ => &[],
+    }
+}
+
+/// Local face (facet) table of one element type, as index lists into the
+/// element's node list — the corners of the element's facets, 3 entries for a
+/// triangle and 4 for a quadrilateral.  `&[]` for 1-D/2-D types, whose "faces"
+/// are edges and whose keys the DP never builds (the 3-D face paths are the
+/// only consumers of the facet tables).
+fn local_facets(et: ElementType) -> &'static [&'static [usize]] {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => &[
+            &[1, 2, 3],
+            &[0, 3, 2],
+            &[0, 1, 3],
+            &[0, 2, 1],
+        ],
+        ElementType::Hex8 | ElementType::Hex20 => &[
+            &[3, 2, 1, 0],
+            &[0, 1, 5, 4],
+            &[1, 2, 6, 5],
+            &[2, 3, 7, 6],
+            &[3, 0, 4, 7],
+            &[4, 5, 6, 7],
+        ],
+        ElementType::Prism6 => &[
+            &[0, 2, 1],
+            &[3, 4, 5],
+            &[0, 1, 4, 3],
+            &[1, 2, 5, 4],
+            &[2, 0, 3, 5],
+        ],
+        ElementType::Pyramid5 => &[
+            &[3, 2, 1, 0],
+            &[0, 1, 4],
+            &[1, 2, 4],
+            &[2, 3, 4],
+            &[3, 0, 4],
+        ],
+        _ => &[],
+    }
+}
+
+/// For every node / edge / facet of the **whole** serial mesh: the minimum rank
+/// over the elements holding it (MFEM `GroupTopology`'s share-set minimum — the
+/// ownership rule D122-1 established), and for every facet additionally the
+/// minimum global element id among its holders (the DP's canonical face anchor,
+/// D412 / D122-3).
+///
+/// The extraction holds the full mesh and the full element-partition vector, so
+/// these are pure functions of the partition — no rank-local traversal is
+/// involved.  That is what frees the ghost layer from the entity-holder closure
+/// (D807-1): a rank no longer has to carry every holder of every entity it
+/// carries, only the canonical anchor of each facet (see the layer discussion in
+/// `extract_submesh_from_partition_impl`).
+pub(crate) struct FullEntityTables {
+    /// Owner by global node id.
+    pub(crate) node_owner: Vec<Rank>,
+    /// Owner by sorted global node pair.
+    pub(crate) edge_owner: HashMap<(u32, u32), Rank>,
+    /// `(owner, anchor global element id)` by padded sorted facet key.
+    pub(crate) facet: HashMap<FacetKey, (Rank, u32)>,
+}
+
+impl FullEntityTables {
+    fn build<const D: usize>(mesh: &Mesh<D>, elem_part: &[Rank]) -> Self {
+        let mut node_owner = vec![Rank::MAX; mesh.n_nodes()];
+        let mut edge_owner: HashMap<(u32, u32), Rank> = HashMap::new();
+        let mut facet: HashMap<FacetKey, (Rank, u32)> = HashMap::new();
+
+        for (e, &rank) in elem_part.iter().enumerate() {
+            let e = e as u32;
+            let ns = mesh.elem_nodes(e);
+            for &n in ns {
+                let slot = &mut node_owner[n as usize];
+                if rank < *slot {
+                    *slot = rank;
+                }
+            }
+            for &(a, b) in local_edges(mesh.element_type_at(e)) {
+                let (ga, gb) = (ns[a], ns[b]);
+                let key = if ga <= gb { (ga, gb) } else { (gb, ga) };
+                edge_owner
+                    .entry(key)
+                    .and_modify(|r| *r = (*r).min(rank))
+                    .or_insert(rank);
+            }
+            for fv in local_facets(mesh.element_type_at(e)) {
+                let mut g: Vec<u32> = fv.iter().map(|&i| ns[i]).collect();
+                g.sort_unstable();
+                let Some(key) = facet_key(&g) else { continue };
+                facet
+                    .entry(key)
+                    .and_modify(|v| {
+                        v.0 = v.0.min(rank);
+                        v.1 = v.1.min(e);
+                    })
+                    .or_insert((rank, e));
+            }
+        }
+        for o in &mut node_owner {
+            if *o == Rank::MAX {
+                *o = 0;
+            }
+        }
+        FullEntityTables { node_owner, edge_owner, facet }
+    }
+
+    /// The ownership channel restricted to the entities of one local element set
+    /// (only those can ever be queried by that rank's `DofPartition`), so the
+    /// published tables and the wire payload stay proportional to the *local*
+    /// mesh rather than to the whole one.
+    fn restrict_to<const D: usize>(&self, mesh: &Mesh<D>, local_elems: &[u32]) -> EntityOwnership {
+        let mut node_owner: Vec<(NodeId, Rank)> = Vec::new();
+        let mut seen_nodes: HashSet<u32> = HashSet::new();
+        let mut edge_owner: HashMap<(u32, u32), Rank> = HashMap::new();
+        let mut facet: HashMap<Vec<NodeId>, (Rank, ElemId)> = HashMap::new();
+
+        for &e in local_elems {
+            let ns = mesh.elem_nodes(e);
+            for &n in ns {
+                if seen_nodes.insert(n) {
+                    node_owner.push((n, self.node_owner[n as usize]));
+                }
+            }
+            for &(a, b) in local_edges(mesh.element_type_at(e)) {
+                let (ga, gb) = (ns[a], ns[b]);
+                let key = if ga <= gb { (ga, gb) } else { (gb, ga) };
+                if let Some(&owner) = self.edge_owner.get(&key) {
+                    edge_owner.insert(key, owner);
+                }
+            }
+            for fv in local_facets(mesh.element_type_at(e)) {
+                let mut g: Vec<u32> = fv.iter().map(|&i| ns[i]).collect();
+                g.sort_unstable();
+                if let Some(key) = facet_key(&g) {
+                    if let Some(&entry) = self.facet.get(&key) {
+                        facet.insert(g, entry);
+                    }
+                }
+            }
+        }
+        EntityOwnership::new(node_owner, edge_owner, facet)
+    }
+}
 
 // ── public entry point ────────────────────────────────────────────────────────
 
@@ -313,8 +502,19 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         .filter(|&e| elem_part[e as usize] == target_rank)
         .collect();
 
-    // 2. Node ownership: owner = rank of first element containing the node.
-    let node_owners = compute_node_owners_from_partition(mesh, elem_part);
+    // 2. Node ownership: owner = the **minimum rank over the elements holding
+    // the node** — MFEM's `GroupTopology` share-set minimum, i.e. the same rule
+    // the edge/facet tables below use.  The previous rule (the rank of the
+    // lowest-indexed holding element) agrees with it for the contiguous block
+    // partitioner of [`partition_mesh`] but not for an arbitrary partition
+    // vector (`partition_mesh_metis`), and node ownership is what decides the
+    // owned/ghost split of every vertex DOF (`DofPartition::from_mesh_partition`
+    // and the vertex segment of `from_dof_manager`), which a rank can no longer
+    // correct from its own traversal now that the layer is not holder-closed.
+    // For the contiguous partitioner the two rules are identical by
+    // construction (blocks are ordered by rank), so no pinned number moves.
+    let tables = FullEntityTables::build(mesh, elem_part);
+    let node_owners = tables.node_owner.clone();
 
     // 3. Collect all nodes touched by local (owned) elements.
     let mut node_set: BTreeSet<NodeId> = BTreeSet::new();
@@ -335,62 +535,80 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         }
     }
 
-    // 3b2. Face-closure: an element that shares a FACE (an edge in 2-D, a
-    // facet in 3-D) with ANY local element (owned or 1-layer ghost) must also
-    // be local, so that every local face has all of its adjacent elements
-    // present.  Interface/trace assembly of a face (Bhat, DG flux, ...) must
-    // see the same adjacent-element set on every rank; with only the 1-layer
-    // node-ghost rule a face can be "half visible" (one neighbour present,
-    // the other absent), making the cross-rank off-diagonal blocks of
-    // A = Bᵀ S⁻¹ B inconsistent.
+    // 3b2. Ghost-layer closure (D807-1 — the layer is now the *anchor* closure).
     //
-    // The closure is iterated to a fixpoint: a face can be shared by a chain
-    // of elements where the intermediate elements are themselves face-closure
-    // additions (not node-ghosts), so a single round misses the far end of
-    // the chain (pex34 np4: the SubMesh RT0 face (71,190,341) was visible on
-    // rank 2 only through a ghost that was itself a closure addition, so the
-    // true owner's element was never made local → the ghost-face id exchange
-    // routed to a rank that did not own it and panicked).
+    // History: this step used to iterate the face closure
+    // ("an element sharing a FACE with any local element must also be local") to
+    // a fixpoint, which for a face-connected mesh is the *entity-holder closure*
+    // — the whole mesh (`tmp/d807/d122r2_red.txt`: 252/252 elements on every rank
+    // of `cylinder-hex.mesh` at np = 2 and 4, while MFEM's local mesh is the
+    // owned block, 126/126).  The fixpoint was needed because `DofPartition`
+    // derived **two** things from the local element traversal:
     //
-    // D807/D122-2 audit: the fixpoint is NOT an over-iteration of the loop —
-    // it is the minimal set satisfying the invariant the DOF partition needs
-    // (see `tmp/d807/README.md`).  The DP's entity owner is "minimum rank over
-    // the elements holding the entity" (D122-1) and its face DOF position /
-    // sign are read off the *minimum-global-id* adjacent element (D412 /
-    // D122-3).  Both are derived from the rank's local element traversal, so
-    // the traversal must contain **every** element holding an entity carried
-    // by the traversal.  Replacing the fixpoint by a single round over the
-    // owned set (the literal D122-2 target) makes `cylinder-hex.mesh` at
-    // np = 4 panic in `exchange_ghost_edge_ids` (rank 3 claims edge (64,113)
-    // from rank 1, whose own minimum is rank 0) — evidence
-    // `tmp/d807/d122r2_onelayer_red.txt`.  Reducing the layer therefore
-    // requires an ownership/anchor channel that does not depend on the local
-    // traversal (extraction-supplied global entity owner + canonical anchor),
-    // not a smaller closure.
+    // 1. the entity **owner** = minimum rank over the elements holding it
+    //    (D122-1, MFEM `GroupTopology`'s share-set minimum), and
+    // 2. a face DOF's canonical **position and sign**, read off the
+    //    minimum-global-id adjacent element (D412 / D122-3).
+    //
+    // Both are now supplied by the extraction instead: [`FullEntityTables`]
+    // publishes the mesh-wide share-set minimum and the minimum-global-id facet
+    // anchor for every entity of the local mesh, through
+    // [`EntityOwnership`] on the returned [`MeshPartition`].  What is left for
+    // the layer is only the *anchor*: to read a shared face's DOF position/sign
+    // the DP must have the facet's minimum-global-id holder **in the local mesh**
+    // — a rank that carries a facet through a ghost whose co-holder is one hop
+    // further out would otherwise name a different anchor (and produce
+    // cross-rank key mismatches or a wrong sign).
+    //
+    // So the layer is the least set L ⊇ (owned ∪ one-node-layer) such that for
+    // every facet carried by an element of L, the facet's global anchor is in L.
+    // `cylinder-hex.mesh` measures 222 / 246 elements at np = 2 (vs 252 for the
+    // old fixpoint) and 222 / 222 / 246 / 234 at np = 4 — measured, not asserted:
+    // see `crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`.
+    //
+    // A note on the *one-node-layer* (step 3b) part of the base set: it is not
+    // cosmetic.  A rank assembles every local element and keeps only its owned
+    // DOF rows, so every element holding an owned DOF's entity must be local;
+    // the holders of a DOF's entity all share its vertices, hence are node
+    // neighbours of an owned element — exactly step 3b.  Cutting below it would
+    // silently drop contributions from the owned rows.
+    //
+    // The DC/NC caveat: `shares_hanging_edge` stays part of the closure.  On a
+    // non-conforming mesh the coarse neighbour of a refined element is not a
+    // node neighbour of it (the hanging node is an *edge midpoint* vertex), yet
+    // the parallel hanging-node constraints PᵀKP reference its parent DOFs
+    // (pex6 deep-water np2), so the hanging-edge rule must keep pulling it in.
+    // On a conforming mesh it is false everywhere and costs nothing.
     let mut local_elem_set: HashSet<u32> = HashSet::new();
     local_elem_set.extend(local_elem_gids.iter().copied());
     local_elem_set.extend(ghost_elem_gids.iter().copied());
-    let face_dim = D;
     let mut extra_ghost: Vec<u32> = Vec::new();
     loop {
         let mut added_any = false;
+        // (a) the canonical anchor of every facet a local element carries.
+        for e in local_elem_set.iter().copied().collect::<Vec<u32>>() {
+            for fv in local_facets(mesh.element_type_at(e)) {
+                let ns = mesh.elem_nodes(e);
+                let mut g: Vec<u32> = fv.iter().map(|&i| ns[i]).collect();
+                g.sort_unstable();
+                let Some(key) = facet_key(&g) else { continue };
+                let anchor = tables.facet.get(&key).map(|v| v.1);
+                if let Some(a) = anchor {
+                    if local_elem_set.insert(a) {
+                        extra_ghost.push(a);
+                        added_any = true;
+                    }
+                }
+            }
+        }
+        // (b) the coarse neighbour of a hanging edge (non-conforming meshes).
         for e in 0..n_elems as u32 {
             if local_elem_set.contains(&e) { continue; }
             let en = mesh.elem_nodes(e);
-            let mut shares_face = false;
-            for &l in local_elem_set.iter() {
-                let ln = mesh.elem_nodes(l);
-                let common = en.iter().filter(|n| ln.contains(n)).count();
-                if common >= face_dim {
-                    shares_face = true;
-                    break;
-                }
-                if shares_hanging_edge(mesh, &en, &ln) {
-                    shares_face = true;
-                    break;
-                }
-            }
-            if shares_face {
+            let hanging = local_elem_set
+                .iter()
+                .any(|&l| shares_hanging_edge(mesh, &en, mesh.elem_nodes(l)));
+            if hanging {
                 local_elem_set.insert(e);
                 extra_ghost.push(e);
                 added_any = true;
@@ -401,6 +619,7 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         }
     }
     ghost_elem_gids.extend(extra_ghost);
+
 
     // 3c. Add nodes from ghost elements to the node set.
     for &ge in &ghost_elem_gids {
@@ -569,36 +788,17 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         target_rank,
     );
     partition.node_id_identity = identity_nodes;
+    // D807-1: publish the traversal-independent ownership/anchor channel for
+    // every entity of the local mesh (owned + the ghost layer chosen above).
+    let all_local: Vec<u32> = local_elem_gids.iter().copied()
+        .chain(ghost_elem_gids.iter().copied())
+        .collect();
+    partition.entities = Some(tables.restrict_to(mesh, &all_local));
 
     (local_mesh, partition)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-/// For each global node, compute which rank owns it given an arbitrary
-/// element partition vector.
-///
-/// A node is owned by the rank that owns the lowest-indexed element containing
-/// it.  Sweeping elements 0 → n_elems in order, the first rank to "see" a node
-/// becomes its owner.
-pub(crate) fn compute_node_owners_from_partition<const D: usize>(
-    mesh: &Mesh<D>,
-    elem_part: &[Rank],
-) -> Vec<Rank> {
-    let n_nodes = mesh.n_nodes();
-    let mut owners = vec![-1_i32; n_nodes];
-    for (e, &rank) in elem_part.iter().enumerate() {
-        for &n in mesh.elem_nodes(e as u32) {
-            if owners[n as usize] < 0 {
-                owners[n as usize] = rank;
-            }
-        }
-    }
-    for o in &mut owners {
-        if *o < 0 { *o = 0; }
-    }
-    owners
-}
 
 /// Extract boundary faces that belong to this rank.
 ///

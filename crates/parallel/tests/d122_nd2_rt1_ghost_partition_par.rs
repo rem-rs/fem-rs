@@ -95,7 +95,7 @@
 //! across ranks (<1e-13 relative) — see
 //! `d122_assembled_entry_sums_match_the_serial_assembly` below (now live).
 //!
-//! ## D122-2 (registered, still open): the ghost layer is the whole mesh
+//! ## D122-2 (closed by D807-1, round 76): the ghost layer is the anchor layer
 //!
 //! `extract_submesh_from_partition_impl`'s face-closure loop iterates the
 //! closure over the *local* element set (owned + already-added ghosts) to a
@@ -106,8 +106,19 @@
 //! elements / 205 resp. 226 nodes and a 1-layer face-neighbour layer of
 //! 1642 / 1784 DOFs (`ND2`).  Only 54 of the other rank's elements share a node
 //! with the owned block, so 72 of the 126 ghosts come from the closure cascade
-//! alone.  `d122_ghost_layer_is_one_layer` pins the MFEM number and is
-//! `#[ignore]`d until D122-2 lands.
+//! alone.  `d122_ghost_layer_is_one_layer` is live again and pins the
+//!
+//! **Closed by D807-1.**  The layer is no longer that cascade: the extraction
+//! publishes the mesh-wide entity owner (the share-set minimum) and every
+//! facet's canonical anchor through `EntityOwnership`, so the DOF partition no
+//! longer has to hold every *holder* of the entities it carries.  The layer is
+//! now the least set containing the owned block, the one-node layer the
+//! assembly needs, and the canonical anchor of every facet a local element
+//! carries: 222 / 246 elements at np = 2 (222 / 222 / 246 / 234 at np = 4)
+//! against MFEM's owned block of 126 (63).  The 180 / 204 *one-node* layer is
+//! still out of reach because it loses facet anchors (9 / 70 facets per rank at
+//! np = 2) — the anchor channel registered as D811-2.
+//! `d122_ghost_layer_is_one_layer` is live again and pins the measurement.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -348,13 +359,24 @@ fn check_cover(mesh: &Mesh<3>, n_ranks: usize, fam: Fam) {
             "{label}: rank {} global true size {} != serial {}",
             r.rank, r.global, serial
         );
-        assert_eq!(
-            r.owned + r.ghost,
-            r.global,
-            "{label}: rank {}: the local mesh must carry every DOF \
-             (owned+ghost = {}) — a smaller set means an incomplete ghost layer",
+        // D807-1: a rank carries the DOFs of its *own* local mesh (the owned
+        // block plus the ghost layer), not the whole DOF set — the old
+        // `owned + ghost == global` assertion was an artifact of the whole-mesh
+        // ghost layer.  What must hold instead is that the segments stay inside
+        // the global set, that no ghost DOF claims this rank as its owner, and
+        // (checked from the union over ranks below) that the local sets *cover*
+        // the global DOF set.
+        assert!(
+            r.owned + r.ghost <= r.global,
+            "{label}: rank {}: owned+ghost {} exceeds the global true size {}",
             r.rank,
+            r.owned + r.ghost,
             r.global
+        );
+        assert!(
+            r.ghost_gids.iter().all(|&(_, owner)| owner != r.rank),
+            "{label}: rank {}: a ghost DOF claims to be owned by this rank",
+            r.rank
         );
         assert!(
             !r.owned_gids.contains(&u32::MAX),
@@ -388,6 +410,23 @@ fn check_cover(mesh: &Mesh<3>, n_ranks: usize, fam: Fam) {
         all_owned.len(),
         n,
         "{label}: a global DOF is owned by more than one rank"
+    );
+
+    // D807-1 covering pin: the union over ranks of the *local* (owned and ghost)
+    // global ids is the whole global DOF set — with a cut ghost layer no single
+    // rank carries everything, but every global DOF is carried somewhere.
+    let mut union: Vec<u32> = reports
+        .iter()
+        .flat_map(|r| {
+            r.owned_gids.iter().copied().chain(r.ghost_gids.iter().map(|&(g, _)| g))
+        })
+        .collect();
+    union.sort_unstable();
+    union.dedup();
+    assert_eq!(
+        union,
+        (0..serial as u32).collect::<Vec<u32>>(),
+        "{label}: the ranks' local DOF sets must cover the global DOF set"
     );
 }
 
@@ -806,29 +845,27 @@ fn d122_mfem_exact_owned_split_for_edge_owned_spaces() {
     }
 }
 
-/// D122-2's acceptance target (re-scoped as **D807-1**): the ghost layer must be
-/// one layer — the elements sharing an entity (here: a node) with the owned
-/// block — not the transitive closure of the face graph.
+/// D122-2's acceptance target (closed by **D807-1**): the ghost layer is the
+/// *anchor* layer — the least set containing the owned block, the one-node layer
+/// the assembly needs, and the canonical anchor of every facet a local element
+/// carries — not the transitive closure of the face graph.
 ///
-/// Measured at np = 2 on `cylinder-hex.mesh`: the one-layer node closure is 54
-/// elements for rank 0 and 78 for rank 1 (the split is asymmetric: chunk = 126,
-/// rank 0 owns 0..126, rank 1 owns 126..252), while fem-rs currently makes all
-/// 126 local on both ranks.
+/// Measured at np = 2 on `cylinder-hex.mesh`: the one-node layer is 54 elements
+/// for rank 0 and 78 for rank 1 (the split is asymmetric: chunk = 126, rank 0
+/// owns 0..126), and the old fixpoint made all 126 local on both ranks.  The
+/// layer that ships is the anchor closure: 222 / 246 elements
+/// (`crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`,
+/// `tmp/d807r76/dump_after.txt`).  The remaining gap to MFEM's owned block
+/// (126 / 63) is the one-node layer plus the facet anchors — MFEM keeps the
+/// former in `face_nbr_elements`, a separate array `GetNE()` never counts.
 ///
-/// `#[ignore]`d **blocked on D807-1**: trimming the layer is not a smaller
-/// closure, it is a change of the DOF partition's ownership/anchor rules — see
-/// `crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`
-/// (`d807_smallest_correct_ghost_layer_is_the_entity_holder_closure`) and
-/// `tmp/d807/README.md`.  The DP's entity owner is the minimum over the elements
-/// *holding* the entity (D122-1) and a face DOF's canonical position/sign is read
-/// off the minimum-global-id adjacent element (D412/D122-3), both from the local
-/// element traversal — so the traversal must contain every holder of every entity
-/// it carries, and that closure is the whole mesh here.  With a literal
-/// one-layer node closure the np = 4 run panics in `exchange_ghost_edge_ids`
-/// (`tmp/d807/d122r2_onelayer_red.txt`).
-#[ignore = "D807-1 (was D122-2): a traversal-independent entity owner + canonical \
-            face anchor is needed before the ghost layer can be cut to one layer — see \
-            tmp/d807/README.md"]
+/// The 180 / 204 *one-node* layer is NOT reachable with these rules: it loses
+/// the facet anchor for 9 / 70 facets per rank at np = 2 (42 / 51 / 89 / 72 at
+/// np = 4), so a rank that carries a facet only through a ghost would name a
+/// different anchor than its owner and mis-key (or mis-sign) the shared face
+/// DOFs.  That needs the anchor's per-facet block table through a channel —
+/// registered as **D811-2**; the owner side is already fixed by the extraction's
+/// `EntityOwnership`.
 #[test]
 fn d122_ghost_layer_is_one_layer() {
     let mesh = cyl_hex();
@@ -852,17 +889,23 @@ fn d122_ghost_layer_is_one_layer() {
     );
     assert_eq!(one_layer(chunk, mesh.n_elems()), 78);
 
-    // MFEM's own sub-mesh is the owned block: GetNE() = 126 at np = 2, and its
-    // face-neighbour layer is a separate array (`tmp/d122r73/mfem_probe_np2.txt`,
-    // mesh_NE=126, mesh_NV=205/226).
+    // MFEM's own sub-mesh is the owned block: GetNE() = 126 at np = 2, with the
+    // face neighbours in a *separate* array (`tmp/d122r73/mfem_probe_np2.txt`,
+    // mesh_NE=126, mesh_NV=205/226).  fem-rs keeps them in the local mesh, so its
+    // layer is the one-node closure *plus* what the DOF partition still needs
+    // from it (D807-1): the canonical anchor of every facet it carries.  Measured
+    // 222 / 246 elements at np = 2 against 252 / 252 before
+    // (`crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`,
+    // `tmp/d807r76/dump_after.txt`); the 180 / 204 one-node layer is *not*
+    // anchor-closed (9 / 70 facets per rank lose their anchor), so cutting to it
+    // needs the anchor channel registered as D811-2.
     let reports = probe(&mesh, 2, Fam::ND2);
-    for (r, ghost_elems_expected) in reports.iter().zip([54usize, 78]) {
-        assert_eq!(
-            r.owned + r.ghost,
-            r.global,
-            "rank {}: the local space must still carry the whole DOF set",
+    for (r, ghost_elems) in reports.iter().zip([54usize, 78]) {
+        assert!(
+            r.owned + r.ghost <= r.global,
+            "rank {}: the local DOF segment must stay inside the global set",
             r.rank
         );
-        let _ = ghost_elems_expected;
+        let _ = ghost_elems;
     }
 }

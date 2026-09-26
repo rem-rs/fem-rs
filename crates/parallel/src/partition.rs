@@ -23,6 +23,102 @@
 use std::collections::HashMap;
 use fem_core::{ElemId, NodeId, Rank};
 
+// ── EntityOwnership (D807-1) ──────────────────────────────────────────────────
+
+/// Traversal-independent entity ownership, published by the mesh extraction.
+///
+/// [`crate::par_partition::partition_mesh`] holds the **full** serial mesh and
+/// the full element-partition vector, so it can answer, for every node / edge /
+/// facet of the local sub-mesh, the two questions `DofPartition` used to answer
+/// from its *local element traversal*:
+///
+/// 1. **who owns the entity** — the MFEM `GroupTopology` rule: the minimum rank
+///    over *all* elements (mesh-wide) that hold it; and
+/// 2. **which element anchors its canonical face basis** — the minimum global
+///    element id among those holders (D412 / D122-3).
+///
+/// Both are pure functions of the full mesh + partition vector, so they do not
+/// depend on which elements this rank happens to carry.  Publishing them lets
+/// the ghost layer be cut from the *entity-holder closure* (the whole mesh, for
+/// a face-connected mesh) to the smallest set the rules actually need — see the
+/// layer discussion in [`crate::par_partition`].
+///
+/// `None` on partitions that were not produced by the extraction (the serial
+/// wrapper, AMR/repartition rebuilds); `DofPartition` then falls back to the
+/// traversal-derived rules, which is byte-identical to the pre-D807 behaviour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntityOwnership {
+    /// `(global node id, owning rank)`, sorted by the global id.
+    node_owner: Vec<(NodeId, Rank)>,
+    /// Edge (sorted global node pair) → minimum rank over its holders.
+    edge_owner: HashMap<(NodeId, NodeId), Rank>,
+    /// Facet (sorted global vertex list) → `(minimum rank over its holders,
+    /// minimum global element id among them)`.
+    facet: HashMap<Vec<NodeId>, (Rank, ElemId)>,
+}
+
+impl EntityOwnership {
+    /// Build from the three tables (the extraction is the only producer).
+    pub(crate) fn new(
+        mut node_owner: Vec<(NodeId, Rank)>,
+        edge_owner: HashMap<(NodeId, NodeId), Rank>,
+        facet: HashMap<Vec<NodeId>, (Rank, ElemId)>,
+    ) -> Self {
+        node_owner.sort_unstable();
+        node_owner.dedup_by_key(|e| e.0);
+        EntityOwnership { node_owner, edge_owner, facet }
+    }
+
+    /// Owner (minimum rank over the holders) of global node `gid`.
+    pub fn node_owner(&self, gid: NodeId) -> Option<Rank> {
+        self.node_owner
+            .binary_search_by_key(&gid, |&(g, _)| g)
+            .ok()
+            .map(|i| self.node_owner[i].1)
+    }
+
+    /// Owner of the edge `(a, b)`, keyed by the sorted global node pair.
+    pub fn edge_owner(&self, a: NodeId, b: NodeId) -> Option<Rank> {
+        let key = if a <= b { (a, b) } else { (b, a) };
+        self.edge_owner.get(&key).copied()
+    }
+
+    /// Owner of the facet whose **sorted** global vertex list is `verts`.
+    pub fn facet_owner(&self, verts: &[NodeId]) -> Option<Rank> {
+        self.facet.get(verts).map(|&(owner, _)| owner)
+    }
+
+    /// Canonical anchor element (minimum global element id among the facet's
+    /// holders) of the facet whose sorted global vertex list is `verts`.
+    pub fn facet_anchor(&self, verts: &[NodeId]) -> Option<ElemId> {
+        self.facet.get(verts).map(|&(_, anchor)| anchor)
+    }
+
+    /// `(owner, canonical anchor element)` of the facet whose **sorted** global
+    /// vertex list is `verts`.
+    pub fn facet(&self, verts: &[NodeId]) -> Option<(Rank, ElemId)> {
+        self.facet.get(verts).copied()
+    }
+
+    /// Number of published node owners.
+    pub fn n_node_owners(&self) -> usize { self.node_owner.len() }
+    /// Number of published edge owners.
+    pub fn n_edge_owners(&self) -> usize { self.edge_owner.len() }
+    /// Number of published facets.
+    pub fn n_facets(&self) -> usize { self.facet.len() }
+
+    /// Node-owner table: `(global node id, owner)`, sorted by the global id.
+    pub fn node_owner_table(&self) -> &[(NodeId, Rank)] { &self.node_owner }
+    /// Edge-owner table: sorted global node pair → owner.
+    pub fn edge_owner_table(&self) -> &HashMap<(NodeId, NodeId), Rank> {
+        &self.edge_owner
+    }
+    /// Facet table: sorted global vertex list → `(owner, anchor element)`.
+    pub fn facet_table(&self) -> &HashMap<Vec<NodeId>, (Rank, ElemId)> {
+        &self.facet
+    }
+}
+
 // ── MeshPartition ─────────────────────────────────────────────────────────────
 
 /// Describes the local share of a distributed mesh on one MPI rank.
@@ -77,6 +173,12 @@ pub struct MeshPartition {
     /// MPI rank that owns each local element, length `n_owned_elems + n_ghost_elems`.
     pub elem_owner: Vec<Rank>,
 
+    /// Traversal-independent entity ownership + canonical facet anchors,
+    /// published by the extraction (D807-1).  `None` on partitions built
+    /// without the full mesh (serial wrapper, AMR/refine rebuilds, legacy wire
+    /// format); `DofPartition` then keeps its traversal-derived rules.
+    pub entities: Option<EntityOwnership>,
+
     // ── reverse lookup ──────────────────────────────────────────────────────
 
     /// Global → local node ID mapping (covers both owned and ghost nodes).
@@ -123,6 +225,7 @@ impl MeshPartition {
             node_global_to_local,
             elem_global_to_local,
             node_id_identity: false,
+            entities: None,
         }
     }
 
@@ -195,6 +298,7 @@ impl MeshPartition {
             node_global_to_local,
             elem_global_to_local,
             node_id_identity: false,
+            entities: None,
         }
     }
 
@@ -327,6 +431,7 @@ impl MeshPartition {
             node_global_to_local,
             elem_global_to_local,
             node_id_identity: false,
+            entities: None,
         }
     }
 
