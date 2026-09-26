@@ -244,6 +244,8 @@ struct RankRow {
     facet: Vec<(Vec<u32>, (i32, u32))>,
     /// Node owners as published: `(global node id, owner)`.
     node_owner: Vec<(u32, i32)>,
+    /// D813-1: the published anchor-element rows, `(anchor gid, type, vertices)`.
+    anchor_elem: Vec<(u32, ElementType, Vec<u32>)>,
     /// (family, owned, ghost, total, mfem true size) per space.
     spaces: Vec<(&'static str, usize, usize, usize, usize)>,
 }
@@ -326,7 +328,19 @@ fn probe(mesh: &Mesh<3>, n_ranks: usize) -> Vec<RankRow> {
             .collect();
         local_elem_gids.sort_unstable();
 
+        let mut anchor_elem: Vec<(u32, ElementType, Vec<u32>)> = part
+            .entities
+            .as_ref()
+            .map(|ent| {
+                ent.facet_anchor_elem_table()
+                    .iter()
+                    .map(|(&gid, (et, v))| (gid, *et, v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        anchor_elem.sort_by_key(|(gid, _, _)| *gid);
         let row = RankRow {
+            anchor_elem,
             rank,
             local_elems: lm.n_elems(),
             local_nodes: lm.n_nodes(),
@@ -528,17 +542,37 @@ fn d807r76_dump_ghost_layer() {
     }
 }
 
-/// **The inverted D122-2 / D807-1 pin.**  The round-75
-/// `d807_ghost_layer_is_the_whole_mesh_at_np_ge_2` asserted
-/// `local_elems == 252` on every rank (the registration of the defect).  The
-/// layer is now the extraction's *anchor closure*: strictly smaller than the
-/// mesh, exactly equal to the independently recomputed closure, and the per-rank
-/// **owned** block is exactly MFEM's `GetNE()` / `GetNV()`.
+/// **The D813-1 pin (round 78): the layer is the one-node closure.**
+///
+/// Rounds 75/76 left the layer at the *anchor* closure (222 / 246 at np = 2)
+/// because a facet's canonical position/sign was read off its
+/// minimum-global-element-id holder, which therefore had to be local; round 77
+/// measured that the one-node layer loses the anchor for 9 / 70 facets per rank
+/// at np = 2 and called 180 / 204 unreachable.  It is reachable now: the
+/// extraction publishes every published facet's anchor element as its
+/// `(ElementType, global vertex list)` (`EntityOwnership::facet_anchor_element`,
+/// wire flag bit 32) and the space rebuilds the facet's canonical frame from the
+/// facet's own vertices (`HCurlSpace::facet_slots_against_published_anchor`;
+/// `fem_space::hdiv`'s grid helpers for RT), so no element of the anchor's
+/// neighbourhood has to be present.
+///
+/// Measured (`d807r76_dump_ghost_layer`, `tmp/d78a/layer_dump.txt`):
+///
+/// | np | rank | MFEM `GetNE`/`GetNV` | fem-rs layer (elements / nodes) |
+/// |---|---|---|---|
+/// | 1 | 0 | 252 / 364 | 252 / 364 |
+/// | 2 | 0 | 126 / 205 | **180 / 268** |
+/// | 2 | 1 | 126 / 226 | **204 / 347** |
+/// | 4 | 0..3 | 63 each | **126 / 144 / 166 / 126** (220 / 247 / 313 / 248) |
 #[test]
-fn d807_ghost_layer_is_the_extraction_anchor_closure() {
+fn d807_ghost_layer_is_the_one_node_closure() {
     let mesh = cyl_hex();
     assert_eq!(mesh.n_elems(), 252);
     assert_eq!(mesh.n_nodes(), 364);
+    const WANT: [[(usize, usize); 4]; 2] = [
+        [(180, 268), (204, 347), (0, 0), (0, 0)],
+        [(126, 220), (144, 247), (166, 313), (126, 248)],
+    ];
     let mfem_idx = |np: usize| np / 2; // MFEM_NV_NE's rows are indexed by np/2
     for n_ranks in [2usize, 4] {
         let part = contiguous_partition(mesh.n_elems(), n_ranks);
@@ -548,20 +582,12 @@ fn d807_ghost_layer_is_the_extraction_anchor_closure() {
             let owned: HashSet<u32> = (0..mesh.n_elems() as u32)
                 .filter(|&e| part[e as usize] == r.rank as i32)
                 .collect();
-            let predicted = anchor_closure(&mesh, &owned, &truth);
-            // (a) three *different* MFEM quantities, each against its own truth:
-            //   * MFEM's `GetNE()` is the owned element block;
-            //   * MFEM's `GetNV()` is the LOCAL vertex count (owned + ghost —
-            //     `ParMesh` keeps a full local mesh, with the neighbouring
-            //     ranks' vertices in `face_nbr_vertices`), so it pairs with the
-            //     local node count, NOT with the rank-owned one;
-            //   * the rank-**owned** node count is the H1 order-1 `TrueVSize`
-            //     (`ltdof_size`), i.e. those two coincide only at np = 1 and
-            //     for rank 0 at np = 2 / 4 when the owned block happens to touch
-            //     no ghost vertex.
-            // Asserting `owned_nodes == GetNV()` is wrong by construction (it
-            // fails at np = 2 rank 1: 159 owned vs 226 local) — that conflation
-            // is what this split pins down.
+            let predicted = node_closure(&mesh, &owned);
+            // Three *different* MFEM quantities, each against its own truth:
+            // `GetNE()` is the owned element block; the rank-owned node count is
+            // the H1 order-1 `TrueVSize` (`ltdof_size`), NOT `GetNV()` (which is
+            // the local vertex count, owned + ghost — `ParMesh` keeps the
+            // neighbours' vertices in `face_nbr_vertices`).
             assert_eq!(
                 r.owned_elems,
                 MFEM_NV_NE[mfem_idx(n_ranks)][r.rank].1,
@@ -575,36 +601,26 @@ fn d807_ghost_layer_is_the_extraction_anchor_closure() {
                  H1 order-1 TrueVSize",
                 r.rank
             );
-            // The local node set must be *exactly* the node set of the local
-            // (anchor-closure) elements — the extraction must not carry a node
-            // that no local element touches.
+            // The layer is exactly the one-node closure (the assembly's
+            // precondition) — pinned, not merely bounded.
             let closure_nodes: HashSet<u32> = predicted
                 .iter()
                 .flat_map(|&e| mesh.elem_nodes(e).iter().copied())
                 .collect();
             assert_eq!(
-                r.local_nodes,
-                closure_nodes.len(),
-                "np={n_ranks} rank {}: local node count must be the anchor closure's \
-                 node set",
-                r.rank
-            );
-            // NOT asserted: `local_nodes == MFEM GetNV()`.  It does not hold and
-            // must not be papered over — at np = 2 the anchor closure is 222
-            // elements carrying 332 nodes, while MFEM's local sub-mesh is 126
-            // elements / 205 nodes.  Reaching MFEM's local mesh needs the facet
-            // position/sign to be published as well (then the anchor *element*
-            // no longer has to be local), which would cut the layer to the
-            // 1-node closure (180/204 elements, 268/347 nodes at np = 2).  See
-            // the D807-1 residual in `tmp/round3_plan.md`.
-            // (b) the layer is exactly the anchor closure.
-            assert_eq!(
                 r.local_elems,
                 predicted.len(),
-                "np={n_ranks} rank {}: local mesh {} elements != the anchor closure {}",
+                "np={n_ranks} rank {}: local mesh {} elements != the one-node closure {}",
                 r.rank,
                 r.local_elems,
                 predicted.len()
+            );
+            assert_eq!(
+                r.local_nodes,
+                closure_nodes.len(),
+                "np={n_ranks} rank {}: local node count must be the one-node closure's \
+                 node set",
+                r.rank
             );
             assert_eq!(
                 r.local_elem_gids,
@@ -612,18 +628,21 @@ fn d807_ghost_layer_is_the_extraction_anchor_closure() {
                 "np={n_ranks} rank {}: the layer is not the predicted element set",
                 r.rank
             );
-            // (c) strictly smaller than the mesh (the defect) and a superset of
-            // the assembly's one-node layer.
-            assert!(
-                r.local_elems < mesh.n_elems(),
-                "np={n_ranks} rank {}: the layer is still the whole mesh",
+            assert_eq!(
+                (r.local_elems, r.local_nodes),
+                WANT[n_ranks / 2 - 1][r.rank],
+                "np={n_ranks} rank {}: measured layer moved",
                 r.rank
             );
-            assert!(r.local_elems > r.owned_elems);
+            // Strictly smaller than the mesh (the D122-2 defect), strictly
+            // smaller than the anchor closure the layer used to be, and a
+            // superset of the owned block.
+            assert!(r.local_elems < mesh.n_elems());
             assert!(
-                r.local_elems >= node_closure(&mesh, &owned).len(),
-                "the one-node layer (assembly precondition) must be contained"
+                r.local_elems < anchor_closure(&mesh, &owned, &truth).len(),
+                "the cut must be strictly smaller than the D807-1 anchor closure"
             );
+            assert!(r.local_elems > r.owned_elems);
         }
     }
 }
@@ -752,33 +771,63 @@ fn d807_one_layer_is_not_anchor_closed() {
     );
 }
 
-/// **The new invariant** (replaces `d807_local_mesh_is_entity_holder_closed`):
-/// the real extraction's local mesh is *anchor-closed* — for every element of the
-/// layer, every facet it carries has its canonical (minimum-global-element-id)
-/// holder in the layer.  That, plus the extraction-published owner, is all
-/// `DofPartition` needs; the entity-holder closure is no longer required.
+/// **The D813-1 invariant** — it replaces `d807_local_mesh_is_anchor_closed`,
+/// which is now *deliberately false*: the layer no longer carries a facet's
+/// canonical holder.  What must hold instead is the channel's precondition: for
+/// every facet of the local mesh whose anchor is missing, the extraction
+/// published that anchor's `(ElementType, global vertex list)` and the row's
+/// vertices contain the facet's.
 #[test]
-fn d807_local_mesh_is_anchor_closed() {
+fn d807_missing_anchors_are_published_as_element_rows() {
     let mesh = cyl_hex();
+    assert_eq!(mesh.element_type(0), ElementType::Hex8);
+    let mut total_missing = 0usize;
     for n_ranks in [2usize, 4] {
         let rows = probe(&mesh, n_ranks);
         for r in &rows {
             let local: HashSet<u32> = r.local_elem_gids.iter().copied().collect();
+            let mut missing = 0usize;
             for &e in &r.local_elem_gids {
                 let ns = mesh.elem_nodes(e);
                 for f in 0..6 {
                     let key = hex_facet_key(ns, f);
                     let (_, anchor) = r.facet_entry(&key);
-                    assert!(
-                        local.contains(&anchor),
-                        "np={n_ranks} rank {}: facet {key:?} of local element {e} has \
-                         anchor {anchor}, which is not in the local mesh",
-                        r.rank
-                    );
+                    if local.contains(&anchor) {
+                        continue;
+                    }
+                    missing += 1;
+                    let (et, verts) = r
+                        .anchor_elem
+                        .iter()
+                        .find(|(g, _, _)| *g == anchor)
+                        .map(|(_, t, v)| (*t, v))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "np={n_ranks} rank {}: facet {key:?} has anchor {anchor} \
+                                 which is not in the local mesh and is not published",
+                                r.rank
+                            )
+                        });
+                    assert_eq!(et, ElementType::Hex8);
+                    assert_eq!(verts.len(), 8, "a hex anchor row needs 8 vertices");
+                    for v in &key {
+                        assert!(
+                            verts.contains(v),
+                            "np={n_ranks} rank {}: anchor {anchor} row {verts:?} does not \
+                             contain facet vertex {v}",
+                            r.rank
+                        );
+                    }
                 }
             }
+            total_missing += missing;
         }
     }
+    assert!(
+        total_missing > 0,
+        "the cut must leave facets whose anchor is missing — that is D813-1's premise"
+    );
+    println!("D813-1: {total_missing} captured facet/anchor pairs are covered by published rows");
 }
 
 /// **The extraction-published owner IS the share-set minimum** (D807-1's
@@ -813,6 +862,31 @@ fn d807r76_published_owner_is_the_share_set_minimum() {
                      minimum {}",
                     r.rank, truth.edge_owner[&(a, b)]
                 );
+            }
+            // D813-1: every published facet's anchor element is published too,
+            // with a vertex list that contains the facet's.
+            for (key, value) in &r.facet {
+                let anchor = value.1;
+                let (_, verts) = r
+                    .anchor_elem
+                    .iter()
+                    .find(|(g, _, _)| *g == anchor)
+                    .map(|(_, et, v)| (*et, v))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "np={n_ranks} rank {}: facet {key:?} anchor {anchor} has no \
+                             published element row",
+                            r.rank
+                        )
+                    });
+                assert_eq!(verts.len(), 8);
+                for v in key {
+                    assert!(
+                        verts.contains(v),
+                        "np={n_ranks} rank {}: anchor {anchor} row lacks facet vertex {v}",
+                        r.rank
+                    );
+                }
             }
             for (key, value) in &r.facet {
                 let (owner, anchor) = *value;

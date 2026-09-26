@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use fem_core::{ElemId, NodeId, Rank};
+use fem_mesh::ElementType;
 
 // ── EntityOwnership (D807-1) ──────────────────────────────────────────────────
 
@@ -35,13 +36,20 @@ use fem_core::{ElemId, NodeId, Rank};
 /// 1. **who owns the entity** — the MFEM `GroupTopology` rule: the minimum rank
 ///    over *all* elements (mesh-wide) that hold it; and
 /// 2. **which element anchors its canonical face basis** — the minimum global
-///    element id among those holders (D412 / D122-3).
+///    element id among those holders (D412 / D122-3), together with that
+///    element's **own vertex list** (D813-1).
 ///
 /// Both are pure functions of the full mesh + partition vector, so they do not
 /// depend on which elements this rank happens to carry.  Publishing them lets
-/// the ghost layer be cut from the *entity-holder closure* (the whole mesh, for
-/// a face-connected mesh) to the smallest set the rules actually need — see the
+/// the ghost layer be cut to the smallest set the rules actually need — see the
 /// layer discussion in [`crate::par_partition`].
+///
+/// D813-1: the anchor element's `(ElementType, global vertex list)` travels
+/// with the ownership tables so the DOF partition can rebuild the facet's
+/// **canonical face-DOF frame** on a rank that does not carry the anchor element
+/// (`crates/space`: `HCurlSpace::facet_slots_against_published_anchor`).  Only
+/// the facet's own vertices are ever read from the frame — every family's frame
+/// is face-local — so the anchor element itself need not be in the ghost layer.
 ///
 /// `None` on partitions that were not produced by the extraction (the serial
 /// wrapper, AMR/repartition rebuilds); `DofPartition` then falls back to the
@@ -55,18 +63,23 @@ pub struct EntityOwnership {
     /// Facet (sorted global vertex list) → `(minimum rank over its holders,
     /// minimum global element id among them)`.
     facet: HashMap<Vec<NodeId>, (Rank, ElemId)>,
+    /// Anchor global element id → `(element type, global vertex list in the
+    /// element's own slot order)` of that anchor (D813-1).  One entry per
+    /// element that is the canonical anchor of at least one published facet.
+    facet_anchor_elem: HashMap<ElemId, (ElementType, Vec<NodeId>)>,
 }
 
 impl EntityOwnership {
-    /// Build from the three tables (the extraction is the only producer).
+    /// Build from the four tables (the extraction is the only producer).
     pub(crate) fn new(
         mut node_owner: Vec<(NodeId, Rank)>,
         edge_owner: HashMap<(NodeId, NodeId), Rank>,
         facet: HashMap<Vec<NodeId>, (Rank, ElemId)>,
+        facet_anchor_elem: HashMap<ElemId, (ElementType, Vec<NodeId>)>,
     ) -> Self {
         node_owner.sort_unstable();
         node_owner.dedup_by_key(|e| e.0);
-        EntityOwnership { node_owner, edge_owner, facet }
+        EntityOwnership { node_owner, edge_owner, facet, facet_anchor_elem }
     }
 
     /// Owner (minimum rank over the holders) of global node `gid`.
@@ -106,6 +119,21 @@ impl EntityOwnership {
     pub fn n_edge_owners(&self) -> usize { self.edge_owner.len() }
     /// Number of published facets.
     pub fn n_facets(&self) -> usize { self.facet.len() }
+    /// Number of published anchor elements.
+    pub fn n_facet_anchor_elems(&self) -> usize { self.facet_anchor_elem.len() }
+
+    /// `(ElementType, global vertex list)` of the canonical anchor element
+    /// `gid`, in the element's own vertex slot order — the data
+    /// `HCurlSpace::facet_slots_against_published_anchor` needs to rebuild a
+    /// facet's canonical frame without the element itself (D813-1).
+    pub fn facet_anchor_element(&self, gid: ElemId) -> Option<(ElementType, &[NodeId])> {
+        self.facet_anchor_elem.get(&gid).map(|(et, v)| (*et, v.as_slice()))
+    }
+
+    /// Anchor-element table: global element id → `(type, vertex list)`.
+    pub fn facet_anchor_elem_table(&self) -> &HashMap<ElemId, (ElementType, Vec<NodeId>)> {
+        &self.facet_anchor_elem
+    }
 
     /// Node-owner table: `(global node id, owner)`, sorted by the global id.
     pub fn node_owner_table(&self) -> &[(NodeId, Rank)] { &self.node_owner }

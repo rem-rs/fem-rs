@@ -556,13 +556,55 @@ fn hex_face_slots(
 /// signed permutation: because the DOFs are nodal point-value functionals
 /// with *unnormalized* tangents, an orientation change is exactly a signed
 /// permutation of the face DOFs.
+/// Absolute tolerance of a face-DOF point match: `1e-9` relative to the point's
+/// distance from the origin (shared by [`match_face_dof`] and
+/// [`nearest_face_point`]).
+#[inline]
+fn face_point_tol(x: [f64; 3]) -> f64 {
+    1e-9 * (1.0 + (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt())
+}
+
+#[inline]
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[inline]
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+#[inline]
+fn norm3(a: [f64; 3]) -> f64 {
+    dot3(a, a).sqrt()
+}
+
 fn match_face_dof(
     nodes: &[[f64; 3]],
     tangents: &[[f64; 3]],
     x: [f64; 3],
     t: [f64; 3],
 ) -> (usize, f64) {
-    let tol = 1e-9 * (1.0 + (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt());
+    match match_face_dof_soft(nodes, tangents, x, t) {
+        Some(v) => v,
+        None => panic!("HCurlSpace: no matching canonical hex face DOF at {x:?}"),
+    }
+}
+
+/// [`match_face_dof`] without the panic: `None` when no canonical DOF sits at
+/// `x` with a parallel tangent (D813-1's frame channel treats a miss as a
+/// refusal — a frame that is not this facet's).
+fn match_face_dof_soft(
+    nodes: &[[f64; 3]],
+    tangents: &[[f64; 3]],
+    x: [f64; 3],
+    t: [f64; 3],
+) -> Option<(usize, f64)> {
+    let tol = face_point_tol(x);
     let tn = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
     for (m, (an, at)) in nodes.iter().zip(tangents.iter()).enumerate() {
         let dx = x[0] - an[0];
@@ -574,10 +616,10 @@ fn match_face_dof(
         let an_n = (at[0] * at[0] + at[1] * at[1] + at[2] * at[2]).sqrt();
         let c = (t[0] * at[0] + t[1] * at[1] + t[2] * at[2]) / (tn * an_n);
         if c.abs() > 1.0 - 1e-9 {
-            return (m, if c > 0.0 { 1.0 } else { -1.0 });
+            return Some((m, if c > 0.0 { 1.0 } else { -1.0 }));
         }
     }
-    panic!("HCurlSpace: no matching canonical hex face DOF at {x:?}");
+    None
 }
 
 /// Physical DOF points/tangents of one quad face's canonical ND DOF list,
@@ -679,21 +721,29 @@ pub struct FacePairTransform {
 /// the shared-face physical point, with a symmetric barycentric GL set the
 /// correspondence is a permutation.
 fn match_face_point(anchor: &TetFaceAnchor, x: [f64; 3]) -> usize {
-    let tol = 1e-9 * (1.0 + (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt());
+    let (best, best_d) = nearest_face_point(&anchor.pts, x);
+    assert!(
+        best_d <= face_point_tol(x),
+        "HCurlSpace: no canonical face DOF point at {x:?} (closest {best_d:e})"
+    );
+    best
+}
+
+/// [`match_face_point`] without the assert: the nearest face point in `pts` and
+/// its distance, for callers that treat a miss as a refusal rather than a panic
+/// (D813-1's frame channel, where a miss means "this family's frame is not
+/// face-local").
+fn nearest_face_point(pts: &[[f64; 3]], x: [f64; 3]) -> (usize, f64) {
     let mut best = usize::MAX;
     let mut best_d = f64::INFINITY;
-    for (p, a) in anchor.pts.iter().enumerate() {
+    for (p, a) in pts.iter().enumerate() {
         let d = ((x[0] - a[0]).powi(2) + (x[1] - a[1]).powi(2) + (x[2] - a[2]).powi(2)).sqrt();
         if d < best_d {
             best_d = d;
             best = p;
         }
     }
-    assert!(
-        best_d <= tol,
-        "HCurlSpace: no canonical face DOF point at {x:?} (closest {best_d:e})"
-    );
-    best
+    (best, best_d)
 }
 
 /// Change of basis of one element's face tangent pair against a canonical
@@ -727,14 +777,31 @@ fn tet_face_slots<M: MeshTopology>(
     k: usize,
     f: usize,
 ) -> (Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>) {
+    // `MeshTopology::node_coords` is a slice (`len == dim`), so lift it to the
+    // fixed 3-vector the tet geometry works in (every caller is 3-D).
+    let p: [[f64; 3]; 4] = std::array::from_fn(|i| {
+        let c = mesh.node_coords(verts[i]);
+        std::array::from_fn(|d| c.get(d).copied().unwrap_or(0.0))
+    });
+    tet_face_slots_coords(&p, k, f)
+}
+
+/// [`tet_face_slots`] from the element's four **vertex coordinates** instead of
+/// the mesh (D813-1: the anchor element's frame is rebuilt from its published
+/// vertex list, so the element itself need not be local).
+fn tet_face_slots_coords(
+    p: &[[f64; 3]; 4],
+    k: usize,
+    f: usize,
+) -> (Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>) {
     let (la, _lb, _lc) = TET_FACES[f];
     if k == 2 {
-        let a0 = mesh.node_coords(verts[la]);
+        let a0 = p[la];
         let (p0, n0, p1, n1) = TET_FACE_TANGENTS[f];
-        let g0 = mesh.node_coords(verts[p0]);
-        let h0 = mesh.node_coords(verts[n0]);
-        let g1 = mesh.node_coords(verts[p1]);
-        let h1 = mesh.node_coords(verts[n1]);
+        let g0 = p[p0];
+        let h0 = p[n0];
+        let g1 = p[p1];
+        let h1 = p[n1];
         let w0 = [g0[0] - h0[0], g0[1] - h0[1], g0[2] - h0[2]];
         let w1 = [g1[0] - h1[0], g1[1] - h1[1], g1[2] - h1[2]];
         let pc = [
@@ -749,12 +816,12 @@ fn tet_face_slots<M: MeshTopology>(
     let tks = nda.dof_tangents();
     let nfd = 2 * (k * (k - 1) / 2);
     let base = 6 * k + f * nfd;
-    let p0 = mesh.node_coords(verts[0]);
+    let p0 = p[0];
     let mut jac = [[0.0_f64; 3]; 3];
     for (c, lv) in [1usize, 2, 3].iter().enumerate() {
-        let p = mesh.node_coords(verts[*lv]);
+        let q = p[*lv];
         for d in 0..3 {
-            jac[d][c] = p[d] - p0[d];
+            jac[d][c] = q[d] - p0[d];
         }
     }
     let mut pts = Vec::with_capacity(nfd / 2);
@@ -780,6 +847,190 @@ fn tet_face_slots<M: MeshTopology>(
 pub(crate) const PYRAMID_QUAD_FACE: [(usize, usize, usize, usize); 1] = [
     (0, 1, 2, 3),
 ];
+
+// ─── D813-1: a facet frame from the anchor element's published vertices ──────
+
+/// Sentinel coordinate for an anchor vertex slot its facet frame must **not**
+/// read (D813-1).  Every family's facet frame is face-local, so the anchor's
+/// off-facet vertices never enter; filling them with a far-away sentinel turns a
+/// family that is *not* face-local into a failed DOF match (a loud refusal)
+/// instead of a silently wrong global face basis.
+const OFF_FACET_SENTINEL: [f64; 3] = [1.0e7, -1.0e7, 1.0e7];
+
+/// One facet block of one 3-D element family, in the order `HCurlSpace` fills
+/// the element's DOF slot table (`build`'s Pass 3): `TET_FACES` for tetrahedra,
+/// `HEX_ND_BLOCK_TO_QUAD_FACE` over `HEX_QUAD_FACES` for hexahedra, prism
+/// triangles-then-quads, pyramid base-quad-then-apex-triangles.
+#[derive(Debug, Clone)]
+struct FacetBlockDesc {
+    /// Element-local vertex slots of the facet.
+    slots: Vec<usize>,
+    /// Index the family's geometry helper takes (`TET_FACES` / `PRISM_TRI_FACES`
+    /// / `PRISM_QUAD_FACES` / `PYRAMID_TRI_FACES` entry, or a `HEX_QUAD_FACES`
+    /// index).
+    family_index: usize,
+    /// Triangular facet (two DOFs per face point, a 2×2 pair relation) vs
+    /// quadrilateral (one DOF per face point, a signed permutation).
+    tri: bool,
+    /// First DOF of the block inside `FESpace::element_dofs(e)`.
+    dof_offset: usize,
+}
+
+/// Facet blocks of one 3-D `NDk` (`k ≥ 2`) element family, in element-slot
+/// order.  `None` for every family the channel does not implement (2-D types
+/// and the variable-node `Polygon`).
+fn facet_block_table(et: ElementType, k: usize) -> Option<Vec<FacetBlockDesc>> {
+    let ndf = k * (k - 1); // tri face: k(k−1)/2 points × 2 DOFs
+    let ndfq = 2 * k * (k - 1); // quad face: one DOF per layout point
+    let mk = |slots: &[usize], family_index: usize, tri: bool, dof_offset: usize| {
+        FacetBlockDesc { slots: slots.to_vec(), family_index, tri, dof_offset }
+    };
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => Some(
+            TET_FACES
+                .iter()
+                .enumerate()
+                .map(|(f, c)| mk(&[c.0, c.1, c.2], f, true, 6 * k + f * ndf))
+                .collect(),
+        ),
+        ElementType::Hex8 | ElementType::Hex20 => Some(
+            HEX_ND_BLOCK_TO_QUAD_FACE
+                .iter()
+                .enumerate()
+                .map(|(i, &lf)| {
+                    let c = HEX_QUAD_FACES[lf];
+                    mk(&[c.0, c.1, c.2, c.3], lf, false, 12 * k + i * ndfq)
+                })
+                .collect(),
+        ),
+        ElementType::Prism6 => Some(
+            PRISM_TRI_FACES
+                .iter()
+                .enumerate()
+                .map(|(f, c)| mk(&[c.0, c.1, c.2], f, true, 9 * k + f * ndf))
+                .chain(PRISM_QUAD_FACES.iter().enumerate().map(|(f, c)| {
+                    mk(&[c.0, c.1, c.2, c.3], f, false, 9 * k + 2 * ndf + f * ndfq)
+                }))
+                .collect(),
+        ),
+        ElementType::Pyramid5 => {
+            let c = PYRAMID_QUAD_FACE[0];
+            Some(
+                std::iter::once(mk(&[c.0, c.1, c.2, c.3], 0, false, 8 * k))
+                    .chain(PYRAMID_TRI_FACES.iter().enumerate().map(|(f, c)| {
+                        mk(&[c.0, c.1, c.2], f, true, 8 * k + ndfq + f * ndf)
+                    }))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// The facet's block index inside one element's `facet_block_table`, located by
+/// the facet's **global** vertex set (the vertex ids the element's own slots
+/// carry, e.g. through `MeshPartition::global_node`).
+fn find_facet_block(
+    blocks: &[FacetBlockDesc],
+    elem_verts: &[u32],
+    facet_verts: &[u32],
+) -> Option<usize> {
+    blocks.iter().position(|b| {
+        b.slots.len() == facet_verts.len()
+            && b.slots
+                .iter()
+                .all(|&s| elem_verts.get(s).is_some_and(|v| facet_verts.contains(v)))
+    })
+}
+
+/// Physical DOF geometry of one facet block (see [`facet_block_geometry`]).
+enum FacetGeom {
+    /// Quadrilateral facet: one point and one tangent per DOF.
+    Quad { nodes: Vec<[f64; 3]>, tangents: Vec<[f64; 3]> },
+    /// Triangular facet: one point and two tangents per DOF pair.
+    Tri { pts: Vec<[f64; 3]>, tans: Vec<[[f64; 3]; 2]> },
+}
+
+/// Physical DOF points/tangents of one facet block, from the element's vertex
+/// coordinates **in slot order** — the same helpers `build`'s Pass 2/3 use, so
+/// an element-local call reproduces the space's own slot geometry exactly.
+fn facet_block_geometry(
+    et: ElementType,
+    verts: &[[f64; 3]],
+    k: usize,
+    block: &FacetBlockDesc,
+) -> Option<FacetGeom> {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => {
+            let p: [[f64; 3]; 4] = verts.try_into().ok()?;
+            let (pts, tans) = tet_face_slots_coords(&p, k, block.family_index);
+            Some(FacetGeom::Tri { pts, tans })
+        }
+        ElementType::Hex8 | ElementType::Hex20 => {
+            let p: [[f64; 3]; 8] = verts.try_into().ok()?;
+            let hnd = HexNDk::new(k);
+            let (nodes, tangents) = hex_face_slots(
+                &p,
+                k,
+                block.family_index,
+                &hnd.dof_coords(),
+                &hnd.dof_tangents(),
+            );
+            Some(FacetGeom::Quad { nodes, tangents })
+        }
+        ElementType::Prism6 => {
+            let p: [[f64; 3]; 6] = verts.try_into().ok()?;
+            let layout = PrismNDk::new(k).mfem_layout_points();
+            let tks = prism_tangents_mfem(k);
+            if block.tri {
+                let (pts, tans) = prism_tri_face_slots(&p, k, block.family_index, &layout, &tks);
+                Some(FacetGeom::Tri { pts, tans })
+            } else {
+                let (nodes, tangents) =
+                    prism_quad_face_slots(&p, k, block.family_index, &layout, &tks);
+                Some(FacetGeom::Quad { nodes, tangents })
+            }
+        }
+        ElementType::Pyramid5 => {
+            let p: [[f64; 3]; 5] = verts.try_into().ok()?;
+            let layout = PyraNDk::new(k).mfem_layout_points();
+            let tks = PyraNDk::new(k).dof_tangents();
+            if block.tri {
+                let (pts, tans) =
+                    pyramid_tri_face_slots(&p, k, block.family_index, &layout, &tks);
+                Some(FacetGeom::Tri { pts, tans })
+            } else {
+                let (nodes, tangents) = pyramid_quad_face_slots(&p, k, &layout, &tks);
+                Some(FacetGeom::Quad { nodes, tangents })
+            }
+        }
+        _ => None,
+    }
+}
+
+/// D813-1: one DOF of a *local* element's facet block, expressed against the
+/// **published anchor element's** own block (see
+/// [`HCurlSpace::facet_slots_against_published_anchor`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FacetSlotToAnchor {
+    /// Index of the DOF inside `FESpace::element_dofs(e)` of the local element.
+    pub slot: usize,
+    /// Index of the same physical DOF inside the anchor element's own facet
+    /// block — the parallel DOF partition's face-DOF label `pos`.
+    pub anchor_slot: usize,
+    /// The anchor element's own `element_signs` value at `anchor_slot`: the
+    /// partition-level sign of D122-3 (always `+1.0` on a triangular facet,
+    /// whose rotation is carried by [`Self::anchor_pair`]).
+    pub anchor_sign: f64,
+    /// Triangular facets: the anchor's own 2×2 pair transform at the matched
+    /// face point (`u_anchor = s·u_canonical`, the same object
+    /// [`HCurlSpace::element_face_pair_transforms`] returns for the anchor
+    /// element) with `slot` set to the pair's first element-local slot **of the
+    /// local element `e`**, so the caller permutes `e`'s own two DOFs.
+    /// `None` on quadrilateral facets, whose relation is a signed permutation
+    /// carried by [`Self::anchor_sign`].
+    pub anchor_pair: Option<FacePairTransform>,
+}
 
 // ─── HCurlSpace ─────────────────────────────────────────────────────────────
 
@@ -1769,6 +2020,207 @@ impl<M: MeshTopology> HCurlSpace<M> {
             .collect()
     }
 
+    // ─── D813-1: facets whose canonical anchor element is not in the local mesh ──
+
+    /// The facet-DOF relation of the local element `e` against a **published
+    /// anchor element** (D813-1) — the channel that lets the parallel ghost
+    /// layer drop the facet's canonical (minimum-global-element-id) holder.
+    ///
+    /// The parallel DOF partition's global face basis is that anchor element's
+    /// own basis (D412 / D122-3): its face DOFs are keyed by `(facet, pos)`,
+    /// `pos` being the anchor's slot index, and D807-2's pair channel reads the
+    /// anchor's 2×2 blocks.  Until D813-1 the partition therefore had to carry
+    /// the anchor element *itself*.  This accessor rebuilds the anchor's facet
+    /// frame from the anchor's `(ElementType, global vertex list)` — published
+    /// by the mesh extraction
+    /// (`fem_parallel::EntityOwnership::facet_anchor_element`).
+    ///
+    /// Arguments:
+    /// * `e` — the local element carrying the facet;
+    /// * `facet_verts` — the facet's global vertex ids (a set; order is
+    ///   irrelevant);
+    /// * `anchor_et`, `anchor_verts` — the anchor element's type and its global
+    ///   vertex list **in the element's own slot order**;
+    /// * `global_node` — local mesh node id → global id (locates the facet in
+    ///   `e`'s own block);
+    /// * `anchor_coords` — global vertex id → physical coordinates.  Only the
+    ///   facet's own vertices are queried: the anchor's off-facet slots are
+    ///   filled with [`OFF_FACET_SENTINEL`] and the returned match must be a
+    ///   bijection onto the anchor's block, so a family whose frame is *not*
+    ///   face-local is refused instead of producing a wrong global basis.
+    ///
+    /// Returns one [`FacetSlotToAnchor`] per facet DOF of `e` (in element slot
+    /// order), or `None` when the channel cannot express the relation: 2-D or
+    /// `k < 2`, an unregistered element family, a facet whose shape disagrees
+    /// between the two elements, or a frame that does not match `e`'s slot
+    /// geometry.  The caller must then keep requiring a local anchor — loudly.
+    pub fn facet_slots_against_published_anchor(
+        &self,
+        e: u32,
+        facet_verts: &[u32],
+        anchor_et: ElementType,
+        anchor_verts: &[u32],
+        global_node: &dyn Fn(u32) -> u32,
+        anchor_coords: &dyn Fn(u32) -> Option<[f64; 3]>,
+    ) -> Option<Vec<FacetSlotToAnchor>> {
+        let k = self.order as usize;
+        if self.dim != 3 || k < 2 || facet_verts.is_empty() {
+            return None;
+        }
+        if facet_verts.len() != 3 && facet_verts.len() != 4 {
+            return None;
+        }
+        if anchor_verts.len() < anchor_et.nodes_per_element() {
+            return None;
+        }
+        let et_e = self.mesh.element_type(e);
+        let blocks_e = facet_block_table(et_e, k)?;
+        let blocks_a = facet_block_table(anchor_et, k)?;
+        let nodes_e = self.mesh.element_nodes(e);
+        let gi_e: Vec<u32> = nodes_e.iter().map(|&n| global_node(n)).collect();
+        let ib_e = find_facet_block(&blocks_e, &gi_e, facet_verts)?;
+        let ib_a = find_facet_block(&blocks_a, anchor_verts, facet_verts)?;
+        if blocks_e[ib_e].tri != blocks_a[ib_a].tri {
+            return None;
+        }
+        // The local space's face tables are keyed by the *local* sub-mesh's
+        // node ids (`build`'s Pass 2), while `facet_verts` is a global-id set —
+        // so the creator lookup needs the facet's ids as this element sees
+        // them, i.e. its own block's slots mapped through `nodes_e`.
+        let fv_local: Vec<u32> = blocks_e[ib_e].slots.iter().map(|&s| nodes_e[s]).collect();
+        // The local element is local: every one of its vertices has real
+        // coordinates.
+        let verts_e: Vec<[f64; 3]> = nodes_e
+            .iter()
+            .map(|&n| {
+                let c = self.mesh.node_coords(n);
+                std::array::from_fn(|d| c.get(d).copied().unwrap_or(0.0))
+            })
+            .collect();
+        let geom_e = facet_block_geometry(et_e, &verts_e, k, &blocks_e[ib_e])?;
+        // The anchor's frame: the facet's vertices only.
+        let verts_a: Vec<[f64; 3]> = anchor_verts
+            .iter()
+            .map(|&g| {
+                if facet_verts.contains(&g) {
+                    anchor_coords(g).unwrap_or(OFF_FACET_SENTINEL)
+                } else {
+                    OFF_FACET_SENTINEL
+                }
+            })
+            .collect();
+        let geom_a = facet_block_geometry(anchor_et, &verts_a, k, &blocks_a[ib_a])?;
+
+        // The local space's own canonical (face-creating element's) frame — the
+        // basis both sides are expressed against.
+        match (geom_e, geom_a) {
+            (
+                FacetGeom::Quad { nodes: xe, tangents: te },
+                FacetGeom::Quad { nodes: xa, tangents: ta },
+            ) => {
+                let creator = self
+                    .quad_face_anchor
+                    .get(&QuadFaceKey::new(
+                        fv_local[0], fv_local[1], fv_local[2], fv_local[3],
+                    ))?;
+                let mut seen = vec![false; xa.len()];
+                let mut out = Vec::with_capacity(xe.len());
+                for n in 0..xe.len() {
+                    let (m, _s) = match match_face_dof_soft(&xa, &ta, xe[n], te[n]) {
+                        Some(v) => v,
+                        None => {
+                            eprintln!(
+                                "[d813dbg] quad match miss n={n} x_e={:?} t_e={:?}\n  x_a={:?}\n  t_a={:?}",
+                                xe[n], te[n], xa, ta
+                            );
+                            return None;
+                        }
+                    };
+                    // A frame that is not this facet's is a refusal, not a
+                    // silently wrong basis (the match is a permutation).
+                    if seen[m] {
+                        return None;
+                    }
+                    seen[m] = true;
+                    // The anchor element's own `element_signs` at `m`: the
+                    // anchor's tangent against the local canonical list — the
+                    // same rule `build`'s Pass 3 records for the anchor.
+                    let (_q, anchor_sign) =
+                        match_face_dof(&creator.nodes, &creator.tangents, xa[m], ta[m]);
+                    out.push(FacetSlotToAnchor {
+                        slot: blocks_e[ib_e].dof_offset + n,
+                        anchor_slot: m,
+                        anchor_sign,
+                        anchor_pair: None,
+                    });
+                }
+                Some(out)
+            }
+            (FacetGeom::Tri { pts: xe, tans: te }, FacetGeom::Tri { pts: xa, tans: ta }) => {
+                let creator = self
+                    .face_anchor
+                    .get(&FaceKey::new(fv_local[0], fv_local[1], fv_local[2]))?;
+                // `xa` holds one entry per face *point*; a point carries a DOF
+                // pair, so the slot-space is twice as wide.
+                let mut seen = vec![false; 2 * xa.len()];
+                let mut out = Vec::with_capacity(2 * xe.len());
+                // Tri-face geometry is **per point** (each entry carries the
+                // point's tangent pair), while the element's DOF block is laid
+                // out as consecutive pairs per point (`build`'s Pass 3) — so
+                // point `i` owns the element slots `2i` and `2i + 1`.
+                for i in 0..xe.len() {
+                    let (p, d) = nearest_face_point(&xa, xe[i]);
+                    if d > face_point_tol(xe[i]) {
+                        return None;
+                    }
+                    // The local element's own tangents are ground truth: both
+                    // must lie in the anchor frame's tangent plane, otherwise
+                    // the frame did not come from this facet (a family whose
+                    // frame is not face-local).  This is the guard the point
+                    // match alone cannot give, because the 2×2 pair below has
+                    // no matching test of its own.
+                    let nrm = cross3(ta[p][0], ta[p][1]);
+                    let nn = norm3(nrm);
+                    if !(nn > 0.0) {
+                        return None;
+                    }
+                    for c in 0..2 {
+                        let e = te[i][c];
+                        if dot3(e, nrm).abs() > 1e-9 * norm3(e) * nn {
+                            return None;
+                        }
+                    }
+                    let q = match_face_point(creator, xa[p]);
+                    let s = face_pair_change_of_basis(
+                        &ta[p],
+                        &creator.tangents(q),
+                        "D813-1 anchor facet frame",
+                    );
+                    let pair = FacePairTransform {
+                        slot: (blocks_e[ib_e].dof_offset + 2 * i) as u32,
+                        s,
+                        s_inv: Self::inv2(s),
+                    };
+                    for c in 0..2 {
+                        let anchor_slot = 2 * p + c;
+                        if seen[anchor_slot] {
+                            return None;
+                        }
+                        seen[anchor_slot] = true;
+                        out.push(FacetSlotToAnchor {
+                            slot: blocks_e[ib_e].dof_offset + 2 * i + c,
+                            anchor_slot,
+                            anchor_sign: 1.0,
+                            anchor_pair: Some(pair),
+                        });
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
     /// Inverse of a 2×2 matrix (D602 helper).
     fn inv2(m: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
         let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
@@ -2387,6 +2839,26 @@ impl<M: MeshTopology> FESpace for HCurlSpace<M> {
 
     fn element_face_pair_transforms(&self, elem: u32) -> Vec<FacePairTransform> {
         HCurlSpace::element_face_pair_transforms(self, elem)
+    }
+
+    fn facet_slots_against_published_anchor(
+        &self,
+        e: u32,
+        facet_verts: &[u32],
+        anchor_et: ElementType,
+        anchor_verts: &[u32],
+        global_node: &dyn Fn(u32) -> u32,
+        anchor_coords: &dyn Fn(u32) -> Option<[f64; 3]>,
+    ) -> Option<Vec<FacetSlotToAnchor>> {
+        HCurlSpace::facet_slots_against_published_anchor(
+            self,
+            e,
+            facet_verts,
+            anchor_et,
+            anchor_verts,
+            global_node,
+            anchor_coords,
+        )
     }
 }
 

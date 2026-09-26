@@ -121,6 +121,35 @@ pub trait FESpace: Send + Sync {
         Vec::new()
     }
 
+    /// D813-1: the relation of the local element `e`'s facet-DOF block to the
+    /// **published anchor element** of the facet `facet_verts` — the channel the
+    /// parallel DOF partition consumes when the facet's canonical
+    /// (minimum-global-element-id) holder is not in the local mesh, so the ghost
+    /// layer no longer has to carry it.
+    ///
+    /// `anchor_et` / `anchor_verts` are the anchor element's type and its global
+    /// vertex list in the element's own slot order
+    /// (`fem_parallel::EntityOwnership::facet_anchor_element`); `global_node`
+    /// maps a local mesh node id to its global id and `anchor_coords` a global
+    /// vertex id to its physical coordinates (only the facet's own vertices are
+    /// ever queried).
+    ///
+    /// The default returns `None` — exact for every space that does not key a
+    /// shared facet's DOFs by another element's frame, and the signal for the
+    /// caller to keep requiring a local anchor (loudly).  Only
+    /// [`crate::HCurlSpace`] implements it today (3-D `NDk`, `k ≥ 2`).
+    fn facet_slots_against_published_anchor(
+        &self,
+        _e: u32,
+        _facet_verts: &[u32],
+        _anchor_et: fem_mesh::ElementType,
+        _anchor_verts: &[u32],
+        _global_node: &dyn Fn(u32) -> u32,
+        _anchor_coords: &dyn Fn(u32) -> Option<[f64; 3]>,
+    ) -> Option<Vec<crate::hcurl::FacetSlotToAnchor>> {
+        None
+    }
+
     /// If this is an L² (DG) space, the node placement of its discontinuous
     /// Lagrange basis ([`crate::L2Basis::GaussLegendre`] or
     /// [`crate::L2Basis::GaussLobatto`]).  Returns `None` for all other

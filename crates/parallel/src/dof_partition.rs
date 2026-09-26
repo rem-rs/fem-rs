@@ -1359,7 +1359,11 @@ impl DofPartition {
             }
             // Pass B: DOF → (face key, position).  The position is
             // authoritative only from the min-global-id element of the face;
-            // the other adjacent element merely records membership.
+            // the other adjacent element merely records membership — unless the
+            // anchor is **not in the local mesh**, in which case the space
+            // rebuilds the anchor's facet frame from the published
+            // `(ElementType, global vertex list)` (D813-1): that is what lets
+            // the ghost layer stop carrying the anchor element.
             for e in mesh.elem_iter() {
                 let et = mesh.element_type(e);
                 let Some(blocks) = nd_face_blocks_for_elem(et, order) else {
@@ -1378,7 +1382,8 @@ impl DofPartition {
                     g.sort_unstable();
                     let key = (g[0], g[1], g[2]);
                     let slots = &dofs[off..off + block.n_dofs];
-                    if nd_face_data[&key].0 == gid {
+                    let anchor_gid = nd_face_data[&key].0;
+                    if anchor_gid == gid {
                         // D122-3: the minimum-global-id element of the face is
                         // the DP's canonical element, so its DOF block fixes
                         // both the position **and** the global orientation of
@@ -1443,6 +1448,91 @@ impl DofPartition {
                             });
                             pair_of_dof.insert(dm[0], (pi, 0));
                             pair_of_dof.insert(dm[1], (pi, 1));
+                        }
+                    } else if partition.local_elem(anchor_gid).is_none() {
+                        // D813-1: the face's canonical anchor is not in the
+                        // local mesh.  Rebuild its frame from the extraction's
+                        // published `(type, vertex list)` and key this
+                        // element's slots against it.  A `None`/incomplete
+                        // answer is *not* papered over: the DOFs then get no
+                        // canonical position and Step 2c panics loudly.
+                        let rel = partition
+                            .entities
+                            .as_ref()
+                            .and_then(|t| t.facet_anchor_element(anchor_gid))
+                            .and_then(|(a_et, a_verts)| {
+                                space.facet_slots_against_published_anchor(
+                                    e,
+                                    &g,
+                                    a_et,
+                                    a_verts,
+                                    &|n| partition.global_node(n),
+                                    &|gn| {
+                                        partition.local_node(gn).map(|lid| {
+                                            let c = mesh.node_coords(lid);
+                                            [c[0], c[1], c[2]]
+                                        })
+                                    },
+                                )
+                            })
+                            .filter(|rel| {
+                                rel.len() == block.n_dofs
+                                    && rel.iter().all(|r| r.slot < dofs.len())
+                            });
+                        match rel {
+                            Some(rel) => {
+                                // The pair's two DOFs in the **anchor's** own
+                                // component order (`anchor_slot` `2p` then
+                                // `2p+1`), which is the order the anchor's own
+                                // branch above records — the 2×2 `s` is
+                                // expressed in it.
+                                let mut pair_dm = [u32::MAX; 2];
+                                let mut pair_t = None;
+                                for r in &rel {
+                                    let d = dofs[r.slot];
+                                    nd_face_key.insert(d, key);
+                                    if let Some(prev) = nd_face_pos.insert(d, r.anchor_slot as u32) {
+                                        assert_eq!(
+                                            prev, r.anchor_slot as u32,
+                                            "D813-1: two elements disagree on the anchor \
+                                             slot of face DOF {d} (face {key:?})"
+                                        );
+                                    }
+                                    if let Some(prev) = nd_face_sign.insert(d, r.anchor_sign) {
+                                        assert_eq!(
+                                            prev, r.anchor_sign,
+                                            "D813-1: two elements disagree on the anchor \
+                                             sign of face DOF {d} (face {key:?})"
+                                        );
+                                    }
+                                    if let Some(t) = r.anchor_pair {
+                                        pair_dm[(r.anchor_slot % 2) as usize] = d;
+                                        pair_t = Some(t);
+                                    }
+                                }
+                                // A pair whose components are both local is
+                                // registered once (the second carrier re-derives
+                                // the identical `pair_dm`).
+                                if let Some(t) = pair_t {
+                                    if t.s != IDENTITY_PAIR
+                                        && !pair_of_dof.contains_key(&pair_dm[0])
+                                    {
+                                        let pi = pair_transforms.len() as u32;
+                                        pair_transforms.push(DofPairTransform {
+                                            dm_dofs: pair_dm,
+                                            s: t.s,
+                                            s_inv: t.s_inv,
+                                        });
+                                        pair_of_dof.insert(pair_dm[0], (pi, 0));
+                                        pair_of_dof.insert(pair_dm[1], (pi, 1));
+                                    }
+                                }
+                            }
+                            None => {
+                                for &d in slots {
+                                    nd_face_key.entry(d).or_insert(key);
+                                }
+                            }
                         }
                     } else {
                         for &d in slots {
@@ -2103,6 +2193,73 @@ impl DofPartition {
         // minimum rank over the face's mesh-wide holders).  With them the anchor
         // no longer depends on the local traversal — the second pass below then
         // fills `min_gid_order` / `dof_to_pos` from that one element.
+        // D813-1 helpers (HDiv/RT): the anchor element's own face vertex order,
+        // and the map from the local space's canonical face-DOF index to the
+        // anchor's slot.  Both are pure functions of the two elements' face
+        // vertex orders and the RT grid conventions `fem_space::hdiv` exports
+        // (`transform_grid` / `tri_face_grid_transform`), so they reproduce
+        // exactly what the anchor element itself would store.
+        let facet_vertex_order =
+            |et: fem_mesh::ElementType, verts: &[u32], facet: &[u32]| -> Option<Vec<u32>> {
+            let (faces, _n) = faces_for_elem(et, space.order() as usize);
+            for (fv, _is_tri) in &faces {
+                if fv.len() != facet.len() {
+                    continue;
+                }
+                let v: Option<Vec<u32>> = fv.iter().map(|&li| verts.get(li).copied()).collect();
+                let Some(v) = v else { continue };
+                if v.iter().all(|x| facet.contains(x)) {
+                    return Some(v);
+                }
+            }
+                None
+            };
+        // `inv[canonical index] = the anchor's own slot inside its face block`.
+        let anchor_slot_inverse = |base: &[u32], a: &[u32], k: usize| -> Vec<u32> {
+            if base.len() == 4 {
+                let side = k + 1;
+                let r = fem_space::hdiv::quad_orientation(
+                    [base[0], base[1], base[2], base[3]],
+                    [a[0], a[1], a[2], a[3]],
+                );
+                let mut inv = vec![u32::MAX; side * side];
+                for j in 0..side {
+                    for i in 0..side {
+                        let (ic, jc) = fem_space::hdiv::transform_grid(i, j, side, r);
+                        inv[jc * side + ic] = (j * side + i) as u32;
+                    }
+                }
+                inv
+            } else {
+                // Triangular face: `RT_TriangleElement(k)` trace, `(k+1)(k+2)/2`
+                // dofs, enumerated by the same nested loop `fem_space::hdiv`
+                // fills the element block with (`slot = tri_grid_index`).
+                let p = k;
+                let n = (k + 1) * (k + 2) / 2;
+                let r = fem_space::hdiv::tri_orientation(
+                    [base[0], base[1], base[2]],
+                    [a[0], a[1], a[2]],
+                );
+                let mut inv = vec![u32::MAX; n];
+                for j in 0..=p {
+                    for i in 0..=(p - j) {
+                        let slot = j * (2 * p + 3 - j) / 2 + i;
+                        let c = fem_space::hdiv::tri_face_grid_transform(p, r, j, i);
+                        inv[c] = slot as u32;
+                    }
+                }
+                inv
+            }
+        };
+
+        // D813-1: for a facet whose anchor is **not** in the local mesh, the
+        // anchor's own face vertex order (published as the anchor element's
+        // `(type, vertex list)`) is the only source for both the sign parity and
+        // the position permutation — the local traversal can no longer supply
+        // them.  `anchor_pos_inv[b]` = the anchor's slot for the local space's
+        // canonical DOF `b` of that face (see the second pass below).
+        let mut anchor_face_order: HashMap<(u32, u32, u32), Vec<u32>> = HashMap::new();
+        let mut anchor_pos_inv: HashMap<(u32, u32, u32), Vec<u32>> = HashMap::new();
         if let Some(tables) = partition.entities.as_ref() {
             for info in face_info.values_mut() {
                 let mut g = info.first_order.clone();
@@ -2110,6 +2267,20 @@ impl DofPartition {
                 if let Some((owner, anchor)) = tables.facet(&g) {
                     info.min_elem_owner = owner;
                     info.min_gid_elem = anchor;
+                    if partition.local_elem(anchor).is_none() {
+                        if let Some((a_et, a_verts)) = tables.facet_anchor_element(anchor) {
+                            if let Some(a_ord) = facet_vertex_order(a_et, a_verts, &g) {
+                                let inv = anchor_slot_inverse(
+                                    &info.first_order,
+                                    &a_ord,
+                                    space.order() as usize,
+                                );
+                                let key = (g[0], g[1], g[2]);
+                                anchor_face_order.insert(key, a_ord);
+                                anchor_pos_inv.insert(key, inv);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2152,6 +2323,21 @@ impl DofPartition {
                 let key = (v4[0], v4[1], v4[2]);
                 if face_info[&key].min_gid_elem == elem_gid {
                     dof_to_pos.insert(dof_id, pos as u32);
+                } else if let Some(inv) = anchor_pos_inv.get(&key) {
+                    // D813-1: the anchor is not local — relabel this element's
+                    // slot by the position the **anchor** would give the same
+                    // DOF: the local space's canonical index `b` of the DOF
+                    // through the anchor's own face order (`anchor_slot_inverse`).
+                    let first = dofs[face_off[face_idx]];
+                    let b = (dof_id.checked_sub(first).unwrap_or(u32::MAX)) as usize;
+                    if let Some(&p_a) = inv.get(b) {
+                        if let Some(prev) = dof_to_pos.insert(dof_id, p_a) {
+                            debug_assert_eq!(
+                                prev, p_a,
+                                "D813-1: two elements disagree on the RT face position"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2169,6 +2355,11 @@ impl DofPartition {
             // element signs by this yields each element's sign relative to the
             // global canonical face orientation, which is cross-rank
             // consistent.
+            // D813-1: when the anchor element is not local the traversal could
+            // not record its face order — the published element row supplies it
+            // (identical to the traversal's value whenever the anchor *is* local,
+            // so that path stays bit-identical).
+            let min_gid_order: &Vec<u32> = anchor_face_order.get(&key).unwrap_or(&info.min_gid_order);
             let sign = if info.first_order.len() == 4 {
                 fem_space::hdiv::rt_face_sign(fem_space::hdiv::quad_orientation(
                     [
@@ -2178,19 +2369,19 @@ impl DofPartition {
                         info.first_order[3],
                     ],
                     [
-                        info.min_gid_order[0],
-                        info.min_gid_order[1],
-                        info.min_gid_order[2],
-                        info.min_gid_order[3],
+                        min_gid_order[0],
+                        min_gid_order[1],
+                        min_gid_order[2],
+                        min_gid_order[3],
                     ],
                 ))
             } else {
                 fem_space::hdiv::rt_face_sign(fem_space::hdiv::tri_orientation(
                     [info.first_order[0], info.first_order[1], info.first_order[2]],
                     [
-                        info.min_gid_order[0],
-                        info.min_gid_order[1],
-                        info.min_gid_order[2],
+                        min_gid_order[0],
+                        min_gid_order[1],
+                        min_gid_order[2],
                     ],
                 ))
             };

@@ -27,6 +27,16 @@
 //! [face_offsets : u32 × (n_faces+1)] // if bit1
 //! [face_types   : u32 × n_faces]     // if bit1
 //! ```
+//!
+//! Flag bits (the flags word is present from v2 on; the numbered bits follow in
+//! ascending order): bit 2 = per-element geometry, bit 3 = ragged geometry rows
+//! (bumps to v3), bit 4 = D807-1 entity ownership channel, bit 5 (D813-1) =
+//! anchor-element table:
+//!
+//! ```text
+//! [n_anchors : u32]
+//! [gid : u32, element_type tag : u32, n_verts : u32, verts : u32 × n_verts] × n_anchors
+//! ```
 
 use std::collections::HashMap;
 use fem_core::{ElemId, NodeId, Rank};
@@ -164,6 +174,19 @@ pub fn encode_submesh<const D: usize>(
             + ent.node_owner_table().len() * 8
             + ent.edge_owner_table().len() * 12
             + ent.facet_table().len() * 24;
+        // D813-1: the anchor elements' `(type, vertex list)` — without them a
+        // non-root rank cannot rebuild a shared facet's canonical DOF frame once
+        // the anchor is no longer forced into the local mesh.  Layout: one u32
+        // count, then `[gid, type tag, n_verts, v0 … v(n-1)]` per entry.
+        let anchors = ent.facet_anchor_elem_table();
+        if !anchors.is_empty() {
+            mix_flags |= 32;
+            ext_tail += 4
+                + anchors
+                    .iter()
+                    .map(|(_, (_, verts))| 12 + verts.len() * 4)
+                    .sum::<usize>();
+        }
     }
     let wire_format: u32 = if mix_flags & 8 != 0 {
         3
@@ -326,6 +349,28 @@ pub fn encode_submesh<const D: usize>(
                 );
                 buf.extend_from_slice(&owner.to_le_bytes());
                 buf.extend_from_slice(&anchor.to_le_bytes());
+            }
+        }
+        if mix_flags & 32 != 0 {
+            // D813-1 anchor elements (see the size computation above): sorted by
+            // global element id so the payload is deterministic.
+            let mut anchors: Vec<(u32, ElementType, &Vec<u32>)> = partition
+                .entities
+                .as_ref()
+                .unwrap()
+                .facet_anchor_elem_table()
+                .iter()
+                .map(|(&gid, (et, verts))| (gid, *et, verts))
+                .collect();
+            anchors.sort_unstable_by_key(|&(gid, _, _)| gid);
+            buf.extend_from_slice(&(anchors.len() as u32).to_le_bytes());
+            for (gid, et, verts) in anchors {
+                buf.extend_from_slice(&gid.to_le_bytes());
+                buf.extend_from_slice(&element_type_to_u32(et).to_le_bytes());
+                buf.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+                for &v in verts {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
             }
         }
     }
@@ -495,7 +540,34 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
             }
             facet.insert(key, (owner, anchor));
         }
-        entities = Some(EntityOwnership::new(node_owner, edge_owner, facet));
+        // D813-1: the anchor elements' `(type, vertex list)`.
+        let mut facet_anchor_elem = HashMap::new();
+        if mix_flags_in_wire & 32 != 0 {
+            let n = read_u32_at(buf, &mut offset)? as usize;
+            for _ in 0..n {
+                let gid = read_u32_at(buf, &mut offset)?;
+                let et = u32_to_element_type(read_u32_at(buf, &mut offset)?)?;
+                let nv = read_u32_at(buf, &mut offset)? as usize;
+                let mut verts = Vec::with_capacity(nv);
+                for _ in 0..nv {
+                    verts.push(read_u32_at(buf, &mut offset)?);
+                }
+                if nv != et.nodes_per_element() {
+                    return Err(format!(
+                        "anchor element {gid}: {nv} vertices for a {et:?} \
+                         (expected {})",
+                        et.nodes_per_element()
+                    ));
+                }
+                facet_anchor_elem.insert(gid, (et, verts));
+            }
+        }
+        entities = Some(EntityOwnership::new(
+            node_owner,
+            edge_owner,
+            facet,
+            facet_anchor_elem,
+        ));
     }
 
     if offset != buf.len() {
@@ -706,6 +778,47 @@ mod tests {
         assert_eq!(g.n_nodes, g2.n_nodes);
         assert_eq!(g.conn, g2.conn);
         assert_eq!(g.coords, g2.coords);
+    }
+
+    /// D813-1: the anchor-element table (wire flag bit 32) survives the round
+    /// trip — without it a non-root rank cannot rebuild a shared facet's
+    /// canonical DOF frame once the anchor is no longer forced into the ghost
+    /// layer, and the failure would be *silent* (an empty channel).
+    #[test]
+    fn round_trip_anchor_element_table() {
+        use std::collections::HashMap;
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let mut partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
+        let mut facet = HashMap::new();
+        facet.insert(vec![0u32, 1, 2], (0, 1u32));
+        facet.insert(vec![0u32, 2, 3], (0, 0u32));
+        let mut anchors = HashMap::new();
+        anchors.insert(1u32, (ElementType::Tri3, vec![0u32, 1, 2]));
+        anchors.insert(0u32, (ElementType::Quad4, vec![0u32, 2, 3, 1]));
+        partition.entities = Some(EntityOwnership::new(
+            vec![(0, 0), (1, 0)],
+            HashMap::new(),
+            facet,
+            anchors,
+        ));
+
+        let buf = encode_submesh(&mesh, &partition);
+        let (_m, part2) = decode_submesh::<2>(&buf).expect("decode");
+        let ent2 = part2.entities.as_ref().expect("channel survives");
+        assert_eq!(ent2.n_facets(), 2);
+        assert_eq!(ent2.n_facet_anchor_elems(), 2);
+        assert_eq!(
+            ent2.facet_anchor_element(1),
+            Some((ElementType::Tri3, &[0u32, 1, 2][..]))
+        );
+        assert_eq!(
+            ent2.facet_anchor_element(0),
+            Some((ElementType::Quad4, &[0u32, 2, 3, 1][..]))
+        );
+        assert_eq!(ent2.facet_anchor_element(7), None);
+        // The ownership tables themselves are unchanged by the new bit.
+        assert_eq!(ent2.facet(&[0, 1, 2]), Some((0, 1)));
+        assert_eq!(ent2.node_owner(1), Some(0));
     }
 
     #[test]

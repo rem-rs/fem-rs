@@ -195,6 +195,10 @@ impl FullEntityTables {
         let mut seen_nodes: HashSet<u32> = HashSet::new();
         let mut edge_owner: HashMap<(u32, u32), Rank> = HashMap::new();
         let mut facet: HashMap<Vec<NodeId>, (Rank, ElemId)> = HashMap::new();
+        // D813-1: the `(type, vertex list)` of every element that anchors a
+        // published facet, keyed by the anchor's global element id.  The
+        // extraction holds the full mesh, so the row is a direct read.
+        let mut facet_anchor_elem: HashMap<ElemId, (ElementType, Vec<NodeId>)> = HashMap::new();
 
         for &e in local_elems {
             let ns = mesh.elem_nodes(e);
@@ -216,11 +220,18 @@ impl FullEntityTables {
                 if let Some(key) = facet_key(&g) {
                     if let Some(&entry) = self.facet.get(&key) {
                         facet.insert(g, entry);
+                        let anchor = entry.1;
+                        facet_anchor_elem.entry(anchor).or_insert_with(|| {
+                            (
+                                mesh.element_type_at(anchor),
+                                mesh.elem_nodes(anchor).to_vec(),
+                            )
+                        });
                     }
                 }
             }
         }
-        EntityOwnership::new(node_owner, edge_owner, facet)
+        EntityOwnership::new(node_owner, edge_owner, facet, facet_anchor_elem)
     }
 }
 
@@ -535,43 +546,42 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         }
     }
 
-    // 3b2. Ghost-layer closure (D807-1 — the layer is now the *anchor* closure).
+    // 3b2. Ghost-layer closure — **D813-1: the layer is the one-node closure**
+    // (plus the non-conforming hanging-edge rule below).  History:
     //
-    // History: this step used to iterate the face closure
-    // ("an element sharing a FACE with any local element must also be local") to
-    // a fixpoint, which for a face-connected mesh is the *entity-holder closure*
-    // — the whole mesh (`tmp/d807/d122r2_red.txt`: 252/252 elements on every rank
-    // of `cylinder-hex.mesh` at np = 2 and 4, while MFEM's local mesh is the
-    // owned block, 126/126).  The fixpoint was needed because `DofPartition`
-    // derived **two** things from the local element traversal:
+    // * pre-round-75 the layer was the face-closure fixpoint, which for a
+    //   face-connected mesh is the *entity-holder closure* — the whole mesh
+    //   (`tmp/d807/d122r2_red.txt`: 252/252 elements on every rank of
+    //   `cylinder-hex.mesh` at np = 2 and 4, while MFEM's local mesh is the owned
+    //   block, 126/126);
+    // * round 76 cut it to the **anchor closure** (222/246 at np = 2,
+    //   222/222/246/234 at np = 4) because `DofPartition` derived two things
+    //   from the local element traversal: (1) the entity **owner** = minimum
+    //   rank over the holders (D122-1) and (2) a face DOF's canonical
+    //   **position/sign** read off the minimum-global-id adjacent element
+    //   (D412/D122-3).  (1) is now published by [`FullEntityTables`] through
+    //   [`EntityOwnership`]; (2) needed the anchor *element* because the
+    //   position/sign was read from its own slot block;
+    // * **round 78 (D813-1)** removes that last requirement.  The extraction now
+    //   publishes the anchor element's `(ElementType, global vertex list)`
+    //   alongside its facet table, and the space rebuilds the facet's canonical
+    //   frame from the facet's own vertices
+    //   (`fem_space::HCurlSpace::facet_slots_against_published_anchor`,
+    //   `fem_space::hdiv`'s grid helpers for RT).  Every family's frame is
+    //   face-local, so no element of the anchor's neighbourhood has to be
+    //   present.  Measured: 180 / 204 elements (268 / 347 nodes) at np = 2 and
+    //   126 / 144 / 166 / 126 at np = 4 on `cylinder-hex.mesh`
+    //   (`crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`,
+    //   `tmp/d78a/`).
     //
-    // 1. the entity **owner** = minimum rank over the elements holding it
-    //    (D122-1, MFEM `GroupTopology`'s share-set minimum), and
-    // 2. a face DOF's canonical **position and sign**, read off the
-    //    minimum-global-id adjacent element (D412 / D122-3).
+    // What the layer still must contain, and why:
     //
-    // Both are now supplied by the extraction instead: [`FullEntityTables`]
-    // publishes the mesh-wide share-set minimum and the minimum-global-id facet
-    // anchor for every entity of the local mesh, through
-    // [`EntityOwnership`] on the returned [`MeshPartition`].  What is left for
-    // the layer is only the *anchor*: to read a shared face's DOF position/sign
-    // the DP must have the facet's minimum-global-id holder **in the local mesh**
-    // — a rank that carries a facet through a ghost whose co-holder is one hop
-    // further out would otherwise name a different anchor (and produce
-    // cross-rank key mismatches or a wrong sign).
-    //
-    // So the layer is the least set L ⊇ (owned ∪ one-node-layer) such that for
-    // every facet carried by an element of L, the facet's global anchor is in L.
-    // `cylinder-hex.mesh` measures 222 / 246 elements at np = 2 (vs 252 for the
-    // old fixpoint) and 222 / 222 / 246 / 234 at np = 4 — measured, not asserted:
-    // see `crates/parallel/tests/d807_d122r2_ghost_layer_par.rs`.
-    //
-    // A note on the *one-node-layer* (step 3b) part of the base set: it is not
-    // cosmetic.  A rank assembles every local element and keeps only its owned
-    // DOF rows, so every element holding an owned DOF's entity must be local;
-    // the holders of a DOF's entity all share its vertices, hence are node
-    // neighbours of an owned element — exactly step 3b.  Cutting below it would
-    // silently drop contributions from the owned rows.
+    // * the **owned block** (rank ownership of nodes/elements/DOFs);
+    // * the **one-node layer** (step 3b): a rank assembles every local element
+    //   and keeps only its owned DOF rows, so every element holding an owned
+    //   DOF's entity must be local; the holders of a DOF's entity all share its
+    //   vertices, hence are node neighbours of an owned element.  Cutting below
+    //   it would silently drop contributions from the owned rows.
     //
     // The DC/NC caveat: `shares_hanging_edge` stays part of the closure.  On a
     // non-conforming mesh the coarse neighbour of a refined element is not a
@@ -585,22 +595,6 @@ fn extract_submesh_from_partition_impl<const D: usize>(
     let mut extra_ghost: Vec<u32> = Vec::new();
     loop {
         let mut added_any = false;
-        // (a) the canonical anchor of every facet a local element carries.
-        for e in local_elem_set.iter().copied().collect::<Vec<u32>>() {
-            for fv in local_facets(mesh.element_type_at(e)) {
-                let ns = mesh.elem_nodes(e);
-                let mut g: Vec<u32> = fv.iter().map(|&i| ns[i]).collect();
-                g.sort_unstable();
-                let Some(key) = facet_key(&g) else { continue };
-                let anchor = tables.facet.get(&key).map(|v| v.1);
-                if let Some(a) = anchor {
-                    if local_elem_set.insert(a) {
-                        extra_ghost.push(a);
-                        added_any = true;
-                    }
-                }
-            }
-        }
         // (b) the coarse neighbour of a hanging edge (non-conforming meshes).
         for e in 0..n_elems as u32 {
             if local_elem_set.contains(&e) { continue; }
@@ -619,7 +613,6 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         }
     }
     ghost_elem_gids.extend(extra_ghost);
-
 
     // 3c. Add nodes from ghost elements to the node set.
     for &ge in &ghost_elem_gids {
