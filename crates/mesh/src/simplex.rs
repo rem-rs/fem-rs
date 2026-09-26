@@ -1358,6 +1358,14 @@ impl<const D: usize> Mesh<D> {
     ///
     /// Returns `(min_coords, max_coords)` where each is a `[f64; D]` array.
     ///
+    /// This is the **vertex** box: the extrema over `n_nodes()` nodes, i.e.
+    /// exactly MFEM's `Mesh::GetBoundingBox(min, max, ref)` in its
+    /// `Nodes == NULL` case (`mesh/mesh.cpp:154`).  For a mesh that carries a
+    /// geometry table (`Nodes != NULL`) MFEM takes a different box — see
+    /// [`get_bounding_box`](Self::get_bounding_box), which is the faithful
+    /// counterpart of the general call and the one an MFEM example's
+    /// `GetBoundingBox(bb_min, bb_max, max(order, 1))` needs.
+    ///
     /// # Panics
     /// Panics if the mesh has no nodes.
     pub fn bounding_box(&self) -> ([f64; D], [f64; D]) {
@@ -1369,6 +1377,65 @@ impl<const D: usize> Mesh<D> {
             for d in 0..D {
                 if c[d] < lo[d] { lo[d] = c[d]; }
                 if c[d] > hi[d] { hi[d] = c[d]; }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// MFEM `Mesh::GetBoundingBox(min, max, ref)` (`mesh/mesh.cpp:142`).
+    ///
+    /// Returns `(min_coords, max_coords)` where each is a `[f64; D]` array.
+    ///
+    /// The two arms are MFEM's:
+    ///
+    /// * **no geometry table** (`Nodes == NULL`, `self.geometry.is_none()`) —
+    ///   the extrema over the `n_nodes()` vertex coordinates, i.e. exactly
+    ///   [`bounding_box`](Self::bounding_box);
+    /// * **geometry table present** (`Nodes != NULL`; also the `L2_T1_*_P1`
+    ///   folded tables of geometrically periodic meshes) — the extrema over
+    ///   each element's isoparametric geometry sampled at
+    ///   `GlobGeometryRefiner.Refine(base_geometry, ref)`'s points
+    ///   ([`mfem_geometry_refiner_points`](crate::transformation::mfem_geometry_refiner_points)),
+    ///   with `ref` clamped to `>= 1`.
+    ///
+    /// The distinction is not academic: for `data/periodic-hexagon.mesh` (the
+    /// default mesh of `examples/mfem_ex9_dg_advection.rs`) the folded
+    /// per-element geometry reaches `[-1, 1] x [-sqrt(3)/2, sqrt(3)/2]`, while
+    /// the mesh-level vertex table (the *means* of the folded copies, D813-2)
+    /// spans only `[-0.5, -sqrt(3)/4] x [0.5, sqrt(3)/4]` — a different box, so
+    /// an ex9 that normalises its initial condition and velocity by it solves a
+    /// different problem from MFEM's (measured: the whole solution moved,
+    /// `|Δ| = 1.0` on every `.gf` value).
+    ///
+    /// # Panics
+    /// Panics if the mesh has no nodes, or if an element carries a geometry
+    /// table and belongs to a family with no `GlobGeometryRefiner` lattice
+    /// (`Polygon`; MFEM has no `Refine` arm for it either).  A straight mesh
+    /// (`geometry.is_none()`) never calls the sampler, and an element-less mesh
+    /// falls back to [`bounding_box`](Self::bounding_box).
+    pub fn get_bounding_box(&self, ref_level: i32) -> ([f64; D], [f64; D]) {
+        if self.geometry.is_none() || self.n_elements() == 0 {
+            return self.bounding_box();
+        }
+        let times = ref_level.max(1) as usize;
+        let mut lo = [f64::INFINITY; D];
+        let mut hi = [f64::NEG_INFINITY; D];
+        for e in 0..self.n_elements() as ElemId {
+            let et = self.element_type(e);
+            let Some(pts) = crate::transformation::mfem_geometry_refiner_points(et, times)
+            else {
+                panic!(
+                    "Mesh::get_bounding_box: no GlobGeometryRefiner lattice for {et:?} \
+                     (element {e}); the mesh carries a geometry table, so the vertex \
+                     box is not MFEM's box — sample this family explicitly instead"
+                );
+            };
+            for xi in &pts {
+                let (_, xp) = crate::transformation::element_jacobian_at(self, e, xi, D);
+                for d in 0..D {
+                    if xp[d] < lo[d] { lo[d] = xp[d]; }
+                    if xp[d] > hi[d] { hi[d] = xp[d]; }
+                }
             }
         }
         (lo, hi)

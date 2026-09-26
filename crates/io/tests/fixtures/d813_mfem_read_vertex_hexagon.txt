@@ -1,0 +1,21 @@
+# MFEM 4.10's mesh-level vertex table after reading periodic-hexagon.mesh (D813-2).
+# This is `Mesh::vertices` as `Mesh::Loader` leaves it:
+#   Nodes = new GridFunction(this, input); SetVerticesFromNodes(Nodes)
+# whose `GridFunction::GetNodalValues(Vector&, vdim)` (fem/gridfunc.cpp:1889)
+# is the *mean over every element reference* of the per-element geometry
+# value at the vertex.
+# probe: tmp/d78b/probe/d78b_bbox_vertex_probe.cpp (block [VERTEX])
+#   ./d78b_bbox_vertex_probe $HOME/mfem410/data/<mesh>.mesh 0 5
+# columns: vertex x y [z]   (%.17g)
+0 0 0
+1 0 0
+2 0 0
+3 0 0
+4 0 0
+5 -0.25 -0.4330127018922193
+6 0.5 0
+7 -0.25 0.4330127018922193
+8 0.25 -0.4330127018922193
+9 0.25 0.4330127018922193
+10 -0.5 0
+11 0 0

@@ -1,0 +1,35 @@
+# MFEM 4.10 `Mesh::GetBoundingBox(min, max, ref)` oracle (D813-3).
+# probe: tmp/d78b/probe/d78b_bbox_vertex_probe.cpp, built at $HOME/work/d78b/
+#   ./d78b_bbox_vertex_probe $HOME/mfem410/data/<mesh>.mesh <refine> 5
+# columns: mesh refine sdim ref min(dim 0..sdim-1) max(dim 0..sdim-1)
+# %.17g
+periodic-hexagon.mesh 0 2 1 -1 -0.8660254037844386 1 0.8660254037844386
+periodic-hexagon.mesh 0 2 2 -1 -0.8660254037844386 1 0.8660254037844386
+periodic-hexagon.mesh 0 2 3 -1 -0.86602540378443871 1 0.86602540378443871
+periodic-hexagon.mesh 0 2 4 -1 -0.8660254037844386 1 0.8660254037844386
+periodic-hexagon.mesh 0 2 5 -1 -0.86602540378443871 1 0.86602540378443871
+periodic-hexagon.mesh 2 2 1 -1 -0.8660254037844386 1 0.8660254037844386
+periodic-hexagon.mesh 2 2 2 -1 -0.8660254037844386 1 0.8660254037844386
+periodic-hexagon.mesh 2 2 3 -1 -0.86602540378443871 1 0.86602540378443871
+periodic-hexagon.mesh 2 2 4 -1 -0.8660254037844386 1 0.8660254037844386
+periodic-hexagon.mesh 2 2 5 -1 -0.86602540378443871 1 0.86602540378443871
+periodic-square.mesh 0 2 1 -1 -1 1 1
+periodic-square.mesh 0 2 2 -1 -1 1 1
+periodic-square.mesh 0 2 3 -1 -1 1 1
+periodic-square.mesh 0 2 4 -1 -1 1 1
+periodic-square.mesh 0 2 5 -1 -1 1 1
+periodic-square.mesh 2 2 1 -1 -1 1 1
+periodic-square.mesh 2 2 2 -1 -1 1 1
+periodic-square.mesh 2 2 3 -1 -1 1 1
+periodic-square.mesh 2 2 4 -1 -1 1 1
+periodic-square.mesh 2 2 5 -1 -1 1 1
+periodic-cube.mesh 0 3 1 -1 -1 -1 1 1 1
+periodic-cube.mesh 0 3 2 -1 -1 -1 1 1 1
+periodic-cube.mesh 0 3 3 -1 -1 -1 1 1 1
+periodic-cube.mesh 0 3 4 -1 -1 -1 1 1 1
+periodic-cube.mesh 0 3 5 -1.0000000000000002 -1.0000000000000002 -1.0000000000000002 1.0000000000000002 1.0000000000000002 1.0000000000000002
+periodic-cube.mesh 2 3 1 -1 -1 -1 1 1 1
+periodic-cube.mesh 2 3 2 -1 -1 -1 1 1 1
+periodic-cube.mesh 2 3 3 -1 -1 -1 1 1 1
+periodic-cube.mesh 2 3 4 -1 -1 -1 1 1 1
+periodic-cube.mesh 2 3 5 -1.0000000000000002 -1.0000000000000002 -1.0000000000000002 1.0000000000000002 1.0000000000000002 1.0000000000000002

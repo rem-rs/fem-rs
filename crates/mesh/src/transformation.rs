@@ -183,6 +183,138 @@ fn curved_geometry<M: MeshTopology + ?Sized>(
     Some((re, nodes.to_vec()))
 }
 
+/// MFEM `GlobGeometryRefiner.Refine(geom, times)->RefPts` — the reference-domain
+/// sample lattice `Mesh::GetBoundingBox(min, max, ref)` takes its extrema over
+/// when the mesh has a `Nodes` field (`mesh/mesh.cpp:142`, the `else` arm).
+///
+/// The global refiner is constructed with the default
+/// `Quadrature1D::ClosedUniform` type (`fem/geom.hpp:369`), so every family's
+/// lattice is built from the `times + 1` **closed uniform** 1-D points
+/// `cp[i] = i / times` (`fem/geom.cpp:1136`, `Refine`), and `times` is clamped
+/// to `>= 1` exactly as MFEM does.  Each arm below is the corresponding `case`
+/// of `Refine`, reproduced verbatim — point *order* included, so the lattice can
+/// be compared element-by-element against an MFEM dump:
+///
+/// | family | count | reference points |
+/// |---|---|---|
+/// | `Line2`/`Line3` (SEGMENT) | `T+1` | `(cp[i], 0, 0)` |
+/// | `Tri3`/`Tri6` (TRIANGLE) | `(T+1)(T+2)/2` | `(cp[i]/w, cp[j]/w, 0)`, `w = cp[i]+cp[j]+cp[T-i-j]` |
+/// | `Quad4`/`8`/`9` (SQUARE) | `(T+1)²` | `(cp[i], cp[j], 0)` |
+/// | `Tet4`/`Tet10` (TETRAHEDRON) | `(T+1)(T+2)(T+3)/6` | `(cp[i]/w, cp[j]/w, cp[k]/w)`, `w = cp[i]+cp[j]+cp[k]+cp[T-i-j-k]` |
+/// | `Hex8`/`20`/`27` (CUBE) | `(T+1)³` | `(cp[i], cp[j], cp[k])` |
+/// | `Prism6`/`15`/`18` (PRISM) | `(T+1)²(T+2)/2` | `(cp[k], cp[i]/w, cp[j]/w)`, `w = cp[i]+cp[j]+cp[T-i-j]` — **extrusion first**, see the arm |
+/// | `Pyramid5`/`Pyramid13` (PYRAMID) | `(T+1)(T+2)(2T+3)/6` | `(cp'ᵢ·(1−cp[k]), cp'ⱼ·(1−cp[k]), cp[k])`, `cp'` the `T-k+1` closed uniform points |
+///
+/// (loops in MFEM's order: `i` innermost, then `j`, then the outermost index).
+///
+/// **Reference domain.**  The returned points are in [`ElementType::ref_elem`]`(1)`'s
+/// own reference domain, i.e. the one [`element_jacobian_at`] evaluates the
+/// geometry map in (the table in [`curved_geometry`]'s docs: `[0,1]²` quads,
+/// `[0,1]³` hexes, unit simplexes for tri/tet, `[0,1]²×[0,1]` pyramids — and
+/// the **extrusion-first** prism frame of D152/D164, which is the one place
+/// where the coordinates are *not* MFEM's).  `crates/mesh/tests/d813_geometry_refiner.rs`
+/// pins the whole table against an MFEM 4.10 dump, applying that single fixed
+/// axis permutation to the fixture rows.
+///
+/// Returns `None` for the families with no `GlobGeometryRefiner` arm that
+/// fem-rs could sample (`Point1`; `Polygon` is fem-rs-only).  A 1-D mesh's
+/// `Line2`/`Line3` **is** covered.  `Mesh::get_bounding_box` refuses an
+/// unmapped family loudly instead of silently returning a vertex-only box.
+pub fn mfem_geometry_refiner_points(et: ElementType, times: usize) -> Option<Vec<Vec<f64>>> {
+    let t = times.max(1);
+    let n = t + 1;
+    let cp: Vec<f64> = (0..n).map(|i| i as f64 / t as f64).collect();
+    let mut pts: Vec<Vec<f64>> = Vec::new();
+    match et {
+        ElementType::Line2 | ElementType::Line3 => {
+            for i in 0..n {
+                pts.push(vec![cp[i], 0.0, 0.0]);
+            }
+        }
+        ElementType::Tri3 | ElementType::Tri6 => {
+            for j in 0..n {
+                for i in 0..(t - j + 1) {
+                    let w = cp[i] + cp[j] + cp[t - i - j];
+                    pts.push(vec![cp[i] / w, cp[j] / w, 0.0]);
+                }
+            }
+        }
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+            for j in 0..n {
+                for i in 0..n {
+                    pts.push(vec![cp[i], cp[j], 0.0]);
+                }
+            }
+        }
+        ElementType::Tet4 | ElementType::Tet10 => {
+            for k in 0..n {
+                for j in 0..(t - k + 1) {
+                    for i in 0..(t - j - k + 1) {
+                        let w = cp[i] + cp[j] + cp[k] + cp[t - i - j - k];
+                        pts.push(vec![cp[i] / w, cp[j] / w, cp[k] / w]);
+                    }
+                }
+            }
+        }
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            for k in 0..n {
+                for j in 0..n {
+                    for i in 0..n {
+                        pts.push(vec![cp[i], cp[j], cp[k]]);
+                    }
+                }
+            }
+        }
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+            // **Axis convention.**  MFEM's PRISM reference domain is the
+            // triangle `(x, y)` extruded along `z` (its `GeomVert` are
+            // `(0,0,0), (1,0,0), (0,1,0), (0,0,1), …`), so MFEM's lattice point
+            // is `(tri_x, tri_y, layer)`.  fem-rs's `PrismPk` reference element
+            // puts the **extrusion axis first** — its `dof_coords` are
+            // `(0,0,0), (0,1,0), (0,0,1), (1,0,0), …`, i.e.
+            // `(ξ0, ξ1, ξ2) = (layer, tri_eta, tri_zeta)` (see
+            // `ElementTransformation::from_simplex_nodes`'s Prism6 note and
+            // D152/D164).  The sampler therefore emits the prism points
+            // *reordered*, `(layer, tri_x, tri_y)`; the triangular pair's own
+            // axis order is free because `{ (i/T, j/T) : i + j <= T }` is
+            // symmetric under swapping the two axes.  Getting this wrong puts
+            // two thirds of the lattice outside the wedge — measured before
+            // the permutation: `d813_curved_wedge-p2.mesh` at `ref = 1` gave
+            // `[-0.101, 1.294]` against MFEM's `[0, 1.174]`.
+            for k in 0..n {
+                for j in 0..n {
+                    for i in 0..(t - j + 1) {
+                        let w = cp[i] + cp[j] + cp[t - i - j];
+                        pts.push(vec![cp[k], cp[i] / w, cp[j] / w]);
+                    }
+                }
+            }
+        }
+        ElementType::Pyramid5 | ElementType::Pyramid13 => {
+            for k in 0..n {
+                // `poly1d.GetPoints(Times-k, ClosedUniform)`: `T-k+1` points,
+                // `i/(T-k)` — and MFEM's `if (Type == 0)` falls through to the
+                // `cp'·(1-cp[k])` branch for the default ClosedUniform type
+                // (`Quadrature1D::ClosedUniform == 3`), which is the formula
+                // below.  The apex layer (`k == T`) is the single point `0`.
+                let cij: Vec<f64> = if t == k {
+                    vec![0.0]
+                } else {
+                    (0..(t - k + 1)).map(|i| i as f64 / (t - k) as f64).collect()
+                };
+                let s = 1.0 - cp[k];
+                for j in 0..(t - k + 1) {
+                    for i in 0..(t - k + 1) {
+                        pts.push(vec![cij[i] * s, cij[j] * s, cp[k]]);
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(pts)
+}
+
 /// The node table to interpolate the geometry with: the element's own table
 /// when it is P1-sized (geometrically periodic meshes — see [`geometry_jacobian`]),
 /// else the plain vertex connectivity.

@@ -60,7 +60,7 @@ pub use findpts::{FindPoints, FindPointsOptions, LocatedPoint as FindPointResult
 pub use simplex::{h1_family_dofs, Mesh, tet_volume};
 pub use submesh::{SubMesh, SubMesh3D, BoundarySubMesh, extract_submesh, extract_submesh_3d, extract_submesh_by_name, extract_boundary_submesh};
 pub use topology::MeshTopology;
-pub use transformation::{ElementTransformation, geometry_jacobian, element_jacobian_at, xform_grads};
+pub use transformation::{ElementTransformation, geometry_jacobian, element_jacobian_at, xform_grads, mfem_geometry_refiner_points};
 pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
 pub use particle::ParticleSet;
 pub use supermesh::{build_supermesh, SupermeshElement};

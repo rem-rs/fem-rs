@@ -418,28 +418,54 @@ fn unsupported_element_families_are_refused_without_writing_a_file() {
         .expect("2-D triangle continuous nodes are written since D178");
     assert!(String::from_utf8(sink).unwrap().contains("H1_2D_P3"));
 
-    // Still refused: the *discontinuous* tetrahedral `nodes` section — MFEM's
-    // `L2_T1_TETRAHEDRON` node ordering has not been reproduced here.  The
-    // writer must refuse rather than emit a mesh whose curvature is silently
-    // dropped — and it must refuse before the output file exists.
+    // Discontinuous **tetrahedral** `nodes`: written since D813-5 — MFEM's
+    // `L2_TetrahedronElement` ordering is now implemented (`mfem_l2_slots`'s
+    // `Tet4` arm, pinned element-by-element against MFEM's own `GetNodes()` in
+    // `src/mfem.rs`'s `d813_tet_l2_nodes_match_mfem_in_order`, and end-to-end
+    // against MFEM's files in `tests/d813_tet_l2_nodes.rs`).
     let mut tet =
         Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
     tet.set_curvature(3);
-    let err = write_mfem_nodes(
-        &mut Vec::<u8>::new(),
+    let mut sink: Vec<u8> = Vec::new();
+    write_mfem_nodes(
+        &mut sink,
         &Mesh::<2>::unit_square_tri(2),
         Some(&tet),
         NodesSpace::Discontinuous,
     )
-    .expect_err("tetrahedral discontinuous nodes must be refused");
-    assert!(format!("{err}").contains("Tet4"), "{err}");
+    .expect("tetrahedral discontinuous nodes are written since D813-5");
+    assert!(String::from_utf8(sink).unwrap().contains("L2_T1_3D_P3"));
+
+    // Still refused: a **pyramid** geometry table — neither MFEM numbering
+    // (`L2_FuentesPyramidElement` `fe_l2.cpp:927` / `L2_BergotPyramidElement`
+    // `:1078`) has been reproduced here, and the two are not even the same node
+    // count (`(p+1)³` vs `(p+1)(p+2)(2p+3)/6`).  The writer must refuse rather
+    // than emit a mesh whose curvature is silently dropped — and it must refuse
+    // before the output file exists.
+    let mut pyramid = read_mfem_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/inline-pyramid.mesh"
+    ))
+    .expect("read data/inline-pyramid.mesh")
+    .mesh3d
+    .expect("3-D mesh");
+    assert_eq!(pyramid.element_type_at(0), ElementType::Pyramid5);
+    pyramid.set_curvature(3);
+    let err = write_mfem_nodes(
+        &mut Vec::<u8>::new(),
+        &Mesh::<2>::unit_square_tri(2),
+        Some(&pyramid),
+        NodesSpace::Discontinuous,
+    )
+    .expect_err("pyramid discontinuous nodes must be refused");
+    assert!(format!("{err}").contains("Pyramid5"), "{err}");
 
     // `write_mfem_file` must not create the file on failure.
-    let path = std::env::temp_dir().join("fem_rs_t32_refused_tet.mesh");
+    let path = std::env::temp_dir().join("fem_rs_t32_refused_pyramid.mesh");
     let _ = std::fs::remove_file(&path);
-    let err = fem_io::mfem::write_mfem_file_3d_nodes(&path, &tet, NodesSpace::Discontinuous)
-        .expect_err("tetrahedral discontinuous nodes must be refused when writing to disk");
-    assert!(format!("{err}").contains("Tet4"));
+    let err = fem_io::mfem::write_mfem_file_3d_nodes(&path, &pyramid, NodesSpace::Discontinuous)
+        .expect_err("pyramid discontinuous nodes must be refused when writing to disk");
+    assert!(format!("{err}").contains("Pyramid5"));
     assert!(!path.exists(), "a refused mesh must not leave a file behind");
 }
 

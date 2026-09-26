@@ -12,7 +12,6 @@
 
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::amr::{refine_uniform, refine_uniform_3d};
-use fem_mesh::topology::MeshTopology as _; // n_nodes counter deriving
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data");
 

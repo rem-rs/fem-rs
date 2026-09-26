@@ -425,27 +425,74 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                         (0..npe).collect()
                     }
                 };
-                // 1) Folded vertex coordinates: for each vertex, take the
-                //    position it has in the first element that references it.
-                //    This mirrors MFEM's `Mesh::vertices` array (used only by
-                //    the face transformations; element assembly uses the
-                //    per-element geometry below).
+                // 1) Folded vertex coordinates: the mesh-level vertex table
+                //    MFEM's reader ends up with.
+                //
+                //    MFEM computes it with `GridFunction::GetNodalValues(Vector
+                //    &nval, int vdim)` (`fem/gridfunc.cpp:1889`, reached from
+                //    `Mesh::Loader` → `SetVerticesFromNodes`, `mesh/mesh.cpp:5300`):
+                //
+                //        for i in 0..NE { for j in 0..nverts(i) {
+                //            nval(verts(i)[j]) += values(i)[j]; overlap++ } }
+                //        for v { nval(v) /= overlap[v] }
+                //
+                //    i.e. the **arithmetic mean over every element reference**
+                //    of the per-element geometry value at that vertex — D813-2.
+                //    Measured on MFEM 4.10 with
+                //    `tmp/d78b/probe/d78b_bbox_vertex_probe.cpp`: 12/12 vertices
+                //    of `data/periodic-hexagon.mesh`, 9/9 of
+                //    `periodic-square.mesh`, 144/144 of the twice-refined
+                //    square equal this mean (only 7/12 and 4/9 equal the
+                //    first- *or* last-referencing element's copy).  The previous
+                //    first-wins rule here was a silent divergence with a wide
+                //    blast radius: this table is what the face transformations
+                //    and (via `Mesh::bounding_box`) any vertex-box consumer see.
+                //
+                //    The accumulation order matters at the 1-ulp level, so it is
+                //    exactly MFEM's: element-major, then the element's own local
+                //    vertex order, in each component, divided once at the end.
+                //    A vertex referenced by no element keeps 0.0 here (MFEM
+                //    divides 0 by 0 and stores NaN; an unreferenced vertex is
+                //    not reachable in a mesh `Mesh::Printer` wrote).
+                //
+                //    `n_local_verts` comes from `et0`'s P1 lattice — the same
+                //    uniform-element-type assumption `perm` above already
+                //    makes.  A *mixed* mesh's L2 `nodes` section has no single
+                //    numbering (that limitation is pre-existing in this arm and
+                //    unchanged here; `l2_geometry_slots` has one row length per
+                //    family, and neither the permutation nor this loop is
+                //    per-element).
+                let n_local_verts = l2_geometry_slots(et0, 1).map_or(0, |s| s.len());
                 coords = vec![0.0_f64; n_vert * dim];
+                let mut overlap = vec![0_usize; n_vert];
+                for e in 0..n_elem {
+                    for k in 0..n_local_verts {
+                        if k >= elem_conn[e].len() {
+                            continue;
+                        }
+                        let v = elem_conn[e][k] as usize;
+                        if v >= n_vert {
+                            continue;
+                        }
+                        // `k` is the vertex index in the element's
+                        // connectivity, which is also its reference slot (the
+                        // vertices come first in every element family), so the
+                        // file's L2 index of that vertex is `perm[k]`.
+                        let kl = perm[k];
+                        for c in 0..dim {
+                            coords[v * dim + c] += raw[(e * npe + kl) * dim + c];
+                        }
+                        overlap[v] += 1;
+                    }
+                }
                 for v in 0..n_vert {
-                    'outer: for e in 0..n_elem {
-                        for k in 0..elem_conn[e].len() {
-                            if elem_conn[e][k] as usize == v {
-                                // `k` is the vertex index in the element's
-                                // connectivity, which is also its reference
-                                // slot (the vertices come first in every
-                                // element family), so the file's L2 index of
-                                // that vertex is `perm[k]`.
-                                let kl = perm[k];
-                                for c in 0..dim {
-                                    coords[v * dim + c] = raw[(e * npe + kl) * dim + c];
-                                }
-                                break 'outer;
-                            }
+                    if overlap[v] > 0 {
+                        // `nval(v) /= overlap[v]` — a true division, not a
+                        // multiply by the reciprocal (they differ in the last
+                        // bit for `overlap` not a power of two).
+                        let n = overlap[v] as f64;
+                        for c in 0..dim {
+                            coords[v * dim + c] /= n;
                         }
                     }
                 }
@@ -1465,11 +1512,23 @@ fn nodes_dof_values<const D: usize>(
                 _ => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful discontinuous `nodes` numbering for \
-                         {et:?} (only Hex8, Quad4, Tri3 and Prism6 are implemented); no \
-                         `nodes` section was written"
+                         {et:?} (only Hex8, Quad4, Tri3, Tet4 and Prism6 are implemented — see \
+                         `mfem_l2_slots`); no `nodes` section was written"
                     )))
                 }
             };
+            // The table's own row length must be the lattice size of `order`:
+            // `perm` below maps the *lattice*'s slots, so a table with a
+            // different number of nodes per element (a stale `order`, or a
+            // corner-only row) would be indexed out of range.
+            if npe != factory.len() {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: the mesh's geometry table has {npe} nodes per element but \
+                     MFEM's `{et:?}` discontinuous order-{order} lattice has {} — the table is \
+                     not on that lattice; no `nodes` section was written",
+                    factory.len()
+                )));
+            }
             let perm: Vec<usize> = lex_slot_permutation(&factory, &mfem).ok_or_else(|| {
                 FemError::Mesh(
                     "write_mfem: the mesh's geometry slots are not on the element's own node \
@@ -1509,6 +1568,7 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
         ElementType::Hex8 => HexQk::new(p).dof_coords(),
         ElementType::Tri3 => fem_element::lagrange::H1TriPk::new(p).dof_coords(),
         ElementType::Prism6 => fem_element::lagrange::PrismPk::new(p).dof_coords(),
+        ElementType::Tet4 => fem_element::lagrange::factory::H1TetPk::new(p).dof_coords(),
         _ => return None,
     })
 }
@@ -1522,10 +1582,12 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
 ///   `ix + iy·(p+1) + iz·(p+1)²`), exactly what [`QuadQk::new_lex`] /
 ///   [`HexQk::new_lex`] enumerate (already pinned against MFEM's own
 ///   `L2_T1_3D_P3` output by `crates/io/tests/nodes_writer.rs`);
-/// * `L2_TriangleElement` enumerates its `(p+1)(p+2)/2` nodes as
-///   `for (j = 0..p) for (i = 0..p-j)` over the `w`-normalised Gauss-Lobatto
-///   barycentric points `(op[i]/w, op[j]/w)`, `w = op[i]+op[j]+op[p-i-j]` —
-///   the *same point set* as `H1TriPk`, in a different order;
+/// * `L2_TetrahedronElement` (`fe_l2.cpp:695`) enumerates its
+///   `(p+1)(p+2)(p+3)/6` nodes with the triangle loop one dimension higher —
+///   `for (k = 0..p) for (j = 0..p-k) for (i = 0..p-j-k)` over the
+///   `w`-normalised Gauss-Lobatto barycentric points
+///   `(op[i]/w, op[j]/w, op[k]/w)`, `w = op[i]+op[j]+op[k]+op[p-i-j-k]` — the
+///   *same point set* as `H1TetPk`, in a different order (D813-5);
 /// * `L2_WedgeElement` (`fe_l2.cpp:839`) composes `L2_TriangleElement ×
 ///   L2_SegmentElement`: its `t_dof`/`s_dof` fill loop leaves
 ///   `t_dof[m] = m mod T`, `s_dof[m] = m / T` (`T = (p+1)(p+2)/2` — the
@@ -1538,8 +1600,8 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
 ///   The point set coincides with `PrismPk`'s GLL lattice (both build on
 ///   `Poly_1D`'s `BasisType::GaussLobatto` closed points — classical
 ///   Gauss-Lobatto-Legendre, `p = 3`: `{0, 0.276393…, 0.723607…, 1}`).
-/// * every other family (tets, pyramids) is left out: its L2 ordering has not
-///   been verified against MFEM here.
+/// * every other family (pyramids) is left out: its L2 ordering has not been
+///   verified against MFEM here.
 fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
     use fem_element::lagrange::factory::{HexQk, QuadQk};
     if p == 0 {
@@ -1579,6 +1641,29 @@ fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
                     for i in 0..=(p - j) {
                         let w = gll[i] + gll[j] + gll[p - i - j];
                         slots.push(vec![gll[k], gll[i] / w, gll[j] / w]);
+                    }
+                }
+            }
+            slots
+        }
+        ElementType::Tet4 => {
+            // `L2_TetrahedronElement` (`fem/fe/fe_l2.cpp:695`): the same
+            // nested loop the triangle arm above uses, one dimension higher —
+            // `k` outermost, then `j`, then `i` (innermost), with the
+            // `i+j+k <= p` filter and the four-term barycentric normalisation
+            // `w = op[i]+op[j]+op[k]+op[p-i-j-k]`, where `op` is the `p+1`
+            // Gauss-Lobatto points of the collection's basis type.
+            let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+                .0
+                .iter()
+                .map(|&x| 0.5 * (x + 1.0))
+                .collect();
+            let mut slots = Vec::with_capacity((p + 1) * (p + 2) * (p + 3) / 6);
+            for k in 0..=p {
+                for j in 0..=(p - k) {
+                    for i in 0..=(p - j - k) {
+                        let w = gll[i] + gll[j] + gll[k] + gll[p - i - j - k];
+                        slots.push(vec![gll[i] / w, gll[j] / w, gll[k] / w]);
                     }
                 }
             }
@@ -6008,4 +6093,90 @@ elements\n1\n1 5 1 2 3 4 5 6 7 8\n\nboundary\n6\n1 3 1 2 3 4\n1 3 5 6 7 8\n1 3 1
             HexGeom::Unsupported(_)
         ));
     }
+    /// **D813-5 — the `L2_TetrahedronElement` node ordering, in order.**
+    ///
+    /// `l2_geometry_slots` / `mfem_l2_slots` had no `Tet4` arm, so an order-1+
+    /// `L2_T1_3D_P*` `nodes` section could not be written at all and a *read*
+    /// table fell through to `perm = identity` with the D153 warning ("the
+    /// geometry is read with the file's own DOF order, which is likely
+    /// scrambled").
+    ///
+    /// The oracle is MFEM 4.10's own `L2_TetrahedronElement(p).GetNodes()` for
+    /// `p = 1, 2, 3` (`tests/fixtures/d813_mfem_l2tet_nodes_p1to3.txt`, written
+    /// by `$HOME/work/d78main/d813_tet_probe`), compared **element-by-element in
+    /// order** — a set comparison would miss an interior-node scramble, which is
+    /// invisible on a straight mesh because the geometry is only sampled at the
+    /// nodes.
+    ///
+    /// `L2_TetrahedronElement` (`fem/fe/fe_l2.cpp:695`) enumerates its
+    /// `(p+1)(p+2)(p+3)/6` nodes as
+    /// `for (k = 0..p) for (j = 0..p-k) for (i = 0..p-j-k)` over
+    /// `(op[i]/w, op[j]/w, op[k]/w)`, `w = op[i]+op[j]+op[k]+op[p-i-j-k]`, with
+    /// `op` the `p+1` closed Gauss-Lobatto points of the collection on `[0,1]`
+    /// (`L2_FECollection`'s `GaussLobatto` basis type) — the same point set as
+    /// `H1TetPk`, in a different order.
+    #[test]
+    fn d813_tet_l2_nodes_match_mfem_in_order() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/d813_mfem_l2tet_nodes_p1to3.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("d813 tet oracle").replace("\r\n", "\n");
+
+        let mut tables = 0usize;
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        while let Some(header) = lines.next() {
+            let h: Vec<&str> = header.split_whitespace().collect();
+            if h.is_empty() {
+                continue;
+            }
+            assert_eq!(h[0], "p", "bad header: {header:?}");
+            assert_eq!(h[2], "dof", "bad header: {header:?}");
+            assert_eq!(h[4], "geom", "bad header: {header:?}");
+            let p: usize = h[1].parse().expect("p");
+            let ndof: usize = h[3].parse().expect("dof");
+            assert_eq!(h[5], "4", "geometry code 4 (TETRAHEDRON)");
+            let want: Vec<Vec<f64>> = (0..ndof)
+                .map(|k| {
+                    let row = lines.next().expect("node row");
+                    let t: Vec<&str> = row.split_whitespace().collect();
+                    assert_eq!(t[0], "i", "bad node row: {row:?}");
+                    assert_eq!(
+                        t[1].parse::<usize>().expect("index"),
+                        k,
+                        "p={p}: node rows must be in order"
+                    );
+                    t[2..5].iter().map(|s| s.parse::<f64>().expect("coord")).collect()
+                })
+                .collect();
+            assert_eq!(ndof, (p + 1) * (p + 2) * (p + 3) / 6, "p={p}: node count");
+
+            let got = mfem_l2_slots(ElementType::Tet4, p)
+                .unwrap_or_else(|| panic!("p={p}: no Tet4 arm in mfem_l2_slots"));
+            assert_eq!(got.len(), ndof, "p={p}: count");
+            for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.len(), 3, "p={p} node {k}: 3 components");
+                for d in 0..3 {
+                    assert!(
+                        (g[d] - w[d]).abs() <= 1e-15,
+                        "p={p} node {k} component {d}: {g:?} vs MFEM {w:?}"
+                    );
+                }
+            }
+
+            // The mesh-side table must be the *same point set* (that is all
+            // `lex_slot_permutation` needs), and the permutation must exist.
+            let mesh_slots = l2_geometry_slots(ElementType::Tet4, p)
+                .unwrap_or_else(|| panic!("p={p}: no Tet4 arm in l2_geometry_slots"));
+            assert_eq!(mesh_slots.len(), ndof, "p={p}: mesh-side count");
+            assert!(
+                lex_slot_permutation(&mesh_slots, &got).is_some(),
+                "p={p}: the tet L2 ordering and the H1TetPk lattice must be the \
+                 same point set"
+            );
+            tables += 1;
+        }
+        assert_eq!(tables, 3, "p = 1, 2, 3");
+    }
+
 }

@@ -28,7 +28,7 @@ use fem_assembly::{
     standard::MassIntegrator,
 };
 use fem_linalg::CooMatrix;
-use fem_mesh::{refine_uniform, topology::MeshTopology, Mesh};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{
     SolverConfig, solve_cg,
     ode::{Rk4, TimeStepper},
@@ -75,17 +75,25 @@ fn main() {
     let mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
     let dim = 2;
 
-    // Bounding box for velocity/IC mapping
-    let mut bb_min = vec![f64::MAX; dim];
-    let mut bb_max = vec![f64::MIN; dim];
-    for n in 0..mesh.n_nodes() as u32 {
-        let c = mesh.node_coords(n);
-        for d in 0..dim { bb_min[d] = bb_min[d].min(c[d]); bb_max[d] = bb_max[d].max(c[d]); }
-    }
-
     let mesh = if args.refine > 0 {
         let mut m = mesh; for _ in 0..args.refine { m = refine_uniform(&m); } m
     } else { mesh };
+
+    // Bounding box for the velocity/IC mapping.
+    //
+    // `ex9.cpp:241` calls `mesh.GetBoundingBox(bb_min, bb_max, max(order, 1))`
+    // **after** the uniform-refinement loop and **on the refined mesh**
+    // (`:232-241`).  With a geometry table present (`Nodes != NULL` — the
+    // default mesh, `periodic-hexagon.mesh`, carries a folded `L2_T1_2D_P1`
+    // table) that arm samples each element's isoparametric geometry on
+    // `GlobGeometryRefiner.Refine(geom, ref)` instead of taking the vertex
+    // extrema (D813-3).  The old code here took the vertex min/max of the
+    // *unrefined* mesh, which for the folded periodic table is the set of
+    // means of the folded copies — a completely different box, and therefore a
+    // different initial condition *and* a different velocity field.
+    let (bb_lo, bb_hi) = mesh.get_bounding_box(args.order.max(1) as i32);
+    let bb_min = bb_lo.to_vec();
+    let bb_max = bb_hi.to_vec();
 
     let problem = match args.problem {
         0 => DgAdvectionProblem::Translation,

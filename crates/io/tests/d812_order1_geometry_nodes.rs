@@ -498,15 +498,17 @@ fn d812_order1_continuous_geometry_writes_h1_p1_nodes() {
 /// The folded per-vertex table of an `L2_T1_2D_P1` mesh: geometry slot `s` of
 /// element `e` describes the physical vertex at connectivity position `s` and
 /// holds one of the copies that vertex has across the elements claiming it.
-/// `last_wins` selects which copy the table keeps (the reader keeps the first,
-/// MFEM the last — see the test below).
+/// `first_wins` selects which copy the table keeps (the first one, or the last
+/// one).  **Neither is MFEM's rule**: MFEM's `Mesh::vertices` for such a mesh is
+/// the *mean* over the references (D813-2 — see
+/// `crates/io/tests/d813_reader_vertex_table.rs` for the oracle sweep).
 ///
 /// The slot ↔ connectivity-position identity is the composition of the two
 /// permutations `l2_curved_nodes.rs` pins: the geometry table's slot `s` holds
 /// the file's L2 row `P1_QUAD_LEX_OF_SLOT[s]` (`[0, 1, 3, 2]`), and file row `j`
 /// is the lexicographic corner of connectivity position
 /// `P1_QUAD_LEX_OF_SLOT[j]` — the same involution, so it cancels.
-fn folded_vertex_table(mesh: &Mesh<2>, last_wins: bool) -> Vec<[f64; 2]> {
+fn folded_vertex_table(mesh: &Mesh<2>, first_wins: bool) -> Vec<[f64; 2]> {
     let g = mesh.geometry.as_ref().expect("L2 P1 geometry table");
     assert_eq!(g.nodes_per_elem, 4, "P1 quads only");
     let npe = g.nodes_per_elem;
@@ -517,7 +519,7 @@ fn folded_vertex_table(mesh: &Mesh<2>, last_wins: bool) -> Vec<[f64; 2]> {
             let v = verts[k] as usize;
             let n = g.conn[e * npe + k] as usize;
             let val = [g.coords[n * 2], g.coords[n * 2 + 1]];
-            if last_wins || table[v][0].is_nan() {
+            if !first_wins || table[v][0].is_nan() {
                 table[v] = val;
             }
         }
@@ -526,38 +528,38 @@ fn folded_vertex_table(mesh: &Mesh<2>, last_wins: bool) -> Vec<[f64; 2]> {
     table
 }
 
-/// **Reader divergence, pinned with MFEM's own output as the oracle.**
+/// **Reader rule, with MFEM's own output as the oracle — corrected (D813-2).**
 ///
-/// For a mesh whose `.mesh` `nodes` section is discontinuous (order 1), the
-/// mesh-level vertex table is a choice: the same vertex index is claimed by
-/// several elements at *different* positions (that is what "folded" means for a
-/// geometrically periodic mesh).  MFEM's own table for
-/// `data/periodic-hexagon.mesh` — read out of
-/// `tests/fixtures/d812_mfem_h1p1_periodic-hexagon.mesh.txt`, i.e.
-/// `Mesh::SetCurvature(1, false)` + `Mesh::Save(out, 16)` on that very file —
-/// keeps the copy of the **last** element that references each vertex, while
-/// `read_mfem` keeps the **first** (`crates/io/src/mfem.rs`, "take the position
-/// it has in the first element that references it").  Four of the twelve
-/// vertices differ, and those are exactly the ones the periodic wrap copies.
+/// Round 77 registered this as "the reader keeps the *first* copy, MFEM keeps
+/// the *last*", with `tests/fixtures/d812_mfem_h1p1_periodic-hexagon.mesh.txt`
+/// (`Mesh::SetCurvature(1, false)` + `Mesh::Save(out, 16)`) as MFEM's table.
+/// Only half of that is true.  The **re-save** is last-wins, but because an H1
+/// rebuild runs `GridFunction::ProjectCoefficient` (`fem/gridfunc.cpp:2450`),
+/// whose element loop overwrites shared dofs.  The **read** path is
+/// `Mesh::Loader` → `SetVerticesFromNodes` → `GetNodalValues(Vector &, int)`
+/// (`fem/gridfunc.cpp:1889`), which stores the **arithmetic mean** over every
+/// element reference of the per-element geometry value at that vertex.
 ///
-/// The divergence is invisible to element geometry — everything downstream
-/// evaluates the *per-element* table — but it is visible to consumers of the
-/// vertex table (face transformations) and to any writer that re-emits the
-/// geometry as a continuous field, which is why the continuous-arm oracle above
-/// has to be fed MFEM's table rather than the reader's.
+/// So the reader's table is neither `first` nor `last` here: it equals the mean
+/// on 12/12 vertices, while the two wrong rules differ from it on the wrapped
+/// vertices 1, 2, 3, 4 (first) and 1, 2, 3 (last).  The full sweep over
+/// `periodic-{hexagon,square,cube}` lives in
+/// `crates/io/tests/d813_reader_vertex_table.rs`; this test keeps the D812-1
+/// file's own teeth: the re-save fixture is *not* the reader's table, which is
+/// exactly why the continuous-arm test above has to install MFEM's vertex table
+/// by hand before writing.
 #[test]
-fn d812_reader_folded_vertex_table_diverges_from_mfems() {
+fn d812_reader_folded_vertex_table_is_the_mean_not_a_copy() {
     let (mesh, _) = load("periodic-hexagon.mesh");
-    let first = folded_vertex_table(&mesh, false);
-    let last = folded_vertex_table(&mesh, true);
-
-    // `read_mfem` keeps the first copy, bit for bit.
+    let first = folded_vertex_table(&mesh, true);
+    let last = folded_vertex_table(&mesh, false);
     let reader_table: Vec<[f64; 2]> = (0..mesh.n_nodes() as usize)
         .map(|v| [mesh.coords[2 * v], mesh.coords[2 * v + 1]])
         .collect();
-    assert_eq!(reader_table, first, "reader vertex table is first-element-wins");
 
-    // MFEM's table (the reference file) is the last copy.
+    // MFEM's re-save table (H1 rebuild) *is* the last copy — that diagnosis of
+    // round 77 stands, and it is what makes the H1 fixture a valid oracle for
+    // the *continuous writer*, not for the reader.
     let golden_rows = nodes_rows(&golden("d812_mfem_h1p1_periodic-hexagon.mesh.txt"));
     let close = |a: &[[f64; 2]], b: &[[f64; 2]]| -> Vec<usize> {
         (0..a.len())
@@ -567,14 +569,47 @@ fn d812_reader_folded_vertex_table_diverges_from_mfems() {
     assert_eq!(
         close(&golden_rows, &last),
         Vec::<usize>::new(),
-        "MFEM's vertex table must be the last-element copy"
+        "the H1 re-save (ProjectCoefficient) keeps the *last* element's copy"
     );
-    let differing = close(&first, &last);
+    assert_eq!(close(&first, &last), vec![1, 2, 3, 4]);
+
+    // The reader is the mean: rebuild the mean from the geometry table and
+    // compare bit for bit (the accumulation order is MFEM's).
+    let g = mesh.geometry.as_ref().expect("L2 P1 geometry");
+    let npe = g.nodes_per_elem;
+    let mut sum = vec![[0.0_f64; 2]; mesh.n_nodes() as usize];
+    let mut cnt = vec![0_usize; mesh.n_nodes() as usize];
+    for e in 0..mesh.n_elems() as usize {
+        for k in 0..npe {
+            let v = mesh.elem_nodes(e as u32)[k] as usize;
+            let n = g.conn[e * npe + k] as usize;
+            sum[v][0] += g.coords[n * 2];
+            sum[v][1] += g.coords[n * 2 + 1];
+            cnt[v] += 1;
+        }
+    }
+    for v in 0..sum.len() {
+        let n = cnt[v] as f64;
+        sum[v][0] /= n;
+        sum[v][1] /= n;
+    }
+    assert_eq!(reader_table, sum, "the reader keeps the mean over references");
+
+    // …and the mean is not a copy for the wrapped vertices: it differs from the
+    // first- *and* the last-copy rule on 0..4 (first vs last differ on 1..4,
+    // round 77's measurement).
     assert_eq!(
-        differing,
-        vec![1, 2, 3, 4],
-        "the two conventions differ on the wrapped vertices only — if this set \
-         moves, re-measure the divergence before touching the reader"
+        close(&sum, &first),
+        vec![0, 1, 2, 3, 4],
+        "first-wins would differ on the wrapped corners — if this set moves, \
+         re-measure the divergence before touching the reader"
+    );
+    assert_eq!(close(&sum, &last), vec![0, 1, 2, 3, 4]);
+    assert_eq!(close(&first, &last), vec![1, 2, 3, 4]);
+    assert_eq!(
+        close(&golden_rows, &reader_table),
+        vec![0, 1, 2, 3, 4],
+        "the *re-save* table is not the reader's table (D813-2)"
     );
 }
 
