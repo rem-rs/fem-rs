@@ -909,11 +909,15 @@ fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemRe
 /// every connectivity entry by one, which made MFEM either abort with
 /// `Invalid mesh topology` or overrun its vertex array.
 ///
-/// **High-order geometry**: when the mesh carries a curved geometry table
-/// (`Mesh::geom_order() > 1`, set by `Mesh::set_curvature`) the file gets an
-/// MFEM `nodes` section and — exactly as `Mesh::Printer` does — the `vertices`
-/// section holds only the vertex count, with the *space dimension* moving into
-/// the section's `VDim` line (`mesh/mesh_readers.cpp:105-110`).  The continuous
+/// **High-order geometry**: when the mesh carries a geometry table (MFEM's
+/// `Nodes != NULL`; in fem-rs anything but `Mesh::geometry == None`) the file
+/// gets an MFEM `nodes` section and — exactly as `Mesh::Printer` does — the
+/// `vertices` section holds only the vertex count, with the *space dimension*
+/// moving into the section's `VDim` line (`mesh/mesh_readers.cpp:105-110`).
+/// The gate is the *presence* of the table, not its order (D812-1): MFEM's
+/// only way to drop a `nodes` field is `Mesh::SetCurvature(order <= 0)`
+/// (`mesh/mesh.cpp:7214`), while `Mesh::SetCurvature(1, discont)` legitimately
+/// writes an order-**1** `H1_<dim>D_P1` / `L2_T1_<dim>D_P1` section.  The continuous
 /// (`H1_<dim>D_P<p>`) numbering is implemented for hexahedra, tetrahedra,
 /// prisms (wedges), 2-D quadrilaterals and 2-D triangles and the discontinuous
 /// (`L2_T1_<dim>D_P<p>`) one for hexahedra, quads, triangles and prisms; any
@@ -1223,8 +1227,25 @@ fn zero_subnormal(s: f64) -> f64 {
 /// The `nodes` dof values of `mesh`, laid out for [`write_nodes_section`], plus
 /// the element order and the dof count.
 ///
-/// Returns `Ok(None)` for a straight-sided mesh (`geom_order() == 1`), which
-/// MFEM stores as a plain `vertices` coordinate block.
+/// Returns `Ok(None)` for a straight-sided mesh (no geometry table at all),
+/// which MFEM stores as a plain `vertices` coordinate block.  **The gate is the
+/// table's presence, not its order** (D812-1): MFEM writes the section whenever
+/// `Nodes != NULL` and its only way to clear `Nodes` is `Mesh::SetCurvature(0)`
+/// (`mesh/mesh.cpp:7214`), so a table of order 1 must be written back as the
+/// `nodes` field it was read from.  Dropping an order-1 **discontinuous**
+/// table is not a formatting loss but silent geometry corruption: the folded
+/// per-element vertex positions (how `data/periodic-{hexagon,segment,square,
+/// cube}.mesh` encode their periodic geometry) are replaced by the mesh's
+/// single vertex table, i.e. the element map the file described is gone.
+///
+/// An order-1 table can only reach here through an `L2_T1_*_P1` `nodes` section
+/// (`build_h1_geometry` refuses to build a continuous table below order 2 and
+/// `Mesh::set_curvature(1)` clears one), so a *reader-produced* order-1 table
+/// must be written with [`NodesSpace::Discontinuous`]; asking for the
+/// continuous space still works — it is the faithful `H1_<dim>D_P1` numbering —
+/// but it is only accepted when the table's node values really are the shared
+/// vertex coordinates (the usual continuity check below), which a folded
+/// periodic table is not.
 ///
 /// **The numbering is MFEM's, not fem-rs's.**  For a continuous space the
 /// per-slot maps are the ones the reader uses ([`hex_slot_map`] for D41,
@@ -1242,9 +1263,24 @@ fn nodes_dof_values<const D: usize>(
     mesh: &Mesh<D>,
     space: NodesSpace,
 ) -> FemResult<Option<(u8, usize, Vec<f64>)>> {
-    let order = mesh.geom_order();
-    if order <= 1 {
+    // D812-1: MFEM's emission rule is `Nodes != NULL`, *not* `order > 1`
+    // (`mesh/mesh.cpp:12551` writes the section unconditionally when the mesh
+    // has a nodal grid function; `SetCurvature(0)` at `mesh/mesh.cpp:7214` is
+    // the only place `Nodes` is dropped).  An order-1 table therefore has to be
+    // written, and only its *absence* falls back to the `vertices` block.
+    let Some(geo) = mesh.geometry.as_ref() else {
         return Ok(None);
+    };
+    let order = geo.order;
+    if order == 0 {
+        // A zero-order table is malformed (MFEM's `SetCurvature` refuses
+        // `order <= 0` by clearing `Nodes`; no `nodes` collection has order 0)
+        // and the slot maps below index with `order - 1`.
+        return Err(FemError::Mesh(
+            "write_mfem: the mesh's geometry table claims polynomial order 0, which no MFEM \
+             `nodes` collection has"
+                .into(),
+        ));
     }
     let dim = mesh.topological_dim() as usize;
     let et = mesh.element_type_at(0);
@@ -1266,11 +1302,6 @@ fn nodes_dof_values<const D: usize>(
         }
     }
     let sdim = D;
-    let geo = mesh.geometry.as_ref().ok_or_else(|| {
-        FemError::Mesh(
-            "write_mfem: mesh reports geometric order > 1 but carries no geometry table".into(),
-        )
-    })?;
     let n_elems = mesh.n_elements();
     let npe = geo.nodes_per_elem;
     if npe == 0 {
@@ -5707,94 +5738,25 @@ pub fn write_gf_file(
 /// ...
 /// ```
 ///
-/// A `precision` of 8 reproduces the C++ `ostream::precision(8)` setting.
-/// fem-rs vector FE spaces use `fem_space::Ordering::ByNodes` (= MFEM
-/// `Ordering::byNODES`, block layout: all component-0 DOFs, then component-1,
-/// …; `vdof = dof + ndofs*vd`), so the ordering line is always `0` —
-/// matching MFEM `GridFunction::Save`.
-/// Format a `f64` exactly like C's `printf("%.16g", x)` — which is what
-/// MFEM `Vector::Print` (via the default `std::ostream` `floatfield` with
-/// precision 16) produces for `GridFunction::Save`.  Used to make `.gf`
-/// output text-identical to the C++ reference.
+/// `precision` is the **stream precision** MFEM's harness sets on the output
+/// stream (`ofstream::precision(p)`, e.g. ex9's `precision = 8`), and the values
+/// are rendered exactly as `Vector::Print` (`linalg/vector.cpp:870`) does it:
+/// `os << value` in the stream's defaultfloat mode, i.e. `%g` with `precision`
+/// significant digits — plain fixed notation for `1e-4 <= |v| < 10^precision`
+/// with trailing zeros stripped, scientific otherwise.  (D812-2: this used to be
+/// `{:.prec$e}`, always scientific, which is *not* what MFEM writes; e.g. `0.5`
+/// came out as `5.000000e-1` and `0.0` as `0.000000e0`.)
 ///
-/// Rules (matching `%.16g`): at most 16 significant digits; trailing zeros
-/// stripped; fixed notation for decimal exponent in `[-4, 16)`, scientific
-/// notation otherwise (exponent sign always present, at least two digits).
-fn c_printf_g16(x: f64) -> String {
-    if x == 0.0 {
-        return "0".to_string();
-    }
-    if !x.is_finite() {
-        return x.to_string();
-    }
-    // 16 significant digits via scientific notation with 15 decimals.
-    let s = format!("{:.15e}", x);
-    let (mant, exp_str) = s.split_once('e').expect("scientific format");
-    let exp: i32 = exp_str.parse().expect("exponent");
-    let neg = mant.starts_with('-');
-    let digits: String = mant
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect();
-    // Strip trailing zeros like %g.
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    if (-4..16).contains(&exp) {
-        // Fixed notation: decimal point sits after digit index `exp`.
-        let mut out = String::new();
-        if neg && digits != "0" {
-            out.push('-');
-        }
-        let dot = 1 + exp; // 0-based position of the decimal point
-        if dot <= 0 {
-            out.push_str("0.");
-            for _ in 0..-dot {
-                out.push('0');
-            }
-            out.push_str(digits);
-        } else if dot as usize >= digits.len() {
-            out.push_str(digits);
-            for _ in 0..(dot as usize - digits.len()) {
-                out.push('0');
-            }
-        } else {
-            out.push_str(&digits[..dot as usize]);
-            out.push('.');
-            out.push_str(&digits[dot as usize..]);
-        }
-        out
-    } else {
-        // Scientific notation, exponent with sign and ≥ 2 digits.
-        let mut m = digits.to_string();
-        if m.len() > 1 {
-            m.insert(1, '.');
-        }
-        let sign = if exp >= 0 { "+" } else { "-" };
-        let e = format!("{}{:02}", sign, exp.abs());
-        format!("{}{}e{}", if neg { "-" } else { "" }, m, e)
-    }
-}
-
-/// Write a `.gf` file in MFEM's native FiniteElementSpace format.
+/// `precision >= 16` therefore renders at 16 significant digits and everything
+/// else at `precision`; both go through the crate's `%.{p}g` renderer
+/// ([`format_g`], the same one the `.mesh` writer uses), which is also what
+/// rounds `-0.0` to `-0` the way glibc's `printf` does.
 ///
-/// Produces files compatible with GLVis (`glvis -m mesh.mesh -g sol.gf`).
-/// The format matches MFEM's `GridFunction::Save(std::ostream &)` output:
-///
-/// ```text
-/// FiniteElementSpace
-/// FiniteElementCollection: H1_<dim>D_P<order>
-/// VDim: <vdim>
-/// Ordering: <ordering>
-/// <value 1>
-/// <value 2>
-/// ...
-/// ```
-///
-/// `precision` controls the value formatting:
-/// - `precision >= 16`: `printf("%.16g")` style (16 significant digits,
-///   defaultfloat) — text-identical to MFEM `Vector::Print` at precision 16.
-/// - `precision < 16`: `{:.prec$e}` scientific notation with `precision`
-///   significant digits.
+/// `space_type` is MFEM's **collection name prefix** — `FiniteElementCollection:
+/// {space_type}_{dim}D_P{order}` — so it has to be the name of the space the
+/// values live in, basis suffix included: a Gauss-Lobatto `L2_FECollection` is
+/// `L2_T1` (`L2_T1_2D_P3`, what `DG_FECollection(p, dim, BasisType::GaussLobatto)`
+/// reports), while `H1` carries no suffix.
 pub fn write_mfem_gf_file(
     path: impl AsRef<std::path::Path>,
     dim: usize, dofs: &[f64],
@@ -5808,16 +5770,8 @@ pub fn write_mfem_gf_file(
     writeln!(file, "VDim: {vdim}")?;
     writeln!(file, "Ordering: 0")?;
     writeln!(file)?;
-    // Values: precision controls total significant digits (C++ precision(8) → 8 sf)
-    // Use {:.prec$e} where prec = precision - 1 gives precision total significant digits
-    // (e.g. prec=7 gives 8 sf: "4.2830810e+01" for value 42.83081)
-    let sig_digits = precision.saturating_sub(1).max(0);
     for v in dofs {
-        if precision >= 16 {
-            writeln!(file, "{}", c_printf_g16(*v))?;
-        } else {
-            writeln!(file, "{:.prec$e}", v, prec = sig_digits)?;
-        }
+        writeln!(file, "{}", format_g(*v, precision.max(1)))?;
     }
     Ok(())
 }

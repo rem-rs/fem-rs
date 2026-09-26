@@ -30,7 +30,7 @@
 use fem_element::lagrange::factory::{HexQk, H1TetPk, H1TriPk, QuadQk};
 use fem_element::lagrange::PrismPk;
 use fem_element::ReferenceElement;
-use fem_io::mfem::{read_mfem_file, read_mfem_mixed_h1_geometry_file};
+use fem_io::mfem::read_mfem_file;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::MeshTopology;
 

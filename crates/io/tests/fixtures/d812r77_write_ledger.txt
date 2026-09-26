@@ -1,0 +1,120 @@
+# D812-1 .mesh write-path byte ledger.
+#
+# Captured WITH the D812-1 fix in the tree (`nodes_dof_values` gated on the
+# geometry table's presence instead of `geom_order() > 1`).  The pre-fix
+# equivalence for straight meshes is structural: that diff's only behavioural
+# hunk is the gate, and `geometry == None` returns `Ok(None)` exactly where the
+# old `geom_order() <= 1` did, so every following byte is unchanged code.
+#
+# Columns: name<TAB>status<TAB>sha256<TAB>bytes<TAB>lines<TAB>geometry<TAB>
+#          geom_order<TAB>nodes<TAB>note
+# status: ok | read_err | write_err | skip_1d
+# note:   why a refusal happens (documentation; not asserted)
+# Asserted: the status; the digest of every geometry-free `ok` row (byte
+# golden); and that every geometry-bearing `ok` row has a `nodes` section.
+amr-hex.mesh	read_err		0	0	0	1	0	nc_mesh (not a conforming MFEM mesh)
+amr-quad.mesh	read_err		0	0	0	1	0	nc_mesh (not a conforming MFEM mesh)
+ball-nurbs.mesh	ok	2cc98efddaff1c8f65935d22c504da21892d9ffc3a6f5557cb88e6446e1c7df5	1384	56	0	1	0	-
+beam-hex-nurbs.mesh	ok	9d1b9cd903ad87d54b57731047b8a1893db1df0e1f01d591805034e88531b963	503	51	0	1	0	-
+beam-hex.mesh	ok	c02409d96e517472cc7be88f8a199030492bda8abced9db5a081023ace038c30	1191	105	0	1	0	-
+beam-quad-amr.mesh	read_err		0	0	0	1	0	nc_mesh (not a conforming MFEM mesh)
+beam-quad-nurbs-sf.mesh	ok	9d0678f811930ca0573dd378b8eba8060372a96ad7a45393cb6bdd5ec1413437	355	41	0	1	0	-
+beam-quad-nurbs.mesh	ok	9d0678f811930ca0573dd378b8eba8060372a96ad7a45393cb6bdd5ec1413437	355	41	0	1	0	-
+beam-quad.mesh	ok	7bde8386090d2dd5d3452c1c3a0f40d03df0c00fb9c130e95355ca0b2a9e9fb4	604	71	0	1	0	-
+beam-tet.mesh	ok	5db2d898b7d71f6cb0194c5ae90927efae75a574dfd52222e00033def410dbff	2008	179	0	1	0	-
+beam-tri.mesh	ok	302d08e792a719b87991fa623b89297b800b7674c4686c83f4455cf747534930	677	79	0	1	0	-
+beam-wedge.mesh	ok	11fdb8a5289efcb5a70ae07aecdda4f70bc47de9caf1f0a9772cabb0eaa57ec0	973	88	0	1	0	-
+box-cylinder.mesh	ok	1c3210f118ccab4822fcc919e5ff874875d5b3b7efc1ff580d6d1002c1fa3a0c	27257	1143	1	2	1	-
+channel-bifurcation-2d.mesh	ok	399415eff5c11f0d2f1e4f9c4e52ce953ecea97c53dd73c0ff8ab0bd0cbb37cb	1368	156	0	1	0	-
+cube-nurbs.mesh	ok	85d250c753088501ab318f012986db00b5247b9ffb10c6b407f50f2dca690c63	399	42	0	1	0	-
+cube.mesh	ok	f09e4b2b72764fb8c9c811a823d287a4f50aac210a3fbb2b6ee06ae557a9c3ff	2244	190	1	2	1	-
+cylinder-hex.mesh	ok	c2fae365ff36ecceb9ab61f144237363bf48949499054be4dda673fd2183d714	26347	847	0	1	0	-
+d235_pyramid_2x2x2.mesh	ok	db7f08ce7f6ecc032fb971640dc45667b22699ae1551ed36bb4e8c565648defa	1804	134	0	1	0	-
+d393_mixed_hex_tet.mesh	ok	bcd099fedf6bf4564e8269f7e4cc20d12e0a436109716e9fd258c1ad6fbc08d6	551	55	0	1	0	-
+d394_prism_stack.mesh	ok	8653bc58e6fec7ffde9ff1b1b902a98130b63e1616ea274a71181becc1f3895b	437	46	0	1	0	-
+d445_one_pyramid.mesh	ok	89f486d8aaa4231fc75080792a9b5013b7b99b2d0afd1584dca78c117af75e52	359	38	0	1	0	-
+d456_hex_ori1.mesh	ok	c6c319d3d125029ac2bf582e645f4b279a4c5e11fc39e70433f72dfb17299457	374	41	0	1	0	-
+d456_hex_ori3.mesh	ok	8f1f165ecc29f831e4e91ae9419e872e26e48f18f6ae0dd850fd64ce81bec2a7	374	41	0	1	0	-
+d456_hex_ori5.mesh	ok	9a2a4ce6d7a3787991f8be596ae617a21404eddd30ffe9a43e3084441e17eda9	374	41	0	1	0	-
+d456_hex_ori7.mesh	ok	9809eb49e68a75c15dfb85cb301b6d50ab7beb47aa0c363867db9ab994c0a4ba	374	41	0	1	0	-
+d456_prisq_ori3.mesh	ok	308f24dee2066196815d52ac84cd88fe126275bb04884c1ce55dc8ffbbf6031a	339	37	0	1	0	-
+d456_prisq_ori7.mesh	ok	33f87ec048c569c0e82e4699d55a737bb887e28df79b74965d7b453ad8aeaa02	339	37	0	1	0	-
+d456_prist_ori1.mesh	ok	8c7762b81080d681ec538b79ef6133228f32f202b845c7984599c29f51e68648	345	38	0	1	0	-
+d456_prist_ori3.mesh	ok	2d37aff0771ad9b1ef51c6cc53bf35104557a8e8606cf6f10865854519953805	345	38	0	1	0	-
+d456_prist_ori5.mesh	ok	b8b813126d42e273394343283cb4c7c44880614b9f117a1c044b16c8757e3c9f	345	38	0	1	0	-
+d456_tet_ori1.mesh	ok	43e2fed633af7f2adef8553222d5f19b6bc631c7e1497907ecdbf27f9d4ddf6d	364	34	0	1	0	-
+d456_tet_ori3.mesh	ok	43e2fed633af7f2adef8553222d5f19b6bc631c7e1497907ecdbf27f9d4ddf6d	364	34	0	1	0	-
+d456_tet_ori5.mesh	ok	43e2fed633af7f2adef8553222d5f19b6bc631c7e1497907ecdbf27f9d4ddf6d	364	34	0	1	0	-
+d525_hex222.mesh	ok	ee2168638905b2701145ddf4266df170c077fdebdd4ec661ce46edba07be3430	1031	86	0	1	0	-
+d525_prism221.mesh	ok	d4788c8d29b5b2b6dcf844ab0329f28da0d1b7ad5402c1c9b9c3b103b65b758b	835	77	0	1	0	-
+d525_pyramid_pair.mesh	ok	83a2306cc3949000958f6c026a28c659226806975f69769af9abc7fe7e5ea223	429	45	0	1	0	-
+d525_quad22.mesh	ok	e81b99ce4dee0d7bc5d0db002c59a6918a0b6ae66a03a417d4c60872219515f9	419	48	0	1	0	-
+d525_tet111.mesh	ok	e593f055aa3422d94296c8be9a8da287edaae3de54db936c815ae75ea0a89c5e	500	53	0	1	0	-
+d525_tri22.mesh	ok	07090c0cca739a9bc12e1eba9835f4071674508950ff929000293358f5aa426d	451	52	0	1	0	-
+d525_unit_prism.mesh	ok	145abf8e06ac9428012154aaa10eba5fc6a2d9f4ef5f2b48ce93a3cd19a78002	367	39	0	1	0	-
+d525_unit_pyramid.mesh	ok	3d67cfc8d8f8082f756bfb987ef3be389497d00da965a0dda4f8807f531395a6	355	38	0	1	0	-
+d547_prism221.mesh	ok	d4788c8d29b5b2b6dcf844ab0329f28da0d1b7ad5402c1c9b9c3b103b65b758b	835	77	0	1	0	-
+d667_curved_hex.mesh	ok	705ed1d8eeec5fe52b3e025e31d7e4effb66a11d6f607bbad5c4cccd056ae968	1274	67	1	2	1	-
+d667_curved_hex_w2.mesh	ok	58af29e809dcdee63cf4f63f00aa70bb064bd1db7f20827dd693c983cf0b0080	1277	67	1	2	1	-
+d667_curved_hex_w6.mesh	ok	244e9e1f1f5c759e16e52cc12daaa3a53076b90c681ca3a70f963e377bbd733c	1277	67	1	2	1	-
+d667_refined_curved.mesh	ok	1179974d109315cc200c5d6982857f1089dc3b08fa627b6eea9f34ce8b00014c	146172	5246	1	2	1	-
+d680_unit_hex_mfem.mesh	ok	08bfbfe7de774026fb83ff3c02a17e72f991dcbb235842c698aa6daa2b9fea97	399	42	0	1	0	-
+disc-nurbs.mesh	ok	fb84a4904f4b717d71c93eea90697998c9b8d8c8245beadc909201961dc41a6c	391	44	0	1	0	-
+escher-p2.mesh	ok	5e60c1dde011cc0cc049031e569db5cb1fc157c39894d674c3b22d3f03eb269e	4953	240	1	2	1	-
+escher-p3.mesh	ok	666f701c4327fd2d13d5c97b105ed27c0a15262765365d56b49868ad057036ef	19355	439	1	3	1	-
+escher.mesh	ok	176e4ae252753a34135f5422557cb2121b92827707444afcf7085ffc3ff99df3	1996	143	0	1	0	-
+fichera-amr.mesh	read_err		0	0	0	1	0	nc_mesh (not a conforming MFEM mesh)
+fichera-mixed-16-p2.mesh	write_err		0	0	1	2	0	ragged_geo (D627)
+fichera-mixed-16.mesh	ok	c8eac18a0daf6661da9543570d199ad7b49d195887285b227f36201ec7103315	1261	108	0	1	0	-
+fichera-mixed-p2.mesh	write_err		0	0	1	2	0	ragged_geo (D627)
+fichera-mixed.mesh	ok	d7a8257b904a5e504081a224a5858846623df2bed74873a89d926ca88990849e	1145	97	0	1	0	-
+fichera-q2.mesh	ok	b08b075b4cbff64bb9fc1b4358ecc406235f94fd8459838b79feb7d28b1e8988	4404	181	1	2	1	-
+fichera-q3.mesh	ok	4547762e6925e5c99eab34333a03ba5ba62ae41cf1726043a0142e98a0ae9599	18517	380	1	3	1	-
+fichera-waveguide.mesh	ok	a4ff0e0ffa8cbf63bba5829d89871584ba6e8de248fce4ac7a35d2497303a72c	1059	93	0	1	0	-
+fichera.mesh	ok	99655b93f0a3b361d4824ad1fa2a633cc246ddba7c84340f96cb8c80cc758e7f	984	84	0	1	0	-
+fluid-cht.mesh	ok	b2f2598dc590b9cf62091510ade42a2936452b05011fc65bbdca3e988ccf14fa	684	74	0	1	0	-
+hexagon.mesh	ok	18f3a7ba5c38c70b1ff1853142f7c4be7fc61a6592af6ed5268d3a763bb58e2d	452	43	0	1	0	-
+inline-hex.mesh	ok	78ecd264b08b3b6e9fd05864cf779d3de0d49343b98495bf69b79d9d1cc3ad47	5039	312	0	1	0	-
+inline-pyramid.mesh	ok	db7f08ce7f6ecc032fb971640dc45667b22699ae1551ed36bb4e8c565648defa	1804	134	0	1	0	-
+inline-quad.mesh	ok	cd7554e71a1ac830d741fb0ddf699d6fd9e246166294d450df5b968188357ccb	820	84	0	1	0	-
+inline-segment.mesh	skip_1d		0	0	0	1	0	read-only 1-D container
+inline-tet.mesh	ok	66d8d071d178b480f3f76539d94f449336d889272d45d4b68b9355a70418cc6f	10453	728	0	1	0	-
+inline-tri.mesh	ok	17013d3b21c8ddb48d635f81b20d403270629664a90f0d0d48fc35ca52dccbf9	968	100	0	1	0	-
+inline-wedge.mesh	ok	9f5d212fcdac03cfd4910522614d0c1e76f64a3b78be56d054254fdbe0679840	6425	408	0	1	0	-
+klein-bottle.mesh	ok	09ac4a3d604ac7b2dc035deae0318c32a271cd01fa991408dc5a8a070da4438a	26110	1313	1	3	1	-
+l-shape.mesh	ok	93988d514c2646b402233a369822539e22f885e5c4c31472773f7dd800b16a9c	403	46	0	1	0	-
+llnl-p3.mesh	write_err		0	0	1	3	0	ragged_geo (D627)
+mobius-strip.mesh	ok	48153a9c6a1c5525048145fbf0689d45e1cba66226382a4d1ca3a8529aa96286	4213	233	1	3	1	-
+multidomain-hex.mesh	ok	c34a01a768832ac4ddbe9fbbe106229b656b1b00f39976d80b5c8f805b610480	30575	804	1	2	1	-
+nc-nurbs3d.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
+nc3-nurbs.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
+octahedron.mesh	ok	f36c4ddc85f9dc701d1197b22e9a22e7fbb7eda7edf474052b51bb9f75a09645	406	43	0	1	0	-
+periodic-cube.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
+periodic-hexagon.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
+periodic-segment.mesh	read_err		0	0	0	1	0	dim1 (no 1-D reader)
+periodic-square.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
+pipe-nurbs-2d.mesh	ok	a133ab697f24ad362445d04f2d15d3b486bc2fb2455ca1b7b54163a08ff814c9	319	36	0	1	0	-
+pipe-nurbs-log.mesh	ok	9f50c80904353fe2bfad7a860b06dcdcc3c1ed38b2cf56eb26b5b03daaa26546	470	47	0	1	0	-
+pipe-nurbs.mesh	ok	9f50c80904353fe2bfad7a860b06dcdcc3c1ed38b2cf56eb26b5b03daaa26546	470	47	0	1	0	-
+ref-prism.mesh	ok	d364aadf93d19b3219c3f4470c2dc234294f7a1cc4dae3bd2820d3e468dadf1d	367	39	0	1	0	-
+rt-2d-q3.mesh	ok	f5beb5070f9670deac8d4c9d2b53824126f45f6d699cd12bbad304360b51ed7e	15439	774	1	3	1	-
+segment-nurbs.mesh	read_err		0	0	0	1	0	dim1 (no 1-D reader)
+solid-cht.mesh	ok	3f65d675c6ba1ebb63c160d798bcde3e6f0d52ee49ebbbaffa743fab5a603c0a	788	85	0	1	0	-
+square-disc-nurbs-patch.mesh	read_err		0	0	0	1	0	nurbs_patch_mesh
+square-disc-nurbs.mesh	ok	cf62bcf07992f8e01a0fbcddf6647f7d8c97a4924f609e872a57973dff626028	511	47	0	1	0	-
+square-disc-p2.mesh	ok	d335676a8d49dc5a1bd165ac044e3d16b35b76ee06013f54797a76d51bcfc62d	8990	591	1	2	1	-
+square-disc-p3.mesh	ok	7eb8099ccbb5142bb4996c4ccbd83aabdd2d5a7b3ac91483dbd588e7a126bf7c	30737	1000	1	3	1	-
+square-disc-surf.mesh	ok	39549c5e485fa881a62b3ec10026c388ded2d713a8f42b0a9e8eb0bf72deda92	9388	591	1	2	1	-
+square-disc.mesh	ok	5973cf321ddd514eb5d6a0c72a1a0d193df27db41d9ac8d6f0feafdb2dd4aa7d	4346	330	0	1	0	-
+square-mixed.mesh	ok	b429700cb4d0ffe593850ca115417b78e7e551a31457a23fff07fc1d25b3ef50	858	88	0	1	0	-
+square-nurbs-pw.mesh	ok	c7c9ac1c9f26fc4a54330eae6bd2c43b20cb86e45da5af6d445248e29c0946f9	319	36	0	1	0	-
+square-nurbs.mesh	ok	c7c9ac1c9f26fc4a54330eae6bd2c43b20cb86e45da5af6d445248e29c0946f9	319	36	0	1	0	-
+star-hilbert.mesh	ok	6900a0a34c70bdc145c040e3f3f8cedcbf4ba94ce1c9d69e8620120d71b4ee1b	1268	98	0	1	0	-
+star-mixed-p2.mesh	write_err		0	0	1	2	0	ragged_geo (D627)
+star-mixed.mesh	ok	2462abacf22e57e392a2d809cdf5f2e5a73dc1096d540efe604ad177b5f4afb7	1358	108	0	1	0	-
+star-q2.mesh	ok	1f65c6a0ca77fe743629b2011e70e278ba6415f90023523b9645d05e7773e89c	2756	174	1	2	1	-
+star-q3.mesh	ok	3f7037d8fde8f931eda095cce4eb9412fa144ffc15ac3245a6d6ad00fc39c958	8345	284	1	3	1	-
+star-surf.mesh	ok	6a85afdc2c8c5a15ebe19415b641f1eccabb3edc6a4af4810b98ffb723d0d75d	2745	174	1	2	1	-
+star.mesh	ok	cdbea7b66456bad0fdffec59d49ba6ddbd00e8c0b6e3311441537eaee78b7add	1268	98	0	1	0	-
+tinyzoo-3d.mesh	ok	3acf820be346faacf41daec3f10c4ef1b6d68323306d1f013861f433a10c40be	559	57	0	1	0	-
+toroid-wedge.mesh	ok	4d00fef9565b18af7f0f22bb1645259b71119869551ec786d37d56fbc183c67d	6863	237	1	3	1	-

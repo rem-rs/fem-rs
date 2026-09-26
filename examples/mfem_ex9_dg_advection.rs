@@ -12,7 +12,7 @@
 //!
 //! Reference: `mfem/ex9.cpp`
 
-use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
+use fem_io::mfem::{write_mfem_file_nodes, write_mfem_gf_file, NodesSpace};
 
 use fem_assembly::{
     Assembler,
@@ -52,12 +52,23 @@ fn main() {
     println!("   --ode-solver {}", args.ode_solver);
     println!("   --t-final {}", args.t_final);
     println!("   --time-step {}", args.dt);
+    // `OptionsParser::PrintOptions` prints the *negative* spelling of a bool
+    // option whose value is false (`ex9.cpp:192` declares
+    // `-imp-state/--implicit-state` **and** `-imp-slope/--implicit-slope` on the
+    // same variable), so the default run prints `--implicit-slope`.
+    println!(
+        "   {}",
+        if args.solve_implicit_state { "--implicit-state" } else { "--implicit-slope" }
+    );
     println!("   --no-visualization");
     println!("   --no-visit-datafiles");
     println!("   --no-paraview-datafiles");
     println!("   --ascii-datafiles");
     println!("   --visualization-steps 5");
-    println!();
+    // `args.PrintOptions(cout)` emits no blank line after the block; dropping it
+    // makes this stdout byte-identical to the C++ oracle (round 66/ex1
+    // precedent).  Only the `--mesh` path line and the `Done. Total time:` line
+    // (a wall-clock line the C++ does not print) differ from here on.
     println!("Device configuration: cpu");
     println!("Memory configuration: host-std");
     let mfem = fem_io::mfem::read_mfem_file(&args.mesh).expect("read mesh");
@@ -171,8 +182,16 @@ fn main() {
 
     // ── Initial output files (matching C++: ex9.mesh, ex9-init.gf) ──────────
     {
-        write_mfem_file("ex9.mesh", &mesh).expect("mesh write failed");
-        write_mfem_gf_file("ex9-init.gf", dim, &u, "L2", args.order, 1, 7).expect("write init gf");
+        // D812-1: the default mesh (`periodic-hexagon.mesh`) carries a
+        // **discontinuous** order-1 geometry field (`L2_T1_2D_P1`), which MFEM
+        // keeps through refinement and writes back as `Nodes` (`Mesh::Printer`).
+        // The continuous writer correctly refuses that folded table, so the
+        // faithful space must be requested explicitly (same shape as D805-3's
+        // ex27 fix).  Straight meshes are unaffected: with no geometry table the
+        // space argument is ignored and the plain `vertices` block is written.
+        write_mfem_file_nodes("ex9.mesh", &mesh, NodesSpace::Discontinuous)
+            .expect("mesh write failed");
+        write_mfem_gf_file("ex9-init.gf", dim, &u, "L2_T1", args.order, 1, 8).expect("write init gf");
     }
 
     // ── Time integration (explicit RK4, matching C++ default ode_solver=4) ──
@@ -192,13 +211,16 @@ fn main() {
         });
         t += dta; ti += 1;
         if ti % vis_steps == 0 || t >= args.t_final - 1e-14 {
-            println!("time step: {ti}, time: {t:.3}");
+            // `ex9.cpp` sets `cout.precision(8)` and streams the time with
+            // `operator<<` — i.e. `%g`, so `time: 0.05` and not `time: 0.050`
+            // (D812-2 residual B; `fmt_g` is the project's `printf("%g", x)`).
+            println!("time step: {ti}, time: {}", fem_solver::fmt_g(t));
         }
     }
 
     // ── Final output file (matching C++: ex9-final.gf) ──────────────────────
     {
-        write_mfem_gf_file("ex9-final.gf", dim, &u, "L2", args.order, 1, 7).expect("write final gf");
+        write_mfem_gf_file("ex9-final.gf", dim, &u, "L2_T1", args.order, 1, 8).expect("write final gf");
     }
     eprintln!("  Done. Total time: {:.3}s", t0.elapsed().as_secs_f64());
 }
@@ -221,7 +243,10 @@ impl Args {
             "-dt"|"--time-step" => { dt = it.next().and_then(|s|s.parse().ok()).unwrap_or(dt); }
             "-tf"|"--t-final" => { t_final = it.next().and_then(|s|s.parse().ok()).unwrap_or(t_final); }
             "-s"|"--ode-solver" => { ode_solver = it.next().and_then(|s|s.parse().ok()).unwrap_or(ode_solver); }
-            "-imp-state"|"--implicit-state"|"-imp-slope"|"--implicit-slope" => solve_implicit_state = true,
+            "-imp-state"|"--implicit-state" => solve_implicit_state = true,
+            // MFEM declares both spellings on the *same* bool (`ex9.cpp:192`),
+            // and `OptionsParser` sets it *false* for the "slope" spelling.
+            "-imp-slope"|"--implicit-slope" => solve_implicit_state = false,
             "-no-vis"|"--no-visualization" => {}
             _ => {}
         }}

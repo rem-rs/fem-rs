@@ -511,7 +511,7 @@ fn single_patch_representable_flags() {
             "{name} should be single-patch"
         );
         match doc.to_nurbs_file().unwrap() {
-            NurbsFile::Mesh1D(m) => assert_eq!(name, "segment-nurbs.mesh", "{name}: 1-D"),
+            NurbsFile::Mesh1D(_) => assert_eq!(name, "segment-nurbs.mesh", "{name}: 1-D"),
             NurbsFile::Mesh2D(m) => assert_eq!(m.n_patches(), 1, "{name}"),
             NurbsFile::Mesh3D(m) => assert_eq!(m.n_patches(), 1, "{name}"),
         }

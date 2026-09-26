@@ -96,19 +96,52 @@ fn scratch(name: &str) -> std::path::PathBuf {
     dir.join(name)
 }
 
-/// Teeth: on a **straight** periodic strip the continuous writer is fine (no
-/// geometry table at all), so the refusal below is specific to the
-/// discontinuous *geometry*, not to periodicity.
+/// Teeth: the refusal above is about the *discontinuous geometry table*, not
+/// about periodicity — the same periodic topology writes fine continuously once
+/// there is no table to preserve.
+///
+/// D812-1 correction: this test used to assert that a straight periodic mesh
+/// has "no nodes section at all".  That was wrong about both implementations:
+/// `make_periodic` deliberately snapshots the pre-merge per-element geometry
+/// into an order-1 table (`periodic_geometry_snapshot`, D56/D799-1), and MFEM
+/// does the same — its `Mesh::MakePeriodic` **materializes a `Nodes` field even
+/// for a straight input** (probe `tmp/d77b/probe/d812_periodic_nodes_probe.cpp`:
+/// `input: nodes=0` → `straight: nodes=1 fec=L2_T1_2D_P1`, and
+/// `curved in: nodes=1 fec=L2_T1_2D_P3`).  So the straight *periodic* mesh is
+/// itself an `L2_T1_*_P1` mesh and the continuous writer must refuse it; the
+/// invariant worth pinning is that dropping the table is what re-enables the
+/// continuous path (the gate follows the table, not the topology).
 #[test]
 fn d805_3_straight_periodic_strip_still_writes_continuously() {
     let m = strip_mesh()
         .make_periodic(&[(5, 6, [3.0, 0.0])], 1e-9)
         .expect("make_periodic");
     assert_eq!(m.geom_order(), 1);
+    // MFEM semantics: the stitch materialised an order-1 *discontinuous* field.
+    assert!(
+        m.geometry.is_some(),
+        "make_periodic must snapshot the pre-merge geometry (MFEM `Nodes != NULL`)"
+    );
     let p = scratch("straight.mesh");
     let _ = std::fs::remove_file(&p);
-    write_mfem_file(&p, &m).expect("a straight periodic mesh has no nodes section to argue about");
+    let err = write_mfem_file(&p, &m)
+        .expect_err("a folded order-1 table must not be written as a straight mesh");
+    assert!(
+        err.to_string().contains("shared by two elements with different coordinates"),
+        "unexpected error: {err}"
+    );
+
+    // Without the table (a mesh whose geometry really is its vertex table) the
+    // same periodic topology writes continuously, with no `nodes` section.
+    let mut straight = m.clone();
+    straight.geometry = None;
+    write_mfem_file(&p, &straight).expect("no geometry table ⇒ the `vertices` block");
     assert!(p.exists());
+    let text = std::fs::read_to_string(&p).expect("read");
+    assert!(
+        !text.lines().any(|l| l.trim() == "nodes"),
+        "a mesh without a geometry table must not grow a `nodes` section"
+    );
 }
 
 /// The defect and its fix, end to end.

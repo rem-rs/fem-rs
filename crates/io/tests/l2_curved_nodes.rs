@@ -94,8 +94,18 @@ fn curved_quad(order: u8) -> Mesh<2> {
     mesh
 }
 
-/// `order >= 2` only: `set_curvature(1)` clears the geometry, so a P1 mesh has
-/// no `nodes` section at all (both in MFEM and here).
+/// `order >= 2` only: `Mesh::set_curvature(1)` **clears** the geometry table, so
+/// a program-built P1 mesh has no table and therefore writes no `nodes` section
+/// (pinned by
+/// `d812_order1_geometry_nodes.rs::d812_straight_mesh_writes_no_nodes_section`).
+///
+/// That is a fem-rs representation choice, **not** MFEM behaviour: MFEM's
+/// `SetCurvature(1, false)` keeps a `Nodes` field (an `H1_<dim>D_P1` section on
+/// save) and `SetCurvature(1, true)` an `L2_T1_<dim>D_P1` one — only
+/// `SetCurvature(order <= 0)` drops it (`mesh/mesh.cpp:7214`).  The write side of
+/// that difference is D812-1; the fixtures that hit it are
+/// `data/periodic-{hexagon,square,cube}.mesh`, whose order-1 tables come from the
+/// *reader* (an `L2_T1_*_P1` `nodes` section), not from `set_curvature`.
 #[test]
 fn l2_curved_hex_roundtrip() {
     for order in 2..=3u8 {
