@@ -26,7 +26,7 @@ use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 use crate::interior_faces::InteriorFaceList;
 
-use super::dg_base::{face_point_geom, face_point_geom_3d};
+use super::dg_base::{face_point_geom, face_point_geom_3d_face};
 
 
 // ─── DgFaceQpData ─────────────────────────────────────────────────────────────
@@ -195,14 +195,8 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
                     nrm,
                 )
             } else {
-                let g1 = face_point_geom_3d(
-                    mesh, el, face_nodes[0], face_nodes[1], face_nodes[2],
-                    [xi_f[0], xi_f[1]],
-                );
-                let g2 = face_point_geom_3d(
-                    mesh, er, face_nodes[0], face_nodes[1], face_nodes[2],
-                    [xi_f[0], xi_f[1]],
-                );
+                let g1 = face_point_geom_3d_face(mesh, el, face_nodes, [xi_f[0], xi_f[1]]);
+                let g2 = face_point_geom_3d_face(mesh, er, face_nodes, [xi_f[0], xi_f[1]]);
                 let nrm = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]
                     + g1.nor[2] * g1.nor[2])
                     .sqrt()
@@ -471,10 +465,7 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
                 let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]).sqrt().max(1e-30);
                 (g.eip.to_vec(), g.xp.to_vec(), vec![g.nor[0] / nrm, g.nor[1] / nrm], nrm)
             } else {
-                let g = face_point_geom_3d(
-                    mesh, elem, fnodes[0], fnodes[1], fnodes[2],
-                    [xi_f[0], xi_f[1]],
-                );
+                let g = face_point_geom_3d_face(mesh, elem, fnodes, [xi_f[0], xi_f[1]]);
                 let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]
                     + g.nor[2] * g.nor[2])
                     .sqrt()
@@ -584,10 +575,7 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
                     nrm,
                 )
             } else {
-                let g = face_point_geom_3d(
-                    mesh, elem, fnodes[0], fnodes[1], fnodes[2],
-                    [xi_f[0], xi_f[1]],
-                );
+                let g = face_point_geom_3d_face(mesh, elem, fnodes, [xi_f[0], xi_f[1]]);
                 let nrm = (g.nor[0] * g.nor[0] + g.nor[1] * g.nor[1]
                     + g.nor[2] * g.nor[2])
                     .sqrt()

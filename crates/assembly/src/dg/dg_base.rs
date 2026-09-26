@@ -373,6 +373,21 @@ const TET_REF_V: [[f64; 3]; 4] = [
     [0.0, 0.0, 1.0],
 ];
 
+/// Reference-cube corners of a hexahedron in the crate's `Hex8` vertex order
+/// (`fem_element::lagrange::factory::HEX_VERT_SIDES`, MFEM
+/// `Geometry::Constants<Geometry::CUBE>::Vertices`): local vertices 0..3 are
+/// the bottom ring (`z = 0`) counter-clockwise, 4..7 the top ring.
+const HEX_REF_V: [[f64; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
+];
+
 /// D799-3 3-D counterpart of [`face_point_geom`]: MFEM
 /// `FaceElementTransformations` geometry at the reference-face coordinate
 /// `ξ ∈ [0,1]²` of the **triangular** face whose nodes are `(a, b, c)`.
@@ -397,7 +412,9 @@ const TET_REF_V: [[f64; 3]; 4] = [
 ///
 /// Only tetrahedral (triangular-face) elements are supported: the 3-D DG paths
 /// take their face measure from the `Tri3` reference element and the face list
-/// only covers tetrahedra (`build_face_elem_map`'s `(4,3)` arm).
+/// only covers tetrahedra (`build_face_elem_map`'s `(4,3)` arm).  For the
+/// **quadrilateral** face of a hexahedron use [`face_point_geom_3d_quad`]
+/// (D805-4).
 // MFEM: FaceElementTransformations::Jacobian + CalcOrtho + Elem1->Weight()
 pub fn face_point_geom_3d<M: MeshTopology + ?Sized>(
     mesh: &M,
@@ -481,9 +498,166 @@ pub fn face_point_geom_3d<M: MeshTopology + ?Sized>(
     FacePointGeom3 { eip, nor, det_j, jit, xp: [xp[0], xp[1], xp[2]] }
 }
 
+/// D805-4: 3-D counterpart of [`face_point_geom_3d`] for the
+/// **quadrilateral** face of a hexahedron, at the reference-face coordinate
+/// `ξ ∈ [0,1]²` (MFEM's `Geometry::SQUARE` parameterisation).
+///
+/// Same contract as the triangular arm — the face is parameterised from node
+/// `a`, the element reference point comes from the **reference composition**,
+/// and the composed face Jacobian is `J_face = J_elem(eip)·[∂eip/∂ξ₁ | ∂eip/∂ξ₂]`
+/// with MFEM's 3-D `CalcOrtho` cross product (`densemat.cpp:2760`) — but the
+/// face map is the quad's own **bilinear** one.  With the face cycle
+/// `(a, b, c, d)` *positively oriented* as seen from outside the element, the
+/// reference square's corners `(0,0), (1,0), (1,1), (0,1)` are `(a, b, c, d)`,
+/// so
+///
+/// ```text
+/// eip(ξ₁, ξ₂) = ra + ξ₁(rb − ra) + ξ₂(rd − ra) + ξ₁ξ₂(rc − rd − rb + ra)
+/// ∂eip/∂ξ₁    = (rb − ra) + ξ₂(rc − rd − rb + ra)
+/// ∂eip/∂ξ₂    = (rd − ra) + ξ₁(rc − rd − rb + ra)
+/// ```
+///
+/// which is the `Geometry::SQUARE` `H1_QuadrilateralElement(1)` map the
+/// reference face of a hex uses (`Loc1`/`Loc2` for a hex face).  Note the
+/// `(1,1)` corner is the cycle's **third** vertex `c`, not `d`: taking `c` as
+/// the `ξ₂` direction is the transpose convention and is wrong on every face
+/// whose cycle is not symmetric (measured against MFEM: `eip` and `nor` off by
+/// 1.8 relative on `beam-hex`'s `z+` faces before this was fixed).  The
+/// bilinear term matters too: on a *warped* hex face the two tangents vary
+/// across the face, so both the measure `|c₀ × c₁|` and the physical point
+/// differ from the affine (corner-only) interpolation — the defect class
+/// D783/D808-4 closed for the element kernels.
+///
+/// Orientation is resolved at the **reference level**, and it has to be:
+/// MFEM's face integration point `ξ` lives in the *canonical* local face's
+/// reference square, while a mesh may store the face's four vertices in either
+/// winding (`data/beam-hex.mesh` stores its `z−` faces as reversed cycles and
+/// its `z+` faces as forward ones).  MFEM aligns the two through the `FaceInfo`
+/// orientation bits, so `Loc1` composes `ξ` as if the cycle were positively
+/// oriented with respect to the element's outward normal.  The same is done
+/// here: the stored corner roles are kept (origin, `ξ₁` direction, `(0,1)`
+/// corner) and only the **orientation** is corrected — when
+/// `(rb−ra) × (rd−ra)` points *into* the element (tested against a reference
+/// vertex off the face: exact and mesh-independent, like the tetrahedron's
+/// fourth vertex) the last two corners are **swapped**, which reverses the
+/// cycle and makes `c₀ × c₁` point out of the element.
+///
+/// Both neighbours must call this with the same `(a, b, c, d)` — the mesh's own
+/// face-node order — exactly as the triangular arm requires.
+// MFEM: FaceElementTransformations::Jacobian + CalcOrtho + Elem1->Weight()
+pub fn face_point_geom_3d_quad<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
+    xi: [f64; 2],
+) -> FacePointGeom3 {
+    let et = mesh.element_type(elem);
+    if !matches!(et, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
+        panic!("face_point_geom_3d_quad: unsupported element type {et:?} (quadrilateral faces of hexahedra only)");
+    }
+    let en = mesh.element_nodes(elem);
+    let idx_of = |n: u32| -> usize {
+        en.iter()
+            .position(|&m| m == n)
+            .unwrap_or_else(|| panic!("face_point_geom_3d_quad: element {elem} has no node {n}"))
+    };
+    let (ia, ib, ic0, id0) = (idx_of(a), idx_of(b), idx_of(c), idx_of(d));
+    let (ra, rb, rc0, rd0) = (HEX_REF_V[ia], HEX_REF_V[ib], HEX_REF_V[ic0], HEX_REF_V[id0]);
+    // A reference vertex off the face: the outward test's witness (exact and
+    // mesh-independent at the reference level, like the tet's fourth vertex).
+    let ie = (0..8)
+        .find(|&k| k != ia && k != ib && k != ic0 && k != id0)
+        .unwrap_or_else(|| {
+            panic!("face_point_geom_3d_quad: element {elem} has no vertex off the face")
+        });
+    let re = HEX_REF_V[ie];
+    // The face's reference normal, from the cycle's two corner directions
+    // `(0,0)→(1,0)` and `(0,0)→(0,1)`; pointing inward ⇒ the stored cycle is
+    // reversed and the last two corners are exchanged below.
+    let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
+    let t2 = [rd0[0] - ra[0], rd0[1] - ra[1], rd0[2] - ra[2]];
+    let nref = [
+        t1[1] * t2[2] - t1[2] * t2[1],
+        t1[2] * t2[0] - t1[0] * t2[2],
+        t1[0] * t2[1] - t1[1] * t2[0],
+    ];
+    let to_off = [re[0] - ra[0], re[1] - ra[1], re[2] - ra[2]];
+    let inward = nref[0] * to_off[0] + nref[1] * to_off[1] + nref[2] * to_off[2] > 0.0;
+    let (rc, rd) = if inward { (rd0, rc0) } else { (rc0, rd0) };
+    let (x1, x2) = (xi[0], xi[1]);
+    // Bilinear face map and its two tangents.
+    let mut eip = [0.0_f64; 3];
+    let mut tan = [[0.0_f64; 3]; 2];
+    for i in 0..3 {
+        let gx = rb[i] - ra[i];
+        let gy = rd[i] - ra[i];
+        let bl = rc[i] - rd[i] - rb[i] + ra[i];
+        eip[i] = ra[i] + x1 * gx + x2 * gy + x1 * x2 * bl;
+        tan[0][i] = gx + x2 * bl;
+        tan[1][i] = gy + x1 * bl;
+    }
+    // Push the reference tangents through the element map at `eip`.  With the
+    // cycle now positively oriented, `c₀ × c₁` points out of the element (up to
+    // the sign of `det J`, exactly as MFEM's `CalcOrtho(Tr->Jacobian())` does).
+    let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 3);
+    let mut col = [[0.0_f64; 3]; 2];
+    for k in 0..2 {
+        for i in 0..3 {
+            col[k][i] = jac[(i, 0)] * tan[k][0] + jac[(i, 1)] * tan[k][1] + jac[(i, 2)] * tan[k][2];
+        }
+    }
+    let (c0, c1) = (col[0], col[1]);
+    let nor = [
+        c0[1] * c1[2] - c0[2] * c1[1],
+        c0[2] * c1[0] - c0[0] * c1[2],
+        c0[0] * c1[1] - c0[1] * c1[0],
+    ];
+    let det_j = jac.determinant();
+    let jit = jac
+        .try_inverse()
+        .unwrap_or_else(|| {
+            eprintln!("  warning: degenerate element {elem} in 3-D DG quad-face assembly");
+            DMatrix::identity(3, 3)
+        })
+        .transpose();
+    FacePointGeom3 { eip, nor, det_j, jit, xp: [xp[0], xp[1], xp[2]] }
+}
+
+/// D805-4: a 3-D face's geometry, dispatched on the face's node count — the
+/// triangular arm ([`face_point_geom_3d`]) for a tetrahedron's face, the
+/// bilinear quadrilateral arm ([`face_point_geom_3d_quad`]) for a
+/// hexahedron's.  `face_nodes` must be the mesh's own face-node list
+/// (`MeshTopology::face_nodes`), so both neighbours parameterise the face
+/// identically.
+pub fn face_point_geom_3d_face<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: u32,
+    face_nodes: &[u32],
+    xi: [f64; 2],
+) -> FacePointGeom3 {
+    match face_nodes.len() {
+        3 => face_point_geom_3d(mesh, elem, face_nodes[0], face_nodes[1], face_nodes[2], xi),
+        4 => face_point_geom_3d_quad(
+            mesh,
+            elem,
+            face_nodes[0],
+            face_nodes[1],
+            face_nodes[2],
+            face_nodes[3],
+            xi,
+        ),
+        n => panic!(
+            "face_point_geom_3d_face: unsupported face with {n} nodes \
+             (triangles and quadrilaterals only)"
+        ),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// Gradient transforms
-// ═══════════════════════════════════════════════════════════════════════════════
+// Gradient transforms// ═══════════════════════════════════════════════════════════════════════════════
 
 /// Transform reference-element gradients to physical gradients:
 /// `∇_phys = J^{-T} ∇_ref`.
@@ -558,6 +732,21 @@ pub fn build_face_elem_map<M: MeshTopology>(
                 vec![0, 2, 3],
                 vec![0, 1, 3],
                 vec![0, 1, 2],
+            ],
+            // D805-4: the six quadrilateral faces of a `Hex8`, in the crate's
+            // `HEX_VERT_SIDES` order (`z−`, `z+`, `y−`, `y+`, `x−`, `x+` — the
+            // same sets `crates/mesh/src/mesh_characteristics.rs::element_faces`
+            // and `fem_space::HEX_QUAD_FACES` list).  Only the *set* matters
+            // here (the key is sorted below); the parameterisation of a face at
+            // assembly time comes from the mesh's own face-node order, which
+            // both neighbours share.
+            (8, 3) => vec![
+                vec![0, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![3, 2, 6, 7],
+                vec![0, 3, 7, 4],
+                vec![1, 2, 6, 5],
             ],
             _ => vec![],
         }
