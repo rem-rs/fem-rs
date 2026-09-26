@@ -16,7 +16,7 @@ use fem_element::{
         TriP1,
         TetL2GL, TriL2GL,
         QuadQk,
-        factory::QuadL2GL,
+        factory::{HexL2GL, QuadL2GL},
     },
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -50,6 +50,10 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tet4, 1) => Box::new(TetL2GL::new(1)),
         (ElementType::Tet4, 2) => Box::new(TetL2GL::new(2)),
         (ElementType::Tet4, 3) => Box::new(TetL2GL::new(3)),
+        // D814-1: hexahedral DG volume elements — MFEM `L2_HexahedronElement`
+        // (open GL tensor nodes, lexicographic order; [`HexL2GL`]).  Before
+        // this arm every DG path panicked on a hexahedral mesh.
+        (ElementType::Hex8, o) if o >= 1 => Box::new(HexL2GL::new(o as usize)),
         _ => panic!("ref_elem_vol: unsupported ({et:?}, order={order})"),
     }
 }
@@ -64,7 +68,14 @@ pub fn ref_elem_vol_dynamic(et: ElementType, order: u8) -> Box<dyn ReferenceElem
     }
 }
 
-/// Face reference element (Line2 for 2-D, Tri3 for 3-D).
+/// Face reference element (Line2 for 2-D, Tri3/Quad4 for 3-D).
+///
+/// The DG face drivers consume this element **only for its quadrature rule**
+/// (MFEM takes the rule from `IntRules.Get(Trans.GetGeometryType(), ...)`,
+/// where the geometry is the *face's*: `SEGMENT` in 2-D, `TRIANGLE`/`SQUARE`
+/// in 3-D).  D814-1: the `Quad4` arms make a hexahedral face take MFEM's
+/// `[0,1]²` tensor Gauss rule ([`QuadL2GL::quadrature`] = `quad_rule_01`)
+/// instead of panicking.
 // MFEM: FECollection::FiniteElementForGeometry (face)
 pub fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
@@ -72,7 +83,25 @@ pub fn ref_elem_face(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Line2, 2) => Box::new(SegP2),
         (ElementType::Line2, 3) => Box::new(SegP3),
         (ElementType::Tri3, 1)  => Box::new(TriP1),
+        (ElementType::Quad4, o) if o >= 1 => Box::new(QuadL2GL::new(o as usize)),
         _ => panic!("ref_elem_face: unsupported ({et:?}, order={order})"),
+    }
+}
+
+/// The face reference-element type for a mesh face, chosen by the face's
+/// **node count** (D814-1): 2 nodes → `Line2` (2-D edge), 3 → `Tri3`
+/// (tetrahedron face), 4 → `Quad4` (hexahedron face).  The pre-D814 dispatch
+/// keyed on `mesh.dim()` instead (`dim == 2 ? Line2 : Tri3`), which silently
+/// gave every 3-D face the triangular rule — wrong for a hexahedron's
+/// quadrilateral faces, both in point layout (`[0,1]` triangle vs `[0,1]²`
+/// tensor) and point count.
+// MFEM: FaceElementTransformations::GetGeometryType()
+pub fn face_type_of(face_nodes: &[u32]) -> ElementType {
+    match face_nodes.len() {
+        2 => ElementType::Line2,
+        3 => ElementType::Tri3,
+        4 => ElementType::Quad4,
+        n => panic!("face_type_of: unsupported face node count {n}"),
     }
 }
 
@@ -364,6 +393,55 @@ pub struct FacePointGeom3 {
     pub xp: [f64; 3],
 }
 
+/// Owned 2-D or 3-D face-geometry result ([`FacePointGeom`] / [`FacePointGeom3`]),
+/// so a dim-generic DG face loop can consume either without duplicating its
+/// per-quadrature-point arithmetic (D814-1; the periodic-seam driver in
+/// `dg_advection.rs` shares it).
+pub(crate) enum FaceGeom {
+    /// 2-D edge (`face_point_geom`).
+    Face2(FacePointGeom),
+    /// 3-D triangular or quadrilateral face (`face_point_geom_3d_face`).
+    Face3(FacePointGeom3),
+}
+
+impl FaceGeom {
+    /// `GetElement1IntPoint()` — the composed reference point in the element.
+    pub fn eip(&self) -> &[f64] {
+        match self {
+            FaceGeom::Face2(g) => &g.eip,
+            FaceGeom::Face3(g) => &g.eip,
+        }
+    }
+    /// `Elem1->Transform(eip)`.
+    pub fn xp(&self) -> &[f64] {
+        match self {
+            FaceGeom::Face2(g) => &g.xp,
+            FaceGeom::Face3(g) => &g.xp,
+        }
+    }
+    /// `CalcOrtho(Trans.Jacobian())` — unnormalised, outward from `Elem1`.
+    pub fn nor(&self) -> &[f64] {
+        match self {
+            FaceGeom::Face2(g) => &g.nor,
+            FaceGeom::Face3(g) => &g.nor,
+        }
+    }
+    /// `Elem1->Weight()` (signed det J at `eip`).
+    pub fn det_j(&self) -> f64 {
+        match self {
+            FaceGeom::Face2(g) => g.det_j,
+            FaceGeom::Face3(g) => g.det_j,
+        }
+    }
+    /// `J^{-T}` of the element map at `eip`.
+    pub fn jit(&self) -> &DMatrix<f64> {
+        match self {
+            FaceGeom::Face2(g) => &g.jit,
+            FaceGeom::Face3(g) => &g.jit,
+        }
+    }
+}
+
 /// Reference-tetrahedron vertex coordinates, MFEM `Geometry::TETRAHEDRON`
 /// reference element (`[0,1]³` simplex).
 const TET_REF_V: [[f64; 3]; 4] = [
@@ -530,17 +608,23 @@ pub fn face_point_geom_3d<M: MeshTopology + ?Sized>(
 ///
 /// Orientation is resolved at the **reference level**, and it has to be:
 /// MFEM's face integration point `ξ` lives in the *canonical* local face's
-/// reference square, while a mesh may store the face's four vertices in either
+/// reference square, and a mesh may store the face's four vertices in either
 /// winding (`data/beam-hex.mesh` stores its `z−` faces as reversed cycles and
-/// its `z+` faces as forward ones).  MFEM aligns the two through the `FaceInfo`
-/// orientation bits, so `Loc1` composes `ξ` as if the cycle were positively
-/// oriented with respect to the element's outward normal.  The same is done
-/// here: the stored corner roles are kept (origin, `ξ₁` direction, `(0,1)`
-/// corner) and only the **orientation** is corrected — when
-/// `(rb−ra) × (rd−ra)` points *into* the element (tested against a reference
-/// vertex off the face: exact and mesh-independent, like the tetrahedron's
-/// fourth vertex) the last two corners are **swapped**, which reverses the
-/// cycle and makes `c₀ × c₁` point out of the element.
+/// its `z+` faces as forward ones).  D814-1: MFEM's `Loc1`/`Loc2`
+/// (`GetLocalQuadToHexTransformation`, mesh.cpp:889, with the
+/// `quad_t::Orient`-permuted point matrix) interpolate the *canonical* face
+/// corners at the face `ξ` on **both** neighbours — so both land on the same
+/// physical point — and the only element-dependent quantity is the *sign* of
+/// the composed normal.  The same is done here: the parameterisation always
+/// uses the stored corner roles (origin, `ξ₁` direction, `(0,1)` corner),
+/// and when `(rb−ra) × (rd−ra)` points *into* the element (tested against a
+/// reference vertex off the face: exact and mesh-independent, like the
+/// tetrahedron's fourth vertex) only `nor`'s **sign** is flipped.  The
+/// pre-D814 version swapped the last two corners instead, which changed the
+/// parameterisation — silently bending the face map on any ring whose stored
+/// normal pointed inward (an interior face seen from its second element, in
+/// particular; MFEM-written boundary sections never trigger it, which is why
+/// D805-4's boundary-only fixture could not see it).
 ///
 /// Both neighbours must call this with the same `(a, b, c, d)` — the mesh's own
 /// face-node order — exactly as the triangular arm requires.
@@ -574,9 +658,8 @@ pub fn face_point_geom_3d_quad<M: MeshTopology + ?Sized>(
             panic!("face_point_geom_3d_quad: element {elem} has no vertex off the face")
         });
     let re = HEX_REF_V[ie];
-    // The face's reference normal, from the cycle's two corner directions
-    // `(0,0)→(1,0)` and `(0,0)→(0,1)`; pointing inward ⇒ the stored cycle is
-    // reversed and the last two corners are exchanged below.
+    // The reference-level normal of the composed map, used only to decide the
+    // SIGN of `nor` below (never the parameterisation).
     let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
     let t2 = [rd0[0] - ra[0], rd0[1] - ra[1], rd0[2] - ra[2]];
     let nref = [
@@ -586,22 +669,31 @@ pub fn face_point_geom_3d_quad<M: MeshTopology + ?Sized>(
     ];
     let to_off = [re[0] - ra[0], re[1] - ra[1], re[2] - ra[2]];
     let inward = nref[0] * to_off[0] + nref[1] * to_off[1] + nref[2] * to_off[2] > 0.0;
-    let (rc, rd) = if inward { (rd0, rc0) } else { (rc0, rd0) };
+    // D814-1: the composition is ALWAYS the canonical ring's own roles — MFEM
+    // builds `Loc1`/`Loc2` (`GetLocalQuadToHexTransformation`, mesh.cpp:889)
+    // as the reference bilinear quad evaluated on the point matrix whose
+    // column j is the local face vertex carrying canonical corner j
+    // (`FaceVert[lf][Orient[o][j]]`), i.e. both neighbours interpolate the
+    // canonical corners `(a,b,c,d)` at the same `ξ` and land on the same
+    // physical point.  The pre-D814 swap of the last two corners changed the
+    // parameterisation instead of the sign — it silently bent the face map
+    // whenever the stored ring's normal pointed into the element (never the
+    // case on MFEM-written boundary sections, which is why D805-4's
+    // boundary-only fixture could not see it).
     let (x1, x2) = (xi[0], xi[1]);
     // Bilinear face map and its two tangents.
     let mut eip = [0.0_f64; 3];
     let mut tan = [[0.0_f64; 3]; 2];
     for i in 0..3 {
         let gx = rb[i] - ra[i];
-        let gy = rd[i] - ra[i];
-        let bl = rc[i] - rd[i] - rb[i] + ra[i];
+        let gy = rd0[i] - ra[i];
+        let bl = rc0[i] - rd0[i] - rb[i] + ra[i];
         eip[i] = ra[i] + x1 * gx + x2 * gy + x1 * x2 * bl;
         tan[0][i] = gx + x2 * bl;
         tan[1][i] = gy + x1 * bl;
     }
-    // Push the reference tangents through the element map at `eip`.  With the
-    // cycle now positively oriented, `c₀ × c₁` points out of the element (up to
-    // the sign of `det J`, exactly as MFEM's `CalcOrtho(Tr->Jacobian())` does).
+    // Push the reference tangents through the element map at `eip`; `c₀ × c₁`
+    // is `CalcOrtho(Trans.Jacobian())` up to the outward sign, applied below.
     let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 3);
     let mut col = [[0.0_f64; 3]; 2];
     for k in 0..2 {
@@ -610,11 +702,19 @@ pub fn face_point_geom_3d_quad<M: MeshTopology + ?Sized>(
         }
     }
     let (c0, c1) = (col[0], col[1]);
-    let nor = [
+    let mut nor = [
         c0[1] * c1[2] - c0[2] * c1[1],
         c0[2] * c1[0] - c0[0] * c1[2],
         c0[0] * c1[1] - c0[1] * c1[0],
     ];
+    // Sign-only orientation correction: `nor` must point out of the element
+    // (MFEM's canonical rings are outward-oriented; a face stored the other
+    // way round just flips the sign — the parameterisation is untouched).
+    if inward {
+        for v in &mut nor {
+            *v = -*v;
+        }
+    }
     let det_j = jac.determinant();
     let jit = jac
         .try_inverse()
@@ -775,10 +875,17 @@ pub fn build_face_elem_map<M: MeshTopology>(
     result
 }
 
-/// Find an element that owns a face by scanning all elements.
+/// Find the element that owns a boundary face by scanning all elements.
 /// A simpler but O(n_elem) alternative to `build_face_elem_map`.
 ///
 /// Useful when only a single face lookup is needed.
+///
+/// D814-1: the owner must contain **every** face node.  The old heuristic —
+/// "at least 2 of the face's nodes" — was exact only for the 2-node edges of
+/// a 2-D mesh; on a hexahedron a quad face's four nodes are shared two-at-a-
+/// time by neighbouring elements all over the mesh (the very first element
+/// of `data/…`'s ordering already matches two nodes of a face it does not
+/// own), so every 3-D boundary term landed on the wrong element.
 // MFEM: Mesh::FaceToElement
 pub fn find_face_elem<M: MeshTopology>(
     mesh: &M,
@@ -792,8 +899,7 @@ pub fn find_face_elem<M: MeshTopology>(
         if enodes.len() < 3 {
             continue;
         }
-        let count = fkey.iter().filter(|&n| enodes.contains(n)).count();
-        if count >= 2 {
+        if fkey.iter().all(|&n| enodes.contains(&n)) {
             return e;
         }
     }

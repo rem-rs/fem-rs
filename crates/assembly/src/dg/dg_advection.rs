@@ -26,7 +26,7 @@ use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
 use crate::interior_faces::InteriorFaceList;
 
-use super::dg_base::{face_point_geom, face_point_geom_3d_face};
+use super::dg_base::{face_point_geom, face_point_geom_3d_face, face_type_of, FaceGeom};
 
 
 // ─── DgFaceQpData ─────────────────────────────────────────────────────────────
@@ -122,9 +122,10 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         let er = face.elem_right;
         let face_nodes = &face.face_nodes;
 
-        // Reference element for the face
-        let face_elem_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-        let ref_face = ref_elem_face(face_elem_type, order);
+        // Reference element for the face — D814-1: chosen by the face's node
+        // count (2 → edge, 3 → triangle, 4 → quadrilateral), not by `dim`,
+        // so a hexahedron's quad faces take MFEM's `[0,1]²` tensor rule.
+        let ref_face = ref_elem_face(face_type_of(face_nodes), order);
         let q_face = ref_face.quadrature(quad_order);
 
         // Volume reference elements — use actual element DOF count from the space
@@ -441,8 +442,9 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
         // Find owning element
         let elem = find_face_elem(mesh, f, fnodes);
 
-        let face_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-        let ref_face = ref_elem_face(face_type, order);
+        // D814-1: face rule by node count (quad faces of hexahedra take the
+        // `[0,1]²` tensor rule).
+        let ref_face = ref_elem_face(face_type_of(&fnodes), order);
         let q_face = ref_face.quadrature(quad_order);
 
         let et = mesh.element_type(elem);
@@ -544,8 +546,9 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
 
         let elem = find_face_elem(mesh, f, fnodes);
 
-        let face_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-        let ref_face = ref_elem_face(face_type, order);
+        // D814-1: face rule by node count (quad faces of hexahedra take the
+        // `[0,1]²` tensor rule).
+        let ref_face = ref_elem_face(face_type_of(&fnodes), order);
         let q_face = ref_face.quadrature(quad_order);
 
         let et = mesh.element_type(elem);
@@ -653,81 +656,130 @@ pub fn assemble_periodic_flux<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoef
     alpha: f64,
 ) {
     let dim = mesh.dim() as usize;
-    let ref_face = ref_elem_face(ElementType::Line2, order);
-    let q_face = ref_face.quadrature(quad_order);
-
+    // D814-1: the face rule follows the pair's own face type (2 nodes → edge
+    // segment; 4 → quadrilateral `[0,1]²` tensor rule for hexahedra), not
+    // `dim`.  All pairs of one mesh share a face type, so building the rule
+    // from the first pair is enough — but keep it per-pair-cheap and assert
+    // the assumption below instead of silently mixing rules.
     for &(el_l, el_r, ref fn_l, ref fn_r) in pairs {
-        // Get element data for both sides
-        let dofs_l: Vec<usize> = space.element_dofs(el_l).iter().map(|&d| d as usize).collect();
-        let dofs_r: Vec<usize> = space.element_dofs(el_r).iter().map(|&d| d as usize).collect();
-        let n_l = dofs_l.len();
-        let n_r = dofs_r.len();
-        let et_l = mesh.element_type(el_l);
-        let et_r = mesh.element_type(el_r);
-        let o_l = space.element_order(el_l);
-        let o_r = space.element_order(el_r);
-        let re_l = ref_elem_vol(et_l, o_l);
-        let re_r = ref_elem_vol(et_r, o_r);
+        debug_assert_eq!(
+            face_type_of(fn_l),
+            face_type_of(fn_r),
+            "assemble_periodic_flux: periodic pair with mismatched face types"
+        );
+        let ref_face = ref_elem_face(face_type_of(fn_l), order);
+        let q_face = ref_face.quadrature(quad_order);
+        periodic_pair(
+            coo, mesh, space, dim, el_l, el_r, fn_l, fn_r, &q_face, velocity, alpha,
+        );
+    }
+}
 
-        let mut phi_l = vec![0.0; n_l];
-        let mut phi_r = vec![0.0; n_r];
-        let mut k_ll = vec![0.0; n_l * n_l];
-        let mut k_lr = vec![0.0; n_l * n_r];
-        let mut k_rl = vec![0.0; n_r * n_l];
-        let mut k_rr = vec![0.0; n_r * n_r];
+/// One periodic pair's four-block face term (the loop body of
+/// [`assemble_periodic_flux`], split out so the face rule is built once per
+/// pair).
+#[allow(clippy::too_many_arguments)]
+fn periodic_pair<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoeff>(
+    coo: &mut CooMatrix<f64>,
+    mesh: &M,
+    space: &S,
+    dim: usize,
+    el_l: ElemId,
+    el_r: ElemId,
+    fn_l: &[NodeId],
+    fn_r: &[NodeId],
+    q_face: &fem_element::QuadratureRule,
+    velocity: &V,
+    alpha: f64,
+) {
+    // Get element data for both sides
+    let dofs_l: Vec<usize> = space.element_dofs(el_l).iter().map(|&d| d as usize).collect();
+    let dofs_r: Vec<usize> = space.element_dofs(el_r).iter().map(|&d| d as usize).collect();
+    let n_l = dofs_l.len();
+    let n_r = dofs_r.len();
+    let et_l = mesh.element_type(el_l);
+    let et_r = mesh.element_type(el_r);
+    let o_l = space.element_order(el_l);
+    let o_r = space.element_order(el_r);
+    let re_l = ref_elem_vol(et_l, o_l);
+    let re_r = ref_elem_vol(et_r, o_r);
 
-        for (qi, xi_f) in q_face.points.iter().enumerate() {
-            // D799-3: each side's own isoparametric face geometry (the periodic
-            // pair's two faces are *different* edges in the mesh tables, so each
-            // element is composed through its own `Loc1`/`Elem1` map — the
-            // pre-fix chord interpolation and physical-inverse map only agreed
-            // with MFEM on straight edges).  MFEM's `DGTraceIntegrator` takes
-            // `nor` and the velocity from `Elem1`, i.e. from the **left** face
-            // (never from a negated left→right normal), so `un = velocity·nor`
-            // uses `g_l.nor` unnormalised.
-            let g_l = face_point_geom(mesh, el_l, fn_l[0], fn_l[1], xi_f[0]);
-            let g_r = face_point_geom(mesh, el_r, fn_r[0], fn_r[1], xi_f[0]);
-            let xp_l = g_l.xp.to_vec();
+    let mut phi_l = vec![0.0; n_l];
+    let mut phi_r = vec![0.0; n_r];
+    let mut k_ll = vec![0.0; n_l * n_l];
+    let mut k_lr = vec![0.0; n_l * n_r];
+    let mut k_rl = vec![0.0; n_r * n_l];
+    let mut k_rr = vec![0.0; n_r * n_r];
 
-            // Evaluate bases at each element's own composed reference point
-            re_l.eval_basis(&g_l.eip, &mut phi_l);
-            re_r.eval_basis(&g_r.eip, &mut phi_r);
+    for (qi, xi_f) in q_face.points.iter().enumerate() {
+        // D799-3: each side's own isoparametric face geometry (the periodic
+        // pair's two faces are *different* faces in the mesh tables, so each
+        // element is composed through its own `Loc1`/`Elem1` map — the
+        // pre-fix chord interpolation and physical-inverse map only agreed
+        // with MFEM on straight edges).  MFEM's `DGTraceIntegrator` takes
+        // `nor` and the velocity from `Elem1`, i.e. from the **left** face
+        // (never from a negated left→right normal), so `un = velocity·nor`
+        // uses `g_l.nor` unnormalised.
+        //
+        // D814-1: 3-D pairs compose through the same
+        // [`face_point_geom_3d_face`] dispatcher as the interior-face
+        // driver, at the quadrature rule's `[0,1]²` points.
+        let (g_l, g_r) = if dim == 2 {
+            (
+                FaceGeom::Face2(face_point_geom(mesh, el_l, fn_l[0], fn_l[1], xi_f[0])),
+                FaceGeom::Face2(face_point_geom(mesh, el_r, fn_r[0], fn_r[1], xi_f[0])),
+            )
+        } else {
+            (
+                FaceGeom::Face3(face_point_geom_3d_face(
+                    mesh, el_l, fn_l, [xi_f[0], xi_f[1]],
+                )),
+                FaceGeom::Face3(face_point_geom_3d_face(
+                    mesh, el_r, fn_r, [xi_f[0], xi_f[1]],
+                )),
+            )
+        };
+        let xp_l = g_l.xp().to_vec();
 
-            let qp = DgFaceQpData {
-                n_dofs_l: n_l,
-                n_dofs_r: n_r,
-                dim,
-                // `weight = ipw·|nor|` is MFEM's `ip.weight·nor` with the unit
-                // normal folded out; `DGTraceIntegrator` uses the split form.
-                weight: q_face.weights[qi]
-                    * (g_l.nor[0] * g_l.nor[0] + g_l.nor[1] * g_l.nor[1]).sqrt(),
-                ip_weight: q_face.weights[qi],
-                phi_l: &phi_l,
-                phi_r: &phi_r,
-                grad_phys_l: &[],
-                grad_phys_r: &[],
-                normal: &[],
-                unor: &g_l.nor,
-                x_phys: &xp_l,
-                elem_l: el_l,
-                elem_r: el_r,
-                elem_dofs_l: None,
-                elem_dofs_r: None,
-            };
-            super::dg_trace::add_nonconservative_blocks(
-                velocity, alpha, 0.5 * alpha, &qp,
-                &mut k_ll, &mut k_lr, &mut k_rl, &mut k_rr,
-            );
-        }
+        // Evaluate bases at each element's own composed reference point
+        re_l.eval_basis(g_l.eip(), &mut phi_l);
+        re_r.eval_basis(g_r.eip(), &mut phi_r);
 
-        for (i, &gi) in dofs_l.iter().enumerate() {
-            for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_ll[i*n_l+j]); }
-            for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_lr[i*n_r+j]); }
-        }
-        for (i, &gi) in dofs_r.iter().enumerate() {
-            for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_rl[i*n_l+j]); }
-            for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_rr[i*n_r+j]); }
-        }
+        let nor_l: &[f64] = g_l.nor();
+        let qp = DgFaceQpData {
+            n_dofs_l: n_l,
+            n_dofs_r: n_r,
+            dim,
+            // `weight = ipw·|nor|` is MFEM's `ip.weight·nor` with the unit
+            // normal folded out; `DGTraceIntegrator` uses the split form.
+            weight: q_face.weights[qi]
+                * nor_l.iter().take(dim).map(|n| n * n).sum::<f64>().sqrt(),
+            ip_weight: q_face.weights[qi],
+            phi_l: &phi_l,
+            phi_r: &phi_r,
+            grad_phys_l: &[],
+            grad_phys_r: &[],
+            normal: &[],
+            unor: nor_l,
+            x_phys: &xp_l,
+            elem_l: el_l,
+            elem_r: el_r,
+            elem_dofs_l: None,
+            elem_dofs_r: None,
+        };
+        super::dg_trace::add_nonconservative_blocks(
+            velocity, alpha, 0.5 * alpha, &qp,
+            &mut k_ll, &mut k_lr, &mut k_rl, &mut k_rr,
+        );
+    }
+
+    for (i, &gi) in dofs_l.iter().enumerate() {
+        for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_ll[i*n_l+j]); }
+        for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_lr[i*n_r+j]); }
+    }
+    for (i, &gi) in dofs_r.iter().enumerate() {
+        for (j, &gj) in dofs_l.iter().enumerate() { coo.add(gi, gj, k_rl[i*n_l+j]); }
+        for (j, &gj) in dofs_r.iter().enumerate() { coo.add(gi, gj, k_rr[i*n_r+j]); }
     }
 }
 

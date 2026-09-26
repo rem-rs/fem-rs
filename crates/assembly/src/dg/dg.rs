@@ -36,7 +36,8 @@ use fem_mesh::transformation::element_jacobian_at;
 use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
-    build_face_elem_map, face_point_geom, ref_elem_face, ref_elem_vol, xform_grads,
+    build_face_elem_map, face_point_geom, face_point_geom_3d_face, face_type_of, ref_elem_face,
+    ref_elem_vol, FaceGeom, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 #[cfg(feature = "parallel")]
@@ -252,7 +253,23 @@ fn accumulate_dg_volume_element<S: FESpace>(
     let elem_type = mesh.element_type(e);
     let re = ref_elem_vol(elem_type, order);
     let n  = re.n_dofs();
-    let q  = re.quadrature(quad_order);
+    // D814-1: MFEM's `DiffusionIntegrator` volume rule
+    // (`DiffusionIntegrator::GetRule`, fem/bilininteg.cpp:1347) is
+    //   Qk (tensor) spaces:  o + o + dim − 1
+    //   Pk (simplex) spaces: o + o − 2
+    // The single `quad_order` argument of `assemble_dg` is the **face** rule
+    // (`2·max(o₁,o₂)`, what ex14 passes); in 2-D the volume orders `2p+dim−1`
+    // and the caller's `2p` select the *same* Gauss points, so Q1..Q3 quad
+    // meshes assemble bit-identically to before.  In 3-D they diverge (hex p=1:
+    // order 4 → 3³ points vs order 2 → 2³), so the tensor families must use
+    // MFEM's own formula.  The simplex formula (`2o−2`, i.e. one centroid point
+    // at p=1) changes simplex values away from the caller's over-integration;
+    // without a simplex DG volume oracle that arm keeps the caller's rule.
+    let vol_quad_order = match elem_type {
+        ElementType::Quad4 | ElementType::Hex8 => 2 * order + dim as u8 - 1,
+        _ => quad_order,
+    };
+    let q  = re.quadrature(vol_quad_order);
     let gd = space.element_dofs(e).iter().map(|&d| d as usize).collect::<Vec<_>>();
 
     phi.resize(n, 0.0);
@@ -358,12 +375,12 @@ fn assemble_interior_face<S: FESpace>(
     quad_order: u8,
 ) {
     let dim = mesh.dim() as usize;
-    let fa = face_nodes[0];
-    let fb = face_nodes[1];
 
-    // Build reference elements and quadrature for the face.
-    let face_elem_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-    let ref_face = ref_elem_face(face_elem_type, order);
+    // D814-1: the face rule follows the face's own type (node count: 2 → edge,
+    // 3 → triangle, 4 → quadrilateral), not `mesh.dim()` — a hexahedron's quad
+    // faces take MFEM's `[0,1]²` tensor rule
+    // (`DGDiffusionIntegrator::GetRule(o, geom) = IntRules.Get(geom, 2·o)`).
+    let ref_face = ref_elem_face(face_type_of(face_nodes), order);
     // MFEM `DGDiffusionIntegrator::GetRule(order, geom) = IntRules.Get(geom, 2*order)`:
     // a `[0,1]` reference segment whose weights sum to 1 (verified against
     // `IntRules.Get(Geometry::SEGMENT, 2)` — 2 Gauss points at
@@ -400,7 +417,6 @@ fn assemble_interior_face<S: FESpace>(
 
     for (qi, xi_f) in face_xi.iter().enumerate() {
         let ipw = face_weights[qi];   // [0,1] face rule: weights sum to 1
-        let xi = xi_f[0];
 
         // MFEM `Trans.SetAllIntPoints(&ip)`: the reference point in each
         // neighbouring element comes from the *reference* face→element map
@@ -409,16 +425,27 @@ fn assemble_interior_face<S: FESpace>(
         // isoparametric geometry (the face transformation is composed through
         // `Elem1` for a `Nodes`-carrying mesh, `Mesh::GetFaceTransformation`),
         // and it is used for BOTH sides.
-        let g1 = face_point_geom(mesh, el, fa, fb, xi);
-        let g2 = face_point_geom(mesh, er, fa, fb, xi);
-        let nor = g1.nor;
+        //
+        // D814-1: 3-D faces (triangular or quadrilateral) compose through the
+        // same `face_point_geom_3d_face` dispatcher as the advection driver.
+        let g1 = if dim == 2 {
+            FaceGeom::Face2(face_point_geom(mesh, el, face_nodes[0], face_nodes[1], xi_f[0]))
+        } else {
+            FaceGeom::Face3(face_point_geom_3d_face(mesh, el, face_nodes, [xi_f[0], xi_f[1]]))
+        };
+        let g2 = if dim == 2 {
+            FaceGeom::Face2(face_point_geom(mesh, er, face_nodes[0], face_nodes[1], xi_f[0]))
+        } else {
+            FaceGeom::Face3(face_point_geom_3d_face(mesh, er, face_nodes, [xi_f[0], xi_f[1]]))
+        };
+        let nor: &[f64] = g1.nor();
 
-        re_l.eval_basis(&g1.eip, &mut phi_l);
-        re_r.eval_basis(&g2.eip, &mut phi_r);
-        re_l.eval_grad_basis(&g1.eip, &mut gref_l);
-        re_r.eval_grad_basis(&g2.eip, &mut gref_r);
-        xform_grads(&g1.jit, &gref_l, &mut gphys_l, n_l, dim);
-        xform_grads(&g2.jit, &gref_r, &mut gphys_r, n_r, dim);
+        re_l.eval_basis(g1.eip(), &mut phi_l);
+        re_r.eval_basis(g2.eip(), &mut phi_r);
+        re_l.eval_grad_basis(g1.eip(), &mut gref_l);
+        re_r.eval_grad_basis(g2.eip(), &mut gref_r);
+        xform_grads(g1.jit(), &gref_l, &mut gphys_l, n_l, dim);
+        xform_grads(g2.jit(), &gref_r, &mut gphys_r, n_r, dim);
 
         // ── MFEM DGDiffusionIntegrator per-QP algorithm ──────────────────────
         //   w  = ip.weight / (2·det(J1))                       (interior)
@@ -430,11 +457,11 @@ fn assemble_interior_face<S: FESpace>(
         // so the consistency term carries **no** det(J) at all (it cancels).
         let half_w = 0.5 * ipw;
         for j in 0..n_l {
-            let dot = gphys_l[j * dim] * nor[0] + gphys_l[j * dim + 1] * nor[1];
+            let dot: f64 = (0..dim).map(|k| gphys_l[j * dim + k] * nor[k]).sum();
             dsf1dn[j] = half_w * dot;
         }
         for j in 0..n_r {
-            let dot = gphys_r[j * dim] * nor[0] + gphys_r[j * dim + 1] * nor[1];
+            let dot: f64 = (0..dim).map(|k| gphys_r[j * dim + k] * nor[k]).sum();
             dsf2dn[j] = half_w * dot;
         }
 
@@ -469,9 +496,9 @@ fn assemble_interior_face<S: FESpace>(
         // C++: wq = ni·nor (side 1) + ni·nor (side 2, with w = ip.w/2/det2),
         // then `wq *= kappa`:
         //   wq = kappa·ipw/2·|nor|²·(1/det(J1) + 1/det(J2))
-        // |nor|² = |dX/dξ|² of the isoparametric edge, det = MFEM `Weight()`.
-        let nor_norm2 = nor[0] * nor[0] + nor[1] * nor[1];
-        let wq = penalty * nor_norm2 * half_w * (1.0 / g1.det_j + 1.0 / g2.det_j);
+        // |nor|² = |dX/dξ|² of the isoparametric face, det = MFEM `Weight()`.
+        let nor_norm2: f64 = (0..dim).map(|k| nor[k] * nor[k]).sum();
+        let wq = penalty * nor_norm2 * half_w * (1.0 / g1.det_j() + 1.0 / g2.det_j());
         // C++: jmat += wq * shape * shape  (lower triangle only)
         // C++: jmat += wq * shape * shape  (lower triangle only)
         let jscale = wq;
@@ -555,16 +582,15 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
 ) {
     let dim = mesh.dim() as usize;
     let face_nodes = mesh.face_nodes(face);
-    let fa = face_nodes[0];
-    let fb = face_nodes[1];
 
     let et = mesh.element_type(elem);
     let re = ref_elem_vol(et, order);
     let n  = re.n_dofs();
     let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
 
-    let face_elem_type = if dim == 2 { ElementType::Line2 } else { ElementType::Tri3 };
-    let ref_face = ref_elem_face(face_elem_type, order);
+    // D814-1: face rule by node count — a hexahedron's quad faces take the
+    // `[0,1]²` tensor rule, not the triangular one.
+    let ref_face = ref_elem_face(face_type_of(&face_nodes), order);
     let q_face   = ref_face.quadrature(quad_order);
 
     let mut el_loc = vec![0.0_f64; n * n];
@@ -579,18 +605,22 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
         // MFEM `Trans.SetAllIntPoints` + `nor = CalcOrtho(Trans.Jacobian())`:
         // reference composition through the (single) neighbouring element, with
         // the isoparametric geometry — see `face_point_geom` (D795-1).
-        let g = face_point_geom(mesh, elem, fa, fb, xi_f[0]);
-        let nor = g.nor;
+        let g = if dim == 2 {
+            FaceGeom::Face2(face_point_geom(mesh, elem, face_nodes[0], face_nodes[1], xi_f[0]))
+        } else {
+            FaceGeom::Face3(face_point_geom_3d_face(mesh, elem, &face_nodes, [xi_f[0], xi_f[1]]))
+        };
+        let nor: &[f64] = g.nor();
 
-        re.eval_basis(&g.eip, &mut phi);
-        re.eval_grad_basis(&g.eip, &mut gref);
-        xform_grads(&g.jit, &gref, &mut gphys, n, dim);
+        re.eval_basis(g.eip(), &mut phi);
+        re.eval_grad_basis(g.eip(), &mut gref);
+        xform_grads(g.jit(), &gref, &mut gphys, n, dim);
 
         // ── MFEM boundary face (ndof2 = 0): w = ip.weight/det(J) (no 1/2).
         //   dshapedn = det(J)·w·∇_xφ·nor = ip.weight·∇_xφ·nor
         //   wq       = kappa·ip.weight·|nor|²/det(J)
         for j in 0..n {
-            let dot = gphys[j * dim] * nor[0] + gphys[j * dim + 1] * nor[1];
+            let dot: f64 = (0..dim).map(|k| gphys[j * dim + k] * nor[k]).sum();
             dsdn[j] = ipw * dot;
         }
 
@@ -602,8 +632,8 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
         }
 
         // Penalty: C++ `wq = ni·nor` with `ni = w·nor`, `w = ip.weight/det(J)`.
-        let nor_norm2 = nor[0] * nor[0] + nor[1] * nor[1];
-        let jscale = penalty * ipw * nor_norm2 / g.det_j;
+        let nor_norm2: f64 = (0..dim).map(|k| nor[k] * nor[k]).sum();
+        let jscale = penalty * ipw * nor_norm2 / g.det_j();
 
         // jmat lower triangle
         for i in 0..n {

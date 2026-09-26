@@ -12,7 +12,8 @@ use fem_mesh::transformation::element_jacobian_at;
 use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
-    build_face_elem_map, face_point_geom, ref_elem_face, ref_elem_vol, xform_grads,
+    build_face_elem_map, face_point_geom, face_point_geom_3d_face, face_type_of, ref_elem_face,
+    ref_elem_vol, FaceGeom, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 
@@ -347,10 +348,11 @@ fn assemble_interior_face_stress<S: FESpace>(
     quad_order: u8,
 ) {
     let order = space.order();
-    let face_re = ref_elem_face(ElementType::Line2, order);
+    // D814-1: face rule by node count — a hexahedron's quad faces take MFEM's
+    // `[0,1]²` tensor rule (`DGElasticityIntegrator`'s inline default
+    // `IntRules.Get(face_geom, 2·max(o₁,o₂))`), not the triangular one.
+    let face_re = ref_elem_face(face_type_of(face_nodes), order);
     let q_face = face_re.quadrature(quad_order);
-    let fa = face_nodes[0];
-    let fb = face_nodes[1];
 
     let et_l = mesh.element_type(el);
     let re_l = ref_elem_vol(et_l, order);
@@ -401,20 +403,30 @@ fn assemble_interior_face_stress<S: FESpace>(
         // `kappa·|nor|²·ip.weight/2·( (λ+2μ)/det₁ + (λ+2μ)/det₂ )` — MFEM's
         // penalty, which the pre-round-76 `w_f·pen` term was **not** (see the
         // `jmatcoef` block below).
-        let g1 = face_point_geom(mesh, el, fa, fb, xi_f[0]);
-        let g2 = face_point_geom(mesh, er, fa, fb, xi_f[0]);
-        // Face size from the isoparametric edge (`nor`'s magnitude = |dX/dξ|;
+        // D814-1: 3-D faces (triangular or quadrilateral) compose through the
+        // same `face_point_geom_3d_face` dispatcher as the other DG drivers.
+        let g1 = if dim == 2 {
+            FaceGeom::Face2(face_point_geom(mesh, el, face_nodes[0], face_nodes[1], xi_f[0]))
+        } else {
+            FaceGeom::Face3(face_point_geom_3d_face(mesh, el, face_nodes, [xi_f[0], xi_f[1]]))
+        };
+        let g2 = if dim == 2 {
+            FaceGeom::Face2(face_point_geom(mesh, er, face_nodes[0], face_nodes[1], xi_f[0]))
+        } else {
+            FaceGeom::Face3(face_point_geom_3d_face(mesh, er, face_nodes, [xi_f[0], xi_f[1]]))
+        };
+        // Face size from the isoparametric face (`nor`'s magnitude = |dX/dξ|;
         // MFEM's `sqrt(nor·nor)`), and the unit normal MFEM's `nor` reduces to.
-        let h_f = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
-        let normal = [g1.nor[0] / h_f, g1.nor[1] / h_f];
+        let h_f = g1.nor().iter().take(dim).map(|n| n * n).sum::<f64>().sqrt().max(1e-30);
+        let normal: Vec<f64> = (0..dim).map(|k| g1.nor()[k] / h_f).collect();
         let w_f = q_face.weights[qi] * h_f;
 
-        re_l.eval_basis(&g1.eip, &mut phi_l);
-        re_r.eval_basis(&g2.eip, &mut phi_r);
-        re_l.eval_grad_basis(&g1.eip, &mut gref_l);
-        re_r.eval_grad_basis(&g2.eip, &mut gref_r);
-        xform_grads(&g1.jit, &gref_l, &mut gphys_l, n_l, dim);
-        xform_grads(&g2.jit, &gref_r, &mut gphys_r, n_r, dim);
+        re_l.eval_basis(g1.eip(), &mut phi_l);
+        re_r.eval_basis(g2.eip(), &mut phi_r);
+        re_l.eval_grad_basis(g1.eip(), &mut gref_l);
+        re_r.eval_grad_basis(g2.eip(), &mut gref_r);
+        xform_grads(g1.jit(), &gref_l, &mut gphys_l, n_l, dim);
+        xform_grads(g2.jit(), &gref_r, &mut gphys_r, n_r, dim);
 
         // D805-1: MFEM's penalty (the `jmat` of `AssembleBlock`), NOT an
         // averaged Lame constant:
@@ -437,9 +449,9 @@ fn assemble_interior_face_stress<S: FESpace>(
         //
         // `nor·nor` is formed from the unnormalised `g1.nor` directly (MFEM's
         // `nor*nor`), not from `h_f*h_f`, to stay bit-faithful.
-        let nor_dot_nor = g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1];
+        let nor_dot_nor = g1.nor().iter().take(dim).map(|n| n * n).sum::<f64>();
         let jmatcoef = kappa * nor_dot_nor * q_face.weights[qi] * 0.5
-            * ((lam_l + 2.0 * mu_l) / g1.det_j + (lam_r + 2.0 * mu_r) / g2.det_j);
+            * ((lam_l + 2.0 * mu_l) / g1.det_j() + (lam_r + 2.0 * mu_r) / g2.det_j());
 
         // Precompute stress flux for each basis×component on both sides
         // sigma_n_L[a][l][i] = (σ_L(φ_a·e_l)·n)_i
@@ -606,8 +618,6 @@ fn assemble_boundary_face_stress<S: FESpace>(
 ) {
     let order = space.order();
     let face_nodes = mesh.face_nodes(face);
-    let fa = face_nodes[0];
-    let fb = face_nodes[1];
 
     let et = mesh.element_type(elem);
     let re = ref_elem_vol(et, order);
@@ -617,7 +627,9 @@ fn assemble_boundary_face_stress<S: FESpace>(
     let lam = lambda_elem[elem as usize];
     let mu = mu_elem[elem as usize];
 
-    let face_re = ref_elem_face(ElementType::Line2, order);
+    // D814-1: face rule by node count — a hexahedron's quad faces take MFEM's
+    // `[0,1]²` tensor rule, not the triangular one.
+    let face_re = ref_elem_face(face_type_of(&face_nodes), order);
     let q_face = face_re.quadrature(quad_order);
 
     let mut kbd = vec![0.0_f64; n * n * dim * dim];
@@ -635,22 +647,28 @@ fn assemble_boundary_face_stress<S: FESpace>(
         // `nL₁ = (ipw/W₁)·λ·nor` against `dshape_ps = W·∇ₓφ` — the `W` cancels
         // and the flux is the same number), and the penalty below is MFEM's
         // `jmatcoef`, not the pre-round-76 `w_f·pen`.
-        let g1 = face_point_geom(mesh, elem, fa, fb, xi_f[0]);
-        let h_f = (g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1]).sqrt().max(1e-30);
-        let normal = [g1.nor[0] / h_f, g1.nor[1] / h_f];
+        //
+        // D814-1: 3-D faces compose through `face_point_geom_3d_face`.
+        let g1 = if dim == 2 {
+            FaceGeom::Face2(face_point_geom(mesh, elem, face_nodes[0], face_nodes[1], xi_f[0]))
+        } else {
+            FaceGeom::Face3(face_point_geom_3d_face(mesh, elem, &face_nodes, [xi_f[0], xi_f[1]]))
+        };
+        let h_f = g1.nor().iter().take(dim).map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
+        let normal: Vec<f64> = (0..dim).map(|k| g1.nor()[k] / h_f).collect();
         let w_f = q_face.weights[qi] * h_f;
 
-        re.eval_basis(&g1.eip, &mut phi);
-        re.eval_grad_basis(&g1.eip, &mut gref);
-        xform_grads(&g1.jit, &gref, &mut gphys, n, dim);
+        re.eval_basis(g1.eip(), &mut phi);
+        re.eval_grad_basis(g1.eip(), &mut gref);
+        xform_grads(g1.jit(), &gref, &mut gphys, n, dim);
 
         // D805-1: MFEM's boundary penalty `jmatcoef = kappa·(nor·nor)·wLM` with
         // `w = ip.weight` (the boundary arm does NOT halve `w`), so
         // `kappa·|nor|²·ipw·(λ+2μ)/Weight₁`.  The pre-fix code used
         // `w_f·pen = ipw·|nor|·kappa·(λ+2μ)/|nor| = ipw·kappa·(λ+2μ)`, which
         // drops MFEM's `|nor|²/Weight` factor.
-        let nor_dot_nor = g1.nor[0] * g1.nor[0] + g1.nor[1] * g1.nor[1];
-        let jmatcoef = kappa * nor_dot_nor * q_face.weights[qi] * (lam + 2.0 * mu) / g1.det_j;
+        let nor_dot_nor = g1.nor().iter().take(dim).map(|v| v * v).sum::<f64>();
+        let jmatcoef = kappa * nor_dot_nor * q_face.weights[qi] * (lam + 2.0 * mu) / g1.det_j();
 
         // Precompute stress flux for each basis×component
         let mut sn = vec![vec![vec![0.0_f64; dim]; dim]; n];

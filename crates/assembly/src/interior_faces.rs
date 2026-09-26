@@ -135,6 +135,18 @@ fn local_faces(npe: usize, dim: usize) -> Vec<Vec<usize>> {
         (3, 2) => vec![vec![0,1], vec![1,2], vec![0,2]], // triangle edges
         (4, 2) => vec![vec![0,1], vec![1,2], vec![2,3], vec![3,0]], // quad edges
         (4, 3) => vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]], // tet faces
+        // D814-1: the six quad faces of a Hex8 — the same vertex sets the
+        // `build_face_elem_map` `(8,3)` arm (dg_base.rs, D805-4) lists.  The
+        // interior-face pairing only depends on the sorted vertex *sets*, so
+        // the ring orientation here is irrelevant.
+        (8, 3) => vec![
+            vec![0, 1, 2, 3],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![3, 2, 6, 7],
+            vec![0, 3, 7, 4],
+            vec![1, 2, 6, 5],
+        ],
         _ => panic!("local_faces: unsupported (npe={npe}, dim={dim})"),
     }
 }
