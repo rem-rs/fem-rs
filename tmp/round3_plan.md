@@ -4470,6 +4470,160 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第七十六轮（round 76）：D805-1/D805-2 DG 面项逐条目 = MFEM + D808-4 曲面 PA 核几何 + D805-3 ex27 refined.mesh + D807-1 部分（提取侧发布实体所有权）
+
+**开局 HEAD = round 75 末笔 `2952d058`（已推送）；树净。** 派单为两路后台代理
+（A = `crates/assembly/src/dg/**` 的 D805-1/D805-2；B = `crates/parallel/**` 的
+D807-1/D807-2，各自 `git worktree`：`C:/temp/r76a`、`C:/temp/r76b`）+ 主会话自办一路
+（候选 ③ 的 D808-4 + 候选 ⑤ 的 D805-3）。**两路代理都在未提交、未报告的状态下终止**
+（与 round 74/75 的 ㉔ 同型：环境墙），主会话按 ⑦「先跑库测试、连贯即 WIP 收编」接手：
+两路的半成品均连贯（各自测试绿），补完缺口后由主会话提交并 cherry-pick 进 main。
+
+提交链（fem-rs main）：`620e16e6`（D808-4）→ `a789e6cf`（D805-3）→ `10787665`（Lane A：
+D805-1+D805-2）→ `f5a7e657`（Lane B：D807-1 部分）。
+
+### 纪律新增（round 76 实测）
+- **㉗ `.gitignore:50` 忽略 `*.mesh` ⇒ git worktree（以及任何新 clone）没有 `data/` 下的
+  全部 mesh 夹具**（实测：worktree 67 个 vs 主树 120 个文件）。派单到 worktree 的代理
+  跑 `cargo test` 时，凡读 `data/*.mesh` 的用例**假红或静默跳过**——**验收与大门一律在主树
+  跑**；需要 worktree 内跑用例时先把夹具 `cp` 进去（本轮主会话已把 `tmp/d805|d807|d122r73|
+  d795|ledger` 复制进两个 worktree，但**没有**复制 `data/*.mesh`）。
+- **㉘ 代理可能在"未提交、未报告"下终止**：本轮两路皆如此，`SendMessage` 返回
+  "No active local_agent task"。判活靠 **worktree 的 mtime + `git log`**，不要等通知；
+  半成品的"连贯"判据 = 它自己的测试文件能编译且绿（本轮两路都满足）。
+
+### 主会话路线（L5）· **D808-4 关闭**：曲面网格上 hex/quad PA 核的几何
+- **根因**：`hex_q1`/`hex_qk`/`hex_q2..q4`/`quad_q1`/`quad_qk`/`quad_q2` 全部用**单元顶点**
+  自建 per-QP Jacobian/det/物理点；只有直网格成立。装配侧走 `assembler.rs` →
+  `geo_ref_elem`/`isoparametric_jacobian`（order-`g` 等参），故 `geom_order ≥ 2` 时
+  PA 与 SpMV **静默差 O(h)**——与 D783 在 `pa::prism_pk` 修掉的是同一缺陷。
+- **实现**：新 `pa/curved.rs::curved_jacobian`（`element_jacobian_at` 的 order-`g` `(J,x)`，
+  转置进 PA 核的"行=参考"约定），**`geom_order() <= 1` 返回 `None`** ⇒ 直网格逐字走旧路径
+  （按构造逐位不变，不是靠舍入）。`prism_pk` 的 D783 helper 改为 delegate，四处实现收敛为一处。
+  `quad_q1` 是唯一工作在 `[-1,1]²` 的核：曲线臂把点映到 `[0,1]²` 求值再把 Jacobian 乘回 `1/2`
+  （D797-2 的帧抵消要求 `weight×detJ` 与 `J⁻ᵀ×∇_ξ` 同帧；不做这一步偏差 187%）。
+- **验收**（`crates/assembly/tests/d808r76_pa_curved_geometry.rs`，4 测）：曲面 2×2×2 hex /
+  2×2 quad 夹具上 **14 个核配置全部 = 7.9e-16 … 3.3e-15**，而"修前"（同夹具 `geometry = None`
+  作 PA 数据源，即旧顶点路线）为 **3.4e-2 … 1.0e-1**——齿在测试内、不会腐烂。
+  单元 0/1 共享 2..25 个 dof（覆盖 scatter/accumulate）；直网格另测每个核。
+  `pa::curved` 自带门控单测（`None`↔`Some`、几何表确实驱动 `J`/`x`）。
+- **登记勘误（⑰）**：D808-4 的名单**漏了 `build_hex_q1_pa_data`**（旧路线修前见证 3.4e-2），
+  本轮一并修好并 pin 住。
+- **新发现（D812-1 类，已登记）**：夹具第一版**折叠**（`min det J = −2.79e-2`，角点 `ξ≈0.9531`），
+  而 PA 核存 `|det J|`（D696/D679 退化守护）而装配侧带**带符号** `det J`（D679）⇒ 折叠网格上
+  二者在比较两个不同量、差 O(1) 且**无任何提示**；且该折叠对 p ≤ 3 的点集不可见、只有 5 点点集
+  才命中。夹具已加 `assert_no_fold`，库侧无此诊断（见下 D812-2）。
+- 门：fem-assembly **111 targets / 1255 / 0 / 10 ign**（本轮前 109/1250/0/10）。
+
+### 主会话路线（L5）· **D805-3 关闭**：ex27 的 `refined.mesh`
+- **复现**：`mfem_ex27_robin_bc.exe -no-vis` rc=0、写出 `sol.gf`、**不写** `refined.mesh`
+  （两处 `let _ =` 吞错）。
+- **真因（比登记更准）**：被吞的错误是
+  `write_mfem: geometry dof 2 is shared by two elements with different coordinates`——
+  **真阳性**：`gen_mesh` 在 `set_curvature(3)` **之后**才 `make_periodic`，周期缝合刻意保留
+  各单元的 pre-merge 几何快照（D56/D799-1，MFEM 的不连续 nodal 语义）。MFEM 的 ex27 用
+  `mesh->SetCurvature(3, true)`（`ex27.cpp:627`，`discont = true`），`Mesh::Printer` 把它写成
+  `L2_T1_2D_P3` 场。**所以修法不是放宽校验器而是选对接续性**。
+- **实现**：`crates/io/src/mfem.rs` 新增公开 `write_mfem_file_nodes(path, mesh, space)`
+  （既有 `write_mfem_file_3d_nodes` 的 2-D 对应物）；ex27 两条路径（H1/DG）改用它 +
+  `NodesSpace::Discontinuous`，失败**只打 stderr**（stdout 逐字节对金标，不能加行）。
+- **真值**：C++ ex27 自身输出 + MFEM 4.10 读回：`r31_meshread refined.mesh` →
+  `NE=256 NBE=96 NV=302 dim=2 sdim=2 nodes=1`；`r32_cmp gold_refined_rs2.mesh refined.mesh`
+  → 两侧 `fec=L2_T1_2D_P3 order=3 vdim=2 vsize=8192 vol=1.74867`，**TOPOLOGY-IDENTICAL**，
+  `nodes max-rel-diff=4.29234e-08`（MFEM 写 `precision(8)`）。
+- **pin + 齿**（`crates/io/tests/d805r76_ex27_refined_mesh.rs`，2 测）：最小周期+曲面条带夹具上
+  断言**连续写者以该诊断拒绝**（且不落空文件）、不连续写者产出可回读且带 `L2_T1_2D_P3` 头的文件、
+  **直周期条带仍走连续写**（拒绝是关于几何不连续、不是关于周期性）。夹具**先曲后缝**才对——
+  次序反过来缺陷就消失。
+- **登记勘误**：round 75 `red_green.txt` 的 ex27 验收配方把两个档混了；金标自带
+  `Options used:` 才是权威：`gold_h1_dbc25` 只需 `-dbc 2.5 -rs 2`，而 `gold_dg_rhs_rs2` 需要
+  `-nbc 0 -dbc 2.5 -rbc-a 1 -rbc-b 0 -rs 2`。按此 **10/10 逐字节**（本轮亲跑）。
+- 门：fem-io **37 targets / 308 / 0 / 3 ign**（本轮前 306/0/3）。
+
+### Lane A（代理，主会话收编）· **D805-1 + D805-2 关闭**：DG 面项逐条目 = MFEM 4.10
+- **D805-1（罚项）**：MFEM `DGElasticityIntegrator`（`bilininteg.cpp:4087-4245`）
+  `jmatcoef = kappa·(nor·nor)·wLM`，内部面 `wLM = (ipw/2)·((λ₁+2μ₁)/W₁ + (λ₂+2μ₂)/W₂)`、
+  边界面 `ipw·(λ+2μ)/W`，用**未归一化** `nor = CalcOrtho(Trans.Jacobian())` 与
+  `Weight()` = 带符号 det J。fem-rs 取 `λ,μ` 平均并除以 `|nor|` ⇒ 任何 `|nor|² ≠ W` 的单元都不同，
+  曲面 41%。**顺带**：MFEM 体项默认阶 = `trial+test+OrderW()` 而面项是 `2·max(order)`，
+  fem-rs 一个参数两用 ⇒ 新增 `mfem_elasticity_volume_rule(geom_order, elem_order, et, dim)`
+  在装配器内部选体项规则（**公开签名不变、直网格选到同一规则故直网格不动**，曲面网格移向 C++ 默认）。
+- **D805-2（对流面项）**：旧实现是**守恒型**迎风 `−∫⟦v⟧F̂`，与**任何** MFEM 积分器都不逐条目等价
+  （夹具 48/256 错），而注释声称 `NonconservativeDGTraceIntegrator` 等价。新
+  `crates/assembly/src/dg/dg_trace.rs` 逐行移植 `DGTraceIntegrator`（`bilininteg.cpp:3480-3610`）
+  与 `TransposeIntegrator` 别名（`NonconservativeDGTraceIntegrator(u,a) = Transpose(DGTrace(u,−a,0.5a))`）；
+  `dgtrace_weights` 是内部面/边界面/周期缝**共用的唯一算术源**。`DGAdvectionIntegrator` 加 `alpha`
+  字段（ex9/ex41 传 −1.0），两个对流示例同步更新（**代理未做，主会话补**）。
+- **验收（主会话亲跑 `tmp/d805/cmp.py`，前 → 后：`max_rel` / >1e-12 条目）**：
+  `MATADV` 1.000e+00 48/256 → **1.388e-14 0/256**；`MATELA` 4.149e-01 384/1024 → **7.501e-12 2/1024**；
+  `MATELAV` 1.115e+00 256/1024 → **2.187e-12 2/1024**；`MATELZ` 3.748e-01 256/1024 → **7.501e-12 2/1024**；
+  `ELA_FACE` 4.149e-01 237/1024 → **2.126e-12 13/1024**；`MATDIF`/`MATDIFIF`/`ELZ_FACE` 不动。
+  残差 2.1e-12 即 `ELZ_FACE` 修前就有的求和噪声。
+- **主会话独立确认 DGTrace 语义**（改之前就做）：探针同时 dump 非守恒矩阵与裸
+  `DGTraceIntegrator(vel,−1,0.5)`，`MATADV == −transpose(MATADV2)` 的 `max_rel = 0.000e+00` **精确**
+  ⇒ 四块结构与 TransposeIntegrator 别名由 MFEM 自身输出证实（不靠读源码）。
+- **反回归（主会话亲跑）**：ex14 **311 行 0 diff**；ex27 **10/10 逐字节**；pex3 四锚点**逐位**
+  （87/1/95/193 it）；**ex9 与 pex9 stdout 与改动前逐字节相同**（路径归一化后）——ex9 的面 K 走
+  ex41 机制、边界 RHS 仍传 −1.0，故不受影响。pin：
+  `crates/assembly/tests/d805r76_dg_face_mfem_equivalence.rs`（23 个内嵌 MFEM 金标常量 + 逐条目断言）；
+  `d805_d799_3_dg_face_geometry.rs` 3/3。
+
+### Lane B（代理，主会话收编）· **D807-1 部分**：提取侧发布实体所有权 + facet 锚
+- **落地**：`par_partition` 持有整网 + 整分区向量，现发布**全网** share-set 最小 owner 与
+  每个 facet 的**最小全局单元锚**（新 `partition.rs::EntityOwnership`，随 `MeshPartition` 传递；
+  非提取产生的分区为 `None`，`DofPartition` 回退旧遍历规则 ⇒ 串行/AMR 路径逐位不变）。
+- **层缩到"锚闭包"**：`cylinder-hex.mesh` np=2 **222 / 246 元**（旧 252）、np=4
+  **222 / 222 / 246 / 234**（旧 252）——实测，非断言。
+- **未达且不声称**：MFEM 的本地子网格（np=2 rank0 = 126 元 / 205 顶点；`GetNE()`/`GetNV()`
+  只数 owned，ghost 在 `face_nbr_elements`/`face_nbr_vertices`），也没到 **180/204 的单层节点闭包**。
+  残余原因 = 第二条规则：facet 的 position/sign 仍从**锚单元**读出，故锚单元必须本地 ⇒
+  **残余 D807-1：把 position/sign 本身发布出去**（而不是锚单元 id），层才能砍到单层闭包。
+- **D807-2 未做**：`crates/space` 未动，`crates/space/tests/d807_tet_nd_face_pair_transform.rs`
+  仍记录该缺口（tet NDk≥2 的切向对交换，标量 `sign_correction` 表达不了）。**仍开放。**
+- **测试侧改动（主会话逐条复核）**：round-75 的"层 = 整网"pin **反转**为锚闭包，并把三个不同的
+  MFEM 量分别对准各自真值（owned 元 = `GetNE()`；**rank-owned 节点 = H1 o1 `GetTrueVSize()`**；
+  本地节点集 = 闭包自己的节点集），在断言处点明 `owned_nodes == GetNV()` 这个**conflation
+  是错的**（np=2 rank1：159 owned vs 226 local）——**代理原版把 `(owned_nodes, owned_elems)`
+  与 `(GetNV, GetNE)` 直接比，red；主会话按上述拆分修正后 8/8 绿**。
+  `d122_nd2_rt1_ghost_partition_par.rs` 把 D122-2 标为随 D807-1 关闭、原 `#[ignore]` 的
+  `d122_ghost_layer_is_one_layer` 转正；`d122r73_d3_mass_functional_par.rs` 把跨 rank 质量泛函
+  比较**限缩到 owned 单元的 dof**（D790-2 引理：owned 单元携带的实体的所有持有者都是 owned 单元的
+  点邻居 ⇒ 各 rank 求和完全相同），剩 **263576/553418** 条目有效；`d706_form_linear_system_par.rs`
+  加 np=4 并记录该夹具边界全属 rank0 ⇒ 砍层后跨 rank `ghost_ess` 腿为空、由值级 ghost 反应测试覆盖。
+- **反回归（主会话亲跑）**：pex3 四锚点**逐位不动**（本轮最重要的一条——层变了、np2 仍 95 it
+  `2.70053057745987e-2`、np4 仍 193 it `2.70053059872530e-2`）。
+
+### 主会话普查新增
+- **D812-1（新，未修）**：**写者把 order-1 的 `nodes` 段丢掉了**。`data/periodic-hexagon.mesh`
+  自带几何场（`FiniteElementCollection: L2_T1_2D_P1`、`VDim: 2`）；**读者保留、写者按
+  `geom_order() > 1` 才写 `nodes`**（MFEM 是 `Nodes != NULL` 就写）⇒ 回环丢几何表：
+  `ex9.mesh` 411 行/8428 B（Rust）vs 993 行/16862 B（C++）。实测：`read` 得
+  `geom_order=1 geometry_table=true`（表 48 节点/96 坐标），`written: has_nodes_section=false`。
+  四份 `data/*.mesh` 属此类（periodic-hexagon/segment/square/cube）。**oracle 已捕获**
+  （`/home/quan/work/d76main/ex9cpp/ex9.mesh` 即 MFEM 自己的回环输出）。**未修的原因**：
+  发射条件被所有 `.mesh` 写路径共享，改它要自带一轮字节金标回归（ledger/`Mesh::Save`），
+  属独立一轮，不是收尾编辑。
+- **D812-2（同族，未查根因）**：ex9 的 `.gf` 输出两侧尺寸差 4×（`ex9-init.gf` 9836 vs 39891 B，
+  `ex9-final.gf` 9704 vs 40589 B），而步进轨迹逐行相同 ⇒ 是输出格式/尺寸问题、不是数值问题，
+  且很可能是同一个缺失的 `nodes` 场（gf 文件记录其网格）。与 D812-1 一并处理。
+- **D810-1（复核后收窄，未修）**：`wg` 族三份私有 `face_geom_2d/3d` 的弦长路线不止一处——
+  (1) 面**测度**、(2) 面**物理点**（面角点线性插值）、(3) **参考点**反解（`local_jac` + `local_phys_to_ref`）
+  **三样都走旧路线** ⇒ 修法是**整条面路径交给 `dg_base::face_point_geom`/`face_point_geom_3d`**，
+  不是登记暗示的一行测度替换（且 `face_point_geom_3d` 是 Tet4-only=D805-4，与 wg 的单纯形假设相容）。
+  **未重写的原因**：`wg` 族在仓内**没有任何真值 oracle**（无 MFEM WG miniapp 端口、无曲面测试、
+  无消费方）⇒ 盲改只能验"直网格不变"，验不了"对"——正是本轮纪律禁止的那类改动。配方已记录。
+
+### 门（主会话亲跑）
+| 门 | 结果 |
+|---|---|
+| fem-assembly（含 Lane A 后）| **111 targets / 1255 / 0 / 10 ign** |
+| fem-io | **37 targets / 308 / 0 / 3 ign** |
+| ex14 byte-gold | **0 diff lines**（311 行体） |
+| ex27 | **10/10 逐字节**（按金标自带 options 头分组） |
+| pex3 | 四锚点**逐位**：`-o1 np1` 2.70053050699196e-2/87 it、`-o2 np1` 3.05558571614408e-4/1 it、`np2` 2.70053057745987e-2/95 it、`np4` 2.70053059872530e-2/193 it |
+| ex9 / pex9 | stdout 与改动前**逐字节相同** |
+| D805 探针 | `tmp/d805/cmp.py` 全 `[MAT*]` 逐条目 ≤ 2.1e-12（见上表） |
+
 ## 第七十五轮（round 75）：D782 二维 serendipity 语义端口 + D799-2/3 DG 面几何 + D800-2 embedded 曲面通量 + D808-1 非法 WGSL + 并行/D808-3
 
 **开局 HEAD = round 74 末笔 `a3520623`（已推送）；树净。** 五路并行（四路后台代理 + L5 主会话亲自），
