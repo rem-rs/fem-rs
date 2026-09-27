@@ -213,7 +213,7 @@ fn rk3_evolution_end_state_pin_2d_quad() {
     let norm: f64 = u.iter().map(|&v| v * v).sum::<f64>().sqrt();
     // Observed with the D822-3 fix + the D822-4 MFEM face rule (p+1 points).
     // The pre-D822-4 rule (3 points at p = 1; MFEM uses 2) gave
-    // 12.12151111491816998 — that rule mismatch is exactly what made the
+    // 12.1215111491816998 — that rule mismatch is exactly what made the
     // round-84 `-o 1` example run diverge from C++ in the 7th digit; with the
     // MFEM rule the end-to-end example matches C++ `0.061686586` to all 8
     // printed digits (MFEM anchor, `$HOME/work/d85main/ex18/cpp_o1.out`).
