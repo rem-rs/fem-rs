@@ -610,7 +610,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         // INLINE reader's `type = segment` arm fills (D724); boundary `POINT`
         // elements (MFEM geometry code 0, one vertex each — `Make1D` writes
         // two of them) land in the face tables.
-        let mesh = Mesh {
+        let mut mesh = Mesh {
             coords,
             conn: flat_elem,
             elem_tags,
@@ -628,17 +628,23 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             nc_vertex_view: None,
             geometry,
         };
-        // A *continuous* (`H1_1D_P*`) `nodes` section has no reader-side
-        // geometry builder yet: the vertex table above was already recovered
-        // from the section's first NV dofs, but the curved 1-D geometry is
-        // dropped (MFEM keeps it).  The discontinuous (`L2_T1_1D_P*`) tables
-        // `data/periodic-segment.mesh` carries are handled in full.
-        if mesh.geometry.is_none() && h1_nodes.is_some() {
-            eprintln!(
-                "warning (D813-4): the H1 `nodes` section of a 1-D mesh is not supported \
-                 yet — the vertex coordinates were recovered, but the curved geometry \
-                 table is dropped"
-            );
+        // A *continuous* (`H1_1D_P*`) `nodes` section is the 1-D H1 space's
+        // dof table, and the vertex table above is already MFEM's own
+        // recovery: `SetVerticesFromNodes` → `GetNodalValues` averages the
+        // per-element vertex contributions, but a continuous nodal element
+        // contributes the same shared dof value at every reference, so the
+        // mean is the dof value bitwise (probe `$HOME/work/d81b/h1_1d_probe.cpp`:
+        // the reloaded `H1_1D_P2` mesh's `GetVertex(v)` equal dof v to the last
+        // digit).  The discontinuous (`L2_T1_1D_P*`) tables
+        // `data/periodic-segment.mesh` carries are handled in full above; the
+        // continuous table itself is attached by `build_h1_1d_geometry` below
+        // (D816-3) whenever its lattice is representable, and refused loudly
+        // (mesh straight-sided, coordinates recovered) otherwise.
+        if mesh.geometry.is_none() {
+            if let Some((p, raw, ord, closed_uniform)) = &h1_nodes {
+                mesh.geometry =
+                    build_h1_1d_geometry(&mesh, *p, raw, *ord, *closed_uniform, nodes_vdim);
+            }
         }
         return Ok(MfemFile { mesh1d: Some(mesh), mesh2d: None, mesh3d: None });
     }
@@ -1000,8 +1006,11 @@ fn check_boundary_tables<const D: usize>(mesh: &Mesh<D>) -> FemResult<Vec<usize>
 /// (`mesh/mesh.cpp:7214`), while `Mesh::SetCurvature(1, discont)` legitimately
 /// writes an order-**1** `H1_<dim>D_P1` / `L2_T1_<dim>D_P1` section.  The continuous
 /// (`H1_<dim>D_P<p>`) numbering is implemented for hexahedra, tetrahedra,
-/// prisms (wedges), 2-D quadrilaterals and 2-D triangles and the discontinuous
-/// (`L2_T1_<dim>D_P<p>`) one for hexahedra, quads, triangles and prisms; any
+/// prisms (wedges), 2-D quadrilaterals and 2-D triangles, 1-D segments (order
+/// 2 — from order 3 on the file's Gauss-Lobatto lattice and the mesh's
+/// equispaced one split, see [`line1d_slot_map`]) and the discontinuous
+/// (`L2_T1_<dim>D_P<p>`) one for hexahedra, quads, triangles, prisms and
+/// 1-D segments (same order-3 lattice split); any
 /// other combination is refused with an error instead of silently writing a
 /// straight-sided mesh.  See [`NodesSpace`] and [`write_mfem_nodes`].
 ///
@@ -1047,7 +1056,10 @@ pub fn write_mfem_nodes<W: Write>(
 /// table round-trips through this function byte for byte against MFEM's own
 /// `Mesh::Save(out, 16)` re-save of `data/periodic-segment.mesh`.  Boundary
 /// `POINT` records (MFEM geometry code 0, one vertex — what `Make1D` writes)
-/// are emitted like any other boundary section.
+/// are emitted like any other boundary section.  Since D816-3 the
+/// *continuous* `H1_1D_P2` numbering works too: a curved 1-D mesh read from
+/// an `H1_1D_P2` file round-trips byte for byte through
+/// `NodesSpace::Continuous` (`line1d_slot_map` / `build_h1_1d_geometry`).
 pub fn write_mfem_nodes_1d<W: Write>(
     writer: &mut W,
     mesh: &Mesh<1>,
@@ -1339,7 +1351,8 @@ fn zero_subnormal(s: f64) -> f64 {
 /// **The numbering is MFEM's, not fem-rs's.**  For a continuous space the
 /// per-slot maps are the ones the reader uses ([`hex_slot_map`] for D41,
 /// [`tet_slot_map`] for D43, [`quad2d_slot_map`] / [`tri2d_slot_map`] for the
-/// 2-D families) — this direction is their exact inverse, and it
+/// 2-D families, [`line1d_slot_map`] for a 1-D segment mesh) — this direction
+/// is their exact inverse, and it
 /// is available because both element families place their dofs on the *same*
 /// nodal lattice as MFEM's `H1_HexahedronElement` / `H1_TetrahedronElement`,
 /// so a value read at one slot can be handed to the matching dof unchanged.
@@ -1486,11 +1499,39 @@ fn nodes_dof_values<const D: usize>(
                     })?;
                     (slots, n_dofs)
                 }
+                // D816-3: the 1-D segment numbering (`line1d_slot_map`): the
+                // element's two endpoint dofs are the shared mesh vertices,
+                // its (p-1) interior dofs are element-private.  Only order 2
+                // can carry a curved table: from order 3 on the file's
+                // closed Gauss-Lobatto lattice is a different point set than
+                // the equispaced `SegPk` lattice this table is evaluated with
+                // (the reader refuses such tables for the same reason), so
+                // writing one would re-label the values onto wrong positions.
+                ElementType::Line2 => {
+                    if order as usize > 2 {
+                        return Err(FemError::Mesh(format!(
+                            "write_mfem: cannot write the 1-D `nodes` section: an order-{order} \
+                             continuous table is interpolated on the closed Gauss-Lobatto points, \
+                             but the mesh's 1-D geometry is evaluated on the equispaced `SegPk` \
+                             lattice — two different point sets from order 3 on (D153/D816-3); \
+                             no `nodes` section was written"
+                        )));
+                    }
+                    let (slots, n_dofs) = line1d_slot_map(mesh, order as usize).map_err(|e| match e {
+                        HexSlotErr::NotHex => FemError::Mesh(
+                            "write_mfem: no MFEM H1 `nodes` numbering for this mesh".into(),
+                        ),
+                        HexSlotErr::Unsupported(why) => FemError::Mesh(format!(
+                            "write_mfem: cannot write the 1-D `nodes` section: {why}"
+                        )),
+                    })?;
+                    (slots, n_dofs)
+                }
                 other => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful continuous `nodes` numbering for \
-                         {other:?} (only Hex8, Tet4, Prism6, Quad4 and Tri3 are implemented); \
-                         no `nodes` section was written"
+                         {other:?} (only Hex8, Tet4, Prism6, Quad4, Tri3 and — for a 1-D \
+                         mesh — Line2 are implemented); no `nodes` section was written"
                     )))
                 }
             };
@@ -2633,6 +2674,52 @@ fn tri2d_slot_map<M: MeshTopology>(mesh: &M, p: usize) -> Result<(Vec<NodeId>, u
     }
 
     Ok((conn, n_dofs))
+}
+
+/// D816-3: MFEM's H1 `nodes` numbering for an all-`Line2` **1-D** mesh, as the
+/// map `conn[e * npe + s] = <file dof of reference slot s of element e>` plus
+/// the total number of geometry dofs — the segment analogue of
+/// [`quad2d_slot_map`] / [`tri2d_slot_map`], with the slots in the mesh's own
+/// ascending (`SegPk`) order.
+///
+/// MFEM's numbering (`fem/fespace.cpp:3457-3460` — `ne = (dim > 1) ? … : 0`,
+/// so a 1-D space has **no edge dofs**; bulk base `elem*nb` with
+/// `nb = GetNumDof(SEGMENT) = (p+1) − 2`; probe-verified on MFEM 4.10,
+/// `$HOME/work/d81b/h1_1d_probe.cpp`: `GetElementDofs(e)` = `[e, e+1, NV+e]`
+/// for p = 2 on `MakeCartesian1D(4)`):
+///
+/// ```text
+///   vertex v            -> dof v
+///   element e, slot j   -> dof NV + e*(p-1) + j   (j = 0..p-2, ascending)
+/// ```
+///
+/// The element-local dof order is `H1_SegmentElement`'s
+/// (`fem/fe/fe_h1.cpp:21`): `[v0 @ cp[0], v1 @ cp[p], interior i @ cp[i]
+/// ascending]` over the closed Gauss-Lobatto points, i.e. in the mesh's
+/// ascending slot order `s = 0..=p`: slot 0 is `v0`, slot p is `v1` and
+/// `0 < s < p` is interior `s−1` — the same row [`build_h1_1d_geometry`]
+/// stores.  (The *positions* behind the slots only coincide with the file's
+/// lattice for p <= 2; from order 3 on the two families split and both
+/// directions refuse — see [`build_h1_1d_geometry`].)
+fn line1d_slot_map<M: MeshTopology>(mesh: &M, p: usize) -> Result<(Vec<NodeId>, usize), HexSlotErr> {
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    if p == 0 || n_elems == 0 || n_vert == 0 {
+        return Err(HexSlotErr::NotHex); // nothing to number
+    }
+    let mut conn: Vec<NodeId> = Vec::with_capacity(n_elems * (p + 1));
+    for e in 0..n_elems as u32 {
+        let vs = mesh.element_nodes(e);
+        if vs.len() != 2 {
+            return Err(HexSlotErr::NotHex);
+        }
+        conn.push(vs[0]);
+        for j in 0..p - 1 {
+            conn.push((n_vert + e as usize * (p - 1) + j) as NodeId);
+        }
+        conn.push(vs[1]);
+    }
+    Ok((conn, n_vert + n_elems * (p - 1)))
 }
 
 // ─── D151: MFEM's H1 `nodes` numbering for prism (wedge) meshes ──────────────
@@ -4827,6 +4914,124 @@ fn build_h1_geometry<M: MeshTopology>(
     })
 }
 
+/// D816-3: the 1-D analogue of [`build_h1_geometry`] — attach a *continuous*
+/// (`H1_1D_P*`) `nodes` table to a `Mesh<1>` as shared-dof geometry.
+///
+/// MFEM's numbering (probe `$HOME/work/d81b/h1_1d_probe.cpp`, MFEM 4.10):
+/// `FiniteElementSpace::GetElementDofs(e)` = `[v0, v1, NV+e·(p−1)+0, …]` — a
+/// 1-D space has **no edge dofs** (`fem/fespace.cpp:3458`, `ne = (dim > 1) ?
+/// … : 0`), the vertex dofs are the vertex indices, and element `e`'s (p−1)
+/// interior dofs are `NV + e·(p−1) + j` with `j` counting
+/// `H1_SegmentElement`'s interior enumeration (ascending closed Gauss-Lobatto
+/// positions, `fem/fe/fe_h1.cpp:21`).  In the mesh's own ascending (`SegPk`)
+/// slot order `s = 0..=p` that is: slot 0 → `v0`, slot p → `v1`, slot `s` →
+/// interior `s−1` — the layout [`line1d_slot_map`] pins for the writer.
+///
+/// The table is only attached when its lattice is the one the in-memory
+/// geometry evaluator uses: `H1_FECollection` interpolates on the closed
+/// Gauss-Lobatto points, which from order 3 on are a *different point set*
+/// than the equispaced `SegPk` lattice (probe: `H1_SegmentElement(3)` nodes
+/// `0, 0.2764, 0.7236, 1` vs `0, ⅓, ⅔, 1`).  Storing such a table slot-ordered
+/// would make every geometry evaluation read the wrong parameter positions, so
+/// order-3+ tables are refused loudly — the same family split that keeps the
+/// `L2_T1_1D_P3+` tables out (D153/D813-4); reopening it needs a GLL 1-D
+/// geometry evaluator in `fem_mesh`/`fem_element` (outside io's territory).
+/// The legacy closed-uniform collections (`Linear`/`Quadratic`/`Cubic`) stay
+/// refused as well: their tables would attach cleanly (the lattices coincide
+/// with `SegPk`), but nothing produces a 1-D legacy `nodes` file to pin the
+/// numbering against, and the writer only emits modern `H1_1D_P*` names.
+/// A refused table leaves the mesh straight-sided with the vertex coordinates
+/// recovered — which are always correct (`SetVerticesFromNodes` semantics).
+///
+/// Returns `None` without a word for order 1 (the vertex table is the whole
+/// table — MFEM's own `SetCurvature(1, false)` clears `Nodes` too).
+fn build_h1_1d_geometry(
+    mesh: &Mesh<1>,
+    order: u8,
+    raw: &[f64],
+    ordering: usize,
+    closed_uniform: bool,
+    vdim: usize,
+) -> Option<GeometryData> {
+    let p = order as usize;
+    if p < 2 {
+        return None; // order-1: the vertex table is the whole table
+    }
+    if closed_uniform {
+        eprintln!(
+            "warning (D816-3): the legacy closed-uniform 1-D `nodes` collection is not \
+             attached (no 1-D legacy fixture exists to pin its numbering against); the mesh \
+             is read as straight-sided (geometric order 1)"
+        );
+        return None;
+    }
+    if p > 2 {
+        eprintln!(
+            "warning (D816-3): refusing the order-{p} continuous `nodes` geometry of a 1-D \
+             mesh — H1 interpolates on the closed Gauss-Lobatto points, which from order 3 on \
+             are a different point set than the equispaced lattice the mesh's geometry is \
+             evaluated with (the L2_T1_1D_P3+ limitation, D153); the mesh is read as \
+             straight-sided (vertex coordinates recovered)"
+        );
+        return None;
+    }
+    let n_vert = mesh.n_nodes();
+    let n_elems = mesh.n_elems();
+    let n_dofs = n_vert + n_elems * (p - 1);
+    if ordering > 1 {
+        eprintln!(
+            "warning (D816-3): unknown `nodes` ordering {ordering} on a 1-D mesh; the mesh \
+             is read as straight-sided (geometric order 1)"
+        );
+        return None;
+    }
+    if raw.len() < vdim * n_dofs {
+        eprintln!(
+            "warning (D816-3): the `nodes` section carries {} values but the 1-D H1 numbering \
+             needs {vdim}·{n_dofs}; the mesh is read as straight-sided (geometric order 1)",
+            raw.len()
+        );
+        return None;
+    }
+    // Component values of dof d, normalised from the section's ordering
+    // (byNODES = 0: [x of all dofs]; byVDIM = 1: interleaved, stride VDim).
+    // A 1-D mesh's geometry is scalar (VDim = 1 in any conforming file); a
+    // `vdim > 1` section is a `spaceDim > dim` mesh, which stays refused the
+    // way the D112b warning upstream already said.
+    let mut coords = vec![0.0f64; n_dofs];
+    match ordering {
+        0 => {
+            for d in 0..n_dofs {
+                coords[d] = raw[d];
+            }
+        }
+        _ => {
+            for d in 0..n_dofs {
+                coords[d] = raw[d * vdim];
+            }
+        }
+    }
+    let mut conn: Vec<NodeId> = Vec::with_capacity(n_elems * (p + 1));
+    for e in 0..n_elems as u32 {
+        let vs = mesh.elem_nodes(e);
+        debug_assert_eq!(vs.len(), 2, "a Line2 element has two vertices");
+        // Slot 0 = v0, slots 1..p = the element's private interior dofs in
+        // ascending order, slot p = v1 (the row `line1d_slot_map` re-derives).
+        conn.push(vs[0]);
+        for j in 0..p - 1 {
+            conn.push((n_vert + e as usize * (p - 1) + j) as NodeId);
+        }
+        conn.push(vs[1]);
+    }
+    Some(GeometryData {
+        order,
+        conn,
+        nodes_per_elem: p + 1,
+        coords,
+        n_nodes: n_dofs,
+    })
+}
+
 // ─── D112: legacy (`closed-uniform`) `nodes` sections ────────────────────────
 //
 // MFEM's legacy finite element collections — `Linear`, `Quadratic` and `Cubic`
@@ -6444,4 +6649,100 @@ elements\n1\n1 5 1 2 3 4 5 6 7 8\n\nboundary\n6\n1 3 1 2 3 4\n1 3 5 6 7 8\n1 3 1
         assert_eq!(tables, 3, "p = 1, 2, 3");
     }
 
+    /// D816-3 — the 1-D continuous (`H1_1D_P*`) numbering, pinned against
+    /// MFEM 4.10's own `FiniteElementSpace::GetElementDofs` for `p = 1..3` on
+    /// `MakeCartesian1D(4)` (`tests/fixtures/
+    /// d816_mfem_h1seg_getelementdofs_p1to3.txt`, written by
+    /// `$HOME/work/d81b/h1_1d_probe.cpp`).  A 1-D space has no edge dofs
+    /// (`fem/fespace.cpp:3458`), so the layout is vertices first
+    /// (`dof v = v`) and (p-1) element-private interior dofs
+    /// (`NV + e*(p-1) + j`) — exactly [`line1d_slot_map`]'s rows in the
+    /// mesh's ascending slot order `[v0, interiors, v1]`.
+    ///
+    /// The fixture's `H1_SegmentElement` lines are the second pin: the
+    /// collection's node *positions* are the closed Gauss-Lobatto points,
+    /// which at `p = 2` coincide with the equispaced `SegPk` lattice (the
+    /// only curved order the reader attaches and the writer emits) and at
+    /// `p = 3` are a different point set — the reason both directions refuse
+    /// order-3+ 1-D tables instead of re-labelling values across families.
+    #[test]
+    fn d816_segment_h1_slot_map_matches_mfem_getelementdofs() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/d816_mfem_h1seg_getelementdofs_p1to3.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("d816 segment oracle").replace("\r\n", "\n");
+
+        // The mesh the probe built: MakeCartesian1D(4, 1.0) — five vertices,
+        // four segments, no boundary (the layout does not depend on it).
+        let mesh = Mesh::<1>::uniform(
+            vec![0.0, 0.25, 0.5, 0.75, 1.0],
+            vec![0, 1, 1, 2, 2, 3, 3, 4],
+            vec![1; 4],
+            ElementType::Line2,
+            vec![],
+            vec![],
+            ElementType::Point1,
+        );
+
+        let mut layouts = 0usize;
+        let mut gll_seen = 0usize;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let t: Vec<&str> = line.split_whitespace().collect();
+            if t[0] == "layout" {
+                let p: usize = t[1].trim_start_matches("p=").parse().expect("p");
+                let (slots, n_dofs) =
+                    line1d_slot_map(&mesh, p).unwrap_or_else(|_| panic!("p={p}: no map"));
+                if t[2].starts_with("vsize=") {
+                    assert_eq!(
+                        n_dofs,
+                        t[2].trim_start_matches("vsize=").parse().expect("vsize"),
+                        "p={p}: MFEM's H1_1D_P{p} space size"
+                    );
+                    assert_eq!(slots.len(), 4 * (p + 1), "p={p}: slot rows");
+                } else {
+                    assert_eq!(t[2], "elem", "bad layout line: {line:?}");
+                    let e: usize = t[3].parse().expect("elem");
+                    let want: Vec<u32> =
+                        t[5..].iter().map(|s| s.parse().expect("dof")).collect();
+                    let (slots, _) =
+                        line1d_slot_map(&mesh, p).unwrap_or_else(|_| panic!("p={p}: no map"));
+                    // MFEM's list is in the *element-local* dof order
+                    // (`H1_SegmentElement`'s `[v0, v1, interiors ascending]`),
+                    // while the slot map is in the mesh's ascending slot order
+                    // (`[v0, interiors, v1]`): local dof d lives at slot 0
+                    // (d = 0), slot p (d = 1) and slot d-1 (the interiors).
+                    let slot_of_local =
+                        |d: usize| if d == 0 { 0 } else if d == 1 { p } else { d - 1 };
+                    for (d, &w) in want.iter().enumerate() {
+                        assert_eq!(
+                            slots[e * (p + 1) + slot_of_local(d)] as u32,
+                            w,
+                            "p={p} elem {e} local dof {d}: GetElementDofs layout"
+                        );
+                    }
+                }
+                layouts += 1;
+            } else if t[0] == "H1_SegmentElement" {
+                let p: usize = t[1].trim_start_matches("p=").parse().expect("p");
+                let want: Vec<f64> =
+                    t[3..].iter().map(|s| s.parse::<f64>().expect("x")).collect();
+                let equi = fem_element::lagrange::factory::SegPk::new(p).dof_coords();
+                assert_eq!(want.len(), p + 1, "p={p}: node count");
+                assert_eq!(equi.len(), p + 1, "p={p}: SegPk node count");
+                let same_set = want.iter().all(|x| {
+                    equi.iter().any(|c| (c[0] - x).abs() < 1e-12)
+                }) && equi.iter().all(|c| want.iter().any(|x| (c[0] - x).abs() < 1e-12));
+                assert_eq!(
+                    same_set,
+                    p <= 2,
+                    "p={p}: the closed Gauss-Lobatto and equispaced lattices must \
+                     coincide only at p <= 2 — that is the order-3+ refusal's premise"
+                );
+                gll_seen += 1;
+            }
+        }
+        assert_eq!(layouts, 15, "3 vsize lines + 4 element rows per order (p = 1, 2, 3)");
+        assert_eq!(gll_seen, 2, "p = 2, 3");
+    }
 }

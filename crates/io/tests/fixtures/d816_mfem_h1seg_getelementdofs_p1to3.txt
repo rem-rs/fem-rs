@@ -1,0 +1,17 @@
+layout p=1 vsize=5
+layout p=1 elem 0 dofs: 0 1
+layout p=1 elem 1 dofs: 1 2
+layout p=1 elem 2 dofs: 2 3
+layout p=1 elem 3 dofs: 3 4
+layout p=2 vsize=9
+layout p=2 elem 0 dofs: 0 1 5
+layout p=2 elem 1 dofs: 1 2 6
+layout p=2 elem 2 dofs: 2 3 7
+layout p=2 elem 3 dofs: 3 4 8
+layout p=3 vsize=13
+layout p=3 elem 0 dofs: 0 1 5 6
+layout p=3 elem 1 dofs: 1 2 7 8
+layout p=3 elem 2 dofs: 2 3 9 10
+layout p=3 elem 3 dofs: 3 4 11 12
+H1_SegmentElement p=2 nodes: 0 1 0.5
+H1_SegmentElement p=3 nodes: 0 1 0.27639320225002106 0.72360679774997894

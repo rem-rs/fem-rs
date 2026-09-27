@@ -150,8 +150,12 @@ fn d813_segment_geometry_survives_the_round_trip_bitexact() {
 // ─── teeth ───────────────────────────────────────────────────────────────────
 
 /// The *continuous* writer must not silently fold the periodic table into a
-/// shared vertex space: `Line2` has no continuous (`H1_1D_P*`) numbering yet,
-/// so the request is refused loudly and nothing is emitted.
+/// shared vertex space.  D816-3 gave `Line2` its continuous (`H1_1D_P*`)
+/// numbering, so the refusal moved to the semantic check that actually
+/// applies: the folded per-element copies contradict each other at the
+/// periodic seam (vertex 0 is claimed with x = 0 by element 0 and x = 1 by
+/// element 3), and a shared dof cannot carry both.  The request is refused
+/// loudly and nothing is emitted.
 #[test]
 fn d813_segment_continuous_writer_refuses() {
     let mesh = read_segment();
@@ -160,7 +164,7 @@ fn d813_segment_continuous_writer_refuses() {
         .expect_err("the folded table must not be writable as a continuous space");
     let msg = err.to_string();
     assert!(
-        msg.contains("no MFEM-faithful continuous `nodes` numbering for Line2"),
+        msg.contains("is not continuous"),
         "unexpected continuous-writer diagnostic: {msg}"
     );
     assert!(buf.is_empty(), "a refused write must emit nothing");
