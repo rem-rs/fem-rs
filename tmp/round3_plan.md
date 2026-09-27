@@ -4470,6 +4470,30 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十六轮（round 86）：§4-4 逐号定性（主会话）+ D827-1 混合族 hp 边基（Lane A）+ D827-3/4 金字塔导出余项（Lane B）——三路并行全交付
+
+**开局 HEAD = round-85 终稿 `fe0d9a4e`；C: 34G；WSL 正常。** 三路主树文件互斥（㉛）：主会话 = 文档/账本（§4-4）；Lane A = `crates/space/**`（D827-1）；Lane B = `crates/io/**`（D827-3/4）。
+
+### 主会话（§4-4）· **关闭**
+44 个 D600+ 逐号一行定性（`tmp/ledger/d_number_census.txt` round-86 节）：**未用/段位预留 22**（D666/D669-671 显式未用、D707/D710/D711/D723/D791/792/794/796/798 派单号段预留尾号、D691/D692 序号空洞、D801-804 四路 L 段预留、D820 基号）、**已闭/兑现/落地 18**（D621/622/623 夹具、D631 闭格、D642/645 审计与吸收、D703 = D700+豁免、D709 pin 常驻、D714 平台事实、D716 兑现、D725/726/731/732/734 随 D585/D721/D715/D787 族裁决关闭、D740 豁免、D806 = D800-2 交付语义）、**process-only/吸收 4**（D604 bpcg、D643 审计、D717 被 D813-1 取代、D741 可选未 pursued）。矩阵 §4 第 4 项关闭。新号段从 D829 起。
+
+### Lane A（D827-1）· **关闭（前提修正 ⑥）**
+- **登记前提被修正**：MFEM `VariableOrderMinimumRule`（fespace.cpp:1094/1110-1139）的边约束 transfer = **collection 级 SEGMENT FE**（`fec->GetFE(SEGMENT,p)`），**与相邻单元族无关**——探针实证同一 tet+pyr 网格只翻 collection 基（GL→CU）全部边约束行翻转（{0.3236,-0.1236,0.8} ↔ {2/9,8/9,-1/9}）；**GL collection 下 tet 自身边 dof 也在 GLL 位**（fe_h1.cpp:617 ClosedPoints(p,btype)）——d85c"tet 边基 = ClosedUniform"表述修正（等距 tet 只在 CU collection 下出现；CU 下金字塔仍 Fuentes）。
+- **fem-rs 忠实翻译**：fem-rs 是按族基的 franken-collection（MFEM 无对应物）⇒ 逐 (实体,阶) 变体取**其使用族基**（主侧权重 + slave 位置各取各基；同族网格退化现状）。
+- **连带修复**：混合 tet×pyr 三边形面两侧各硬编码己方基（tet 分支等距/pyr 分支 H1TriPk）对同一面各算各的错位行——新 `tri_face_variant_rows` 统一（[4,3] identity 抓实）；`propagate_nc_2d_edge_variants` 抽出共用（detector 裸查表会 panic，已实证）。
+- 7 测（3 红 + 4 控制/有牙，stash 复红）；位门自证：tet+pyr 须 `EnsureNCMesh(true)`。fem-space **637/0**。新债 D829-1/2。
+
+### Lane B（D827-3/4）· **关闭（-3 放行 / -4 裁决拒绝）**
+- **D827-3**：Pyramid13 **连续 H1 导出**放行——`pyramid13_h1_conn_nodes`：13 节点行 → 15-dof `H1_3D_P2` Fuentes 载荷（行 slots 0..12 与 Fuentes 前 13 一一对应；基座面 (½,½,0) 与内部 (¼,¼,½) 两个行外 slot = 直边 P1 映像）；探针 vs MFEM 自产 15 值偏差 **0.0**；三套拓扑（单元 0..14、倒立对 NDofs=21、并肩对 NDofs=27）slot 级钉死；导出 Load 回读逐 slot 0.0 + **再存逐字节**。
+- **D827-4 裁决**：**维持拒绝，探针有据**——MFEM 4.10 无任何可用弯曲金字塔 ingest：①Gmsh 读侧无 code-19（type 表 `gmsh.cpp:613` → ABORT `:677`，exit 134 实证）；②名义 type-14 路径自身缺陷：14 个 refiner-stump 值写进 15-dof ClosedUniform 空间（`HOPyramidMapping` 产 14 项 vs `GetFE(0)->GetDof()=15`），逐 slot 错位 + 内部 dof 未初始化垃圾（直边对照 dof13=顶点值、dof14=1.6e-322）。拒绝消息携带全部证据；**上游知会候选**（非 fem-rs 债）。
+- 4 测红→绿；fem-io **376/0**（基线 372+4）。
+
+### 整合与提交
+三路亲验（⑰）复跑绿；Lane B 期间观察到 Lane A 的 p_refine.rs 一度编译红（E0308）阻塞其全量 ~45 分钟，Lane A 自行修复（㉝ 一轮闭环，无主会话介入）。分笔：`3ff8444c`（§4-4 census+矩阵）→ `3c4a7519`（D827-3/4）→ `6e5d053a`（D827-1）→ docs。证据：`tmp/d86a|d86b/`。
+
+### 债务状态
+**D827-1、D827-3、§4-4 关闭；D827-4 裁决关闭（拒绝有据，上游知会候选）；D827-2 维持（记录）**；新债 **D829-1/2**。
+
 ## 第八十五轮（round 85）：D822-4 ex18 -o3 档（主会话）+ D824-A 金字塔行 hp（Lane C）+ D825-1/2 导出族余项（Lane B）——三路主树并行全交付
 
 **开局 HEAD = round-84 终稿 `967fa4d5`；开局即发现并修复 round-83/84 两轮代理漏 `git add` 的 8 个 tracked 引用文件（卫生笔 `4691a818`）；C: 开局 34G（⑨：清 incremental 后跑门）。**
