@@ -10,18 +10,31 @@
 //! In p-refinement, different elements can have different polynomial orders.
 //! Every topological entity (edge/face) holds **one DOF set ("variant") per
 //! distinct element order of its adjacent elements**, with the DOFs placed at
-//! that order's own basis node positions (Gauss-Lobatto for the H1
-//! quad/tri/hex bases, equispaced for the TetPk path). An element references
+//! that order's own basis node positions. An element references
 //! the variant matching its own order — exactly MFEM's
-//! `var_edge_dofs`/`var_face_dofs` tables.
+//! `var_edge_dofs`/`var_face_dofs` tables (MFEM keys variants by order only,
+//! never per cell family — probe `tmp/d86a/out_p33_gl.txt`).
+//!
+//! The 1-D node set of a variant follows the **family of the elements that
+//! use it** (D827-1): closed Gauss-Lobatto for the tri/quad/hex/prism/
+//! pyramid bases (`H1TriPk`/`QuadQk`/`HexQk`/`H1PrismPk`/
+//! `H1FuentesPyramidPk`), equispaced for the tet (`TetPk`) — the
+//! first-encountering element of that (entity, order) donates the basis if
+//! two families share one variant.  MFEM itself keeps a collection-global
+//! entity basis (its hp constraints evaluate
+//! `fec->GetFE(Geometry::SEGMENT/TRIANGLE, p)`, `fem/fespace.cpp:1094` —
+//! probe `tmp/d86a/mixed_edge_probe.cpp`: flipping only the collection basis
+//! flips every row GLL ↔ equispaced); fem-rs's per-family cell bases make
+//! the variant-level dispatch the faithful translation.
 //!
 //! ## Constraint generation (MFEM `BuildConformingInterpolation`)
 //!
 //! * Conforming entities holding multiple variants (MFEM
 //!   `VariableOrderMinimumRule`): the lowest-order variant is the master; every
 //!   higher-order variant DOF is constrained to interpolate the lowest-order
-//!   trace: `u_i = Σ_j L_j^{(p0)}(t_i) u_j` with `L_j` the order-`p0` nodal
-//!   Lagrange basis evaluated at the higher-variant node position `t_i`.
+//!   trace at the slave DOF's own node position: `u_i = Σ_j L_j^{(p0)}(t_i) u_j`
+//!   with `L_j` the master variant's nodal basis (per its family, D827-1)
+//!   evaluated at the higher-variant node position `t_i`.
 //! * Non-conforming (hanging) 2D edges: a *slave* edge strictly inside a
 //!   *master* edge has **all** its variant DOFs (and its hanging endpoint
 //!   vertices) constrained to the master edge's lowest-variant interpolation
@@ -53,7 +66,7 @@
 //!   `tmp/d85c/pyr_hp_probe.cpp` (D824-A): rows, NDofs and the min-rule
 //!   constraints of a mixed-order pyramid triple on `EnsureNCMesh`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use fem_core::types::{DofId, NodeId};
 use fem_element::lagrange::{H1TriPk, PRISM_EDGES};
 use fem_element::ReferenceElement;
@@ -455,15 +468,43 @@ fn n_bubble_dofs_2d(et: ElementType, p: u8) -> usize {
 // Entity variant computation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Per-edge state: distinct orders of adjacent elements (one DOF set per
-/// order) + Gauss-Lobatto node-set flag.
-type EdgeVariantSets = HashMap<EdgeKey, (BTreeSet<u8>, bool)>;
+/// Per-edge state: for each edge, the distinct orders of its adjacent
+/// elements (one DOF set per order) mapped to the edge's 1-D basis flag
+/// (`true` = closed Gauss-Lobatto, `false` = equispaced) for that variant.
+///
+/// D827-1: the flag is tracked per (edge, ORDER) VARIANT — the
+/// first-encountering element of that order on the edge donates its family's
+/// basis — not once per edge and not from element 0.  On a mixed-family edge
+/// (tet p3 × pyramid p2) the p3 variant's dofs sit where the tet's
+/// `TetPk` equispaced basis interpolates them and the p2 variant's at the
+/// pyramid's GLL midpoint.  A variant shared by two families at the SAME
+/// order (tet p3 × pyramid p3) keeps the first-encountering family's basis:
+/// MFEM stores one variant per order and never per family (probe
+/// `tmp/d86a/out_p33_gl.txt`: variant orders "3", single dof set, no
+/// constraints), so one cell basis has to win — same limitation as the
+/// documented TetPk-basis divergence (d176).
+type EdgeVariantSets = HashMap<EdgeKey, BTreeMap<u8, bool>>;
 
 /// Per-face state: distinct orders of adjacent elements + face node count.
-type FaceVariantSets = HashMap<FaceKey, (BTreeSet<u8>, usize)>;
+/// Per-face state: for each face, the distinct orders of its adjacent
+/// elements mapped to the face's basis flag (`true` = closed Gauss-Lobatto:
+/// `H1TriPk` barycentrics on tri faces, GLL tensor on quad faces; `false` =
+/// equispaced `TetPk` tri faces) plus the face's corner count (3 or 4).
+///
+/// D827-1: like the edge flags, the tri-face flag is tracked per
+/// (face, ORDER) VARIANT — the first-encountering element of that order on
+/// the face donates its family's basis — so a mixed tet × pyramid face
+/// places the tet variant's dofs on the equispaced barycentric grid and the
+/// pyramid variant's on the `H1TriPk` GLL grid.  Quad faces only occur in
+/// GLL families (hex/prism/pyramid), so their flag is always `true`.
+type FaceVariantSets = HashMap<FaceKey, (BTreeMap<u8, bool>, usize)>;
 
 /// Collect the order variants of every edge (the set of orders of adjacent
-/// elements; each order gets its own DOF set).
+/// elements; each order gets its own DOF set) with the 1-D basis flag of
+/// each (edge, order) variant — the first-encountering element of that
+/// order donates its family's basis (D827-1).  Also consumed by
+/// [`detect_p_constraints`] so the constraint node positions match the
+/// builder's DOF coordinates variant for variant.
 fn collect_edge_variants<M: MeshTopology>(mesh: &M, elem_orders: &[u8]) -> EdgeVariantSets {
     let mut sets: EdgeVariantSets = HashMap::new();
     for e in 0..mesh.n_elements() as u32 {
@@ -472,11 +513,62 @@ fn collect_edge_variants<M: MeshTopology>(mesh: &M, elem_orders: &[u8]) -> EdgeV
         let ns = elem_corners(et, mesh.element_nodes(e), mesh.geom_order() > 1);
         let gll = elem_uses_gll(et);
         for (a, b) in elem_local_edges(et, &ns) {
-            let entry = sets.entry(EdgeKey::new(a, b)).or_insert_with(|| (BTreeSet::new(), gll));
-            entry.0.insert(p);
+            sets.entry(EdgeKey::new(a, b))
+                .or_default()
+                .entry(p)
+                .or_insert(gll);
         }
     }
     sets
+}
+
+/// 2D NC hp variant-order propagation (MFEM `CalcEdgeFaceVarOrders`,
+/// fespace.cpp): a master edge must hold a variant at the minimum order of
+/// its slave edges, and every slave edge adopts the master's post-update
+/// minimum order, iterated to fixpoint.  Shared by the builder and
+/// [`detect_p_constraints`] so both see the SAME variant set per edge
+/// (D827-1: the detector's per-variant basis lookup must cover the
+/// propagated variants too).
+fn propagate_nc_2d_edge_variants<M: MeshTopology>(mesh: &M, edge_sets: &mut EdgeVariantSets) {
+    let nc = detect_nc_geometry_2d(mesh);
+    let mut masters: Vec<EdgeKey> = nc.masters.iter().map(|m| m.key).collect();
+    masters.sort();
+    let mut slaves_of: HashMap<EdgeKey, Vec<EdgeKey>> = HashMap::new();
+    for s in &nc.slaves {
+        slaves_of.entry(s.master).or_default().push(s.key);
+    }
+    loop {
+        let mut changed = false;
+        for mkey in &masters {
+            let Some(slaves) = slaves_of.get(mkey) else { continue };
+            // min order over all slave edges of this master
+            let min_slaves = slaves.iter()
+                .map(|k| edge_sets[k].keys().next().copied().unwrap())
+                .min()
+                .expect("master with no slaves");
+            let min_master = edge_sets[mkey].keys().next().copied().unwrap();
+            if min_slaves < min_master {
+                // The inserted low variant inherits the edge's existing
+                // variant basis (2D tri/quad edges are all GLL, so this
+                // only keeps the map well-formed).
+                let inherit = *edge_sets[mkey].values().next().unwrap();
+                edge_sets.get_mut(mkey).unwrap().entry(min_slaves).or_insert(inherit);
+                changed = true;
+            }
+            // apply the master's post-update minimum order to all slave
+            // edges (MFEM's unconditional `|=` of `min_mask`)
+            let min_master = edge_sets[mkey].keys().next().copied().unwrap();
+            for sk in slaves {
+                let min_slave = edge_sets[sk].keys().next().copied().unwrap();
+                if min_master < min_slave {
+                    let inherit = *edge_sets[sk].values().next().unwrap();
+                    edge_sets.get_mut(sk).unwrap().entry(min_master).or_insert(inherit);
+                    changed = true;
+                }
+            }
+        }
+        if !changed { break; }
+    }
 }
 
 /// Collect the order variants of every 3D face.
@@ -489,42 +581,43 @@ fn collect_face_variants<M: MeshTopology>(
         let p = elem_orders[e as usize];
         let et = mesh.element_type(e);
         let ns = elem_corners(et, mesh.element_nodes(e), mesh.geom_order() > 1);
+        let gll = elem_uses_gll(et);
         if is_hex_row(et) {
             for face4 in hex_quad_faces(&ns) {
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
-                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
-                entry.0.insert(p);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 4));
+                entry.0.entry(p).or_insert(gll);
             }
         } else if is_pyramid_row(et) {
             for face4 in [pyramid_base_face(&ns)] {
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
-                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
-                entry.0.insert(p);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 4));
+                entry.0.entry(p).or_insert(gll);
             }
             for (a, b, c) in pyramid_tri_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
-                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 3));
-                entry.0.insert(p);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 3));
+                entry.0.entry(p).or_insert(gll);
             }
         } else if is_prism_row(et) {
             for (a, b, c) in prism_tri_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
-                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 3));
-                entry.0.insert(p);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 3));
+                entry.0.entry(p).or_insert(gll);
             }
             for face4 in prism_quad_faces(&ns) {
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
-                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
-                entry.0.insert(p);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 4));
+                entry.0.entry(p).or_insert(gll);
             }
         } else if is_tet_row(et) {
             for (a, b, c) in tet_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
-                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 3));
-                entry.0.insert(p);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 3));
+                entry.0.entry(p).or_insert(gll);
             }
         } else {
             panic!("collect_face_variants: unsupported element geometry {et:?}");
@@ -592,40 +685,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
     // DOFs MFEM never creates (D136: 4 spurious order-2 variants at
     // `hpref -n 100`).
     if dim == 2 {
-        let nc = detect_nc_geometry_2d(mesh);
-        let mut masters: Vec<EdgeKey> = nc.masters.iter().map(|m| m.key).collect();
-        masters.sort();
-        let mut slaves_of: HashMap<EdgeKey, Vec<EdgeKey>> = HashMap::new();
-        for s in &nc.slaves {
-            slaves_of.entry(s.master).or_default().push(s.key);
-        }
-        loop {
-            let mut changed = false;
-            for mkey in &masters {
-                let Some(slaves) = slaves_of.get(mkey) else { continue };
-                // min order over all slave edges of this master
-                let min_slaves = slaves.iter()
-                    .map(|k| edge_sets[k].0.iter().copied().next().unwrap())
-                    .min()
-                    .expect("master with no slaves");
-                let min_master = edge_sets[mkey].0.iter().copied().next().unwrap();
-                if min_slaves < min_master {
-                    edge_sets.get_mut(mkey).unwrap().0.insert(min_slaves);
-                    changed = true;
-                }
-                // apply the master's post-update minimum order to all slave
-                // edges (MFEM's unconditional `|=` of `min_mask`)
-                let min_master = edge_sets[mkey].0.iter().copied().next().unwrap();
-                for sk in slaves {
-                    let min_slave = edge_sets[sk].0.iter().copied().next().unwrap();
-                    if min_master < min_slave {
-                        edge_sets.get_mut(sk).unwrap().0.insert(min_master);
-                        changed = true;
-                    }
-                }
-            }
-            if !changed { break; }
-        }
+        propagate_nc_2d_edge_variants(mesh, &mut edge_sets);
     }
 
     // 2. Assign global DOF ids: vertices, then edge variants (ascending order
@@ -656,9 +716,9 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
     }
     debug_assert_eq!(edge_list.len(), edge_sets.len(), "edge scan must find every variant edge");
     for key in &edge_list {
-        let (orders, _) = &edge_sets[key];
+        let orders = edge_sets[key].keys().copied().collect::<Vec<u8>>();
         let mut variants: Vec<(u8, Vec<DofId>)> = Vec::with_capacity(orders.len());
-        for &p in orders {
+        for &p in &orders {
             let n = (p - 1) as usize;
             let dofs: Vec<DofId> = (0..n).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
             variants.push((p, dofs));
@@ -673,7 +733,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         for key in face_list {
             let (orders, nn) = &face_sets[&key];
             let mut variants: Vec<(u8, Vec<DofId>)> = Vec::with_capacity(orders.len());
-            for &p in orders {
+            for &p in orders.keys() {
                 let n = n_face_dofs_3d(*nn, p);
                 if n == 0 { continue; }
                 let dofs: Vec<DofId> = (0..n).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
@@ -805,13 +865,15 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         dof_coords[base..base + dim].copy_from_slice(c);
     }
 
-    // Edge DOFs: at the variant's own basis node positions along the edge.
+    // Edge DOFs: at the variant's own basis node positions along the edge
+    // (D827-1: the basis flag is per (edge, order) variant, so on a
+    // mixed-family edge each variant sits at its own family's node set).
     for key in &edge_list {
-        let (_, gll) = edge_sets[key];
+        let gll_of = &edge_sets[key];
         let ca = mesh.node_coords(key.0);
         let cb = mesh.node_coords(key.1);
         for (p, dofs) in &edge_variants[key] {
-            let pos = interior_positions_1d(*p, gll);
+            let pos = interior_positions_1d(*p, gll_of[p]);
             for (k, &dof_id) in dofs.iter().enumerate() {
                 let t = pos[k];
                 let base = dof_id as usize * dim;
@@ -827,15 +889,16 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
     // (tet tri faces) or GLL barycentric (prism/pyramid tri faces)
     // interpolation at the variant's node positions.
     if dim == 3 {
-        // Face-local node lists per face key (from the first element seen),
-        // with the face's 1-D basis flag: quad faces — `true` when the face
-        // belongs to a pyramid (Fuentes `(cp[i], cp[p−j])` layout, j
-        // reversed) and `false` for the plain ascending GLL tensor of
-        // hex/prism quad faces; tri faces — `true` for the `H1TriPk` GLL
-        // barycentrics of prism/pyramid faces, `false` for the equispaced
-        // `TetPk` tri faces.
+        // Face-local node lists per face key (from the first element seen —
+        // the canonical face ORIENTATION only).  The 1-D BASIS is per
+        // (face, order) variant (D827-1), read off `face_sets`: quad faces —
+        // always GLL tensor, `true` in the pyr-arm flag selecting the
+        // Fuentes j-reversed layout `(cp[i], cp[p−j])` for pyramid base
+        // faces; tri faces — GLL `H1TriPk` barycentrics for the
+        // prism/pyramid variants, equispaced `TetPk` barycentrics for the
+        // tet variants.
         let mut face_nodes4: HashMap<FaceKey, ([NodeId; 4], bool)> = HashMap::new();
-        let mut face_nodes3: HashMap<FaceKey, ([NodeId; 3], bool)> = HashMap::new();
+        let mut face_nodes3: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
         for e in 0..n_elems as u32 {
             let et = mesh.element_type(e);
             let ns = elem_corners(et, mesh.element_nodes(e), mesh.geom_order() > 1);
@@ -850,11 +913,11 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 face_nodes4.entry(FaceKey::new(face4[0], face4[1], face4[2]))
                     .or_insert((face4, true));
                 for (a, b, c) in pyramid_tri_faces(&ns) {
-                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert(([a, b, c], true));
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
                 }
             } else if is_prism_row(et) {
                 for (a, b, c) in prism_tri_faces(&ns) {
-                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert(([a, b, c], true));
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
                 }
                 for face4 in prism_quad_faces(&ns) {
                     let face4 = canon_quad_face(face4);
@@ -863,7 +926,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 }
             } else {
                 for (a, b, c) in tet_faces(&ns) {
-                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert(([a, b, c], false));
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
                 }
             }
         }
@@ -891,10 +954,12 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                                 + (1.0 - r) * t * c[3][d];
                         }
                     }
-                } else if let Some(&(n3, gll_face)) = face_nodes3.get(key) {
+                } else if let Some(&n3) = face_nodes3.get(key) {
                     // Tri face: barycentric interpolation, dof list in the
-                    // `H1TriPk`/TriPk running (j outer, i inner) order.
+                    // `H1TriPk`/TriPk running (j outer, i inner) order, on
+                    // the VARIANT's own basis (D827-1).
                     let pq = p as usize;
+                    let gll_face = face_sets[key].0[&p];
                     let c: Vec<[f64; 3]> = (0..3).map(|i| {
                         let c = mesh.node_coords(n3[i]); [c[0], c[1], c[2]]
                     }).collect();
@@ -1301,15 +1366,33 @@ pub fn detect_nc_geometry_2d<M: MeshTopology>(mesh: &M) -> NcGeometry2D {
 pub fn detect_p_constraints<M: MeshTopology>(
     dm: &DofManager,
     mesh: &M,
-    _elem_orders: &[u8],
+    elem_orders: &[u8],
 ) -> Vec<PRefineConstraint> {
     let mut constraints: Vec<PRefineConstraint> = Vec::new();
     let dim = mesh.dim() as usize;
+    assert_eq!(elem_orders.len(), mesh.n_elements(),
+        "elem_orders length {} != n_elements {}",
+        elem_orders.len(), mesh.n_elements());
 
-    // Node-set flag: the builder requires a homogeneous element geometry
-    // (MFEM `PRefinementSupported` also requires purely quad/hex meshes), so
-    // derive the Gauss-Lobatto flag from the first element.
-    let gll = elem_uses_gll(mesh.element_type(0));
+    // D827-1: the 1-D basis of an edge variant is a property of the
+    // (edge, order) VARIANT — the family that uses it — not of element 0.
+    // Recompute the per-variant flags with the builder's own rule so the
+    // constraint node positions match the DOF coordinates variant for
+    // variant (mixed-family hp edges: tet p3 × pyramid p2 → equispaced
+    // slave positions on the tet side, GLL master nodes on the pyramid
+    // side).  MFEM's counterpart (`VariableOrderMinimumRule`,
+    // fem/fespace.cpp:1094) evaluates `fec->GetFE(Geometry::SEGMENT, p/q)`
+    // — the collection-level segment FE for both sides, independent of the
+    // adjacent cell families (probe tmp/d86a/: flipping only the collection
+    // basis flips every edge row GLL ↔ equispaced); fem-rs's per-family
+    // cell bases (TetPk equispaced vs GLL elsewhere) make the variant-level
+    // dispatch the faithful translation.
+    let mut edge_gll = collect_edge_variants(mesh, elem_orders);
+    if dim == 2 {
+        // Mirror the builder's 2D NC propagation so the per-variant basis
+        // lookup covers the propagated master/slave variants too.
+        propagate_nc_2d_edge_variants(mesh, &mut edge_gll);
+    }
 
     // 2D NC geometry (before the min-rule so slave edges can be excluded).
     let nc = if dim == 2 { Some(detect_nc_geometry_2d(mesh)) } else { None };
@@ -1325,17 +1408,20 @@ pub fn detect_p_constraints<M: MeshTopology>(
         if variants.len() <= 1 || slave_keys.contains(key) {
             continue;
         }
+        let gll_of = &edge_gll[key];
         let (p0, dofs0) = &variants[0];
-        // Master node list: endpoints + variant-0 interior positions.
+        // Master node list: endpoints + variant-0 interior positions (at the
+        // master variant's own family basis).
         let mut nodes0 = vec![0.0_f64];
-        nodes0.extend_from_slice(&interior_positions_1d(*p0, gll));
+        nodes0.extend_from_slice(&interior_positions_1d(*p0, gll_of[p0]));
         nodes0.push(1.0);
         let mut master_dofs: Vec<DofId> = vec![key.0 as DofId];
         master_dofs.extend_from_slice(dofs0);
         master_dofs.push(key.1 as DofId);
 
         for (q, dofs_q) in variants.iter().skip(1) {
-            let pos_q = interior_positions_1d(*q, gll);
+            // Slave positions at the slave variant's own family basis.
+            let pos_q = interior_positions_1d(*q, gll_of[q]);
             for (j, &dof) in dofs_q.iter().enumerate() {
                 let weights = lagrange_weights_at(&nodes0, pos_q[j]);
                 let parents: Vec<(DofId, f64)> = master_dofs.iter()
@@ -1362,8 +1448,10 @@ pub fn detect_p_constraints<M: MeshTopology>(
             let variants = dm.edge_variants.get(&key)
                 .unwrap_or_else(|| panic!("edge_variants missing for master edge {key:?}"));
             let (p0, dofs0) = &variants[0];
+            let gll_of = edge_gll.get(&key)
+                .unwrap_or_else(|| panic!("edge basis missing for master edge {key:?}"));
             let mut nodes0 = vec![0.0_f64];
-            nodes0.extend_from_slice(&interior_positions_1d(*p0, gll));
+            nodes0.extend_from_slice(&interior_positions_1d(*p0, gll_of[p0]));
             nodes0.push(1.0);
             let mut master_dofs: Vec<DofId> = vec![key.0 as DofId];
             master_dofs.extend_from_slice(dofs0);
@@ -1393,8 +1481,10 @@ pub fn detect_p_constraints<M: MeshTopology>(
             let (nodes0, master_dofs) = &master_cache[&s.master];
             let variants = dm.edge_variants.get(&s.key)
                 .unwrap_or_else(|| panic!("edge_variants missing for slave edge {:?}", s.key));
+            let gll_of = edge_gll.get(&s.key)
+                .unwrap_or_else(|| panic!("edge basis missing for slave edge {:?}", s.key));
             for (q, dofs_q) in variants {
-                let pos_q = interior_positions_1d(*q, gll);
+                let pos_q = interior_positions_1d(*q, gll_of[q]);
                 for (j, &dof) in dofs_q.iter().enumerate() {
                     // Local canonical position s_j → global master position.
                     let t = s.t_a + (s.t_b - s.t_a) * pos_q[j];
@@ -1493,6 +1583,89 @@ fn quad_face_variant_constraint(
     constraints.push(PRefineConstraint { constrained: dof, parents });
 }
 
+/// One tri-face min-rule row set for the order-`q` slave variant of a face
+/// whose canonical orientation is `canon`: every slave dof interpolates the
+/// order-`p_low` master trace over the face closure — vertices, oriented
+/// edge runs, the master variant's interior dofs `dofs0` (empty when the
+/// p_low variant holds none) — with the MASTER basis selected by
+/// `master_gll` (D827-1: the basis of the master VARIANT's family —
+/// `H1TriPk` GLL barycentrics when the p_low variant belongs to a
+/// prism/pyramid, equispaced `TetPk` factory nodes when it belongs to a
+/// tet) evaluated at the SLAVE variant's own node positions (`slave_gll`).
+///
+/// Both bases are closed P_k nodal sets in the same slot order as the
+/// parent closure `[c0, c1, c2 | e(c0,c1) from c0 | e(c1,c2) from c1 |
+/// e(c2,c0) from c2 | interior]`, so the weight vectors zip with the
+/// parents directly.  `tri_w_cache` memoizes the weight rows per
+/// (p_low, master_gll, q, slave_gll).
+// The ten parameters are the minimal description of a tri-face row: the
+// canonical face, the master variant (order, family, dofs), the slave
+// variant (order, family, dofs) and the two shared scratch buffers —
+// splitting them into structs would not reduce the arity of the state.
+#[allow(clippy::too_many_arguments)]
+fn tri_face_variant_rows(
+    dm: &DofManager,
+    canon: [NodeId; 3],
+    p_low: u8,
+    master_gll: bool,
+    dofs0: &[DofId],
+    q: u8,
+    slave_gll: bool,
+    dofs_q: &[DofId],
+    tri_w_cache: &mut HashMap<(u8, bool, u8, bool), Vec<Vec<f64>>>,
+    constraints: &mut Vec<PRefineConstraint>,
+) {
+    let pq = q as usize;
+    let ws = tri_w_cache.entry((p_low, master_gll, q, slave_gll)).or_insert_with(|| {
+        // Slave (λ1, λ2) per dof, in the running (j outer, i inner) order
+        // of the builder's face-block allocation.
+        let slave_pos: Vec<[f64; 2]> = if slave_gll {
+            H1TriPk::new(pq).dof_coords()[3 * pq..3 * pq + dofs_q.len()]
+                .iter().map(|rc| [rc[0], rc[1]]).collect()
+        } else {
+            (1..=pq.saturating_sub(2))
+                .flat_map(|j| {
+                    (1..=pq - 1 - j).map(move |i| [i as f64 / pq as f64, j as f64 / pq as f64])
+                })
+                .collect()
+        };
+        (0..dofs_q.len())
+            .map(|k| {
+                let (l1, l2) = (slave_pos[k][0], slave_pos[k][1]);
+                if master_gll {
+                    let master = H1TriPk::new(p_low as usize);
+                    let mut w = vec![0.0_f64; master.n_dofs()];
+                    master.eval_basis(&[l1, l2], &mut w);
+                    w
+                } else {
+                    // `lagrange_weights_tri` takes (λ0, λ1).
+                    lagrange_weights_tri(1.0 - l1 - l2, l1, p_low)
+                }
+            })
+            .collect()
+    });
+    // Master closure in the shared slot order (see above).
+    let mut parent_dofs: Vec<DofId> = canon.iter().map(|&n| n as DofId).collect();
+    if p_low >= 2 {
+        for (va, vb) in [(canon[0], canon[1]), (canon[1], canon[2]), (canon[2], canon[0])] {
+            for k in 0..(p_low as usize - 1) {
+                parent_dofs.push(dofs_edge(dm, EdgeKey::new(va, vb), p_low, va, k));
+            }
+        }
+    }
+    parent_dofs.extend_from_slice(dofs0);
+    for (j, &dof) in dofs_q.iter().enumerate() {
+        let parents: Vec<(DofId, f64)> = parent_dofs.iter()
+            .zip(ws[j].iter())
+            .filter(|&(_, &w)| w.abs() > 1e-15)
+            .map(|(&d, &w)| (d, w))
+            .collect();
+        if !parents.is_empty() {
+            constraints.push(PRefineConstraint { constrained: dof, parents });
+        }
+    }
+}
+
 /// 3D face variant min-rule constraints: every higher-order face variant
 /// interpolates the lowest-order variant's face trace (tet faces: equispaced
 /// barycentric; hex and prism quad faces: GLL tensor product; prism and
@@ -1512,6 +1685,13 @@ fn detect_face_variant_constraints<M: MeshTopology>(
     constraints: &mut Vec<PRefineConstraint>,
 ) {
     let n_elems = mesh.n_elements();
+
+    // Per-(face, order) variant basis flags, recomputed with the builder's
+    // rule (D827-1): the master weights and the slave node positions of a
+    // mixed tet × pyramid/prism tri face follow each variant's own family.
+    let dm_orders: Vec<u8> =
+        (0..n_elems as u32).map(|e| dm.element_order(e)).collect();
+    let face_gll = collect_face_variants(mesh, &dm_orders);
 
     // Canonical face orientation (first-encountering element, matching the
     // builder's coordinate walk) + lowest adjacent order per face key.
@@ -1571,10 +1751,11 @@ fn detect_face_variant_constraints<M: MeshTopology>(
         }
     }
 
-    // Master-basis weights per (p_low, q) prism tri face pair: entry j is the
-    // order-`p_low` GLL triangle basis (`H1TriPk`, slot order) evaluated at
-    // the order-`q` variant's j-th interior node.
-    let mut tri_w_cache: HashMap<(u8, u8), Vec<Vec<f64>>> = HashMap::new();
+    // Master-basis weights per (p_low, master_gll, q, slave_gll) tri face
+    // tuple: entry j is the order-`p_low` master basis (per the master
+    // variant's family) evaluated at the order-`q` slave variant's j-th
+    // interior node (per the slave variant's family).
+    let mut tri_w_cache: HashMap<(u8, bool, u8, bool), Vec<Vec<f64>>> = HashMap::new();
 
     // Face keys of prism, pyramid, tet and hex faces.
     for e in 0..n_elems as u32 {
@@ -1608,47 +1789,19 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                 let p_low = face_low.get(&key).copied().unwrap_or(first_order);
                 if variants.iter().all(|(q, _)| *q <= p_low) { continue; }
                 let canon = face_canon3.get(&key).copied().unwrap_or([a, b, c]);
-                // Master closure in `H1TriPk` slot order: [v0 v1 v2 |
-                // edge (v0,v1) from v0 | edge (v1,v2) from v1 |
-                // edge (v0,v2) from v2 | p_low face-interior dofs].
-                let mut parent_dofs: Vec<DofId> = Vec::new();
-                parent_dofs.extend_from_slice(&canon);
-                if p_low >= 2 {
-                    for (va, vb) in
-                        [(canon[0], canon[1]), (canon[1], canon[2]), (canon[2], canon[0])]
-                    {
-                        for k in 0..(p_low as usize - 1) {
-                            parent_dofs
-                                .push(dofs_edge(dm, EdgeKey::new(va, vb), p_low, va, k));
-                        }
-                    }
-                }
-                if let Some((_, dofs0)) = variants.iter().find(|(p, _)| *p == p_low) {
-                    parent_dofs.extend_from_slice(dofs0);
-                }
+                let dofs0 = variants.iter().find(|(p, _)| *p == p_low)
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default();
+                // D827-1: master/slave bases per (face, order) variant —
+                // a tet sharing this face contributes equispaced variants.
+                let gll_of = face_gll.get(&key);
+                let master_gll = gll_of.and_then(|m| m.0.get(&p_low)).copied().unwrap_or(true);
                 for (q, dofs_q) in variants {
                     if *q <= p_low { continue; }
-                    let ws = tri_w_cache.entry((p_low, *q)).or_insert_with(|| {
-                        let master = H1TriPk::new(p_low as usize);
-                        let slave_pos = H1TriPk::new(*q as usize).dof_coords();
-                        let base = 3 * *q as usize;
-                        (0..dofs_q.len())
-                            .map(|j| {
-                                let pos = &slave_pos[base + j];
-                                let mut w = vec![0.0_f64; master.n_dofs()];
-                                master.eval_basis(&[pos[0], pos[1]], &mut w);
-                                w
-                            })
-                            .collect()
-                    });
-                    for (j, &dof) in dofs_q.iter().enumerate() {
-                        let parents: Vec<(DofId, f64)> = parent_dofs.iter()
-                            .zip(ws[j].iter())
-                            .filter(|&(_, &w)| w.abs() > 1e-15)
-                            .map(|(&d, &w)| (d, w))
-                            .collect();
-                        constraints.push(PRefineConstraint { constrained: dof, parents });
-                    }
+                    let slave_gll = gll_of.and_then(|m| m.0.get(q)).copied().unwrap_or(true);
+                    tri_face_variant_rows(
+                        dm, canon, p_low, master_gll, &dofs0, *q, slave_gll, dofs_q,
+                        &mut tri_w_cache, constraints);
                 }
             }
             for (face4, reversed_y) in quad_faces {
@@ -1697,12 +1850,15 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                 }
             }
         } else if is_tet_row(et) {
-            // Tet: triangular face constraints (equispaced TetPk trace),
-            // mastered at the lowest ADJACENT order like MFEM: a p2 tri
-            // face stores no interior dof but still masters (probe
-            // `tmp/d176_hextet_p_probe.cpp`, tet [3,2] rows
-            // `constrained 40/41`: −1/9 on the 3 face vertices, +4/9 on the
-            // 3 p2 edge dofs).
+            // Tet: triangular face constraints, mastered at the lowest
+            // ADJACENT order like MFEM: a p2 tri face stores no interior dof
+            // but still masters (probe `tmp/d176_hextet_p_probe.cpp`, tet
+            // [3,2] rows `constrained 40/41`: −1/9 on the 3 face vertices,
+            // +4/9 on the 3 p2 edge dofs).  D827-1: on a mixed tet ×
+            // pyramid/prism face the master (and any higher GLL-family
+            // variant) takes its own family's basis via
+            // [`tri_face_variant_rows`], shared with the pyramid/prism arm
+            // so both sides of the face emit identical rows.
             for (v0, v1, v2) in tet_faces(&ns) {
                 let key = FaceKey::new(v0, v1, v2);
                 let Some(variants) = dm.face_variants.get(&key) else { continue };
@@ -1710,63 +1866,17 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                 let p_low = face_low.get(&key).copied().unwrap_or(first_order);
                 if variants.iter().all(|(q, _)| *q <= p_low) { continue; }
                 let canon3 = face_canon3.get(&key).copied().unwrap_or([v0, v1, v2]);
-                let (cv0, cv1, cv2) = (canon3[0], canon3[1], canon3[2]);
                 let dofs0 = variants.iter().find(|(p, _)| *p == p_low)
                     .map(|(_, d)| d.clone())
                     .unwrap_or_default();
+                let gll_of = face_gll.get(&key);
+                let master_gll = gll_of.and_then(|m| m.0.get(&p_low)).copied().unwrap_or(false);
                 for (q, dofs_q) in variants {
                     if *q <= p_low || dofs_q.is_empty() { continue; }
-                    let pq = *q as usize;
-                    // Positions of the higher variant's face DOFs, matching
-                    // the builder's face-block placement (and the `TetPk`
-                    // factory): slot (i, j) sits at barycentrics
-                    // (λ_v0, λ_v1, λ_v2) = (1−i/q−j/q, i/q, j/q); store the
-                    // (λ_v0, λ_v1) pair for the master-basis evaluation.
-                    let mut pos: Vec<(f64, f64)> = Vec::new();
-                    for j in 1..=pq.saturating_sub(2) {
-                        for i in 1..=pq - 1 - j {
-                            pos.push((
-                                (pq - i - j) as f64 / pq as f64,
-                                i as f64 / pq as f64,
-                            ));
-                        }
-                    }
-                    // Parent DOFs (canonical face orientation, matching the
-                    // builder's face coordinates) in TriPk factory order:
-                    // vertices v0, v1, v2; edge (v0,v1) near v0; edge
-                    // (v1,v2) near v1; edge (v2,v0) near v2; then the p_low
-                    // face-interior dofs (empty when p_low < 3).
-                    let mut parent_dofs: Vec<DofId> = vec![cv0, cv1, cv2];
-                    if p_low >= 2 {
-                        for (a, b) in [(cv0, cv1), (cv1, cv2), (cv2, cv0)] {
-                            let ekey = EdgeKey::new(a, b);
-                            if let Some(evars) = dm.edge_variants.get(&ekey) {
-                                if let Some((_, edofs)) =
-                                    evars.iter().find(|(p, _)| *p == p_low)
-                                {
-                                    // Orient: stored canonical; want near `a`.
-                                    if a == ekey.0 {
-                                        parent_dofs.extend_from_slice(edofs);
-                                    } else {
-                                        parent_dofs.extend(edofs.iter().rev());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    parent_dofs.extend_from_slice(&dofs0);
-                    for (k, &dof) in dofs_q.iter().enumerate() {
-                        let (r, s) = pos[k];
-                        let weights = lagrange_weights_tri(r, s, p_low);
-                        let parents: Vec<(DofId, f64)> = parent_dofs.iter()
-                            .zip(weights.iter())
-                            .filter(|&(_, &w)| w.abs() > 1e-16)
-                            .map(|(&d, &w)| (d, w))
-                            .collect();
-                        if !parents.is_empty() {
-                            constraints.push(PRefineConstraint { constrained: dof, parents });
-                        }
-                    }
+                    let slave_gll = gll_of.and_then(|m| m.0.get(q)).copied().unwrap_or(false);
+                    tri_face_variant_rows(
+                        dm, canon3, p_low, master_gll, &dofs0, *q, slave_gll, dofs_q,
+                        &mut tri_w_cache, constraints);
                 }
             }
         }
