@@ -597,13 +597,14 @@ fn d825_row_geometry_table_path_matches_rows() {
 /// `SetCurvature(2, true, 3, byVDIM)` on a straight pyramid fills the 27
 /// dofs with the straight P1 map at the Fuentes nodal points (probe
 /// `tmp/d85b/probe_pyr_gen.txt`, max deviation 5.6e-17), so a straight row
-/// now exports (pinned end-to-end in `d825_row_geometry_h1`).  This test
-/// keeps the two halves of that split pinned: the discontinuous export goes
-/// through, and the continuous space stays refused (MFEM's continuous
-/// pyramid container is the 15-dof H1 Fuentes element, probe
-/// `tmp/d85b/probe_pyr_gen_h1.txt`; D827-3).
+/// now exports (pinned end-to-end in `d825_row_geometry_h1`).  **D827-3 then
+/// superseded the continuous arm the same way**: the 15-dof H1 Fuentes
+/// container's two rowless dofs are the straight P1 map at the H1 Fuentes
+/// nodal points (probe `tmp/d86b/probe_pyr_h1_gen.txt`, max deviation 0.0),
+/// so both spaces now export a straight row (full pin in
+/// `d827_pyramid13_h1_export`; only *curved* rows stay refused, D827-4).
 #[test]
-fn d825_pyramid13_l2_exported_h1_refused() {
+fn d825_pyramid13_both_spaces_exported() {
     // All-zero coordinates: every midsides sits at its exact midpoint, i.e.
     // the row is straight and the corner-only synthesis is exact.
     let mesh = Mesh::<3>::uniform(
@@ -629,11 +630,12 @@ fn d825_pyramid13_l2_exported_h1_refused() {
         "collection:\n{text}"
     );
 
-    let err = write_mfem_nodes(&mut Vec::new(), &scratch, Some(&mesh), NodesSpace::Continuous)
-        .expect_err("the continuous pyramid space stays refused")
-        .to_string();
+    let mut bytes = Vec::new();
+    write_mfem_nodes(&mut bytes, &scratch, Some(&mesh), NodesSpace::Continuous)
+        .expect("a straight pyramid exports its 15-dof H1 Fuentes container");
+    let text = String::from_utf8(bytes).unwrap();
     assert!(
-        err.contains("Pyramid13") && err.contains("H1_3D_P2") && err.contains("D827-3"),
-        "the continuous refusal must name the H1 Fuentes container, got: {err}"
+        text.contains("FiniteElementCollection: H1_3D_P2"),
+        "collection:\n{text}"
     );
 }

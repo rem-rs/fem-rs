@@ -1715,12 +1715,12 @@ fn zero_subnormal(s: f64) -> f64 {
 ///   corners ([`pyramid13_fuentes_conn_nodes`]).
 ///
 /// **Continuous space**: `H1_<dim>D_P2` for every row-geometry family
-/// (D825-1) — Quad9 through [`quad9_h1_conn_nodes`], Line3 through
+/// (D825-1, D827-3) — Quad9 through [`quad9_h1_conn_nodes`], Line3 through
 /// [`line3_h1_conn_nodes`], the four 2-D/3-D families with 6+ slots through
 /// [`row_geometry_h1_conn_nodes`] (the mixed-mesh entity engine, whose
-/// consumer slot orders are exactly the row orders), and Pyramid13 still
-/// refused (MFEM's continuous pyramid container is the 15-dof H1 Fuentes
-/// element — probe `tmp/d85b/probe_pyr_gen_h1.txt`; D827-3).
+/// consumer slot orders are exactly the row orders), and Pyramid13 through
+/// [`pyramid13_h1_conn_nodes`] (the 15-dof H1 Fuentes container — the two
+/// rowless dofs synthesised from the straight P1 map).
 fn row_geometry_conn_nodes<const D: usize>(
     mesh: &Mesh<D>,
     space: NodesSpace,
@@ -1732,15 +1732,10 @@ fn row_geometry_conn_nodes<const D: usize>(
             ElementType::Line3 => line3_h1_conn_nodes(mesh).map(Some),
             ElementType::Tri6 | ElementType::Tet10 | ElementType::Hex27
             | ElementType::Prism18 => row_geometry_h1_conn_nodes(mesh, et).map(Some),
-            ElementType::Pyramid13 => Err(FemError::Mesh(
-                "write_mfem: a Pyramid13-cell mesh has no derived continuous (H1) `nodes` \
-                 numbering — MFEM's own continuous pyramid container is the H1_3D_P2 Fuentes \
-                 element (15 dofs per element, probe tmp/d85b/probe_pyr_gen_h1.txt), whose \
-                 payload a 13-node row does not fill (D827-3); write it with \
-                 NodesSpace::Discontinuous (the exact per-element 27-dof L2_T1_3D_P2 Fuentes \
-                 encoding, D825-2)"
-                    .into(),
-            )),
+            // D827-3: the pyramid's continuous container is not a permutation
+            // of the row either (15 H1 Fuentes dofs vs 13 row slots) — the two
+            // rowless dofs are synthesised from the straight P1 map.
+            ElementType::Pyramid13 => pyramid13_h1_conn_nodes(mesh).map(Some),
             other => Err(FemError::Mesh(format!(
                 "write_mfem: {other:?} is not a row-geometry cell"
             ))),
@@ -1953,10 +1948,23 @@ fn put_h1_dof<const D: usize>(
     family: ElementType,
 ) -> FemResult<()> {
     let n = node as usize;
-    let v = &mesh.coords[n * D..(n + 1) * D];
+    let v = std::array::from_fn(|c| mesh.coords[n * D + c]);
+    put_h1_xyz::<D>(g, &v, values, filled, family)
+}
+
+/// The coordinate-flavoured [`put_h1_dof`]: the dof's value is *synthesised*
+/// (the straight P1 map at an H1 Fuentes nodal point, D827-3) rather than read
+/// from a row node; the shared-dof consistency guard is the same.
+fn put_h1_xyz<const D: usize>(
+    g: usize,
+    xyz: &[f64; D],
+    values: &mut [f64],
+    filled: &mut [bool],
+    family: ElementType,
+) -> FemResult<()> {
     let dst = &mut values[g * D..(g + 1) * D];
     if filled[g] {
-        if (0..D).any(|c| !approx_eq(dst[c], v[c])) {
+        if (0..D).any(|c| !approx_eq(dst[c], xyz[c])) {
             return Err(FemError::Mesh(format!(
                 "write_mfem: continuous {family:?} `nodes` dof {g} is claimed by two elements \
                  with different coordinates — the mesh geometry is not continuous"
@@ -1965,7 +1973,7 @@ fn put_h1_dof<const D: usize>(
     } else {
         filled[g] = true;
     }
-    dst.copy_from_slice(v);
+    dst.copy_from_slice(xyz);
     Ok(())
 }
 
@@ -2109,6 +2117,195 @@ fn row_geometry_h1_conn_nodes<const D: usize>(
     Ok((2u8, n_dofs, values))
 }
 
+/// The Pyramid13 row's midsides slots: Gmsh type-19 order — base edges
+/// (0,1),(1,2),(2,3),(3,0) then the four laterals to the apex (the
+/// d84fixA/pyr13 fixture convention; the same *eight edges* as MFEM's
+/// `Constants<PYRAMID>::Edges`, two of the base ones listed reversed).
+const PYRAMID13_MIDSIDE_EDGES: [[usize; 2]; 8] = [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [0, 4],
+    [1, 4],
+    [2, 4],
+    [3, 4],
+];
+
+/// The D827-4 refusal for a curved Pyramid13 row — shared verbatim by both
+/// `nodes` spaces, because neither has an MFEM-defined payload for curvature:
+///
+/// * the only MFEM ingest that could define a curved pyramid from row values
+///   is the Gmsh reader, and MFEM 4.10 has **no code-19** (type 19 is absent
+///   from its element-type table `mesh/gmsh.cpp:613` — `GetGeometryAndOrder`
+///   falls through to `MFEM_ABORT("Unknown Gmsh element type.")`,
+///   `mesh/gmsh.cpp:677`; probe `tmp/d86b/probe_pyr_curved_g19.txt`, exit
+///   134);
+/// * its nominal order-2 pyramid family, Gmsh **type 14**, loads but is
+///   defective: the reader writes the 14 refiner-stump node values into the
+///   15-dof `ClosedUniform` H1 space with mismatched point pairing and leaves
+///   the interior dof at uninitialised memory (straight-pyramid probe
+///   `tmp/d86b/probe_pyr_curved_g14_straight.txt`: dof 13 carries the apex
+///   value, dof 14 garbage);
+/// * the `.mesh` route is circular — `Load` stores a written `nodes` section
+///   verbatim (only orientation fixes re-derive anything).
+///
+/// So any 13→27 (or 13→15) synthesis would be a fem-rs invention no MFEM
+/// reader or generator produces or validates; the guard keeps refusing and
+/// names the evidence.
+fn curved_pyramid_refusal(e: usize, k: usize, space: &str) -> FemError {
+    FemError::Mesh(format!(
+        "write_mfem: a curved Pyramid13 mesh has no MFEM-defined `nodes` synthesis ({space}) \
+         — the payload is derived from the five corners of a *straight* pyramid only, but \
+         element {e}'s edge-{k} midsides node deviates from the midpoint.  MFEM defines no \
+         curved-pyramid geometry a 13-node row could be measured against: its Gmsh reader has \
+         no code-19 (type 19 is absent from the element-type table — `Unknown Gmsh element \
+         type`, mesh/gmsh.cpp:677; probe tmp/d86b exit 134), and its nominal type-14 path is \
+         defective (14 refiner-stump values written into the 15-dof ClosedUniform space, \
+         mispairing every dof and leaving the interior dof uninitialised — probe \
+         tmp/d86b/probe_pyr_curved_g14_straight.txt), while the .mesh route is circular \
+         (Load stores the written nodes verbatim).  Keeping the refusal (D827-4)"
+    ))
+}
+
+/// The straight-side guard shared by the two Pyramid13 payloads: every
+/// midsides node must sit at its edge midpoint, else the row is curved.
+fn pyramid13_check_straight<const D: usize>(
+    mesh: &Mesh<D>,
+    row: &[u32],
+    e: usize,
+) -> FemResult<()> {
+    for (k, &[la, lb]) in PYRAMID13_MIDSIDE_EDGES.iter().enumerate() {
+        let n = row[5 + k] as usize;
+        for d in 0..D {
+            let mid = 0.5 * (mesh.coords[row[la] as usize * D + d]
+                + mesh.coords[row[lb] as usize * D + d]);
+            if !approx_eq(mesh.coords[n * D + d], mid) {
+                return Err(curved_pyramid_refusal(e, k, "D827-4"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// D827-3: the continuous `H1_3D_P2` `nodes` payload of a Pyramid13-cell mesh
+/// — MFEM's own continuous pyramid container, the `H1_FuentesPyramidElement`
+/// with `p(p²+3)+1 = 15` dofs per element (`fe_coll.cpp:1978-1985`; probe
+/// `tmp/d85b/probe_pyr_gen_h1.txt`, `tmp/d86b/probe_pyr_h1_gen.txt`).
+///
+/// The numbering is the mixed entity engine's ([`mixed_h1_engine`] over
+/// PYRAMID corner rows, exactly as [`row_geometry_h1_conn_nodes`] runs it for
+/// the other 3-D families): vertex dofs = the compacted corner ranks, the 8
+/// edge blocks in `Constants<PYRAMID>::Edges` order (first encounter wins),
+/// the base-quad-face block, the (empty at P2) tri-face blocks, the private
+/// interior.  The engine's per-element row comes back in the consumer family's
+/// p = 2 slot order — the H1 Fuentes entity order, which `Mesh::
+/// element_jacobian`'s `h1_pyramid_element` already speaks (round-85 Lane C
+/// pinned the entity layout: base edges `(3,2)`/`(0,3)` listed reversed, the
+/// base quad face Fuentes j-reversed, 4 tri faces in `Faces` order).
+///
+/// The row's 13 slots cover the first 13 engine slots one-to-one (5 corners,
+/// then 8 edge dofs — one per edge at P2, and `Constants<PYRAMID>::Edges`
+/// lists the *same* eight edges as the Gmsh type-19 midsides, `(3,2)`/`(0,3)`
+/// being the row's `(2,3)`/`(3,0)`).  The two rowless dofs — the base-quad
+/// face dof at reference `(½, ½, 0)` and the interior dof at `(¼, ¼, ½)`
+/// (`h1_fuentes_pyramid_nodes(2)` slots 13/14) — are **synthesised**: MFEM's
+/// own generator fills them with the straight P1 map at the nodal points,
+/// exactly as the 27-dof discontinuous synthesis of D825-2 (probe
+/// `tmp/d86b/probe_pyr_h1_gen.txt`: max |nodes − P1_map| = 0.0 over the
+/// asymmetric pyramid, including both synthesised slots).  A curved row has
+/// no MFEM-defined payload in either space and stays refused
+/// ([`curved_pyramid_refusal`], D827-4).
+fn pyramid13_h1_conn_nodes<const D: usize>(
+    mesh: &Mesh<D>,
+) -> FemResult<(u8, usize, Vec<f64>)> {
+    const NPE: usize = 13;
+    // The H1 Fuentes P2 pyramid: 5 vertices + 8 edge dofs + 1 base-quad-face
+    // dof + 0 tri-face dofs + 1 interior dof.
+    const H1_SLOTS: usize = 15;
+    let n_elems = mesh.n_elements();
+    debug_assert_eq!(
+        mesh.conn.len(),
+        n_elems * NPE,
+        "pyramid13_h1_conn_nodes: uniform Pyramid13 stride expected"
+    );
+    // MFEM's compacted vertex numbering, then the engine over PYRAMID corner
+    // rows (`row_geometry_h1_conn_nodes`'s recipe with the pyramid base
+    // family).
+    let mut vertex_ids: Vec<u32> = Vec::with_capacity(n_elems * 5);
+    for e in 0..n_elems {
+        let row = &mesh.conn[e * NPE..(e + 1) * NPE];
+        vertex_ids.extend_from_slice(&row[..5]);
+    }
+    vertex_ids.sort_unstable();
+    vertex_ids.dedup();
+    let nv = vertex_ids.len();
+    let rows: Vec<(ElementType, Vec<NodeId>)> = (0..n_elems)
+        .map(|e| {
+            let r = &mesh.conn[e * NPE..(e + 1) * NPE];
+            let corners: Vec<NodeId> =
+                r[..5].iter().map(|&v| rank_of(v, &vertex_ids) as NodeId).collect();
+            (ElementType::Pyramid5, corners)
+        })
+        .collect();
+    let rows_mesh = MixedMeshRows { rows, n_nodes: nv, dim: D };
+    let (engine_rows, _keys, n_dofs) =
+        mixed_h1_engine(&rows_mesh, 2).map_err(|why| {
+            FemError::Mesh(format!(
+                "write_mfem: cannot write the continuous Pyramid13 `nodes` section: {why}"
+            ))
+        })?;
+    // The synthesised slots' reference points: the H1 Fuentes node table in
+    // the element's own dof order (round-85 probe-pinned against MFEM), slots
+    // 13 (base face, (½,½,0)) and 14 (interior, (¼,¼,½)) at P2.
+    let nodal = fem_element::lagrange::h1_fuentes_pyramid_nodes(2);
+    debug_assert_eq!(nodal.len(), H1_SLOTS, "the H1 Fuentes P2 node table");
+    debug_assert!(
+        (0..2).all(|d| (nodal[13][d] - 0.5).abs() < 1e-12) && nodal[13][2] == 0.0,
+        "the H1 Fuentes P2 base-face node is the base centre"
+    );
+    let mut values = vec![0.0f64; n_dofs * D];
+    let mut filled = vec![false; n_dofs];
+    for (e, erow) in engine_rows.iter().enumerate() {
+        let row = &mesh.conn[e * NPE..(e + 1) * NPE];
+        debug_assert_eq!(erow.len(), H1_SLOTS, "the H1 Fuentes P2 slot count");
+        pyramid13_check_straight::<D>(mesh, row, e)?;
+        let corners: [[f64; D]; 5] = std::array::from_fn(|v| {
+            std::array::from_fn(|c| mesh.coords[row[v] as usize * D + c])
+        });
+        // Row slots 0..13: corners and edge midsides, engine slots in order.
+        for (s, &g) in erow.iter().take(13).enumerate() {
+            put_h1_dof::<D>(g as usize, row[s], &mut values, &mut filled, mesh, ElementType::Pyramid13)?;
+        }
+        // Slots 13/14: the straight P1 map at the two rowless H1 Fuentes
+        // nodal points (`s·λ'(x/s, y/s)` base weights, apex lift z).
+        for (s, &g) in erow.iter().enumerate().skip(13) {
+            let xi = nodal[s];
+            let sv = 1.0 - xi[2];
+            let (xp, yp) = (xi[0] / sv, xi[1] / sv);
+            let lam = [
+                (1.0 - xp) * (1.0 - yp),
+                xp * (1.0 - yp),
+                xp * yp,
+                (1.0 - xp) * yp,
+            ];
+            let xyz = std::array::from_fn(|c| {
+                let mut v = xi[2] * corners[4][c];
+                for (i, &l) in lam.iter().enumerate() {
+                    v += sv * l * corners[i][c];
+                }
+                v
+            });
+            put_h1_xyz::<D>(g as usize, &xyz, &mut values, &mut filled, ElementType::Pyramid13)?;
+        }
+    }
+    debug_assert!(
+        filled.iter().all(|&f| f),
+        "pyramid13_h1_conn_nodes: every H1 dof is claimed by construction"
+    );
+    Ok((2u8, n_dofs, values))
+}
+
 /// D825-2: the discontinuous `L2_T1_3D_P2` `nodes` payload of a Pyramid13-cell
 /// mesh — MFEM's Fuentes pyramid curvature container.
 ///
@@ -2123,9 +2320,8 @@ fn row_geometry_h1_conn_nodes<const D: usize>(
 /// `o = k(p+1)² + j(p+1) + i`).  The synthesis below reproduces that from the
 /// five corners alone — which is also all a *straight* 13-node row
 /// determines: the guard refuses a row whose midsides leave their edge
-/// midpoints, because a curved pyramid's 27-dof Fuentes payload is not
-/// derivable from a 13-node row without the inverted least-squares fit
-/// (D827-4).
+/// midpoints, because MFEM defines no curved-pyramid geometry a 13-node row
+/// could be measured against (the D827-4 probes, [`curved_pyramid_refusal`]).
 ///
 /// The container is per-element private (probe: `GetElementDofs` = `0..26`),
 /// so there is no sharing guard.  The written element rows carry the base
@@ -2146,20 +2342,6 @@ fn pyramid13_fuentes_conn_nodes<const D: usize>(
     );
     let nodal = L2FuentesPyramidPk::new_gauss_lobatto(2).dof_coords();
     debug_assert_eq!(nodal.len(), NPTS, "the Fuentes P2 nodal point count");
-    // The Pyramid13 row's midsides: Gmsh type-19 order — base edges
-    // (0,1),(1,2),(2,3),(3,0) then the four laterals to the apex (the
-    // d84fixA/pyr13 fixture convention; same *edges* as MFEM's
-    // `Constants<PYRAMID>::Edges`, midpoints included).
-    const MIDSIDE_EDGES: [[usize; 2]; 8] = [
-        [0, 1],
-        [1, 2],
-        [2, 3],
-        [3, 0],
-        [0, 4],
-        [1, 4],
-        [2, 4],
-        [3, 4],
-    ];
     let mut values = vec![0.0f64; n_elems * NPTS * D];
     for e in 0..n_elems {
         let row = &mesh.conn[e * NPE..(e + 1) * NPE];
@@ -2168,22 +2350,10 @@ fn pyramid13_fuentes_conn_nodes<const D: usize>(
                 .try_into()
                 .expect("D components per coordinate"));
         // Straight-side guard: every midsides node must sit at its edge
-        // midpoint, else the row is curved and the corner-only synthesis
-        // would silently drop the curvature.
-        for (k, &[la, lb]) in MIDSIDE_EDGES.iter().enumerate() {
-            let n = row[5 + k] as usize;
-            for d in 0..D {
-                let mid = 0.5 * (corners[la][d] + corners[lb][d]);
-                if !approx_eq(mesh.coords[n * D + d], mid) {
-                    return Err(FemError::Mesh(format!(
-                        "write_mfem: a curved Pyramid13 mesh has no derived `nodes` synthesis \
-                         — the 27-dof Fuentes payload is derived from the five corners of a \
-                         *straight* pyramid, but element {e}'s edge-{k} midsides node \
-                         deviates from the midpoint (D827-4)"
-                    )));
-                }
-            }
-        }
+        // midpoint, else the row is curved and no MFEM-defined payload exists
+        // for it (D827-4).
+        pyramid13_check_straight::<D>(mesh, row, e)?;
+
         for (p, xi) in nodal.iter().enumerate() {
             // The closed Fuentes lattice keeps z = a·cp[k] < 1 (a is the
             // largest Gauss-Legendre point), so 1 - z never vanishes.

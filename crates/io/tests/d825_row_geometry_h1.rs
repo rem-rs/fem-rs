@@ -587,23 +587,34 @@ fn d825_pyramid13_curved_row_refused() {
     assert!(bytes.is_empty(), "a refused write must emit nothing");
 }
 
-/// The *continuous* space stays refused for pyramids: MFEM's own continuous
-/// container is the H1 Fuentes element with 15 dofs per element (probe
-/// `tmp/d85b/probe_pyr_gen_h1.txt`) — a payload the 13-node row does not fill
-/// (D827-3).
+/// The *continuous* space originally stayed refused for pyramids (round 85:
+/// MFEM's own continuous container is the H1 Fuentes element with 15 dofs per
+/// element, probe `tmp/d85b/probe_pyr_gen_h1.txt` — a payload the 13-node row
+/// does not fill).  **D827-3 superseded the refusal**: the two rowless dofs
+/// (base-face `(½,½,0)`, interior `(¼,¼,½)`) are the straight P1 map at the
+/// H1 Fuentes nodal points — MFEM's own generator produces exactly that with
+/// max deviation 0.0 (probe `tmp/d86b/probe_pyr_h1_gen.txt`) — so a straight
+/// row now exports.  This test keeps the smoke pin; the full pin (entity
+/// numbering on shared-edge/shared-face pairs, the byte oracle, the curved
+/// refusal in both spaces) lives in `d827_pyramid13_h1_export`.
 #[test]
-fn d825_pyramid13_continuous_refused() {
+fn d825_pyramid13_continuous_exported() {
     let mesh = pyramid13_fixture();
     let mut bytes = Vec::new();
     let scratch = Mesh::<2>::unit_square_tri(1);
-    let err = write_mfem_nodes(&mut bytes, &scratch, Some(&mesh), NodesSpace::Continuous)
-        .expect_err("the continuous pyramid space must stay refused");
-    let msg = err.to_string();
+    write_mfem_nodes(&mut bytes, &scratch, Some(&mesh), NodesSpace::Continuous)
+        .expect("a straight pyramid exports its 15-dof H1 Fuentes container");
+    let text = String::from_utf8(bytes).unwrap();
     assert!(
-        msg.contains("H1_3D_P2") && msg.contains("D827-3") && msg.contains("Discontinuous"),
-        "refusal must name the continuous container and the alternative: {msg}"
+        text.contains("FiniteElementCollection: H1_3D_P2"),
+        "collection:\n{text}"
     );
-    assert!(bytes.is_empty(), "a refused write must emit nothing");
+    assert!(
+        text.contains("elements\n1\n1 7 0 1 2 3 4\n"),
+        "PYRAMID corner row:\n{text}"
+    );
+    let got = dof_lines(&text);
+    assert_eq!(got.len(), 15, "15 H1 Fuentes dofs:\n{text}");
 }
 
 // ─── reader smoke: the written files round-trip through fem-rs's own reader ─
