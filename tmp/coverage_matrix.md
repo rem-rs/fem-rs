@@ -159,12 +159,12 @@
 3. 元素层：ND tri k≥2？L2 高阶 hex/prism/pyr 的 prolongation？H1 pyramid prolongation
    （D536b locator 空缺）；
 4. 债务号与矩阵格的双向对账（509 个 D 号 → 每个映射到矩阵格或标记 process-only）——
-   **round 84 主会话完成归一化普查**（`tmp/ledger/d_number_census.txt`：区间记号展开、
-   子债归并后，plan 基号 723 vs 矩阵基号 261，plan-only 464；其中 **420 个是 D1-599
-   建矩阵前历史债**（推定已闭/process-only，记录在 plan 历史，按建表决定不导入），
-   **44 个 D600+ 后矩阵号**需逐个一行定性（初判：未用段 D666/D669-671、段位预留
-   D801-x/D820、随他债关闭 D731→D721、主会话代闭 D621 等；清单与规则在 census 文件，
-   逐个落格 = 剩余工作）。
+   **round 84 主会话完成归一化普查 + round 86 完成逐号定性（§4-4 关闭）**
+   （`tmp/ledger/d_number_census.txt`：区间记号展开、子债归并后，plan 基号 723 vs 矩阵 261，
+   plan-only 464；其中 **420 个 D1-599 建矩阵前历史债**（推定已闭/process-only，按建表决定
+   不导入），**44 个 D600+ 已逐号一行定性**：未用/段位预留 22、已闭/兑现/落地 18、
+   process-only/吸收/被超越 4——逐号依据见 census 文件 round-86 节；新号段从 D829 起，
+   D827-1..4 在案，D828 并行动态占用须先 grep）。
 
 ## 5. 真实功能缺口分诊（用户优先级，round 60 起执行）
 
