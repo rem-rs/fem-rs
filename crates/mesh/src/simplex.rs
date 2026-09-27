@@ -1850,6 +1850,19 @@ impl<const D: usize> Mesh<D> {
         }
 
         // 3. Build new compact node numbering (skip merged-away nodes)
+        // D820-3: a node can be a replica through a *chain* of pairs (e.g.
+        // corner (0,0) → (3,0) by the x pair, then (3,0) → (3,3) by the y
+        // pair).  Compress every replica to its fixpoint first — the plain
+        // single pass below reads `new_id[target]` before the target's own
+        // remap is resolved, which used to leak u32::MAX into the element
+        // connectivity whenever the target had a higher id.
+        for i in 0..self.n_nodes() {
+            let mut r = remap[i];
+            while r != remap[r as usize] {
+                r = remap[r as usize];
+            }
+            remap[i] = r;
+        }
         let mut new_id = vec![u32::MAX; self.n_nodes()];
         let mut new_coords = Vec::new();
         let mut next = 0u32;

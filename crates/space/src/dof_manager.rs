@@ -3948,19 +3948,64 @@ impl DofManager {
         // are element-private singletons; they join the same first-touch
         // ordering so the global id sequence stays the builder's.
         let mut relabel = vec![u32::MAX; uf.n_dofs];
-        for g in 0..n_uf_nodes as u32 {
-            if fold[g as usize] != u32::MAX {
-                relabel[g as usize] = fold[g as usize];
+        // D820-3: final vertex-dof handling.  When the covering build
+        // addresses vertex dofs by node id (corner meshes, and order>=2 row
+        // builds over the full geometry table), the fold values *are* the
+        // final ids and the entity classes start at `n_nodes`.  When the
+        // covering build compacts a corner view (order-1 Quad9 & family,
+        // `build_p1`; order-2 `build_q2_quad`), the covering vertex dofs are
+        // a fresh dense 0..n_vertex set — indexing `relabel` by node id
+        // walked past `uf.n_dofs` (len 16 vs 49 nodes) and panicked.  Group
+        // the compacted dofs by fold target and hand out dense final ids in
+        // first-touch (dof id) order instead.
+        let node_addressed_vertices = uf.n_vertex_dofs == n_uf_nodes;
+        let n_vertex_final = if node_addressed_vertices {
+            for g in 0..n_uf_nodes as u32 {
+                if fold[g as usize] != u32::MAX {
+                    relabel[g as usize] = fold[g as usize];
+                }
             }
-        }
-        let mut singletons: Vec<DofId> = (n_uf_nodes as DofId..uf.n_dofs as DofId)
-            .filter(|&d| relabel[d as usize] == u32::MAX)
-            .collect();
+            n_nodes
+        } else {
+            // Mirror the covering builder's vertex view exactly (the same
+            // precedence `build_q2_quad` uses; `build_p1` uses the corner
+            // view alone).
+            let view = wrapper
+                .nc_vertex_view()
+                .map(|v| v.to_vec())
+                .or_else(|| quadratic_row_corner_view(&wrapper));
+            let vmap = VertexDofMap::new(view);
+            let mut fold_target: HashMap<NodeId, DofId> = HashMap::new();
+            let mut nv = 0usize;
+            for d in 0..uf.n_vertex_dofs as DofId {
+                let g = vmap.node_of(d);
+                let f = fold[g as usize];
+                if f == u32::MAX {
+                    continue;
+                }
+                relabel[d as usize] = match fold_target.get(&f) {
+                    Some(&id) => id,
+                    None => {
+                        let id = nv as DofId;
+                        fold_target.insert(f, id);
+                        nv += 1;
+                        id
+                    }
+                };
+            }
+            nv
+        };
         let classified: std::collections::HashSet<DofId> = classes
             .iter()
             .flat_map(|ms| ms.iter().flat_map(|o| o.dofs.iter().copied()))
             .collect();
-        singletons.retain(|&d| !classified.contains(&d));
+        // D820-3: with compacted vertex views the entity dofs can live below
+        // `n_uf_nodes` (the old `n_uf_nodes..uf.n_dofs` window assumed
+        // node-addressed vertices) — enumerate every still-unlabelled,
+        // unclassified dof instead.
+        let singletons: Vec<DofId> = (0..uf.n_dofs as DofId)
+            .filter(|&d| relabel[d as usize] == u32::MAX && !classified.contains(&d))
+            .collect();
         for &d in &singletons {
             order_key.push((d, usize::MAX));
         }
@@ -3971,7 +4016,7 @@ impl DofManager {
         let mut rec_edge_pk: Vec<(EdgeKey, Vec<DofId>)> = Vec::new();
         let mut rec_face_pk: Vec<(FaceKey, Vec<DofId>)> = Vec::new();
         let mut rec_qface_pk: Vec<(QuadFaceKey, Vec<DofId>)> = Vec::new();
-        let mut next = n_nodes as DofId;
+        let mut next = n_vertex_final as DofId;
         for (first, ci) in &order_key {
             if *ci == usize::MAX {
                 relabel[*first as usize] = next;
@@ -4119,7 +4164,7 @@ impl DofManager {
             elem_dof_offsets: uf.elem_dof_offsets,
             dof_coords: vec![0.0; next as usize * dim],
             dim,
-            n_vertex_dofs: n_nodes,
+            n_vertex_dofs: n_vertex_final,
             edge_dof_map,
             edge_dof2_map,
             phys_to_vertex_dof: uf.phys_to_vertex_dof,
