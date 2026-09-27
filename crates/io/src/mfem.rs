@@ -23,6 +23,18 @@ use fem_space::dof_manager::DofManager;
 
 use crate::data_collection::format_g;
 
+/// MFEM `.mesh` geometry code → element type.
+///
+/// D819-C: the format defines codes **0-7** only (`Geometry::Type`,
+/// `fem/geom.hpp:39-44`); `Mesh::ReadElementWithoutAttr` runs the code through
+/// `NewElement` and aborts on anything else (`mesh/mesh.cpp:5002-5010`, probe
+/// `tmp/d84b/probe_reject_results.txt`: every one of 8..=14 — elements *and*
+/// boundary — dies with "invalid Geometry::Type, geom = N", while 0..=7 are
+/// accepted by the same harness).  The private high-order codes this table
+/// used to accept (Line3=8, Tri6=9, Quad8=10, Tet10=11, Hex20=12, Prism15=13,
+/// Pyramid13=14) made fem-rs read files real MFEM refuses and let such files
+/// round-trip through the writer as unreadable output.  High-order geometry
+/// travels as the base code plus a `nodes` section, never as an element code.
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
     Some(match code {
         0 => ElementType::Point1,
@@ -33,18 +45,30 @@ fn mfem_elem_type(code: u32) -> Option<ElementType> {
         5 => ElementType::Hex8,
         6 => ElementType::Prism6,
         7 => ElementType::Pyramid5,
-        8 => ElementType::Line3,
-        9 => ElementType::Tri6,
-        10 => ElementType::Quad8,
-        11 => ElementType::Tet10,
-        12 => ElementType::Hex20,
-        13 => ElementType::Prism15,
-        14 => ElementType::Pyramid13,
         _ => return None,
     })
 }
 
-/// Reverse mapping: `ElementType` → MFEM element type code.
+/// The read-side rejection for a geometry code outside 0-7 — MFEM's own
+/// semantics (loud, naming the code and the reason it cannot exist).
+fn mfem_elem_type_err(code: usize) -> FemError {
+    FemError::Mesh(format!(
+        "MFEM: unsupported element type {code} — the .mesh format defines geometry codes 0-7 \
+         (POINT..PYRAMID) only, and MFEM aborts with \"invalid Geometry::Type\" on any other \
+         code (geom.hpp `Geometry::Type`, mesh.cpp:5002-5010).  A high-order element is stored \
+         as its base code plus a `nodes` section, so this file was not written by MFEM and is \
+         not portable."
+    ))
+}
+
+/// Reverse mapping: `ElementType` → MFEM element type code — the strict
+/// format table, codes 0-7 only.
+///
+/// D819-C: the private entries this table used to carry (Line3=8, Tri6=9,
+/// Quad8=10, Tet10=11, Hex20=12, Prism15=13, Pyramid13=14) made the writer
+/// emit files real MFEM refuses (probe `tmp/d84b/probe_reject_results.txt`).
+/// A high-order cell's `.mesh` encoding is its base code plus a `nodes`
+/// section ([`NodesSpace`]); the `elements` section never grows a code for it.
 fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
     Some(match et {
         ElementType::Point1   => 0,
@@ -55,15 +79,44 @@ fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
         ElementType::Hex8     => 5,
         ElementType::Prism6   => 6,
         ElementType::Pyramid5 => 7,
-        ElementType::Line3    => 8,
-        ElementType::Tri6     => 9,
-        ElementType::Quad8    => 10,
-        ElementType::Tet10    => 11,
-        ElementType::Hex20    => 12,
-        ElementType::Prism15  => 13,
-        ElementType::Pyramid13 => 14,
-        _ => return None, // Hex27 / Polygon / Point1 not in MFEM v1.0
+        _ => return None,
     })
+}
+
+/// What one **uniform** `elements`-section row emits for `et`:
+/// `(geometry code, connectivity entries carried by the row)`.
+///
+/// MFEM element rows carry the *base* geometry code and the vertex prefix of
+/// the connectivity only (`Mesh::ReadElementWithoutAttr` reads
+/// `GetNVertices()` entries, `mesh.cpp:5002-5016`), so a high-order cell type
+/// emits its base code plus a vertex prefix, and the curvature travels in the
+/// `nodes` section — which the write path resolves **before** any byte is
+/// emitted (`nodes_dof_values`, called at the top of
+/// [`write_mfem_mesh_nodes`]):
+///
+/// * [`ElementType::Quad9`] — the complete tensor-Q2 cell: a SQUARE row with
+///   the four corner ids plus a 9-dof `L2_T1_2D_P2` `nodes` row synthesised
+///   from the cell's own connectivity.  Probe-verified TOPOLOGY-IDENTICAL
+///   against MFEM 4.10 (`tmp/d84b/probe_quad9.cpp`).
+/// * every other high-order type is refused loudly: no exact MFEM encoding is
+///   derived for it yet.  Quad8 is a serendipity cell — MFEM has no 8-dof
+///   quad `nodes` family, so any encoding would be lossy; Tri6/Tet10/Line3/
+///   Hex20/Hex27/Prism15/Prism18/Pyramid13 need the same base+`nodes`
+///   derivation, each with its own verified permutation (D821).
+fn mfem_elem_row(et: ElementType) -> FemResult<(u32, usize)> {
+    if let Some(code) = elem_type_to_mfem_code(et) {
+        return Ok((code, et.nodes_per_element()));
+    }
+    match et {
+        ElementType::Quad9 => Ok((3, 4)),
+        _ => Err(FemError::Mesh(format!(
+            "write_mfem: no MFEM encoding for {et:?} cells — the .mesh format has geometry \
+             codes 0-7 only, and a high-order cell is written as its base code plus a `nodes` \
+             section.  Only Quad9 (SQUARE + L2_T1_2D_P2, D819-C) is derived so far; emitting \
+             the private high-order codes 8-14 this writer once used would produce a file \
+             real MFEM refuses to read."
+        ))),
+    }
 }
 
 /// Parsed MFEM mesh data (supports 1D, 2D and 3D files; D813-4 added the 1-D
@@ -112,7 +165,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         if vals.len() < 3 { return Err(FemError::Mesh("MFEM: invalid element line".into())); }
         let attr = vals[0];
         let et = mfem_elem_type(vals[1] as u32)
-            .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown elem type {}", vals[1])))?;
+            .ok_or_else(|| mfem_elem_type_err(vals[1]))?;
         let npe = et.nodes_per_element();
         if vals.len() != 2 + npe {
             return Err(FemError::Mesh(format!("MFEM: elem type {} expects {npe} nodes, got {}", vals[1], vals.len() - 2)));
@@ -139,7 +192,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         if vals.len() < 3 { return Err(FemError::Mesh("MFEM: invalid boundary line".into())); }
         let attr = vals[0];
         let et = mfem_elem_type(vals[1] as u32)
-            .ok_or_else(|| FemError::Mesh(format!("MFEM: unknown boundary type {}", vals[1])))?;
+            .ok_or_else(|| mfem_elem_type_err(vals[1]))?;
         let npe = et.nodes_per_element();
         if vals.len() != 2 + npe {
             return Err(FemError::Mesh(format!("MFEM: bdr type {} expects {npe} nodes", vals[1])));
@@ -1308,8 +1361,17 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
         let offsets = mesh.elem_offsets.as_ref();
         for ei in 0..n_elems {
             let et = &etypes[ei];
+            // A mixed mesh never carries a `nodes` payload (the pre-flight
+            // `nodes_dof_values` refuses non-uniform tables), so only the
+            // base codes are writable: a high-order cell here would either
+            // lose its geometry (prefix rows, no section) or emit a private
+            // code (the pre-D819-C behaviour — a file real MFEM refuses).
             let code = elem_type_to_mfem_code(*et).ok_or_else(|| {
-                FemError::Mesh(format!("write_mfem: unsupported mixed type {et:?}"))
+                FemError::Mesh(format!(
+                    "write_mfem: unsupported mixed type {et:?} — the .mesh `elements` section \
+                     carries the base geometry codes 0-7 only, and a mixed mesh has no \
+                     `nodes` section that could carry a high-order cell's geometry (D627)"
+                ))
             })?;
             let npe_local = et.nodes_per_element();
             let offset = offsets.map(|offs| offs[ei]).unwrap_or(ei * npe);
@@ -1320,15 +1382,17 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
             writeln!(writer)?;
         }
     } else {
-        // Uniform element type
-        let code = elem_type_to_mfem_code(*elem_type).ok_or_else(|| {
-            FemError::Mesh(format!("write_mfem: unsupported element type {elem_type:?}"))
-        })?;
+        // Uniform element type.  D819-C: MFEM element rows carry the *base*
+        // geometry code and the vertex prefix of the connectivity only
+        // (`ReadElementWithoutAttr` reads `GetNVertices()` entries,
+        // mesh.cpp:5002-5016); the Quad9 arm relies on the `nodes` payload
+        // the pre-flight above has already resolved.
+        let (code, n_emit) = mfem_elem_row(*elem_type)?;
         for ei in 0..n_elems {
             let offset = ei * npe;
             let tag = if !elem_tags.is_empty() { elem_tags[ei] } else { 1 };
             write!(writer, "{tag} {code}")?;
-            for j in 0..npe {
+            for j in 0..n_emit {
                 write!(writer, " {}", conn[offset + j])?;
             }
             writeln!(writer)?;
@@ -1338,8 +1402,9 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
     // Boundary section
     //
     // Each record is `<attr> <mfem geometry code> <n1> ... <nn>`, with the code
-    // and the node count taken from the face's own geometric type (D126).
-    write_boundary_section(writer, mesh, &face_nv)?;
+    // and the node count taken from the face's own geometric type (D126).  A
+    // high-order face type needs the resolved `nodes` payload (D819-C).
+    write_boundary_section(writer, mesh, &face_nv, nodes.is_some())?;
 
     // Vertices section
     //
@@ -1482,6 +1547,64 @@ fn zero_subnormal(s: f64) -> f64 {
     }
 }
 
+/// The `nodes` payload of a **Quad9-cell** mesh, synthesised exactly from the
+/// mesh's own element rows (D819-C).
+///
+/// MFEM has no element code for a 9-node quad: the `.mesh` encoding of such a
+/// cell is a SQUARE row (four corner ids) plus a 9-dof-per-element Q2 `nodes`
+/// section.  The fem-rs Quad9 slot order — corners counter-clockwise, then the
+/// bottom / right / top / left edge midsides, then the centre (the Gmsh
+/// type-10 order, which is also the tensor entity order) — permutes into MFEM's
+/// lexicographic `L2_T1_2D_P2` dof order (ix fastest) as
+/// `FEMRS_TO_LEX[fem-rs slot] = lex dof`, verified end-to-end against MFEM 4.10
+/// (`tmp/d84b/probe_quad9.cpp`: the read-back mesh is one SQUARE cell with a
+/// 9-dof order-2 `L2_T1_2D_P2` nodes field whose dof coordinates equal the
+/// original node coordinates, and MFEM's own save/load round-trip preserves
+/// it).
+///
+/// Only the **discontinuous** space is derived: the element-owned table is
+/// exact without any global dof numbering, and it is the encoding MFEM reads
+/// back faithfully.  A continuous (H1) table for Quad9 rows would need the
+/// shared edge/face numbering derived and probe-verified first — refused until
+/// then rather than guessed.
+fn quad9_conn_nodes<const D: usize>(
+    mesh: &Mesh<D>,
+    space: NodesSpace,
+) -> FemResult<Option<(u8, usize, Vec<f64>)>> {
+    match space {
+        NodesSpace::Continuous => Err(FemError::Mesh(
+            "write_mfem: a Quad9-cell mesh has no derived continuous (H1) `nodes` numbering — \
+             write it with NodesSpace::Discontinuous (the exact per-element L2_T1_2D_P2 \
+             encoding, D819-C)"
+                .into(),
+        )),
+        NodesSpace::Discontinuous => {
+            // fem-rs slot → MFEM `L2_T1_2D_P2` lex dof.  Composed from the two
+            // pinned orders: fem-rs [v0 v1 v2 v3 e01 e12 e23 e30 centre]
+            // against lex [(0,0) (0.5,0) (1,0) (0,0.5) (0.5,0.5) (1,0.5)
+            //               (0,1) (0.5,1) (1,1)].
+            const FEMRS_TO_LEX: [usize; 9] = [0, 2, 8, 6, 1, 5, 7, 3, 4];
+            let npe = 9usize;
+            let n_elems = mesh.n_elements();
+            debug_assert_eq!(
+                mesh.conn.len(),
+                n_elems * npe,
+                "quad9_conn_nodes: uniform Quad9 stride expected (check_element_tables ran)"
+            );
+            let mut values = vec![0.0f64; n_elems * npe * D];
+            for e in 0..n_elems {
+                let row = &mesh.conn[e * npe..(e + 1) * npe];
+                for (f, &lex) in FEMRS_TO_LEX.iter().enumerate() {
+                    let n = row[f] as usize;
+                    values[(e * npe + lex) * D..(e * npe + lex) * D + D]
+                        .copy_from_slice(&mesh.coords[n * D..n * D + D]);
+                }
+            }
+            Ok(Some((2u8, n_elems * npe, values)))
+        }
+    }
+}
+
 /// The `nodes` dof values of `mesh`, laid out for [`write_nodes_section`], plus
 /// the element order and the dof count.
 ///
@@ -1518,29 +1641,13 @@ fn zero_subnormal(s: f64) -> f64 {
 /// (the lexicographic tensor order for the tensor families, the layer ×
 /// L2-triangle order for the wedge), which is a permutation of the mesh's own
 /// slot order.
+///
+/// D819-C: a Quad9-cell mesh reaches [`quad9_conn_nodes`] before the
+/// geometry-table gate below.
 fn nodes_dof_values<const D: usize>(
     mesh: &Mesh<D>,
     space: NodesSpace,
 ) -> FemResult<Option<(u8, usize, Vec<f64>)>> {
-    // D812-1: MFEM's emission rule is `Nodes != NULL`, *not* `order > 1`
-    // (`mesh/mesh.cpp:12551` writes the section unconditionally when the mesh
-    // has a nodal grid function; `SetCurvature(0)` at `mesh/mesh.cpp:7214` is
-    // the only place `Nodes` is dropped).  An order-1 table therefore has to be
-    // written, and only its *absence* falls back to the `vertices` block.
-    let Some(geo) = mesh.geometry.as_ref() else {
-        return Ok(None);
-    };
-    let order = geo.order;
-    if order == 0 {
-        // A zero-order table is malformed (MFEM's `SetCurvature` refuses
-        // `order <= 0` by clearing `Nodes`; no `nodes` collection has order 0)
-        // and the slot maps below index with `order - 1`.
-        return Err(FemError::Mesh(
-            "write_mfem: the mesh's geometry table claims polynomial order 0, which no MFEM \
-             `nodes` collection has"
-                .into(),
-        ));
-    }
     let dim = mesh.topological_dim() as usize;
     let et = mesh.element_type_at(0);
     if dim != D {
@@ -1559,6 +1666,44 @@ fn nodes_dof_values<const D: usize>(
                  (spaceDim > dim) is not supported"
             )));
         }
+    }
+    // D819-C: a Quad9 *cell* mesh's geometry lives in its own 9-node rows
+    // (Gmsh type-10 import; the geometry table `attach_second_order_geometry`
+    // attaches is a clone of those rows), so its encoding is derived from the
+    // element table directly — before the geometry-table gate below, which
+    // would silently classify a table-free Quad9 mesh as straight-sided and
+    // drop every midside node.
+    if et == ElementType::Quad9 {
+        let n_elems = mesh.n_elements();
+        for e in 1..n_elems as u32 {
+            if mesh.element_type_at(e) != et {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: a `nodes` section needs a uniform element type, but the mesh \
+                     mixes {et:?} and {:?}",
+                    mesh.element_type_at(e)
+                )));
+            }
+        }
+        return quad9_conn_nodes(mesh, space);
+    }
+    // D812-1: MFEM's emission rule is `Nodes != NULL`, *not* `order > 1`
+    // (`mesh/mesh.cpp:12551` writes the section unconditionally when the mesh
+    // has a nodal grid function; `SetCurvature(0)` at `mesh/mesh.cpp:7214` is
+    // the only place `Nodes` is dropped).  An order-1 table therefore has to be
+    // written, and only its *absence* falls back to the `vertices` block.
+    let Some(geo) = mesh.geometry.as_ref() else {
+        return Ok(None);
+    };
+    let order = geo.order;
+    if order == 0 {
+        // A zero-order table is malformed (MFEM's `SetCurvature` refuses
+        // `order <= 0` by clearing `Nodes`; no `nodes` collection has order 0)
+        // and the slot maps below index with `order - 1`.
+        return Err(FemError::Mesh(
+            "write_mfem: the mesh's geometry table claims polynomial order 0, which no MFEM \
+             `nodes` collection has"
+                .into(),
+        ));
     }
     let sdim = D;
     let n_elems = mesh.n_elements();
@@ -2016,28 +2161,62 @@ fn approx_eq(a: f64, b: f64) -> bool {
 /// `face_nv[f]` is the validated node count of face `f` (from
 /// [`check_boundary_tables`]); `face_conn` is walked with those counts, so the
 /// records can never overlap or overrun.  The MFEM geometry code comes from the
-/// face's own type via [`elem_type_to_mfem_code`].
+/// face's own type via [`elem_type_to_mfem_code`] — extended, D819-C, with the
+/// vertex-prefix emission for high-order face types ([`mfem_face_row`]).
 fn write_boundary_section<W: Write, const D: usize>(
     writer: &mut W,
     mesh: &Mesh<D>,
     face_nv: &[usize],
+    has_nodes: bool,
 ) -> FemResult<()> {
     writeln!(writer, "\nboundary\n{}", face_nv.len())?;
     let mut off = 0usize;
     for (fi, &nvf) in face_nv.iter().enumerate() {
         let et = mesh.face_type_at(fi as u32);
-        let code = elem_type_to_mfem_code(et).ok_or_else(|| {
-            FemError::Mesh(format!("write_mfem: unsupported boundary face type {et:?}"))
-        })?;
+        let (code, n_emit) = mfem_face_row(et, has_nodes)?;
+        debug_assert!(n_emit <= nvf, "boundary prefix emission overruns the face row");
         let tag = if !mesh.face_tags.is_empty() { mesh.face_tags[fi] } else { 1 };
         write!(writer, "{tag} {code}")?;
-        for j in 0..nvf {
+        for j in 0..n_emit {
             write!(writer, " {}", mesh.face_conn[off + j])?;
         }
         writeln!(writer)?;
         off += nvf;
     }
     Ok(())
+}
+
+/// What one `boundary`-section row emits for face type `et`:
+/// `(geometry code, connectivity entries carried by the row)`.
+///
+/// MFEM boundary rows follow the same rule as element rows — the base code and
+/// `GetNVertices()` ids (`mesh.cpp:5022-5031`), with the face midsides living
+/// in the volume's `nodes` section.  A high-order face type is therefore
+/// writable by vertex prefix **only when the payload carries a `nodes`
+/// section**; on a straight mesh the midside geometry would be silently
+/// dropped, so that combination is refused.
+fn mfem_face_row(et: ElementType, has_nodes: bool) -> FemResult<(u32, usize)> {
+    if let Some(code) = elem_type_to_mfem_code(et) {
+        return Ok((code, et.nodes_per_element()));
+    }
+    let prefix = match et {
+        ElementType::Line3 => Some((1u32, 2usize)),
+        ElementType::Tri6 => Some((2, 3)),
+        ElementType::Quad8 | ElementType::Quad9 => Some((3, 4)),
+        _ => None,
+    };
+    match (prefix, has_nodes) {
+        (Some(row), true) => Ok(row),
+        (Some(_), false) => Err(FemError::Mesh(format!(
+            "write_mfem: {et:?} boundary faces need a `nodes` section to carry their midside \
+             geometry (MFEM boundary rows carry the base code and the vertex ids only), but \
+             this mesh has no `nodes` payload — writing the straight prefix would silently \
+             drop the midside nodes"
+        ))),
+        (None, _) => Err(FemError::Mesh(format!(
+            "write_mfem: unsupported boundary face type {et:?} (no MFEM geometry code)"
+        ))),
+    }
 }
 
 /// Write a mesh to MFEM `.mesh` file on disk.
@@ -4589,7 +4768,12 @@ fn parse_mixed_h1_geometry(text: &str) -> Result<Option<MixedH1Geometry>, String
                     let row = lines.next().ok_or("short elements")?;
                     let t: Vec<&str> = row.split_whitespace().collect();
                     let code: usize = t[1].parse().map_err(|_| "bad geometry code")?;
-                    let et = mfem_elem_type(code as u32).ok_or("unsupported geometry code")?;
+                    let et = mfem_elem_type(code as u32).ok_or_else(|| {
+                        format!(
+                            "unsupported geometry code {code} (the .mesh format defines 0-7 \
+                             only; MFEM aborts on any other code, mesh.cpp:5002-5010)"
+                        )
+                    })?;
                     elem_rows.push((et, t[2..].iter().map(|v| v.parse().unwrap()).collect()));
                 }
             }
@@ -6448,15 +6632,43 @@ mod tests {
 
     #[test]
     fn elem_type_roundtrip() {
+        // D819-C: the format has codes 0-7 only — both directions agree, and
+        // the private high-order codes (8-14) exist on NEITHER side any more
+        // (the old table mapped Line3=8/Tri6=9/Quad8=10/Tet10=11/Hex20=12/
+        // Prism15=13/Pyramid13=14; MFEM aborts on every one of them).
         let cases = [
-            (ElementType::Line2, 1u32), (ElementType::Tri3, 2u32),            (ElementType::Quad4, 3u32), (ElementType::Tet4, 4u32),
-            (ElementType::Hex8, 5u32), (ElementType::Prism6, 6u32),
-            (ElementType::Pyramid5, 7u32), (ElementType::Line3, 8u32),
-            (ElementType::Tri6, 9u32), (ElementType::Tet10, 11u32),
+            (ElementType::Point1, 0u32),
+            (ElementType::Line2, 1u32),
+            (ElementType::Tri3, 2u32),
+            (ElementType::Quad4, 3u32),
+            (ElementType::Tet4, 4u32),
+            (ElementType::Hex8, 5u32),
+            (ElementType::Prism6, 6u32),
+            (ElementType::Pyramid5, 7u32),
         ];
         for (et, code) in &cases {
             assert_eq!(elem_type_to_mfem_code(*et), Some(*code));
             assert_eq!(mfem_elem_type(*code), Some(*et));
+        }
+        // Every high-order type is unwritable as an element code and unreadable
+        // from one.
+        for et in [
+            ElementType::Line3,
+            ElementType::Tri6,
+            ElementType::Quad8,
+            ElementType::Quad9,
+            ElementType::Tet10,
+            ElementType::Hex20,
+            ElementType::Hex27,
+            ElementType::Prism15,
+            ElementType::Prism18,
+            ElementType::Pyramid13,
+            ElementType::Polygon,
+        ] {
+            assert_eq!(elem_type_to_mfem_code(et), None, "{et:?}");
+        }
+        for code in [8u32, 9, 10, 11, 12, 13, 14, 15, 200] {
+            assert_eq!(mfem_elem_type(code), None, "code {code}");
         }
     }
 

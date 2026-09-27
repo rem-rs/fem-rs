@@ -96,6 +96,27 @@ fn ref_elem_vol_with_pyramid_basis(
             fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
         ElementType::Quad4 => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
+        // D819-D — the round-83 D819 verdict applied to this table: a
+        // quadratic quad *cell* label is a tensor-family cell, never a
+        // serendipity one (one SQUARE geometry, one tensor H¹ family — the
+        // same verdict that routed the mixed table's Quad8/Quad9 arms to
+        // `QuadQk`, and the slots the H¹ space's own dof numbering uses).
+        // This file's quad frame is the legacy `[-1,1]²` (the frame
+        // `geom_jacobian`'s bilinear corner arm is written in), so the arms
+        // are the `[-1,1]²` fixed-order elements, constructed here because
+        // `fem_space::ref_elem::fixed_order_tensor` keys on the `Quad4` label
+        // only.  `QuadQ2`'s slot sequence (corners CCW, bottom/right/top/left
+        // midsides, centre) equals `QuadQk`'s entity order, so the slots pair
+        // with the space's `element_dofs` exactly like the `Quad4` arm's.
+        ElementType::Quad8 | ElementType::Quad9 => match order {
+            1 => Box::new(fem_element::lagrange::QuadQ1),
+            2 => Box::new(fem_element::lagrange::QuadQ2),
+            o => panic!(
+                "ref_elem_vol: Quad8/Quad9 flux recovery tops out at the legacy \
+                 fixed-order elements (order {o} > 2; the same ceiling the \
+                 Quad4 arm's `fixed_order_tensor` has)"
+            ),
+        },
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             fem_space::ref_elem::gll_tensor(elem_type, order.max(1))
         }
@@ -314,11 +335,15 @@ fn infer_fe_order(elem_type: ElementType, n_flux_dofs: usize) -> u8 {
         (ElementType::Tri3, 10) | (ElementType::Tri6, 10) => 3,
         (ElementType::Tri3, 15) | (ElementType::Tri6, 15) => 4,
         (ElementType::Tri3, 21) | (ElementType::Tri6, 21) => 5,
-        (ElementType::Quad4, 4) => 1,
-        (ElementType::Quad4, 9) => 2,
-        (ElementType::Quad4, 16) => 3,
-        (ElementType::Quad4, 25) => 4,
-        (ElementType::Quad4, 36) => 5,
+        // D819-D: the quadratic quad *cell* labels share the quad counts
+        // (tensor family — one SQUARE geometry, one H¹ family; the same
+        // verdict that routed `ref_elem_vol`'s Quad8/Quad9 arms to the
+        // fixed-order tensor elements).
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 4) => 1,
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 9) => 2,
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 16) => 3,
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 25) => 4,
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 36) => 5,
         // D353 sweep: the `_ => 1` fallback happened to be right for the
         // hex only at p = 1 (HexQk(1) has 8 DOFs); at p >= 2 the estimator
         // would read an 8-DOF basis against a 27- (or 64-) DOF flux vector.
@@ -1066,6 +1091,151 @@ mod d366_fe_order_table {
         }
         for (n, p) in [(6usize, 1u8), (18, 2), (40, 3), (75, 4), (126, 5)] {
             assert_eq!(infer_fe_order(ElementType::Prism18, n), p, "Prism18 n={n}");
+        }
+    }
+}
+
+// ─── D819-D: the quadratic quad *cell* labels in the flux table ─────────────
+#[cfg(test)]
+mod d819d_quad_cell_labels {
+    //! Round-83 D819 verdict applied to the flux-recovery table: a Quad8/Quad9
+    //! cell is a tensor-family cell (one SQUARE geometry, one tensor H¹
+    //! family), never a serendipity one.  Pre-D819-D this table had no
+    //! Quad8/Quad9 arms at all — every flux-recovery call on such a cell hit
+    //! the fail-fast panic.
+
+    use super::{infer_fe_order, ref_elem_vol, ref_elem_vol_with_pyramid_basis};
+    use crate::postproc::grid_function::GridFunction;
+    use crate::standard::DiffusionIntegrator;
+    use crate::postproc::flux_recovery::FluxRecovery;
+    use fem_element::lagrange::{QuadQ1, QuadQ2};
+    use fem_element::ReferenceElement;
+    use fem_mesh::element_type::ElementType;
+    use fem_mesh::topology::MeshTopology as _;
+    use fem_mesh::Mesh;
+    use fem_space::fe_space::FESpace;
+    use fem_space::H1Space;
+
+    /// The cell labels share the Quad4 arm's tensor lattice exactly (the
+    /// pairing guarantee against the space's own `QuadQk` numbering), and the
+    /// flux-order inference resolves their counts like the Quad4 counts.
+    #[test]
+    fn quad89_table_arms_are_the_tensor_family() {
+        for p in [1u8, 2] {
+            let q4 = ref_elem_vol(ElementType::Quad4, p);
+            let want_coords = q4.dof_coords();
+            let want_n = q4.n_dofs();
+            for et in [ElementType::Quad8, ElementType::Quad9] {
+                let e = ref_elem_vol(et, p);
+                assert_eq!(e.n_dofs(), want_n, "{et:?} p={p} dof count");
+                assert_eq!(e.dof_coords(), want_coords, "{et:?} p={p} lattice");
+            }
+        }
+        // The constructed elements are the legacy [-1,1]² frames this file's
+        // quad geometry arm is written in — slot-for-slot the tensor family.
+        assert_eq!(
+            ref_elem_vol(ElementType::Quad9, 1).dof_coords(),
+            QuadQ1.dof_coords()
+        );
+        assert_eq!(
+            ref_elem_vol(ElementType::Quad9, 2).dof_coords(),
+            QuadQ2.dof_coords()
+        );
+        for (n, p) in [(4usize, 1u8), (9, 2), (16, 3), (25, 4), (36, 5)] {
+            assert_eq!(infer_fe_order(ElementType::Quad8, n), p, "Quad8 n={n}");
+            assert_eq!(infer_fe_order(ElementType::Quad9, n), p, "Quad9 n={n}");
+        }
+    }
+
+    /// One straight Quad9 cell (corners CCW, then the bottom/right/top/left
+    /// edge midsides, then the centre — the fem-rs Quad9 slot order).
+    fn quad9_mesh() -> Mesh<2> {
+        let mut coords = Vec::with_capacity(18);
+        for (x, y) in [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (0.5, 0.5),
+        ] {
+            coords.push(x);
+            coords.push(y);
+        }
+        Mesh::uniform(
+            coords,
+            (0..9).collect(),
+            vec![1],
+            ElementType::Quad9,
+            vec![0, 1, 4],
+            vec![7],
+            ElementType::Line3,
+        )
+    }
+
+    /// A Quad9 cell recovers the exact affine gradient through the public
+    /// flux-recovery API — red (fail-fast panic) before the D819-D arms.
+    #[test]
+    fn quad9_cell_flux_is_affine_exact() {
+        let mesh = quad9_mesh();
+        let space = H1Space::new(mesh.clone(), 1);
+        let dof_values = space.interpolate(&|x| x[0] + 2.0 * x[1]);
+        let gf = GridFunction::new(&space, dof_values.as_slice().to_vec());
+        let integrator = DiffusionIntegrator::<f64> { kappa: 1.0 };
+        let flux = integrator.compute_element_flux(
+            &mesh,
+            gf.space(),
+            0,
+            gf.dofs(),
+            &QuadQ1.dof_coords(),
+        );
+        assert_eq!(flux.len(), 4 * 2, "flux layout: 4 Q1 dofs x 2 components");
+        for (i, f) in flux.chunks(2).enumerate() {
+            assert!(
+                (f[0] - 1.0).abs() < 1e-12 && (f[1] - 2.0).abs() < 1e-12,
+                "flux dof {i}: got ({}, {}), want (1, 2)",
+                f[0],
+                f[1]
+            );
+        }
+    }
+
+    /// `compute_flux_energy` of a constant flux difference on the Quad9 cell:
+    /// the inference maps the 9-dof flux vector to order 2 and the Q2 energy
+    /// integral over the straight cell is κ·|v|²·|K| exactly.
+    #[test]
+    fn quad9_cell_flux_energy_closed_form() {
+        let mesh = quad9_mesh();
+        let integrator = DiffusionIntegrator::<f64> { kappa: 2.0 };
+        let diff = vec![1.0, 2.0].repeat(9);
+        let got = integrator.compute_flux_energy(&mesh, 0, &diff);
+        let want = 2.0 * (1.0 + 4.0) * 1.0;
+        assert!(
+            (got - want).abs() < 1e-12,
+            "energy {got}, want {want} (a 0 here means det J == 0)"
+        );
+    }
+
+    /// The pyramid-family threading ignores the quad labels (the explicit
+    /// family only affects pyramid cells ≥ order 2).
+    #[test]
+    fn quad89_arms_ignore_the_pyramid_family() {
+        for et in [ElementType::Quad8, ElementType::Quad9] {
+            let a = ref_elem_vol_with_pyramid_basis(
+                et,
+                2,
+                fem_element::lagrange::PyramidBasisType::Fuentes,
+            );
+            let b = ref_elem_vol_with_pyramid_basis(
+                et,
+                2,
+                fem_element::lagrange::PyramidBasisType::Bergot,
+            );
+            assert_eq!(a.n_dofs(), b.n_dofs(), "{et:?}");
+            assert_eq!(a.dof_coords(), b.dof_coords(), "{et:?}");
         }
     }
 }

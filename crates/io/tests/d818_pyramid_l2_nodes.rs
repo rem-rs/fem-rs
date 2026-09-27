@@ -19,7 +19,6 @@
 //! the loaded mesh's vertex table at precision 17; the table values are the
 //! file's own (precision 17) `nodes` dump.
 
-use fem_io::mfem::read_mfem;
 use std::io::Cursor;
 use std::path::Path;
 
