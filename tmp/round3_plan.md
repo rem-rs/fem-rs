@@ -4470,6 +4470,35 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十五轮（round 85）：D822-4 ex18 -o3 档（主会话）+ D824-A 金字塔行 hp（Lane C）+ D825-1/2 导出族余项（Lane B）——三路主树并行全交付
+
+**开局 HEAD = round-84 终稿 `967fa4d5`；开局即发现并修复 round-83/84 两轮代理漏 `git add` 的 8 个 tracked 引用文件（卫生笔 `4691a818`）；C: 开局 34G（⑨：清 incremental 后跑门）。**
+三路主树文件互斥（㉛）：主会话 = `crates/assembly`+`examples`（D822-4）；Lane B = `crates/io/**`（D825-1/2）；Lane C = `crates/space/**`（D824-A）。真值一律 `$HOME/mfem410_ser` 探针/现编实跑（⑯）。
+
+### 主会话（D822-4）· **关闭**
+ex18 -o3 档对拍被两层缺口挡住，全修：
+- **Quad4 臂放开任意阶**：`make_ref_elem` 删 `assert_eq!(order, 1)`，改 `QuadL2GL::new(order)`（= MFEM `DG_FECollection(order,2,GaussLegendre)` 张量 GL-L2 元，order-3 = 16 dof/元）。
+- **2-D 面规则改 MFEM 公式**：`build_faces_2d` 的 `(2p+1).min(4)` → `p+1`。依据链：`HyperbolicFormIntegrator` 面规则阶 `2·max_el_order + IntOrderOffset`（hyperbolic.cpp:224；ex18.cpp:68/179 传 1）+ `SegmentIntegrationRule` GaussLegendre 臂 `n = Order/2 + 1`（intrules.cpp）⇒ p+1 点/[0,1]/Σw=1。**旧公式 p=1 给 3 点（MFEM 2）、p=2 给 4 点（MFEM 3）、仅 p=3 恰好 4=4**——**round-84 登记的 `-o 1` 档 ~6e-6 相对残差真根因即此，"装配 vs MFEM PA/FA fp 排序"归因证伪（⑥ 又一例）**。
+- **示例默认 order 1→3**（ex18.cpp:70 默认 3；其余默认档 round-84 已逐项核过一致，`EulerMesh(1)` 就是 `../data/periodic-square.mesh`）。
+- **验收（C++ 现编现跑 `$HOME/work/d85main/ex18/`，快照 `tmp/d85main/cpp_*.out`）**：默认档（=C++ 默认 `-o 3 -r 1`，2304 unknowns）**435 步 = C++，`Solution error: 3.930926246114457e-3` = C++ `0.0039309262` 全部 8 位打印数字逐位一致**；`-o 1` 档 **184 步 = C++（原 185），`6.168658610565338e-2` = C++ `0.061686586` 8 位全对齐（原 6 位）**。d822 测试 4/4（o1 演化钉重钉 + 新增 o3 双测），**有牙**（stash 后 o3 双测红于旧 panic、o1 演化钉红、o1 free-stream 规则无关仍绿）；d816c 3-D 金标零变化。台账 ex18 行 RUN-REG→RUN；**锚点变更**：ex18 默认档锚换为 o3 值 + `-o 1` 显式档新值。
+
+### Lane B（D825-1/2）· **关闭**
+- **D825-1**：Line3/Tri6/Tet10/Hex27/Prism18 行几何**连续 H1 导出**放行——Tri6/Tet10/Hex27/Prism18 复用 `mixed_h1_engine`（角点行 + 紧凑顶点秩；实体表 = `fem/geom.cpp` 各族 Edges/Faces 序，探针 `probe_h1_truth` 五族 `GetElementDofs` 全表钉死：tri6 15、tet10 27、hex27 45、prism18 45，共享 dof 单值）；Line3 走专函数 `[v0|v1|NV+e]`。
+- **D825-2**：**Pyramid13 导出**——载荷语义确证可推导：MFEM `SetCurvature(2,true)` 自产 27-dof `L2_T1_3D_P2` Fuentes 容器值 = 直边 P1 金字塔映射在 27 个 Fuentes nodal points 的像（非对称金字塔 max 偏差 5.551e-17）；`pyramid13_fuentes_conn_nodes` 闭式合成 + 直边守卫。元素行 = 基码 7 + 角点前缀。
+- **六份导出 vs MFEM `Load`+`Print`(16) 再存全部逐字节一致**（`tmp/d85b/byte_compare.txt`）+ Load 回读逐 slot 偏差 0.0。**连带修复**：写侧角点发射改 `row_geometry_corner_slots`（Prism18 非前缀 [0,1,2,12,13,14]；旧行前缀发射在一般网格上 `remap_vertex` panic/MFEM abort）。红→绿 9/9；fem-io **372/0**（基线 363）。新债 D827-3（Pyramid13 连续 H1 = Fuentes 15 dof 未推导）、D827-4（弯曲金字塔 13→27 载荷）。
+
+### Lane C（D824-A + D824-C）· **关闭**
+- **D824-A**：金字塔行 hp 放行（`p_refine.rs` 9 处；`dof_manager.rs` 未动）。MFEM 语义探针钉死：变阶金字塔行 = 默认 `H1_FuentesPyramidElement` 实体序——8 边块按 `Geometry::Constants<PYRAMID>::Edges` 序**与方向**（(3,2)/(0,3) 反向）、基座 quad 面 **j 反转**布局（p3 权重 0.2/0.0764/0.2/0.5236 钉死）、4 三角面 Faces 序、内部 (p−1)³；总数 `p(p²+3)+1`。**探针 trip hazard**：纯金字塔网格 meshgen 0x8 不触发 `EnsureNCMesh`（mesh.cpp:11781 静默跳过）→ 须混入远置 hex。
+- **D824-C 结账**：金字塔 = 闭 GLL（true）——边内点 `0.5(1∓1/√5)` 探针坐实；`elem_uses_gll` 改显式逐族 match。**D824-B 维持**（口径钉测试：net-of-gaps 对拍 57−17=40；紧化视图重构不做）。
+- 红→绿 4/4（红 = 旧 assert panic，stash 复现）；硬约束 d824/d820/p_refine 全绿；fem-space 67 靶 + lib 294 全绿 0 警告。新债 D827-1（`detect_p_constraints` 边基标记 element(0) 同质假设）、D827-2（fem-rs hex 边枚举 2/6 反向差，slot 级记录）。
+
+### 主会话整合
+- 三路亲验（⑰）：Lane B/C 全部测试主树复跑绿；红证据、有牙记录逐份核。
+- 分笔提交：`4691a818`（卫生）→ `76647210`（D822-4）→ `e6cc8a2a`（注释勘误）→ `7eedbe34`（D824-A/C）→ `93f8efd9`（D825-1/2）→ docs。证据：`tmp/d85main|d85b|d85c/`。
+
+### 债务状态
+**D822-4、D824-A、D824-C（结账为 true）、D825-1/2 关闭**；**D824-B 维持**（口径已钉）；新债 **D827-1..4**。round-85 头号候选 ①②③ 全部交付；④（§4-4 44 个 D600+ 定性）顺延。
+
 ## 第八十四轮（round 84）：D819-A/B 空间接线（Lane A）+ D819-C/D io+flux（Lane B）+ §4-1 台账刷新（Lane C，抓出 D822-3 真回归）+ 主会话 §4-4 对账 + 四路修复追击 + data/ 删除事故恢复
 
 **开局 HEAD = round 83 末笔 `c5a06dd6`（已推送）；树净；C: 32G（⑨：中途清 target/debug）。**
