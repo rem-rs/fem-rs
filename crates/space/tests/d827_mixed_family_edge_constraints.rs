@@ -5,9 +5,9 @@
 //! `elem_uses_gll(mesh.element_type(0))` (homogeneous-mesh assumption): on a
 //! mixed tet × pyramid mesh every mixed-order edge constraint was computed
 //! with element 0's family basis, misplacing the other family's half.  The
-//! fix tracks the basis per (edge, order) VARIANT (first-encountering
-//! element of that order donates its family's basis) in the builder's edge
-//! DOF coordinates AND the constraint node positions.
+//! fix tracks the basis per (edge, order) VARIANT (D829-1, round 87: the
+//! flag folds with a sticky OR over the users' family flags) in the
+//! builder's edge DOF coordinates AND the constraint node positions.
 //!
 //! MFEM 4.10 ground truth (probe `tmp/d86a/mixed_edge_probe.cpp`, outputs
 //! `out_p32_gl.txt` / `out_p32_cu.txt` / `out_p23_gl.txt` / `out_p43_gl.txt`
@@ -36,9 +36,9 @@
 //! faithful translation is variant-level dispatch: each variant's node
 //! positions follow the family that uses it (equispaced on the tet side,
 //! GLL on the pyramid side of the same edge).  A variant shared by two
-//! families at the SAME order keeps the first-encountering family's basis
-//! (MFEM's exact analogue does not exist — its cells would share the
-//! collection basis; pinned as a documented limitation in test 5).
+//! families at the SAME order takes the sticky-GLL basis (D829-1: any
+//! GLL-family user makes it GLL; MFEM's own ruling is collection-global —
+//! probe `tmp/d87a/out_p33_cu.txt`).
 //!
 //! Fixtures `data/d827_mixed_tet_first.msh` / `data/d827_mixed_pyr_first.msh`
 //! are the same physical mesh with the element file order swapped (tet
@@ -365,10 +365,10 @@ fn d827_tet_p4_pyr_p3_master_gll_nodes_slave_equispaced() {
 /// Same-order shared edge (tet p3 x pyr p3): MFEM stores ONE variant per
 /// order (probe out_p33_gl.txt: shared-edge variant orders "3", no
 /// constraints, NDofs=47) and never per family.  fem-rs matches the
-/// structure (one variant, no constraints, NDofs 47); the variant's node
-/// set keeps the first-encountering family's basis (tet here) — the
-/// documented limitation for a same-order mixed-family edge, which has no
-/// MFEM counterpart (MFEM's two cells would share the collection basis).
+/// structure (one variant, no constraints, NDofs 47).  D829-1 (round 87)
+/// replaced the first-encounter basis donation with the sticky-GLL ruling;
+/// the file-order invariance of the shared variant's node set is pinned in
+/// `d829_file_order_invariant_variant_basis.rs`.
 #[test]
 fn d827_same_order_shared_edge_single_variant_matches_mfem_ndofs() {
     let mesh = tet_first_mesh();

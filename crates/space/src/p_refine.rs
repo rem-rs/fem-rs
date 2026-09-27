@@ -18,14 +18,19 @@
 //! The 1-D node set of a variant follows the **family of the elements that
 //! use it** (D827-1): closed Gauss-Lobatto for the tri/quad/hex/prism/
 //! pyramid bases (`H1TriPk`/`QuadQk`/`HexQk`/`H1PrismPk`/
-//! `H1FuentesPyramidPk`), equispaced for the tet (`TetPk`) — the
-//! first-encountering element of that (entity, order) donates the basis if
-//! two families share one variant.  MFEM itself keeps a collection-global
-//! entity basis (its hp constraints evaluate
+//! `H1FuentesPyramidPk`), equispaced for the tet (`TetPk`).  When two
+//! families share ONE variant (same order — D829-1), the GLL basis wins
+//! (equispaced only if every user is a tet).  MFEM itself keeps a
+//! collection-global entity basis (its hp constraints evaluate
 //! `fec->GetFE(Geometry::SEGMENT/TRIANGLE, p)`, `fem/fespace.cpp:1094` —
 //! probe `tmp/d86a/mixed_edge_probe.cpp`: flipping only the collection basis
-//! flips every row GLL ↔ equispaced); fem-rs's per-family cell bases make
-//! the variant-level dispatch the faithful translation.
+//! flips every row GLL ↔ equispaced wholesale, including the tet's own edge
+//! dofs — `out_p33_gl.txt` GLL vs `tmp/d87a/out_p33_cu.txt` equispaced at
+//! the identical dofs); fem-rs's per-family cell bases (TetPk equispaced,
+//! GLL elsewhere — the documented d176 divergence) make the sticky-GLL
+//! variant ruling the faithful translation of the GL collection: the tet
+//! exception is confined to all-tet entities, exactly where fem-rs's cell
+//! basis itself is equispaced.
 //!
 //! ## Constraint generation (MFEM `BuildConformingInterpolation`)
 //!
@@ -472,37 +477,43 @@ fn n_bubble_dofs_2d(et: ElementType, p: u8) -> usize {
 /// elements (one DOF set per order) mapped to the edge's 1-D basis flag
 /// (`true` = closed Gauss-Lobatto, `false` = equispaced) for that variant.
 ///
-/// D827-1: the flag is tracked per (edge, ORDER) VARIANT — the
-/// first-encountering element of that order on the edge donates its family's
-/// basis — not once per edge and not from element 0.  On a mixed-family edge
-/// (tet p3 × pyramid p2) the p3 variant's dofs sit where the tet's
-/// `TetPk` equispaced basis interpolates them and the p2 variant's at the
-/// pyramid's GLL midpoint.  A variant shared by two families at the SAME
-/// order (tet p3 × pyramid p3) keeps the first-encountering family's basis:
-/// MFEM stores one variant per order and never per family (probe
-/// `tmp/d86a/out_p33_gl.txt`: variant orders "3", single dof set, no
-/// constraints), so one cell basis has to win — same limitation as the
-/// documented TetPk-basis divergence (d176).
+/// D827-1: the flag is tracked per (edge, ORDER) VARIANT — not once per edge
+/// and not from element 0.  On a mixed-family edge (tet p3 × pyramid p2) the
+/// p3 variant's dofs sit where the tet's `TetPk` equispaced basis
+/// interpolates them and the p2 variant's at the pyramid's GLL midpoint.
+/// D829-1: a variant shared by two families at the SAME order (tet p3 ×
+/// pyramid p3) takes the GLL basis (sticky OR over the users' family flags —
+/// equispaced only if every user is a tet): MFEM's ruling is
+/// collection-global (probe `tmp/d86a/out_p33_gl.txt` vs
+/// `tmp/d87a/out_p33_cu.txt`: the same single-variant dofs sit at GLL
+/// 0.2764/0.7236 under the default GL collection and at 1/3, 2/3 under
+/// `BasisType::ClosedUniform`, and the tet's OWN edge dofs flip with the
+/// collection too), so the GL-dominant side wins — file-order independent,
+/// with the tet exception confined to all-tet entities (the d176
+/// divergence).
 type EdgeVariantSets = HashMap<EdgeKey, BTreeMap<u8, bool>>;
 
 /// Per-face state: distinct orders of adjacent elements + face node count.
-/// Per-face state: for each face, the distinct orders of its adjacent
+/// For each face, the distinct orders of its adjacent
 /// elements mapped to the face's basis flag (`true` = closed Gauss-Lobatto:
 /// `H1TriPk` barycentrics on tri faces, GLL tensor on quad faces; `false` =
 /// equispaced `TetPk` tri faces) plus the face's corner count (3 or 4).
 ///
 /// D827-1: like the edge flags, the tri-face flag is tracked per
-/// (face, ORDER) VARIANT — the first-encountering element of that order on
-/// the face donates its family's basis — so a mixed tet × pyramid face
-/// places the tet variant's dofs on the equispaced barycentric grid and the
-/// pyramid variant's on the `H1TriPk` GLL grid.  Quad faces only occur in
-/// GLL families (hex/prism/pyramid), so their flag is always `true`.
+/// (face, ORDER) VARIANT, so a mixed tet × pyramid face places the tet-only
+/// variant's dofs on the equispaced barycentric grid and the pyramid-only
+/// variant's on the `H1TriPk` GLL grid.  D829-1: a variant shared by two
+/// families at the same order takes the GLL basis (sticky OR — see the
+/// [`EdgeVariantSets`] doc for the MFEM probe ruling).  Quad faces only
+/// occur in GLL families (hex/prism/pyramid), so their flag is always
+/// `true`.
 type FaceVariantSets = HashMap<FaceKey, (BTreeMap<u8, bool>, usize)>;
 
 /// Collect the order variants of every edge (the set of orders of adjacent
 /// elements; each order gets its own DOF set) with the 1-D basis flag of
-/// each (edge, order) variant — the first-encountering element of that
-/// order donates its family's basis (D827-1).  Also consumed by
+/// each (edge, order) variant — sticky OR over the users' family flags, so
+/// any GLL-family user makes the variant GLL and only an all-tet user list
+/// keeps it equispaced (D827-1/D829-1).  Also consumed by
 /// [`detect_p_constraints`] so the constraint node positions match the
 /// builder's DOF coordinates variant for variant.
 fn collect_edge_variants<M: MeshTopology>(mesh: &M, elem_orders: &[u8]) -> EdgeVariantSets {
@@ -513,10 +524,13 @@ fn collect_edge_variants<M: MeshTopology>(mesh: &M, elem_orders: &[u8]) -> EdgeV
         let ns = elem_corners(et, mesh.element_nodes(e), mesh.geom_order() > 1);
         let gll = elem_uses_gll(et);
         for (a, b) in elem_local_edges(et, &ns) {
-            sets.entry(EdgeKey::new(a, b))
+            // D829-1: sticky OR, not first-encounter — the shared-entity
+            // variant's basis must not depend on the element file order.
+            let flag = sets.entry(EdgeKey::new(a, b))
                 .or_default()
                 .entry(p)
-                .or_insert(gll);
+                .or_insert(false);
+            *flag |= gll;
         }
     }
     sets
@@ -587,37 +601,43 @@ fn collect_face_variants<M: MeshTopology>(
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 4));
-                entry.0.entry(p).or_insert(gll);
+                // D829-1: sticky OR over the users' family flags.
+                *entry.0.entry(p).or_insert(false) |= gll;
             }
         } else if is_pyramid_row(et) {
             for face4 in [pyramid_base_face(&ns)] {
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 4));
-                entry.0.entry(p).or_insert(gll);
+                // D829-1: sticky OR over the users' family flags.
+                *entry.0.entry(p).or_insert(false) |= gll;
             }
             for (a, b, c) in pyramid_tri_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 3));
-                entry.0.entry(p).or_insert(gll);
+                // D829-1: sticky OR over the users' family flags.
+                *entry.0.entry(p).or_insert(false) |= gll;
             }
         } else if is_prism_row(et) {
             for (a, b, c) in prism_tri_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 3));
-                entry.0.entry(p).or_insert(gll);
+                // D829-1: sticky OR over the users' family flags.
+                *entry.0.entry(p).or_insert(false) |= gll;
             }
             for face4 in prism_quad_faces(&ns) {
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 4));
-                entry.0.entry(p).or_insert(gll);
+                // D829-1: sticky OR over the users' family flags.
+                *entry.0.entry(p).or_insert(false) |= gll;
             }
         } else if is_tet_row(et) {
             for (a, b, c) in tet_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeMap::new(), 3));
-                entry.0.entry(p).or_insert(gll);
+                // D829-1: sticky OR over the users' family flags.
+                *entry.0.entry(p).or_insert(false) |= gll;
             }
         } else {
             panic!("collect_face_variants: unsupported element geometry {et:?}");
