@@ -4470,6 +4470,39 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十四轮（round 84）：D819-A/B 空间接线（Lane A）+ D819-C/D io+flux（Lane B）+ §4-1 台账刷新（Lane C，抓出 D822-3 真回归）+ 主会话 §4-4 对账 + 四路修复追击 + data/ 删除事故恢复
+
+**开局 HEAD = round 83 末笔 `c5a06dd6`（已推送）；树净；C: 32G（⑨：中途清 target/debug）。**
+三路并行 + 台账路抓出真回归后加派第四路修复 + 主会话对账/整合/事故处置。
+
+### Lane A（D819-A/B）· **关闭**
+Quad8/Quad9 cell 空间接线：MFEM 探针钉死 SQUARE+order-2-Nodes 顶点表与 H1(1..5) 全表；`dof_manager` 角点视图 + `build_p1` 4 角（修前 15）+ `h1_field_element` tensor 臂（修前 panic）+ `hcurl` 九臂加宽（ND 表证 Quad9 = 角点 Quad4 逐位）。红 8/8 → 绿 9/9，质量阵 vs MFEM ≤1e-12。新债 D820-1/2/3。
+
+### Lane B（D819-C/D）· **关闭**
+私造格式码普查（五处，仅 mfem.rs）+ MFEM 探针矩阵（8-14 全 abort）→ 读侧响亮拒绝、写侧收窄 0-7；**Quad9 导出推导成功**（SQUARE 行 + 合成 `L2_T1_2D_P2` 节，置换 [0,2,8,6,1,5,7,3,4]），真 MFEM 读回拓扑同一。flux_recovery **前提有误（⑥）**：表无 Quad8/9 臂（panic）→ 补张量臂 + 修 `(Quad9,9)` 静默 order-1（D353 类）。新债 D821-1..4。
+
+### Lane C（§4-1 台账刷新）· **关闭 + 抓出 D822-3**
+examples 三态台账刷新为 round-84 权威值：**BIT 8（r61=4）/ RUN\* 0（r61=3）/ CRASH 0（r61=12）/ RUN 74**；24 档抽样实跑（14 档字节级复现）。**抓出 D822-3（P1 真回归）**：ex18 默认档 NaN——二分钉到 round-81 `24e00a8d`（8/8 金标全 3-D、2-D 无 pin 漏网三轮）。新债 D822-1/2。
+
+### 修复追击（第四波，主会话派单）
+- **D822-3 关闭**：根因 = `rusanov_combine` 以 `normal.len()` 当通量张量步长、2-D 垫 0 的 3-slice 读错位、能量面通量读未写垫 0；修 = 残差两臂 `[..dim]` 切片；终值 `6.168620814596272e-2` 17 位 = 台账值、C++ 同配置前 6 位吻合；新钉 2/2 有牙；3-D 金标零变化。新债 D822-4。
+- **D821-1/2 关闭**：base+nodes 导出族五族（Line3/Tri6/Tet10/Hex27/Prism18）逐族真 MFEM 读回认证；Quad9 H1 连续导出；连带修行几何压缩顶点编号（5/7 族逐字节）+ 1-D P2 读侧缺陷。新债 D825-1/2。
+- **D820-1/2 关闭**：二次行 P1 角点视图族（Prism18 非前缀 [0,1,2,12,13,14]）+ hp 按元素类型分派（~20 处）；11/12 红 → 12/12 绿 + 4/5 红 → 5/5 绿。**D826 发现 Prism18 约定按几何表分裂**（带表 layer-major / straight 前缀——d614 与 d824 夹具各执一式且都合法）→ `quadratic_row_corner_slots(et, curved_geometry)` 按态选择。新债 D824-A/B/C。
+
+### 主会话
+- **§4-4 债号对账普查**：归一化（区间展开/子债归并）后 plan 723 基号 vs 矩阵 261：**420 个 D1-599 建表前历史**（推定已闭/process-only）+ **44 个 D600+** 待一行定性；census 落盘 `tmp/ledger/d_number_census.txt`，矩阵 §4 已更新。
+- **data/ 删除事故与恢复**：Lane C 运行期间主树 326 个 tracked 文件（data 82 + tmp 244）被删（其 junction/链接清理在 Windows 上穿透目标为最可能向量，非故意）；`git restore` 全恢复 + **行尾次生修复**（autocrlf 使 restore 物化 CRLF，326 文件按 index blob 原样重建 LF）+ d812r77/d817r82 双账本字节仲裁零损失。教训入 HANDOVER：并行路产物一律实体拷贝、恢复 tracked 文件勿裸 `git restore`。
+- **⑯ 审计**：各路测试亲跑复核；整合期修复 D818-3 类账本联动、d516（行尾次生）、d614（D826）。
+
+### 大门（round 84 冻结树，主树 ㉗）
+十 crate：`--lib`(debug) **10 靶/2664/0/5**、`--tests`(release) **359 靶/4419/0/30**（基线 353/4354 + 6 靶）、`--doc` **10/9/0/95**；examples **rc=0/0 非 vendor**；pro **rc=0**；fem-py **rc=0**。锚点：ex9-2D stdout 逐字节、ex14 311 行逐字节、ex27 双档 IDENTICAL、**ex18 `6.1686e-2` = 台账值**、ex9-3D init 逐字节/stdout 0 实质差。**pro 层同期**：pro-iga clamp PoU 修复 + 8 性质测试（166→174，fem-pro `f12523f`）。
+
+### 提交链
+`39145fb0`（A：D819-A/B）→ `03f12183`（B：D819-C/D）→ `6838f74d`（C：台账）→ `6ec5e9e2`（D822-3）→ `16b54d30`（D821-1/2）→ `0eb677d6`（D820-1/2+D826）→ docs。证据：`tmp/d84a|d84b|d84c|d84fix|d84fixA|d84fixB|d84ts/`（fem-rs）+ `tmp/pro-iga-research|d84ts/`（fem-pro）。
+
+### 债务状态
+**D819-A/B/C/D、D820-1/2、D821-1/2、D822-3、D814-5 关闭**；新债 **D820-3、D821-1..4、D822-1/2/4、D824-A/B/C、D825-1/2**；D818-1/2、D809-1、D113-2/3、§1.5 三 LAT、D814-3 维持。
+
 ## 第八十三轮（round 83）：D817-3 金字塔 fused P1 + D817-4 一维 GLL（Lane A）+ D809-2 前提被驳真修（Lane B）+ D817-2 阴性钉（Lane C）+ 主会话 D814-5 转纪律 + 两账本整合——三路并行全交付
 
 **开局 HEAD = round 82 末笔 `ecc0c564`（已推送）；树净；C: 52G。** 三路代理 + 主会话（㉛ 主树文件互斥）：
