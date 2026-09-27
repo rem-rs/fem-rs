@@ -49,45 +49,103 @@ fn get_edge_dofs_pk(
     if a == key.0 { dofs.clone() } else { let mut r = dofs.clone(); r.reverse(); r }
 }
 
-// ─── D820: vertex set of meshes with quadratic-quad geometry rows ────────────
+// ─── D820/D824: vertex set of meshes with quadratic geometry rows ────────────
 
-/// The mesh's *vertex* node set when quadratic-quad geometry rows are present,
-/// or `None` when every element row is a plain (vertex-only) row.
+/// Corner slots of one **quadratic connectivity row**, in the element's local
+/// vertex order (`None` for linear/unknown families whose row *is* the vertex
+/// set).
 ///
-/// MFEM has a single `Geometry::SQUARE`: a fem-rs `Quad8` (serendipity) or
-/// `Quad9` (tensor-Q2) mesh cell is a *geometry row label* (D243; round-83
-/// adjudication D819), and the mesh MFEM builds from such a file carries
-/// exactly **4 vertices per cell** — the row's corner nodes; the remaining
-/// row nodes belong to the order-2 `Nodes` grid function, never to the vertex
-/// table.  Every H¹ space on such a mesh therefore numbers vertex dofs over
-/// the corner set only, whatever the polynomial order.
+/// Slot positions follow the fem-rs row conventions, i.e. the order the io
+/// readers leave `Mesh::element_nodes` in (D319):
+/// * `Tri6` (Gmsh 9), `Quad8` (16), `Quad9` (10), `Tet10` (11, permuted to
+///   `H1TetPk`), `Hex20` (17), `Hex27` (12, permuted to `HexQk`), `Prism15`
+///   (18), `Pyramid13` (19/`vtk` (14,13)): the family's corners are the row's
+///   **first** slots — a prefix;
+/// * `Prism18` (Gmsh 13, permuted to the layer-major `PrismPk` lattice, D319):
+///   the row holds [bottom tri verts, bottom edge dofs | vertical/quad-face
+///   dofs | top tri verts, top edge dofs], so the 6 corners sit at slots
+///   `[0, 1, 2, 12, 13, 14]` — NOT a prefix (verified against the frozen
+///   `GMSH_PERM_PRISM18`, whose inverse is consistent with MFEM's
+///   `HOPrismMapping`/`WedgeToGmshPrism` slot-for-slot).
 ///
-/// The corner set is the union of the first 4 nodes of every Quad8/Quad9 row
-/// and *all* nodes of every other element row, returned in ascending node
-/// id — the same numbering MFEM's Gmsh reader assigns the mesh vertices
-/// (probe `tmp/d84a/h1_probe.cpp`: fixture `data/d819_quad9_curved.msh`,
-/// nodes {0,2,4,10,12,14} → vertices 0..5).
-fn quadratic_quad_corner_view<M: MeshTopology>(mesh: &M) -> Option<Vec<NodeId>> {
+/// MFEM ground truth (`tmp/d84fixA/probe_*.txt`, MFEM 4.10 Gmsh reader): the
+/// element's `GetVertices` are the first `NumVerts` nodes of the file row, so
+/// a mesh built from such a file carries the compacted corner set as its
+/// vertex table and every H¹ order numbers vertex dofs over it — 3/4/4/6/5
+/// per Tri6/Quad8/Quad9/Prism18/Pyramid13 cell, 8 per Hex20/Hex27 cell.
+const PRISM18_CORNER_SLOTS: [usize; 6] = [0, 1, 2, 12, 13, 14];
+const CORNER_PREFIX_3: [usize; 3] = [0, 1, 2];
+const CORNER_PREFIX_4: [usize; 4] = [0, 1, 2, 3];
+const CORNER_PREFIX_5: [usize; 5] = [0, 1, 2, 3, 4];
+const CORNER_PREFIX_6: [usize; 6] = [0, 1, 2, 3, 4, 5];
+const CORNER_PREFIX_8: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+
+/// [`quadratic_row_corner_slots`] — the corner slots of a quadratic row, or
+/// `None` when the row is the vertex set.
+///
+/// Prism18 is **convention-split** (D826): a mesh that carries an isoparametric
+/// geometry table (Gmsh order-2 files, `geom_order() > 1`) stores its row in
+/// `PrismPk`'s layer-major lattice — corners at `[0, 1, 2, 12, 13, 14]`; a
+/// *straight* Prism18 mesh (no table) is evaluated by the 6-point factory
+/// prism, which reads the row's first six slots as its corners — so its row
+/// must be, and in every in-repo constructor is, a **prefix** (`[0..5]`).  All
+/// other quadratic families are prefixes in both conventions.
+pub(crate) fn quadratic_row_corner_slots(t: ElementType, curved_geometry: bool) -> Option<&'static [usize]> {
+    match t {
+        ElementType::Tri6 => Some(&CORNER_PREFIX_3),
+        ElementType::Quad8 | ElementType::Quad9 => Some(&CORNER_PREFIX_4),
+        ElementType::Tet10 => Some(&CORNER_PREFIX_4),
+        ElementType::Hex20 | ElementType::Hex27 => Some(&CORNER_PREFIX_8),
+        ElementType::Prism15 => Some(&CORNER_PREFIX_6),
+        ElementType::Prism18 => Some(if curved_geometry {
+            &PRISM18_CORNER_SLOTS
+        } else {
+            &CORNER_PREFIX_6
+        }),
+        ElementType::Pyramid13 => Some(&CORNER_PREFIX_5),
+        _ => None,
+    }
+}
+
+/// The mesh's *vertex* node set when quadratic geometry rows are present, or
+/// `None` when every element row is a plain (vertex-only) row.
+///
+/// MFEM has one `Geometry` per family: a fem-rs `Tri6`/`Quad8`/`Quad9`/
+/// `Tet10`/`Hex20`/`Hex27`/`Prism15`/`Prism18`/`Pyramid13` mesh cell is a
+/// *geometry row label* (D243; round-83 adjudication D819, round-84 D824),
+/// and the mesh MFEM builds from such a file carries exactly the **corner**
+/// nodes per cell as its vertex table — the remaining row nodes belong to the
+/// order-2 `Nodes` grid function, never to the vertex table (probe
+/// `tmp/d84fixA/h1p1_probe.cpp`: Tri6 pair → NV=4, Tet10 → NV=5, Hex27 →
+/// NV=12, Prism18 → NV=8; every H¹ space on such a mesh numbers vertex dofs
+/// over the corner set only, whatever the polynomial order).
+///
+/// The corner set is the union of [`quadratic_row_corner_slots`] of every
+/// quadratic row and *all* nodes of every other element row, returned in
+/// ascending node id — the same numbering MFEM's Gmsh reader assigns the mesh
+/// vertices (`RemoveUnusedVertices` compacts ascending; probe: the corner
+/// ids are the ascending node-table order).
+fn quadratic_row_corner_view<M: MeshTopology>(mesh: &M) -> Option<Vec<NodeId>> {
     let n_elems = mesh.n_elements();
     let mut is_vertex = vec![false; mesh.n_nodes()];
-    let mut any_quad_row = false;
+    let mut any_quadratic_row = false;
     for e in 0..n_elems as u32 {
-        if matches!(
-            mesh.element_type(e),
-            ElementType::Quad8 | ElementType::Quad9
-        ) {
-            any_quad_row = true;
-            // Slot contract (D243): vertices first — slots 0..3 are corners.
-            for &n in mesh.element_nodes(e).iter().take(4) {
-                is_vertex[n as usize] = true;
+        match quadratic_row_corner_slots(mesh.element_type(e), mesh.geom_order() > 1) {
+            Some(slots) => {
+                any_quadratic_row = true;
+                let ns = mesh.element_nodes(e);
+                for &s in slots {
+                    is_vertex[ns[s] as usize] = true;
+                }
             }
-        } else {
-            for &n in mesh.element_nodes(e) {
-                is_vertex[n as usize] = true;
+            None => {
+                for &n in mesh.element_nodes(e) {
+                    is_vertex[n as usize] = true;
+                }
             }
         }
     }
-    if !any_quad_row {
+    if !any_quadratic_row {
         return None;
     }
     Some(
@@ -717,27 +775,25 @@ impl DofManager {
         let n_elems = mesh.n_elements();
         let dim = mesh.dim() as usize;
 
-        // D820 (D819-A): a Quad8/Quad9 mesh cell is a geometry row label on
-        // MFEM's single SQUARE geometry — its row's trailing nodes belong to
-        // the order-2 `Nodes` grid function, so P1 numbers only the 4 corner
-        // vertices of such rows (MFEM probe: H1(1) NDofs = NV = compacted
-        // corner set).  Plain meshes keep the identity convention
-        // (vertex dof = node id) bit-for-bit.
-        let corner_view = quadratic_quad_corner_view(mesh);
+        // D820 (D819-A) / D824: a quadratic geometry row (Quad8/Quad9, and the
+        // same-family Tri6/Tet10/Hex20/Hex27/Prism15/Prism18/Pyramid13) is a
+        // row label on MFEM's single per-family geometry — the row's trailing
+        // (or, for the layer-major Prism18, non-prefix) nodes belong to the
+        // order-2 `Nodes` grid function, so P1 numbers only the row's corner
+        // slots (MFEM probe: H1(1) NDofs = NV = compacted corner set,
+        // `tmp/d84fixA/probe_*.txt`).  Plain meshes keep the identity
+        // convention (vertex dof = node id) bit-for-bit.
+        let corner_view = quadratic_row_corner_view(mesh);
         let vmap = VertexDofMap::new(corner_view);
 
-        // Per-element P1 slice: the 4 corner nodes of a quadratic-quad row,
-        // every node of all other rows.  Rows of unequal slice length (mixed
+        // Per-element P1 slice: the corner nodes of a quadratic row, every
+        // node of all other rows.  Rows of unequal slice length (mixed
         // meshes) are addressed through `elem_dof_offsets`.
-        let slice_of = |e: ElemId| -> &[NodeId] {
+        let slice_of = |e: ElemId| -> Vec<NodeId> {
             let nodes = mesh.element_nodes(e);
-            if matches!(
-                mesh.element_type(e),
-                ElementType::Quad8 | ElementType::Quad9
-            ) {
-                nodes.split_at(nodes.len().min(4)).0
-            } else {
-                nodes
+            match quadratic_row_corner_slots(mesh.element_type(e), mesh.geom_order() > 1) {
+                Some(slots) => slots.iter().map(|&s| nodes[s]).collect(),
+                None => nodes.to_vec(),
             }
         };
         let first_npe = if n_elems > 0 { slice_of(0).len() } else { 0 };
@@ -751,7 +807,7 @@ impl DofManager {
         }
 
         for e in 0..n_elems as u32 {
-            for &n in slice_of(e) {
+            for n in slice_of(e) {
                 dofs_flat.push(vmap.dof_of(n));
             }
             if let Some(ref mut offsets) = elem_dof_offsets {
@@ -874,7 +930,7 @@ impl DofManager {
     /// D820: quadratic-quad rows (`Quad8`/`Quad9`, the D819 geometry row
     /// labels) share this tensor numbering — one SQUARE geometry — with the
     /// vertex dofs taken over the rows' 4 corner nodes
-    /// ([`Self::quadratic_quad_corner_view`]).
+    /// ([`Self::quadratic_row_corner_view`]).
     fn build_q2_quad<M: MeshTopology>(mesh: &M) -> Self {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
@@ -893,7 +949,7 @@ impl DofManager {
         let view = mesh
             .nc_vertex_view()
             .map(|v| v.to_vec())
-            .or_else(|| quadratic_quad_corner_view(mesh));
+            .or_else(|| quadratic_row_corner_view(mesh));
         let vmap = VertexDofMap::new(view);
         // Number of vertex DOFs = vertex-view length when present.  The mesh
         // node table may contain extra (preserved) nodes that are not part of
@@ -1862,7 +1918,7 @@ impl DofManager {
         let view = mesh
             .nc_vertex_view()
             .map(|v| v.to_vec())
-            .or_else(|| quadratic_quad_corner_view(mesh));
+            .or_else(|| quadratic_row_corner_view(mesh));
         let vmap = VertexDofMap::new(view);
         let n_vertex = vmap.n_vertices(n_nodes);
         let edge_dofs_per = p - 1;

@@ -162,12 +162,16 @@ fn hex20_mesh() -> Mesh<3> {
     )
 }
 
-/// Prism18 conn: 6 vertices in the fem-rs prism frame's corner slot order
-/// (d581 pin: `H1PrismPk(1)`/`PrismPk(1)` corner slots = [0,0,0],[0,1,0],
-/// [0,0,1],[1,0,0],[1,1,0],[1,0,1] with the frame (ξ segment)×((η,ζ)
-/// triangle) → physical (η, ζ, ξ)) + 9 edge mids + 3 face centres.
+/// Prism18 conn: 6 vertices first, then the 9 edge mids ((0,3),(1,4),(2,5),
+/// (0,1),(1,2),(0,2),(3,4),(4,5),(3,5)), then the 3 face centres.
+///
+/// Convention note (D826): a *straight* Prism18 mesh carries no geometry
+/// table, so its geometry is the 6-point factory prism reading the row's
+/// first six slots as corners — the row must be (and here is) **vertex
+/// prefixed**.  Reader-loaded order-2 Gmsh files instead attach a table and
+/// store `PrismPk`'s layer-major row (corners at [0,1,2,12,13,14]); the
+/// P1 corner view picks the slots per mesh state (`build_p1`/D820-1).
 fn prism18_mesh() -> Mesh<3> {
-    // physical vertex k = P(ref corner k), P(ξ,η,ζ) = (η, ζ, ξ)
     let verts: [[f64; 3]; 6] = [
         [0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0],
@@ -184,13 +188,9 @@ fn prism18_mesh() -> Mesh<3> {
         ]
     };
     let mut nodes: Vec<[f64; 3]> = verts.to_vec();
-    // ξ-direction edges (3): (0,3),(1,4),(2,5); triangle edges (6):
-    // (0,1),(1,2),(0,2),(3,4),(4,5),(3,5).
     for (a, b) in [(0usize, 3usize), (1, 4), (2, 5), (0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)] {
         nodes.push(mid(a, b));
     }
-    // Face centres: triangle ξ=0 (verts 0,1,2), triangle ξ=1 (3,4,5), quad
-    // face (0,1,4,3).
     let tri = |a: usize, b: usize, c: usize| {
         [
             (verts[a][0] + verts[b][0] + verts[c][0]) / 3.0,
