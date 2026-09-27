@@ -443,9 +443,13 @@ impl<M: MeshTopology> L2Space<M> {
                 let mut corners = [[0.0_f64; 3]; 8];
                 // High-order H1 tables (Hex20/27 curved meshes) list their
                 // corner dofs FIRST, in the same MFEM vertex order; L2 P1
-                // folded tables have exactly 8.  (An L2 table of order ≥ 2
-                // stores tensor-lex corners instead — none exists in the
-                // corpus; registered caveat.)
+                // folded tables have exactly 8.  An L2 table of order ≥ 2
+                // stores tensor-lex corners *in the file*, but the reader's
+                // D153 slot permutation re-orders them onto this factory slot
+                // order, so `geometry_nodes` stays ring-ordered here too —
+                // verified end-to-end against MFEM's own `L2_T1_3D_P2`
+                // periodic-cube table (D820:
+                // crates/space/tests/d820_l2_folded_corner_order.rs).
                 for (ring, &id) in gn.iter().take(8).enumerate() {
                     let c = mesh.geom_coords_of(id);
                     corners[ring] = [c[0], c[1], c[2]];
