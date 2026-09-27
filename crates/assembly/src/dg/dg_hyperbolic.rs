@@ -143,6 +143,12 @@ impl<F: FluxFunction> FluxFunction for RusanovFlux<F> {
 /// `w·f̂ = ipw·(½(F·nor_L + F·nor_R) − ½·c·|nor|·(qR − qL))` — MFEM's
 /// `RusanovFlux::Eval` (hyperbolic.cpp:763) with its `scaledMaxE` folded out
 /// of the first half and into the weight.
+///
+/// Contract (D822-3): `normal.len()` is taken as the flux tensor's stride,
+/// so it MUST equal the flux function's intrinsic spatial dimension — the
+/// operator truncates its `[f64; 3]` face-data layout to `self.dim` before
+/// calling (a padded 3-slice against the 2-D `EulerFlux`'s stride-2 rows
+/// scrambles the flux read-back).
 fn rusanov_combine(ff: &dyn FluxFunction, ql: &[f64], qr: &[f64], normal: &[f64]) -> Vec<f64> {
     let neq = ff.num_equations();
     let dim = normal.len();
@@ -1086,7 +1092,15 @@ impl DgHyperbolicConservationLaws {
                         uR[eq] += face.basis_r[q][i] * u[baseR + i * nq + eq];
                     }
                 }
-                let nor = &face.nor_qp[q];
+                // D822-3: `nor_qp` shares the `[f64; 3]` face-data layout
+                // (2-D z padded with 0 — D816-2), but the flux function's
+                // stride is its INTRINSIC dimension (2-D EulerFlux writes
+                // stride-2 rows).  Passing the padded 3-slice made
+                // `rusanov_combine` read the 2-D flux tensor with stride 3 →
+                // scrambled momentum fluxes and a vanished energy face flux
+                // (ex18 default NaN from step 27).  Truncate to `self.dim`;
+                // in 3-D the slice is the identity.
+                let nor = &face.nor_qp[q][..dim];
                 let cL = self.flux.max_speed(&uL, nor);
                 let cR = self.flux.max_speed(&uR, nor);
                 let c = cL.max(cR);
@@ -1127,7 +1141,9 @@ impl DgHyperbolicConservationLaws {
                         uL[eq] += face.basis[q][i] * u[base + i * nq + eq];
                     }
                 }
-                let nor = &face.nor_qp[q];
+                // D822-3: truncate to `self.dim` — same padded-layout hazard
+                // as the interior-face arm above.
+                let nor = &face.nor_qp[q][..dim];
                 let mut vn = 0.0_f64;
                 for d in 0..dim {
                     vn += uL[1 + d] * nor[d];
