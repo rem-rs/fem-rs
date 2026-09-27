@@ -12,12 +12,13 @@
 //!
 //! Reference: `mfem/ex9.cpp`
 
-use fem_io::mfem::{write_mfem_file_nodes, write_mfem_gf_file, NodesSpace};
+use fem_io::mfem::{write_mfem_file_3d_nodes, write_mfem_file_nodes, write_mfem_gf_file, NodesSpace};
 
 use fem_assembly::{
     Assembler,
     dg::dg_advection::{
         DGAdvectionIntegrator, assemble_advection_boundary_full,
+        assemble_dg_interior_faces,
         DgAdvectionProblem, dg_velocity, dg_initial_condition, dg_inflow_bc,
     },
     dg::dg_imex::{
@@ -26,9 +27,10 @@ use fem_assembly::{
     },
     postproc::coefficient::FnVectorCoeff,
     standard::MassIntegrator,
+    InteriorFaceList,
 };
 use fem_linalg::CooMatrix;
-use fem_mesh::{refine_uniform, Mesh};
+use fem_mesh::{refine_uniform, refine_uniform_3d, Mesh};
 use fem_solver::{
     SolverConfig, solve_cg,
     ode::{Rk4, TimeStepper},
@@ -72,6 +74,17 @@ fn main() {
     println!("Device configuration: cpu");
     println!("Memory configuration: host-std");
     let mfem = fem_io::mfem::read_mfem_file(&args.mesh).expect("read mesh");
+    // D815-3: the 3-D periodic cube (`data/periodic-cube.mesh`) — a full
+    // 3-D DG advection chain whose seam faces are periodically identified in
+    // the file (27 pre-merged vertices), so the seam couples through the
+    // ordinary interior-face assembly while the file's 54 boundary entries
+    // are interior-coincident boundary elements that MFEM *keeps* (nbe=54,
+    // unlike the 2-D hexagon whose nbe=0) and charges with the one-sided
+    // boundary-trace terms on top of the two-sided interior coupling.
+    if let Some(mesh3d) = mfem.mesh3d {
+        run_3d(args, mesh3d);
+        return;
+    }
     let mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
     let dim = 2;
 
@@ -231,6 +244,163 @@ fn main() {
         write_mfem_gf_file("ex9-final.gf", dim, &u, "L2_T1", args.order, 1, 8).expect("write final gf");
     }
     eprintln!("  Done. Total time: {:.3}s", t0.elapsed().as_secs_f64());
+}
+
+/// The 3-D DG advection chain (`-m data/periodic-cube.mesh`), D815-3.
+///
+/// Mirrors the 2-D flow with the round-79/80 hexahedral-capable drivers: the
+/// interior-face coupling through [`assemble_dg_interior_faces`] (the
+/// D805-2-verified `NonconservativeDGTraceIntegrator` block layout over the
+/// D805-4/D814-1 hexahedral face geometry and node-count face dispatch) and
+/// the boundary terms through [`assemble_advection_boundary_full`] (the
+/// round-79-verified `ADVB` boundary-trace arm plus the inflow RHS).  The
+/// periodically identified cube keeps its 54 interior-coincident boundary
+/// elements (MFEM nbe=54), so the seam faces carry both the two-sided
+/// interior coupling and the one-sided boundary trace — exactly like C++
+/// ex9.  Quadrature from the MFEM rule probe on this exact fixture
+/// (GLL L2 hex = `FunctionSpace::Qk`, straight-hex `OrderW = g·(dim−1) = 2`):
+/// volume mass/convection `o+o+dim−1 = 2p+2` (5³ points at p=3) and face
+/// `OrderW+2p = 2p+2` (5² points), all served by one `2p+2` argument.
+fn run_3d(args: Args, mesh: Mesh<3>) {
+    let dim = 3usize;
+    let mesh = if args.refine > 0 {
+        let mut m = mesh;
+        for _ in 0..args.refine { m = refine_uniform_3d(&m); }
+        m
+    } else {
+        mesh
+    };
+
+    let (bb_lo, bb_hi) = mesh.get_bounding_box(args.order.max(1) as i32);
+    let bb_min = bb_lo.to_vec();
+    let bb_max = bb_hi.to_vec();
+
+    let problem = match args.problem {
+        0 => DgAdvectionProblem::Translation,
+        1 => DgAdvectionProblem::Rotation,
+        2 => DgAdvectionProblem::RotationP2,
+        3 => DgAdvectionProblem::Twist,
+        _ => DgAdvectionProblem::Translation,
+    };
+
+    let vel_fn = {
+        let bb_min_c = bb_min.clone();
+        let bb_max_c = bb_max.clone();
+        move |x: &[f64], out: &mut [f64]| {
+            let v = dg_velocity(problem, x, &bb_min_c, &bb_max_c);
+            for (i, &vi) in v.iter().enumerate() { out[i] = vi; }
+        }
+    };
+    let vel_coeff = FnVectorCoeff(vel_fn);
+
+    let space = L2Space::new_with_basis(mesh.clone(), args.order, L2Basis::GaussLobatto);
+    let n = space.n_dofs();
+    println!("Number of unknowns: {n}");
+
+    let qo = (args.order as u8 * 2 + 2).max(3);
+    let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo);
+
+    let dg_adv = DGAdvectionIntegrator { velocity: vel_coeff, alpha: -1.0 };
+    let k_vol = Assembler::assemble_bilinear(&space, &[&dg_adv], qo);
+
+    let mut coo = CooMatrix::new(n, n);
+    for i in 0..n {
+        for p in k_vol.row_ptr[i]..k_vol.row_ptr[i + 1] {
+            coo.add(i, k_vol.col_idx[p] as usize, k_vol.values[p]);
+        }
+    }
+
+    // Interior faces — the periodic seam pairs come out of the vertex-merged
+    // topology like any other face.
+    let ifl = InteriorFaceList::build(&mesh);
+    let mut coo_faces = CooMatrix::<f64>::new(n, n);
+    assemble_dg_interior_faces(&mut coo_faces, &mesh, &space, &ifl, args.order, qo, &dg_adv);
+    let k_face = coo_faces.into_csr();
+    for i in 0..n {
+        for p in k_face.row_ptr[i]..k_face.row_ptr[i + 1] {
+            coo.add(i, k_face.col_idx[p] as usize, k_face.values[p]);
+        }
+    }
+
+    // Boundary trace + inflow RHS.  MFEM's `GetBdrFaceTransformations`
+    // (mesh.cpp:1312) returns INVALID for a boundary element whose face is
+    // *true interior* — on the periodically identified cube every one of the
+    // file's 54 boundary entries is interior-coincident, so C++ ex9 charges
+    // no boundary term at all (probed: K·u0 matches the no-bdr assembly).
+    // An empty tag set = no Dirichlet boundary = exactly what a fully
+    // periodic mesh has; `rhs_bc` stays zero (inflow data is 0 on ex9).
+    let bc_tags: Vec<i32> = Vec::new();
+    let inflow_g = |x: &[f64]| dg_inflow_bc(problem, x);
+    let vel_bdr = {
+        let bb_min_c = bb_min.clone();
+        let bb_max_c = bb_max.clone();
+        FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
+            let v = dg_velocity(problem, x, &bb_min_c, &bb_max_c);
+            for (i, &vi) in v.iter().enumerate() { out[i] = vi; }
+        })
+    };
+    let (_k_bdr, rhs_bc) = assemble_advection_boundary_full(
+        &space, &vel_bdr, &bc_tags, &inflow_g, args.order, qo, -1.0,
+    );
+    let k_adv = coo.into_csr();
+
+    // ── Initial condition ──────────────────────────────────────────────────
+    let mut u = space
+        .interpolate(&|x| dg_initial_condition(problem, x, &bb_min, &bb_max))
+        .as_slice()
+        .to_vec();
+    {
+        write_mfem_file_3d_nodes("ex9.mesh", &mesh, NodesSpace::Discontinuous)
+            .expect("mesh write failed");
+        write_mfem_gf_file("ex9-init.gf", dim, &u, "L2_T1", args.order, 1, 8)
+            .expect("write init gf");
+    }
+
+    // D815-3 debugging: dump the operator applied to u0 (K·u0, M·u0, u0).
+    if std::env::var("EX9_DUMP_OP").is_ok() {
+        let mut ku = vec![0.0; n];
+        k_adv.spmv(&u, &mut ku);
+        let mut mu = vec![0.0; n];
+        mass.spmv(&u, &mut mu);
+        let w = |name: &str, v: &[f64]| {
+            std::fs::write(name, v.iter().map(|x| format!("{x:.17e}\n")).collect::<String>()).unwrap();
+        };
+        w("ex9-ku0.txt", &ku);
+        w("ex9-mu0.txt", &mu);
+        w("ex9-u0.txt", &u);
+        println!(
+            "DUMP n={} max|K u0|={:.6e} max|M u0|={:.6e}",
+            n,
+            ku.iter().fold(0.0_f64, |m, v| m.max(v.abs())),
+            mu.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+        );
+    }
+
+    let solver_cfg = SolverConfig { rtol: 1e-9, max_iter: 100, verbose: false, ..Default::default() };
+    let dt = args.dt.min(args.t_final);
+    let mut t = 0.0;
+    let vis_steps = 5;
+    let mut ti = 0;
+
+    let steps = (args.t_final / dt).ceil() as usize;
+    for _ in 0..steps {
+        let dta = dt.min(args.t_final - t);
+        Rk4.step(t, dta, &mut u, |_t, u, dudt| {
+            let mut f = vec![0.0; n];
+            k_adv.spmv(u, &mut f);
+            for i in 0..n { f[i] += rhs_bc[i]; }
+            let _ = solve_cg(&mass, &f, dudt, &solver_cfg);
+        });
+        t += dta;
+        ti += 1;
+        if ti % vis_steps == 0 || t >= args.t_final - 1e-14 {
+            println!("time step: {ti}, time: {}", fem_solver::fmt_g(t));
+        }
+    }
+
+    write_mfem_gf_file("ex9-final.gf", dim, &u, "L2_T1", args.order, 1, 8)
+        .expect("write final gf");
+    eprintln!("  Done. Total time: {:.3}s", std::time::Instant::now().elapsed().as_secs_f64());
 }
 
 /// Detect periodic face pairs for 'boundary 0' meshes and assemble their

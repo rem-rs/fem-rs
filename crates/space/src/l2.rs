@@ -424,16 +424,37 @@ impl<M: MeshTopology> L2Space<M> {
         } else {
             // Trilinear Q1 geometry map via HexQ1 ([0,1]³ reference domain,
             // D721 — same frame as the physical unit cube).
+            //
+            // D816-4: the 8 corners come from the mesh's own isoparametric
+            // geometry table when one is present (`geometry_nodes` falls back
+            // to the element's vertices on a straight mesh, so the no-table
+            // path is unchanged bit for bit).  A folded periodic table
+            // (`data/periodic-cube.mesh`) encodes the geometry in *per-element*
+            // dofs — the `vertices` section carries the mean of the folded
+            // copies (file vertex 0 is (0,0,0), the mean of ±1), and MFEM
+            // evaluates space dofs through `Nodes`, never through `Vertices`.
+            // The table (reader and D814-2 refinement propagation alike)
+            // stores its corners in the MFEM `Geometry::Constants<CUBE>`
+            // order, which is exactly the HexQ1 ring order.
             let q1 = HexQ1;
             let mut phi = vec![0.0_f64; 8];
             for e in 0..n_elems as u32 {
-                let nodes = mesh.element_nodes(e);
+                let gn = mesh.geometry_nodes(e);
+                let mut corners = [[0.0_f64; 3]; 8];
+                // High-order H1 tables (Hex20/27 curved meshes) list their
+                // corner dofs FIRST, in the same MFEM vertex order; L2 P1
+                // folded tables have exactly 8.  (An L2 table of order ≥ 2
+                // stores tensor-lex corners instead — none exists in the
+                // corpus; registered caveat.)
+                for (ring, &id) in gn.iter().take(8).enumerate() {
+                    let c = mesh.geom_coords_of(id);
+                    corners[ring] = [c[0], c[1], c[2]];
+                }
                 let base_dof = e as usize * dofs_per_elem;
                 for (k, c) in ref_coords.iter().enumerate() {
                     q1.eval_basis(c, &mut phi);
                     let mut p = [0.0_f64; 3];
-                    for (j, &n) in nodes.iter().enumerate() {
-                        let cn = mesh.node_coords(n);
+                    for (j, cn) in corners.iter().enumerate() {
                         for d in 0..3 { p[d] += phi[j] * cn[d]; }
                     }
                     let idx = (base_dof + k) * 3;

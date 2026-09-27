@@ -37,7 +37,7 @@ use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
     build_face_elem_map, face_point_geom, face_point_geom_3d_face, face_type_of, ref_elem_face,
-    ref_elem_vol, FaceGeom, xform_grads,
+    FaceGeom, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 #[cfg(feature = "parallel")]
@@ -251,7 +251,8 @@ fn accumulate_dg_volume_element<S: FESpace>(
     let mut grad_p   = Vec::<f64>::new();
 
     let elem_type = mesh.element_type(e);
-    let re = ref_elem_vol(elem_type, order);
+    // D816-4: space-basis-aware shapes (GLL L2 spaces carry Qk shapes).
+    let re = fem_space::ref_elem::field_element_for_space(space, elem_type, order);
     let n  = re.n_dofs();
     // D814-1 + D815-1: MFEM's `DiffusionIntegrator::GetRule`
     // (`DiffusionIntegrator::GetRule`, fem/bilininteg.cpp:1347) is
@@ -393,9 +394,9 @@ fn assemble_interior_face<S: FESpace>(
 
     // Build reference elements for the volume.
     let et_l = mesh.element_type(el);
-    let re_l = ref_elem_vol(et_l, order);
+    let re_l = fem_space::ref_elem::field_element_for_space(space, et_l, order);
     let et_r = mesh.element_type(er);
-    let re_r = ref_elem_vol(et_r, order);
+    let re_r = fem_space::ref_elem::field_element_for_space(space, et_r, order);
     let n_l = re_l.n_dofs();
     let n_r = re_r.n_dofs();
 
@@ -587,7 +588,7 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
     let face_nodes = mesh.face_nodes(face);
 
     let et = mesh.element_type(elem);
-    let re = ref_elem_vol(et, order);
+    let re = fem_space::ref_elem::field_element_for_space(space, et, order);
     let n  = re.n_dofs();
     let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
 

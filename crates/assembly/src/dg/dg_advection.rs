@@ -137,8 +137,11 @@ pub fn assemble_dg_interior_faces<M: MeshTopology, S: FESpace<Mesh=M>, F: DgFace
         let et_r = mesh.element_type(er);
         let elem_order_l = space.element_order(el);
         let elem_order_r = space.element_order(er);
-        let re_l = ref_elem_vol(et_l, elem_order_l);
-        let re_r = ref_elem_vol(et_r, elem_order_r);
+        // D816-4: the shapes must be the SPACE's basis (MFEM evaluates
+        // el1.CalcShape of the space's own element — a GaussLobatto L2 space
+        // has Qk shapes, not the default GL ones).
+        let re_l = fem_space::ref_elem::field_element_for_space(space, et_l, elem_order_l);
+        let re_r = fem_space::ref_elem::field_element_for_space(space, et_r, elem_order_r);
 
         // Scatter: face quadrature points along the edge (2-D) or triangle (3-D)
         let face_points: Vec<Vec<f64>> = q_face.points.clone();
@@ -448,7 +451,7 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
         let q_face = ref_face.quadrature(quad_order);
 
         let et = mesh.element_type(elem);
-        let ref_elem = ref_elem_vol(et, order);
+        let ref_elem = fem_space::ref_elem::field_element_for_space(space, et, order);
         let n_dofs_e = ref_elem.n_dofs();
         let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
 
@@ -552,7 +555,7 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
         let q_face = ref_face.quadrature(quad_order);
 
         let et = mesh.element_type(elem);
-        let ref_elem = ref_elem_vol(et, order);
+        let ref_elem = fem_space::ref_elem::field_element_for_space(space, et, order);
         let n_dofs_e = ref_elem.n_dofs();
         let dofs: Vec<usize> = space.element_dofs(elem).iter().map(|&d| d as usize).collect();
 
@@ -701,8 +704,8 @@ fn periodic_pair<M: MeshTopology, S: FESpace<Mesh=M>, V: VectorCoeff>(
     let et_r = mesh.element_type(el_r);
     let o_l = space.element_order(el_l);
     let o_r = space.element_order(el_r);
-    let re_l = ref_elem_vol(et_l, o_l);
-    let re_r = ref_elem_vol(et_r, o_r);
+    let re_l = fem_space::ref_elem::field_element_for_space(space, et_l, o_l);
+    let re_r = fem_space::ref_elem::field_element_for_space(space, et_r, o_r);
 
     let mut phi_l = vec![0.0; n_l];
     let mut phi_r = vec![0.0; n_r];
