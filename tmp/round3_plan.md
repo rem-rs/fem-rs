@@ -4470,6 +4470,50 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十一轮（round 81）：D816-1/2 折叠表 2-D 顶点真红 + tet/prism 传播（Lane A）+ D816-3 一维 H1 读写（Lane B）+ D815-2 hyperbolic 3-D 面（Lane C）+ 主会话 D816-4 L2 dof 坐标表感知 + ex9-3D 周期链上线（D815-3 实质闭合）
+
+**开局 HEAD = round 80 末笔 `8ba7202c`（已推送）；树净；C: 96%（47G）。** 三路代理 + 主会话：
+Lane A = `crates/mesh/**`；Lane B = `crates/io/**`；Lane C = `crates/assembly/src/dg/dg_hyperbolic.rs`；
+主会话 = `crates/space/src/l2.rs` + `examples/mfem_ex9_dg_advection.rs` + DG 驱动基感知。
+**协调实录**：Lane A 一次 E0753 编译红（`curved_hex.rs` 残留 `//!`）主会话定位即通知即修（㉝）；
+Lane C 的 dg_hyperbolic 在飞期阻塞过一次 examples 构建（㉕ 等锁正常）；三路报告完整、领地零互侵。
+
+### Lane A（D816-1 + D816-2）· **关闭**（一次前提被驳 + 一次真红）
+- **D816-1 前提被驳（㉖）**：2-D `refine_uniform_quad4` **早已**按 element-major 传播折叠 `L2_T1_2D_P1` 表（r0/r1/r2 几何 vs MFEM oracle **逐位 0.0**）。**真红 = 细顶点表缺 MFEM `SetVerticesFromNodes` 引用均值**：hexagon r1 max|diff|=**0.5**（25/48 顶点）、r2=**0.75**；square 同。修 = 尾部整体重建为引用均值（`set_vertices_from_nodes::<D>` 泛型化）；修后几何+顶点**全部逐位 0.0**（hexagon/square ×2 步），折叠 ±1 保持（r2 max|x|=1.0）。
+- **D816-2 确认丢表 → 修**：Tet4/Prism6 折叠 `L2_T1_*_P1` 细化一步即 `geometry=None`。`curved_tet.rs`/`curved_prism.rs` 新增识别 + 传播（MFEM embedding 矩阵处求值父 P1 形函数，element-major 不共享）；`refine_nonforming_3d`/`refine_prism6_uniform` 三路互斥尾部；tet 边界门扩到 L2（MFEM new_boundary 模板，oracle r1 Print 实证）。修后 tet（48→384→3072）、prism（8→64→512）几何+顶点**逐位 0.0**。
+- **Pyramid5 按预案遗留**：探针证实 MFEM 用 **fused pyramid P1（8 dof/元，子网格 6 pyr+4 tet）**——需 io 侧先有 8-dof fused 读取臂（他人领地），证据留 `tmp/d81a/pyrl2_*`。
+- **回归**：fem-mesh **40 靶/510/0**（基线 39/506 + 新靶）；io 侧两钉只跑未修全绿。
+
+### Lane B（D816-3）· **关闭** —— `H1_1D_P*` 连续表读 + `Line2` 连续 H1 写
+- **语义核查（⑯）**：`H1_SegmentElement` 单元内 dof 序 = `[v0, v1, 内点升序]`（闭 GLL）；1-D 空间**无 edge dof**（fespace.cpp:3457），全局编号 = `v→v` + `NV+e(p−1)+j`（探针 p=1..3 逐位钉死）；顶点重建 = 逐顶点直读（连续单元 Kronecker → 均值精确还原）；`H1_SegmentElement(3)` 节点 = GLL `{0, 0.2764, 0.7236, 1}` ≠ 等距（D153 的 H1 孪生）⇒ p≥3 响亮降级。
+- **修**：reader `build_h1_1d_geometry`（p=2 共享 dof 表 `[v0, 内点, v1]`）；writer `nodes_dof_values` 连续臂 `Line2` arm + `line1d_slot_map`；折叠 L2 表的 Continuous 写改由连续性检查拒绝（断言翻转并注明）。
+- **oracle**：曲 `H1_1D_P2` 读→写 == MFEM 重存**逐字节**（含重存不动点）；直 P2 用手工 GeometryData（dof id 故意 20/21/22）独立钉死取值路径。
+- **回归**：fem-io **45 靶/346/0**（主会话亲验复跑一致）；ledger 无需重生成。
+- **遗留**：放开 `H1_1D_P3+`/`L2_T1_1D_P3+` 需 1-D GLL 几何求值器（fem_mesh/fem_element 领域）。
+
+### Lane C（D815-2）· **关闭** —— `dg_hyperbolic` 3-D 面臂（tet/hex）
+- **修**：面配对/参数化 = MFEM `Mesh::GenerateFaces`（first owner = Elem1、canonical `FaceVert[lf]` 圈共享、geom.cpp:987/1032），经 round-79 `face_point_geom_3d_face` 单一真源；面规则 `IntRules.Get(face_geom, 2·order)` 按 `face_type_of` 分派；PYRAMID 显式拒绝。3-D 体元走共享 `ref_elem_vol`；`elem_jac_at_qp` 新增 3-D 伴随臂（2-D 臂位兼容）。`EulerFlux3` 逐行移植 MFEM 5 方程臂；Rusanov 组合因子化为 `rusanov_combine` 单一算术源（2-D 委托、位一致）；反射壁 BC 维度泛化；新公开 `mult_residual`。
+- **红→绿**：修前 HEX/TET 均 panic（2-D 臂误入 3-D）；修后 `d816c_hyperbolic_3d` 8/8 金标（{HEX,TET}×{直,曲}×{u1,u2}）**worst 4.9e-15**。oracle 逼出伴随实现**两个真 bug**（cofactor 转置、(d+1,d+2) 循环序翻转 minor 符号）——用 MFEM 分量隔离（自由流抵消到 4e-17）定位。
+- **回归**：fem-assembly **116 靶/1275/0**（主会话亲验 hyperbolic_3d 1 passed/1 ign）。
+- **偏差记录**：3-D Euler `u=1` 负压 NaN → 常态改 `[1,0,0,0,2.5]`；MFEM byNODES vdim 布局探针侧置换。
+
+### 主会话（D816-4 + D815-3）· **关闭/实质闭合** —— L2 dof 坐标表感知 + DG 驱动基感知 + ex9-3D 周期链
+- **D816-4（新发现真缺陷）**：3-D `L2Space::dof_coords` 走 **HexQ1×共享顶点表**——周期折叠网格的文件顶点是均值坐标（file v0=(0,0,0) = ±1 的均值！）⇒ 一切按位置求值的系数（`space.interpolate` = IC 投影）在折叠面附近全错（ex9-3D IC 出现 0.944 vs MFEM 8.29e-22）。修 = 3-D hex 臂改走 `geometry_nodes`/`geom_coords_of`（几何表；无表回退顶点、逐位不变；H1 高阶表前 8 项即角点）。2-D 侧 `corner_coords` 本就表感知——这就是 2-D ex9 没踩坑的原因。
+- **DG 驱动基感知（⑰ 同族全量收口）**：`assemble_dg_interior_faces`/`assemble_advection_boundary{,_full}`/`assemble_periodic_flux`/`dg.rs` 三处/`dg_elasticity.rs` 三处的 `ref_elem_vol` 换成 `fem_space::ref_elem::field_element_for_space(space, et, order)`——MFEM 语义 = `el1.CalcShape` 用**空间自己的元素**（GLL L2 hex = Qk 形状，非默认 GL）。GL 空间解析到相同元素 ⇒ 全部既有金标零扰动（d805r76/r78、d814r79、d815r80 复跑绿）。**由 ex9-3D 逼出**：GL 形状下单步即 1074/1728 dof 差 0.17。
+- **D815-3 ex9-3D 周期链**：`run_3d` 分支（`refine_uniform_3d` + GLL L2Space + 表感知 IC + `assemble_dg_interior_faces` + 空边界标记）。**边界面语义（源码实证）**：MFEM `GetBdrFaceTransformations`（mesh.cpp:1312）对"真内面"的 bdr 元素返回 INVALID ⇒ 全周期 cube 的 54 个内合 bdr 元素**零装配**（探针实证：K·u0 == 无 bdr 装配）⇒ 传空 tag 集。
+- **验收**：`-m data/periodic-cube.mesh -r 2 -o 3`（110592 dof、1000 步 RK4）：**stdout 0 实质差异**（唯一豁免 = `--mesh` 路径回声）、**`ex9-init.gf` 逐字节 = C++**、**`ex9-final.gf` max|Δ| = 1e-07**（RK4+CG 时间积分漂移；2-D 先例 1e-08 同性质）。r=0 档：init 逐字节、final max|Δ|=1e-08。
+- **回归**：fem-space **62/595/0**、fem-assembly 116/1275/0（基线绿）、DG 钉家族全绿。
+
+### 大门（round 81 冻结树，主树 ㉗）
+十 crate：`--lib`(debug) **10 靶/2657/0/5**、`--tests`(release) **346 靶/4354/0/30**（基线 343/4329/0/28 + 恰 3 新靶：A/B/C 各 1）、`--doc` **10 靶/9/0/95**（= 基线）；examples **rc=0/0 非 vendor 警告**；pro **rc=0**；fem-py **rc=0**。锚点：ex14/ex27 不动（未在本轮触碰路径）、ex9-3D 新锚（见上）。
+
+### 新债（round 81 登记）
+- **D817-1**：ex9-3D 的边界面语义（内合 bdr 元素零装配）目前在 examples 层以空 tag 集表达；Mesh 层等价语义（MFEM `GetBdrFaceTransformations` 的 INVALID 路径）应下沉到 `crates/mesh`/装配 bdr 遍历，需全量金标回归护航。
+- **D817-2**：L2 order≥2 折叠表的角点序为 tensor-lex（非 ring）——`l2.rs` 的 dof 坐标提取对高阶折叠表未验证（corpus 无此文件；登记 caveat）。
+- **D817-3**：Pyramid5 fused P1 细化传播需 io 侧 8-dof fused 读取臂先行（Lane A 证据 `tmp/d81a/pyrl2_*`）。
+- **D817-4**：1-D GLL 几何求值器（fem_mesh/fem_element）放开 `H1_1D_P3+`/`L2_T1_1D_P3+`。
+- （D816-1..4 本轮关闭；D814-3 wg / D809-2 / D814-5 维持）
+
 ## 第八十轮（round 80）：D814-2 折叠几何表细化传播（Lane A）+ D813-4 一维读入 + D813-5 金字塔 L2 前提翻转（Lane B）+ D814-4 金字塔块序（Lane C）+ D815-1 单纯形体项规则（主会话）——四路并行全交付
 
 **开局 HEAD = round 79 末笔（已推送）；树净；C: 93%（75G）。** 按 ㉛ 主树文件互斥三路代理 + 主会话一路：
