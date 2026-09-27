@@ -13,67 +13,70 @@
 
 ## 统计（86 = 45 串行 + 40 并行 + 1 self-test）
 
+**round-84 权威值（C 路盘点 + 抽样重验，HEAD c5a06dd6；下表为本表唯一现行口径）**：
+
 | 分类 | 串行 | 并行 | self-test | 合计 |
 |---|---|---|---|---|
-| BIT | 4（ex1/ex2/ex24/ex31） | 0 | 0 | **4** |
-| RUN（含 RUN-LONG：pex15 替代档/pex30） | 29 | 34 | 0 | **63** |
-| RUN\*（数值失配，已立债） | 3（ex4/ex5/ex20） | 0 | 0 | **3** |
-| CRASH | 8（6×dump + ex9 + ex15dyn 默认档） | 4（pex5/pex9/pex15 默认档/pex40） | 0 | **12** |
+| BIT | 8（ex1/ex2/ex3/ex9/ex14/ex24/ex27/ex31） | 0 | 0 | **8** |
+| RUN（含 RUN-LONG 2：pex15 替代档/pex30 单列） | 36 | 38 | 0 | **74** |
+| RUN\*（数值失配，已立债） | 0 | 0 | 0 | **0** |
+| CRASH | 0 | 0 | 0 | **0** |
 | DEV | 0 | 2（pex19/pex32） | 0 | **2** |
 | NOREF | 1（ex4_darcy_simple 未注册） | 0 | 1（par_heat self-test） | **2** |
 | **合计** | **45** | **40** | **1** | **86** |
 
-本轮 **RUN→BIT 升级 4 例**（ex1/ex2/ex24/ex31，现编 C++ 真对拍）。
+**round-61 初账快照（历史，仅存档）**：BIT 4 / RUN 63 / RUN\* 3（ex4/ex5/ex20）/ CRASH 12 / DEV 2 / NOREF 2。
+round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的权威三态对照表。
 
 ## 串行（45）
 
 | 名字 | MFEM 对应 | 档位 | 分类 | 证据/日志 | 备注 |
 |---|---|---|---|---|---|
 | mfem_ex0_mesh_intro | ex0 | 默认档 | RUN | logs/mfem_ex0_mesh_intro.log | ARF 0.140201 收敛正常 |
-| mfem_ex1_poisson | ex1 | `-m data/star.mesh -no-vis` | **BIT** | logs/… + ref/ex1.out | **本轮现对拍**：除 Rust 缺 10 行 `Options used:` 头外逐字节（111 迭代 + ARF 0.882852 全同） |
-| mfem_ex2_elasticity | ex2 | `-m data/beam-tri.mesh -no-vis` | **BIT** | 同上 + ref/ex2.out | **round 63 D647 全流逐字节**：C++ 4.10 ex2 本就不打 `Wrote…`（旧豁免注销），Rust 删该 stderr 行后 stdout 278 行/11783 字节 + stderr 空两侧全同（tmp/d597/ex2run/）；ARF 0.965229/268 迭代全同 |
-| mfem_ex3_maxwell_cavity | ex3 | 默认 beam-tet -o1 | RUN | logs/… + ref/ex3.out | 终值 3.91630923150637e-1 = C++ 0.391631（6 位）；PCG 历史口径不同（Rust 打归一化残差、119 迭代 vs C++ 137/ARF 0.903118）→ D634 |
-| mfem_ex4_darcy | ex4 | `-m data/star.mesh -no-vis` | **RUN\*** | logs/… + ref/ex4.out | **失配**：‖F−F_h‖=0.432497 vs C++ 0.0161443（27×）；Rust 287 迭代即"收敛" vs C++ 646 → D634 |
+| mfem_ex1_poisson | ex1 | `-m data/star.mesh -no-vis` | **BIT** | logs/… + ref/ex1.out | **本轮现对拍**：除 Rust 缺 10 行 `Options used:` 头外逐字节（111 迭代 + ARF 0.882852 全同）。**round-84:** 现档 BIT（r66 D687 补齐 Options 头后 cmp 全等）；重验 = 仅 mesh 路径行差 ✓ |
+| mfem_ex2_elasticity | ex2 | `-m data/beam-tri.mesh -no-vis` | **BIT** | 同上 + ref/ex2.out | **round 63 D647 全流逐字节**：C++ 4.10 ex2 本就不打 `Wrote…`（旧豁免注销），Rust 删该 stderr 行后 stdout 278 行/11783 字节 + stderr 空两侧全同（tmp/d597/ex2run/）；ARF 0.965229/268 迭代全同。**round-84:** 重验 = 仅 mesh 路径行差 ✓ |
+| mfem_ex3_maxwell_cavity | ex3 | 默认 beam-tet -o1 | **BIT**（r65 D664 双档） | logs/… + ref/ex3.out | 终值 3.91630923150637e-1 = C++ 0.391631（6 位）；PCG 历史口径不同（Rust 打归一化残差、119 迭代 vs C++ 137/ARF 0.903118）→ D634。**round-84:** 现档 BIT（r64 D651/D653 + r65 D664，PCG 轨迹 137 行逐字节）；重验默认档 vs ref/ex3.out = 仅 mesh 路径回声行（built-in vs 文件） |
+| mfem_ex4_darcy | ex4 | `-m data/star.mesh -no-vis` | RUN（r62 D634） | logs/… + ref/ex4.out | **失配**：‖F−F_h‖=0.432497 vs C++ 0.0161443（27×）；Rust 287 迭代即"收敛" vs C++ 646 → D634。**round-84:** 失配已闭（r62 停机规则 + r63 D639 评估器，646 it = C++）；重验：终误差行 0.0161443 逐字同、iter0-588 逐字节，589+ 为 1e-17 噪声级分叉（r62 已记载口径），ARF 第 6 位差 |
 | mfem_ex4_darcy_simple | —（无对应） | — | NOREF | — | 未注册死文件、无 exe（round 30 D133 在案）；自述 SIMPLIFIED |
-| mfem_ex5_mixed_darcy | ex5 | `-m data/star.mesh -no-vis` | **RUN\*** | logs/… + ref/ex5.out | **失配**：dim(R/W) 全同（41280/20480），Rust MINRES 423 it ‖r‖/‖b‖=9.24e-7 判收敛但 u_err **1.211582e0** vs C++ 396 it / 1.43587e-4 → D634（块预条件/minres 判据族） |
-| mfem_ex6_flux_recovery | ex6 | 默认 star -o1 -no-vis | RUN | logs/… + ref/ex6.out | 前 4 迭代逐字节（0.441629/0.00864066/2.48721e-06/1.90288e-09）；首个求解 C++@5 停、Rust 拖到 4.6e-40 → D634；AMR 环两端 rc=0（C++ 打 `Reached the maximum number of dofs.`，Rust 打 `Done.`，终态行未逐字节比对） |
-| mfem_ex7_surface_poisson | ex7 | 默认 | RUN | logs/… | rc=0 |
-| mfem_ex8_dpg_2x2 | ex8 | `-m data/star.mesh -no-vis` | RUN | logs/… + ref/ex8.out | 前 13 迭代逐字节；DPG 范数 0.0181446 vs C++ 0.0183277（~1%）；ARF 0.829413 vs 0.608926 → D634 |
-| mfem_ex9_dg_advection | ex9 | 默认 periodic-hexagon | CRASH | logs/… | 默认档 panic（D633 资产缺失）；`-m data/periodic-square.mesh` rc=0；文件头自述 L2 基 ≠ MFEM GLL ⇒ 有意分歧（DEV 性质）双注记 |
+| mfem_ex5_mixed_darcy | ex5 | `-m data/star.mesh -no-vis` | RUN（r62 D634） | logs/… + ref/ex5.out | **失配**：dim(R/W) 全同（41280/20480），Rust MINRES 423 it ‖r‖/‖b‖=9.24e-7 判收敛但 u_err **1.211582e0** vs C++ 396 it / 1.43587e-4 → D634（块预条件/minres 判据族）。**round-84:** 失配已闭（r63 D639：397 行逐字节、u_err 0.000143587 = C++）；重验：数值行逐字同，豁免 = C++ Options 块 8 行 Rust 不打、Rust 多 `Wrote` 行、wall-clock |
+| mfem_ex6_flux_recovery | ex6 | 默认 star -o1 -no-vis | RUN | logs/… + ref/ex6.out | 前 4 迭代逐字节（0.441629/0.00864066/2.48721e-06/1.90288e-09）；首个求解 C++@5 停、Rust 拖到 4.6e-40 → D634；AMR 环两端 rc=0（C++ 打 `Reached the maximum number of dofs.`，Rust 打 `Done.`，终态行未逐字节比对）。**round-84:** 重验 rc=0；D634 后首解与 C++ 逐字节 ✓；AMR 标记路径自第 2 环分叉（C++ 76 vs Rust 86 unknowns，r61 已有性质非新漂移；疑与参考命令带 `--no-ls-zz/--max-dofs` 旗标不对齐有关），终态行差维持 |
+| mfem_ex7_surface_poisson | ex7 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，HEAD c5a06dd6） |
+| mfem_ex8_dpg_2x2 | ex8 | `-m data/star.mesh -no-vis` | RUN（数值级 = C++） | logs/… + ref/ex8.out | 前 13 迭代逐字节；DPG 范数 0.0181446 vs C++ 0.0183277（~1%）；ARF 0.829413 vs 0.608926 → D634。**round-84:** 数值失配已闭（r63 D640 sinv 四边形分支修复：DPG 0.0183277 与 C++ 逐字同）；重验 ✓，残 = Rust 29 it vs C++ 28 it（停机阈值 1 it 差）、`S^-1` vs `S^{-1}` 打印、Rust 多诊断行 |
+| mfem_ex9_dg_advection | ex9 | 默认 periodic-hexagon | **BIT**（r77 D812-2，具名豁免） | logs/… + `$HOME/work/d76main/ex9_rerun/` | 默认档 panic（D633 资产缺失）；`-m data/periodic-square.mesh` rc=0；文件头自述 L2 基 ≠ MFEM GLL ⇒ 有意分歧（DEV 性质）双注记。**round-84:** 现档 BIT——r62 资产回填后 rc=0；r77 D812-2 stdout 与 C++ oracle **逐字节**（豁免 = `--mesh` 路径回声 + stderr wall-clock 两处具名）+ r78 D813-3 `ex9-init.gf` 逐字节/final max\|Δ\|=1.0e-08；r82/r83 锚点重验 ✓（旧"L2 基有意分歧"注记作废） |
 | mfem_ex10_hyperelastic_dyn | ex10 | 默认 beam-quad | RUN | logs/… + ref/ex10_quad.out | step1..100 的 EE/KE/ΔTE 与 C++ 全部 6 位吻合（0.011958/0.000784/-0.019639）；Newton ‖r‖ 自 iter1 起第 4 位漂移（0.0099624 vs 0.0099476）；打印多诊断行 |
-| mfem_ex14_dg_poisson | ex14 | `-m data/star.mesh -no-vis` | RUN | logs/… + ref/ex14.out | **前 309 行逐字节**；C++@308 收敛（ARF 0.956044），Rust 500 maxiter 不收敛（ARF 0.950077）→ D634 |
-| mfem_ex15_dynamic_amr | ex15 | 默认 star-hilbert | CRASH | logs/… | 默认档 panic：`data/star-hilbert.mesh` 不存在（D633）；`-m data/star.mesh` 替代档 700 s 内 rc=0（435 s，20 轮 AMR） |
-| mfem_ex15_dump_A_true | —（tools_ex15_ref 配套） | 内置 star-hilbert | CRASH | logs/… | debug dump harness（非用户示例）；panic 于读 `data/star-hilbert.mesh`（D633） |
-| mfem_ex15_dump_T002 | 同上 | 同 | CRASH | logs/… | 同上（D633） |
-| mfem_ex15_dump_flow | 同上 | 同 | CRASH | logs/… | 同上（D633） |
-| mfem_ex15_dump_it2_coords | 同上 | 同 | CRASH | logs/… | 同上（D633） |
-| mfem_ex15_dump_p1 | 同上 | 同 | CRASH | logs/… | 同上（D633） |
-| mfem_ex15_dump_p1_it3 | 同上 | 同 | CRASH | logs/… | 同上（D633） |
-| mfem_ex16_nonlinear_heat | ex16 | 默认 star | RUN | logs/… | rc=0（SDIRK33 时间推进完成） |
-| mfem_ex17_dg_elasticity | ex17 | 默认 beam-tri | RUN | logs/… | rc=0 |
-| mfem_ex18_euler | ex18 | 默认 periodic-square | RUN | logs/… | rc=0（RK4 推进完成） |
-| mfem_ex19_hyperelastic_incomp | ex19 | 默认 beam-quad | RUN | logs/… | rc=0（Newton+块 GMRES 收敛） |
-| mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | **RUN\*** | logs/… + ref/ex20.out | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635 |
-| mfem_ex21_amr_elasticity | ex21 | 默认 beam-tri | RUN | logs/… | rc=0；历史有机器本地 golden 注记（非 C++ 逐字节） |
-| mfem_ex22_complex_helmholtz | ex22 | 默认 inline-quad | RUN | logs/… | rc=0（复数系统求解完成） |
-| mfem_ex23_wave_equation | ex23 | 默认 star | RUN | logs/… | rc=0；历史 golden 本地注记 |
-| mfem_ex24_discrete_ops | ex24 | `-m data/star.mesh -p 0 -o 1 -no-vis` | **BIT** | logs/… + ref/ex24_p0o1.out | **本轮现对拍**：数值行逐字节；豁免 = Rust 的 Options 块少 3 行（--no-static-condensation/--no-partial-assembly/--device） |
-| mfem_ex25_pml_maxwell | ex25 | 默认 beam-hex | RUN | logs/… | rc=0（复 PML 系统完成） |
-| mfem_ex26_geom_mg | ex26 | 默认 star；hex 档 `-m inline-hex -gr 0 -or 2` | RUN | logs/mfem_ex26_geom_mg.log、logs/mfem_ex26_hex.log + ref/ex26_hex.out | 默认档 rc=0。hex 档本轮**实况对拍**：274625 未知数同、6 迭代轨迹机器精度级吻合（ARF 0.0435272 vs 0.0435273、iter1 1.55112e-6 vs 1.55209e-6），**非逐字节**（Chebyshev smoother 特征值估计 ulp 级分叉）。round 60 存档对 tmp/d31/ex26_{rs,cpp}.log 数值逐字节，但其原命令不可复原 ⇒ 存档对不作为本轮逐字节证据引用 |
-| mfem_ex27_robin_bc | ex27 | 默认 `-no-vis` | **BIT\***（round 72 D771） | logs/… + `tmp/d771/`（gold/diff/probe） | **canonical stdout 对齐**：Options 块 12 行 + 去前导空行 + 删非 C++ 的 `Solved in N iterations.` + 平均值行 `", \t"` 与 `%g6`（`fem_solver::fmt_g`）⇒ **default 51 行中 49 行逐字节、`-dbc 2.5` 52 行中 50 行逐字节**（残 2 行/档 = 半面求积 + 网格表示差 **D778**，非格式）；迭代历史 29/30 行零差异保持；**`-dg` 迭代历史逐字节不回退**（其 C++ 差距 = **D779**） |
-| mfem_ex28_sliding_elasticity | ex28 | 默认 | RUN | logs/… | rc=0 |
-| mfem_ex29_curved_poisson | ex29 | 默认（-mt 4 -mo 3） | RUN | logs/… + ref/ex29.out | 迭代 0–7 逐字节；C++@7 停（ARF 0.0969461）Rust@11（ARF 0.0719572）；终误差 ‖u−u_h‖ 0.00138643 / ‖f−f_h‖ 0.00797749 **逐字节同**；Rust 多 2 行头注 → D634 |
-| mfem_ex30_aniso_amr | ex30 | 默认 star | RUN | logs/… | rc=0（三系数预处理完成） |
-| mfem_ex31_anisotropic_maxwell | ex31 | `-m data/inline-quad.mesh -r 2 -o 1 -no-vis` | **BIT** | logs/… + ref/ex31.out | **本轮现对拍**：除 Options 里 mesh 路径串外**全 stdout 逐字节**（含 0.181455 / ARF 0.829075）；无参默认档会 exit(3)（-vis 未移植，文档化） |
+| mfem_ex14_dg_poisson | ex14 | `-m data/star.mesh -no-vis` | **BIT**（r73 D795-1，剥 Options 前缀逐字节） | logs/… + ref/ex14.out | **前 309 行逐字节**；C++@308 收敛（ARF 0.956044），Rust 500 maxiter 不收敛（ARF 0.950077）→ D634。**round-84:** 现档 BIT——r73 D795-1（DG 面规则改等参几何）后迭代史 **311 行逐字节 = C++**（ARF 0.956044 同；豁免 = C++ 12 行 Options 前缀 Rust 不打 = D822-2）；r79/r82/r83 锚点重验 ✓，本轮重验 ✓ |
+| mfem_ex15_dynamic_amr | ex15 | 默认 star-hilbert | RUN（r62 D633） | logs/… | 默认档 panic：`data/star-hilbert.mesh` 不存在（D633）；`-m data/star.mesh` 替代档 700 s 内 rc=0（435 s，20 轮 AMR）。**round-84:** 现档 RUN——r62 资产回填后默认档 513 s 全程 rc=0；本轮未重跑（>600 s 预算），维持 r62 定档 |
+| mfem_ex15_dump_A_true | —（tools_ex15_ref 配套） | 内置 star-hilbert | RUN（r62 D633） | logs/… | debug dump harness（非用户示例）；panic 于读 `data/star-hilbert.mesh`（D633）。**round-84:** 重验 rc=0（5606 行 PROW dump），D633 修复钉住 |
+| mfem_ex15_dump_T002 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0（2187409 行） |
+| mfem_ex15_dump_flow | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0 |
+| mfem_ex15_dump_it2_coords | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0 |
+| mfem_ex15_dump_p1 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0，stdout 与 r61-后状态一致（PROW 表） |
+| mfem_ex15_dump_p1_it3 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0 |
+| mfem_ex16_nonlinear_heat | ex16 | 默认 star | RUN | logs/… | rc=0（SDIRK33 时间推进完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，chksum 1.072997e6 逐字同） |
+| mfem_ex17_dg_elasticity | ex17 | 默认 beam-tri | RUN（round-84 漂移注记） | logs/… + `tmp/d84c/`（r84 对拍） | rc=0。**round-84:** 数值漂移 = r76 D805-1（DG 弹性罚项改 MFEM 原式）传导：1063→1269 it、‖u_h‖_L2 227.189938→226.758078、checksum −0.15%（旧值系错误罚项产物，非回归）；**新对拍 C++（NOREF-NEW 登记，ref/ex17_cpp_default.out）**：dofs 24576 逐字同、同 PCG+GS+rtol² 配置下 C++ 767 it vs Rust 1269 it → **D822-1**；另 sol.gf 输出表示差（H1 平均位移 vs C++ DG 节点空间）→ 同债 |
+| mfem_ex18_euler | ex18 | 默认 periodic-square | **RUN-REG**（round-84 回归 → D822-3） | logs/… + `tmp/d84c/`（二分证据） | rc=0（RK4 推进完成）。**round-84:** **回归**——默认档 step 27（t≈0.07）起发散，`Solution error: NaN`（rc 仍 0，静默）；二分钉到 **`24e00a8d`（r81 D815-2 dg_hyperbolic 面路径重构，登记为 3-D 但 2-D Euler 被扰动）**：前一笔 `6e5ef034` 稳定 6.1686e-2、`24e00a8d` 起 NaN（r82 `a0ab0f01`/HEAD 同）；C++ 真值（`$HOME/work/d76main/ex18_cpp` 默认档）= 435 步稳定 0.0039309262。历史 "r65/r66 逐字节不变" 为本地 golden 口径（非 C++ 对拍）。修前最后好值 = 6.168620814596272e-2 |
+| mfem_ex19_hyperelastic_incomp | ex19 | 默认 beam-quad | RUN | logs/… | rc=0（Newton+块 GMRES 收敛）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Newton 3 it 收敛行逐字同） |
+| mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | RUN（r62 D635b） | logs/… + ref/ex20.out | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635。**round-84:** 失配已闭（r62 D635b 六配置逐字节 = C++）；重验 `-o 1 -t 100 -no-vis`：数值行逐字同，豁免 = C++ Options 回声多 2 行（`--no-visualization/--no-gnuplot`，→ D822-2） |
+| mfem_ex21_amr_elasticity | ex21 | 默认 beam-tri | RUN | logs/… | rc=0；历史有机器本地 golden 注记（非 C++ 逐字节）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff） |
+| mfem_ex22_complex_helmholtz | ex22 | 默认 inline-quad | RUN（r67 D693-695 收口） | logs/… | rc=0（复数系统求解完成）。**round-84:** r67 -p0/-p1 双双逐位收官 + r69 D738 评估器求积阶修复 + r71 D748 评估器族配对化（余项 D704/D748/D765/D767）；重验默认档：误差行 1.422826e-1/1.422741e-1 与 r61 后状态逐字同，GMRES 打印已换 MFEM Pass/Iteration 族 |
+| mfem_ex23_wave_equation | ex23 | 默认 star | RUN | logs/… | rc=0；历史 golden 本地注记。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，checksum 1.889982e4 / du/dt 2.955466e4 逐字同） |
+| mfem_ex24_discrete_ops | ex24 | `-m data/star.mesh -p 0 -o 1 -no-vis` | **BIT**（r70 D712 四口径） | logs/… + ref/ex24_p0o1.out | **本轮现对拍**：数值行逐字节；豁免 = Rust 的 Options 块少 3 行（--no-static-condensation/--no-partial-assembly/--device）。**round-84:** 现档 BIT——r66 D686 三口径 + r70 D712 四口径全部逐字节 = C++（D721 翻转后 -p1 iter1 1.47776e-22 归零）；重验 -p0 -o1 = 仅 mesh 路径行差 ✓ |
+| mfem_ex25_pml_maxwell | ex25 | 默认 beam-hex | RUN | logs/… | rc=0（复 PML 系统完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff） |
+| mfem_ex26_geom_mg | ex26 | 默认 star；hex 档 `-m inline-hex -gr 0 -or 2` | RUN | logs/mfem_ex26_geom_mg.log、logs/mfem_ex26_hex.log + ref/ex26_hex.out | 默认档 rc=0。hex 档本轮**实况对拍**：274625 未知数同、6 迭代轨迹机器精度级吻合（ARF 0.0435272 vs 0.0435273、iter1 1.55112e-6 vs 1.55209e-6），**非逐字节**（Chebyshev smoother 特征值估计 ulp 级分叉）。round 60 存档对 tmp/d31/ex26_{rs,cpp}.log 数值逐字节，但其原命令不可复原 ⇒ 存档对不作为本轮逐字节证据引用。**round-84:** 重验 OK（默认档 stdout 与 r61 记录 **0 diff**；r72 D754 并行装配逐位化后 5 连跑 sha256 全同口径维持） |
+| mfem_ex27_robin_bc | ex27 | 默认 `-no-vis` | **BIT\***（round 72 D771） | logs/… + `tmp/d771/`（gold/diff/probe） | **canonical stdout 对齐**：Options 块 12 行 + 去前导空行 + 删非 C++ 的 `Solved in N iterations.` + 平均值行 `", \t"` 与 `%g6`（`fem_solver::fmt_g`）⇒ **default 51 行中 49 行逐字节、`-dbc 2.5` 52 行中 50 行逐字节**（残 2 行/档 = 半面求积 + 网格表示差 **D778**，非格式）；迭代历史 29/30 行零差异保持；**`-dg` 迭代历史逐字节不回退**（其 C++ 差距 = **D779**）。**round-84:** 现档全逐字节——r73 D778（半面求积修为 [0,1] 恒等语义）后 **default 51/51 + `-dbc 2.5` 52/52 逐字节**；r76 D805-3 refined.mesh TOPOLOGY-IDENTICAL 10/10；r82/r83 锚点重验 IDENTICAL ✓ |
+| mfem_ex28_sliding_elasticity | ex28 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Pass 15 707 it 轨迹逐字同） |
+| mfem_ex29_curved_poisson | ex29 | 默认（-mt 4 -mo 3） | RUN（数值行 = C++ 逐字节） | logs/… + ref/ex29.out | 迭代 0–7 逐字节；C++@7 停（ARF 0.0969461）Rust@11（ARF 0.0719572）；终误差 ‖u−u_h‖ 0.00138643 / ‖f−f_h‖ 0.00797749 **逐字节同**；Rust 多 2 行头注 → D634。**round-84:** 重验 = 与 C++ **全部数值行逐字节**（含 ARF/停机点，D634/D758b 停机同步达成）；豁免仅 Rust 多 2 行头注（Geometry order/Mesh nodes 诊断行） |
+| mfem_ex30_aniso_amr | ex30 | 默认 star | RUN | logs/… | rc=0（三系数预处理完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，12572 元/Osc error 0.000619） |
+| mfem_ex31_anisotropic_maxwell | ex31 | `-m data/inline-quad.mesh -r 2 -o 1 -no-vis` | **BIT** | logs/… + ref/ex31.out | **本轮现对拍**：除 Options 里 mesh 路径串外**全 stdout 逐字节**（含 0.181455 / ARF 0.829075）；无参默认档会 exit(3)（-vis 未移植，文档化）。**round-84:** 重验 = 仅 mesh 路径行差 ✓；r69 后 `-m data/inline-segment.mesh` 档按声明缺口 exit(3)（1-D ND_R1D 未移植 = D733，C++ 金标已留档） |
 | mfem_ex31_dump | —（tools/ex31_cpp_helper 配套） | `-m data/inline-quad.mesh -r 2 -o 1` | RUN | logs/… | debug dump harness；rc=0，落盘 rust_*.txt 供 harness 比对（D375 管线） |
-| mfem_ex33_fractional_diffusion | ex33 | 默认 star | RUN | logs/… | rc=0；AAA 模块与 spde 共享（那边有逐位锚点），本示例无逐字节记录 |
+| mfem_ex33_fractional_diffusion | ex33 | 默认 star | RUN | logs/… | rc=0；AAA 模块与 spde 共享（那边有逐位锚点），本示例无逐字节记录。**round-84:** 重验 OK——与 r61 记录仅 1 处末位显示差（iter120 `6.40485e-27`→`6.40484e-27`，噪声级），ARF 0.795112 其余逐字同 |
 | mfem_ex34_magnetostatics | ex34 | 默认 fichera-mixed | RUN | logs/… | rc=0（SubMesh 电流密度链路完成） |
-| mfem_ex36_obstacle | ex36 | 默认 disc_p2 | RUN | logs/… | rc=0（proximal Galerkin Newton 完成） |
-| mfem_ex37_topology_optimization | ex37 | 默认 | RUN | logs/… | rc=0 |
-| mfem_ex38_implicit_integration | ex38 | 默认 surface2d | RUN | logs/… | rc=0（moment-fitting 求积完成） |
+| mfem_ex36_obstacle | ex36 | 默认 disc_p2 | RUN | logs/… | rc=0（proximal Galerkin Newton 完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，L2/H1 误差行逐字同） |
+| mfem_ex37_topology_optimization | ex37 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Final step 33 / compliance 0.003875） |
+| mfem_ex38_implicit_integration | ex38 | 默认 surface2d | RUN | logs/… | rc=0（moment-fitting 求积完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Surface 误差 5.4492670572e-5 逐字同） |
 | mfem_ex39_compass | ex39 | 默认 compass.msh | RUN | logs/… | rc=0（命名属性集链路完成） |
-| mfem_ex40_eikonal | ex40 | 默认 star | RUN | logs/… | rc=0（阻尼拟牛顿完成） |
-| mfem_ex41_imex | ex41 | 默认 periodic-square -s64 | RUN | logs/… | rc=0（IMEX DIRK3 1000 步完成） |
+| mfem_ex40_eikonal | ex40 | 默认 star | RUN | logs/… | rc=0（阻尼拟牛顿完成）。**round-84:** 重验 rc=0；终值 `0.026921483748254076` = r65 D674 真值反转后的 C++ 对齐锚（C++ 0.0269214）✓；Newton 轨迹行 vs r61 记录的差异属 D674 修正预期传导；页脚 Outer 5/Total 6/15520 不变 |
+| mfem_ex41_imex | ex41 | 默认 periodic-square -s64 | RUN | logs/… | rc=0（IMEX DIRK3 1000 步完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff）——r82 D817-1 触及 dg_imex bdr K 源、r76 D805-2 加 alpha 字段，默认档均无扰动 |
 
 （注：串行 45 行齐全——含 ex4_darcy_simple（NOREF）与 6 个 ex15_dump（CRASH）；
 86 = 45 串行 + 40 并行 + 1 self-test，与盘点清单 `tmp/ledger/ex86_list.txt`
@@ -86,20 +89,20 @@
 | mfem_pex0_parallel_poisson | ex0p | 默认 --ranks | RUN | logs/… | rc=0 |
 | mfem_pex1_parallel_poisson | ex1p | 默认（81920 quads） | RUN | logs/… | rc=0（240 s 内；round 30 曾 150 s 超时） |
 | mfem_pex2_parallel_elasticity | ex2p | 默认 beam-tri | RUN | logs/… | rc=0 |
-| mfem_pex3_maxwell_cavity | ex3p | 默认 star（2-D 折叠档） | RUN | logs/… | rc=0；历史对照：dofs 10400、‖E−E_h‖=2.70053055689122e-2 vs C++ mpirun 0.0270053（6 位；迭代数 102 vs AMS 17 属求解器栈差异） |
+| mfem_pex3_maxwell_cavity | ex3p | 默认 star（2-D 折叠档） | RUN（数值级 = C++ 6 位） | logs/… | rc=0；历史对照：dofs 10400、‖E−E_h‖=2.70053055689122e-2 vs C++ mpirun 0.0270053（6 位；迭代数 102 vs AMS 17 属求解器栈差异）。**round-84:** r65 漂移（D683）→ r66 仲裁（D697 回归确认）→ r67 D697/D705 翻正：default 87/102 it、2.70053048394657e-2/2.70053055702279e-2 = C++ 六位；r71 L² 锚复活（-o1/-o2 逐位稳定）；r78 四锚点逐位（87/1/95/193 it）；r70 D746 并行确定性根治。维持 RUN（无全 stdout 逐字节主张） |
 | mfem_pex4_parallel_hdiv_diffusion | ex4p | 默认 star | RUN | logs/… | rc=0；文件头注明 PCG+Jacobi 替代 AMS（求解器栈差异） |
-| mfem_pex5_hdiv_darcy | ex5p | `-m data/star.mesh -no-vis` | **CRASH** | logs/… | panic：`crates/parallel/src/launcher/native.rs:154` worker `index out of bounds: len 2 index 2`（round 30 曾 rc=0 ⇒ **回归嫌疑**）→ D635a |
+| mfem_pex5_hdiv_darcy | ex5p | `-m data/star.mesh -no-vis` | RUN（r62 D635a） | logs/… | panic：`crates/parallel/src/launcher/native.rs:154` worker `index out of bounds: len 2 index 2`（round 30 曾 rc=0 ⇒ **回归嫌疑**）→ D635a。**round-84:** 越界已修（r62 D635a 二分闭环）；AMG 配置 = r64 D654 结构性豁免（示例文件有注记）；r70 快查 MINRES 95 it/2.91889e-5 ✓。本轮未重跑，维持 |
 | mfem_pex6_parallel_amr | ex6p | 默认 star | RUN | logs/… | rc=0（AMR 环完成） |
 | mfem_pex7_parallel_surface | ex7p | 默认 octahedron | RUN | logs/… | rc=0 |
 | mfem_pex8_parallel_dpg | ex8p | 默认 | RUN | logs/… | rc=0 |
-| mfem_pex9_parallel_dg_advection | ex9p | 默认 periodic-hexagon | **CRASH** | logs/… | panic 于读 `data/periodic-hexagon.mesh`（D633 资产缺失） |
+| mfem_pex9_parallel_dg_advection | ex9p | 默认 periodic-hexagon | RUN（r62 D633） | logs/… | panic 于读 `data/periodic-hexagon.mesh`（D633 资产缺失）。**round-84:** 现档 RUN——r62 资产回填后 rc=0；r76/r78 mass 锚点 3.638348e2、stdout 与改动前逐字节（路径归一化后）。本轮未重跑，维持 |
 | mfem_pex10_parallel_hyperelastic | ex10p | 默认 beam-quad | RUN | logs/… | rc=0 |
 | mfem_pex11_parallel_eigenvalue | ex11p | 默认 star | RUN | logs/… | rc=0（LOBPCG） |
 | mfem_pex12_parallel_elastic_eigen | ex12p | 默认 beam-tri | RUN | logs/… | rc=0 |
 | mfem_pex13_parallel_eigenvalue | ex13p | 默认 beam-tet | RUN | logs/… | rc=0 |
 | mfem_pex14_parallel_dg_poisson | ex14p | 默认 star | RUN | logs/… | rc=0 |
-| mfem_pex15_parallel_dynamic_amr | ex15p | 默认 star-hilbert | **CRASH**（默认档） | logs/… | 默认档 panic（D633）；`-m data/star.mesh` 替代档 **800 s 超时**：日志推进正常（AMR 迭代 2 → 59352 unknowns，带 load rebalance）⇒ 长跑非挂死；对照：串行 ex15 同档 435 s 完成 |
-| mfem_pex16_parallel_nonlinear_heat | ex16p | 默认 star | RUN | logs/… | rc=0 |
+| mfem_pex15_parallel_dynamic_amr | ex15p | 默认 star-hilbert | RUN（r62；替代档 RUN-LONG） | logs/… | 默认档 panic（D633）；`-m data/star.mesh` 替代档 **800 s 超时**：日志推进正常（AMR 迭代 2 → 59352 unknowns，带 load rebalance）⇒ 长跑非挂死；对照：串行 ex15 同档 435 s 完成。**round-84:** r62 资产回填 + D635a 修复后默认档 rc=0（CRASH 12→0 批次内）；本轮未重跑（长跑预算），维持 r62 定档 |
+| mfem_pex16_parallel_nonlinear_heat | ex16p | 默认 star | RUN | logs/… | rc=0。**round-84:** 重验 OK——默认档（ranks 1）stdout 与 r61 记录 **0 diff**；附带 `--ranks 2` 探针：chksum 1.620186e7→1.618583e7（−9.9e-4 相对，r71-r73 并行分区/确定性改动族的未钉档漂移，该档无既有主张，仅观察记录） |
 | mfem_pex17_parallel_dg_elasticity | ex17p | 默认 beam-tri | RUN | logs/… | rc=0 |
 | mfem_pex18_parallel_euler | ex18p | 默认 periodic-square | RUN | logs/… | rc=0 |
 | mfem_pex19_parallel_incomp_hyperelastic | ex19p | 默认 beam-tet | DEV | logs/… | exit(3)+文案：本 port 仅 2-D 分支（C++ 默认网格 3-D）——round 31 D137 文档化裁剪 |
@@ -109,7 +112,7 @@
 | mfem_pex24_parallel_discrete_ops | ex24p | 默认 beam-hex | RUN | logs/… | rc=0 |
 | mfem_pex25_pml_maxwell | ex25p | 默认 beam-hex | RUN | logs/… | rc=0 |
 | mfem_pex26_parallel_geom_mg | ex26p | 默认 star | RUN | logs/… | rc=0 |
-| mfem_pex27_parallel_robin_bc | ex27p | 默认 | RUN | logs/… | rc=0（round 30 的内核 assert panic 已于 D138 修复，本轮绿） |
+| mfem_pex27_parallel_robin_bc | ex27p | 默认 | RUN | logs/… | rc=0（round 30 的内核 assert panic 已于 D138 修复，本轮绿）。**round-84:** 重验 OK——默认档（ranks 1）stdout 与 r61 记录 **0 diff**（4 个平均值行逐字同）；D778 半面求积同款问题在 r72 已注记（pex27 侧配方在案未动）；附带 `--ranks 2` 探针：PCG 26→38 it（平均值行不变，同上观察记录） |
 | mfem_pex28_parallel_sliding_elasticity | ex28p | 默认 | RUN | logs/… | rc=0 |
 | mfem_pex29_surface_poisson | ex29p | 默认 | RUN | logs/… | rc=0 |
 | mfem_pex30_amr_preprocess | ex30p | `-m data/star.mesh -no-vis` | RUN-LONG | logs/… | 240 s/600 s/**900 s** 三档均超时（rc=124）；日志停在 3341 元素 / Osc error 7.752668e-4，stdout 无时间戳 ⇒ 推进缓慢与停滞不可辨（round 30 同样 150 s 超时）——需专项 |
@@ -121,7 +124,7 @@
 | mfem_pex36_obstacle | ex36p | 默认 disc | RUN | logs/… | rc=0 |
 | mfem_pex37_topology_optimization | ex37p | 默认 | RUN | logs/… | rc=0 |
 | mfem_pex39_named_attributes | ex39p | 默认 compass.msh | RUN | logs/… | rc=0 |
-| mfem_pex40_eikonal | ex40p | `-m data/star.mesh -no-vis` | **CRASH** | logs/… | panic：`crates/parallel/src/dof_partition.rs:1251 index out of bounds: len 2 index 2` → D635a |
+| mfem_pex40_eikonal | ex40p | `-m data/star.mesh -no-vis` | RUN（r62 D635a） | logs/… | panic：`crates/parallel/src/dof_partition.rs:1251 index out of bounds: len 2 index 2` → D635a。**round-84:** 越界已修（r62）；r64 D655 页脚本地真 dof 和（np=1 15520 与 C++ 逐字节）；r65 D674 终值换核心 0.0269215 ✓。本轮未重跑，维持 |
 | mfem_pex41_imex | ex41p | 默认 periodic-square | RUN | logs/… | rc=0 |
 
 ## self-test（1）
@@ -364,3 +367,91 @@
   SUPERSEDED 头（旧"never-refresh"模型 (2)，被 round 71 D749 证伪；现行权威 =
   `tmp/d749/multidomain_{rt,nd}_printref_refresh.cpp`、`tmp/d737/multidomain_h1_printref.cpp`；
   重钉四值 rt cyl −2.137667e-4/1.439350e-6、nd cyl 6.932270e-5/1.594225e-4）。历史证据保留未删。
+
+## round 84 增量（C 路：三态台账刷新 + 抽样重验，HEAD c5a06dd6）
+
+> 本节为**现行权威口径**。头部计数表已更新为 round-84 值；表体行仅在状态变化/本轮重验处
+> 追加 `round-84:` 注记（历史行未重写）。证据：`tmp/d84c/`（24 档落盘日志 `run/logs/`、
+> 对拍摘要、二分记录）。
+
+### r61→r84 状态迁移总账（权威三态对照）
+
+| 行 | r61 档 | r84 权威档 | 迁移轮次/债号 |
+|---|---|---|---|
+| ex1 | BIT | **BIT** | r66 D687（Options 头补齐后 cmp 全等） |
+| ex2 | BIT | **BIT** | r63 D647 全流逐字节 |
+| ex3 | RUN | **BIT**（双档） | r64 D651/D653 + r65 D664（4 处打印格式差清零） |
+| ex4 | RUN\* | **RUN** | r62 D634（646 it = C++）+ r63 D639（0.0161443 逐字） |
+| ex5 | RUN\* | **RUN** | r62/r63 D639（397 行逐字节） |
+| ex8 | RUN | **RUN**（数值 = C++） | r63 D640（sinv 四边形分支；DPG 0.0183277 逐字） |
+| ex9 | CRASH | **BIT**（具名豁免） | r62 D633 + r77 D812-2（stdout 逐字节）+ r78 D813-3（init.gf 逐字节）；r82/r83 重验 |
+| ex14 | RUN | **BIT**（剥 Options 前缀） | r73 D795-1（311 行逐字节、ARF 0.956044）；r79/r82/r83 重验 |
+| ex15dyn + 6×ex15_dump | 7×CRASH | **RUN** ×7 | r62 D633（资产回填，ex15dyn 513 s rc=0） |
+| ex18 | RUN | **RUN-REG（回归）** | **r84 新发现 → D822-3**（见下） |
+| ex20 | RUN\* | **RUN** | r62 D635b（六配置逐字节 = C++） |
+| ex22 | RUN | **RUN**（多档逐位） | r67 D693-695 + r69 D738/D720 + r71 D748（余 D704/D748/D765/D767） |
+| ex24 | BIT | **BIT**（四口径） | r66 D686 + r70 D712（D721 翻转闭环） |
+| ex26 | RUN（r61 自 BIT 收窄） | **RUN** | r72 D754（并行装配逐位化，5 连跑 sha256 同） |
+| ex27 | BIT\*（r72） | **BIT**（全逐字节） | r73 D778（51/51 + 52/52）+ r76 D805-3；r82/r83 重验 |
+| ex29 | RUN | **RUN**（全数值行 = C++ 逐字节） | r62 D634 + r70 D758b（停机同步达成，本轮复证） |
+| ex31 | BIT | **BIT** | r69 D724/D733（inline-segment 档诚实 exit(3)） |
+| ex34 | RUN | **RUN**（leg1 逐位） | r70（pex34 ranks2 发散 = D756） |
+| ex40 | RUN | **RUN**（终值 = C++） | r65 D674（0.0269215 = C++ 0.0269214） |
+| pex3 | RUN | **RUN**（四锚点逐位） | r67 D697/D705 翻正 + r71 D746 + r78 四锚点（87/1/95/193 it） |
+| pex5 | CRASH | **RUN** | r62 D635a + r64 D654（AMG 结构性豁免） |
+| pex9 | CRASH | **RUN** | r62 D633（r76/r78 mass 锚 3.638348e2） |
+| pex15 | CRASH | **RUN**（替代档 RUN-LONG） | r62 D633+D635a |
+| pex40 | CRASH | **RUN** | r62 D635a + r64 D655（np1 页脚逐字节） |
+| 其余 RUN 行 | RUN | **RUN**（不变） | r62–r83 未触碰；本轮抽样见下 |
+
+### round-84 抽样重验（24 档，全部实跑落盘 `tmp/d84c/run/logs/`）
+
+- **与 r61 记录 0 diff（13 档）**：ex7、ex16、ex19、ex21、ex23、ex25、ex28、ex30、ex36、
+  ex37、ex38、ex41（r82 触面无扰动）、pex16/pex27 默认档（ranks 1）。
+- **与 r61 记录仅噪声级差（1 档）**：ex33（iter120 末位显示差 1 ulp @1e-27）。
+- **BIT/数值档复证（10 档，对 `tmp/ledger/ref/` 金标）**：ex1/ex2/ex3/ex24/ex31（仅 mesh
+  路径行差，口径内）、ex14（311 行体逐字节）、ex20（数值行逐字）、ex4（终误差行逐字 +
+  iter0-588 逐字节）、ex5（数值行逐字）、ex8（DPG 0.0183277 逐字）、ex29（全数值行逐字节，
+  豁免仅 2 行 Rust 头注）、ex40（终值 D674 锚）、ex22（误差行与 r61 后状态逐字同）。
+- **ex15_dump×6**：全部 rc=0，D633 修复钉住。
+- **SKIP-TRANSIENT：无**（`cargo build --release --examples --keep-going` exit 0，334 exe，
+  与他路无编译冲突）。
+- **未重跑维持原档**：ex15dyn（513 s）、pex15（长跑）、pex30（RUN-LONG）、pex5/pex9/pex40
+  （r62 已钉）、ex10/ex26/ex29/ex31/ex34（r69/r70 已钉）等；miniapps 全量不本轮范围。
+
+### round-84 新债（D822 号段）
+
+- **D822-1（P2）ex17 与 C++ 迭代数/输出表示失配（NOREF-NEW 首对拍）**：
+  r76 D805-1 罚项修正传导后 ex17 数值漂移（1063→1269 it、‖u_h‖ −0.19%——旧值为错误罚项
+  产物，非回归）。新增 C++ 参考（`ref/ex17_cpp_default.out`，binary `$HOME/work/d84c/ex17_cpp`，
+  MFEM 4.10 默认档）：dofs 24576 逐字同；同 PCG+GSSmoother、rtol²=1e-12、maxit 5000 配置下
+  **C++ 767 it vs Rust 1269 it**。HYPOTHESIS：Rust 停机用 ‖r‖/‖r0‖<1e-12 而 MFEM `PCG()`
+  自由函数按 (B r,r) 比值 <1e-12（= 范数比 1e-6）——D634/D753"两套语义"同族。另：Rust
+  `sol.gf` = H1_2D_P1 平均位移场（7.8 KB）vs C++ = L2_T1_2D_P1 DG 节点空间解（293 KB），
+  示例内 "matching MFEM ex17 format" 注记失实（示例侧可修，会动输出文件）。
+- **D822-2（P3）Options 回声缺口族**：ex14 缺 C++ 全部 12 行 Options 前缀（r73 起的既有
+  豁免，本轮升级为债号）；ex20 缺 `--no-visualization/--no-gnuplot` 2 行回声（本轮新发现）。
+  D687（ex1）同族收尾项。
+- **D822-3（P1，回归）ex18 Euler 默认档 NaN**：HEAD 默认档 step 27（t≈0.07）起发散
+  `Solution error: NaN`（rc=0 静默）。**二分钉到 `24e00a8d`（r81 D815-2 dg_hyperbolic
+  3-D 面路径重构）**——前一笔 `6e5ef034` 稳定 6.168620814596272e-2（= r61 记录），其后
+  `24e00a8d`/`7da0baaf`/`a0ab0f01`/HEAD 全 NaN；该债登记为 3-D 专用但 2-D Euler 被扰动
+  （疑似 GenerateFaces 语义配对/face_type_of 分派波及 2-D 臂）。C++ 仲裁（既有 binary
+  `$HOME/work/d76main/ex18_cpp`）：默认档 435 步稳定 0.0039309262 ⇒ 真回归，非 MFEM 忠实
+  行为。r81 的 8/8 金标全为 3-D oracle，2-D Euler 无回归 pin ⇒ 建议主会话把 ex18 默认档
+  加入常驻锚点集。注意：r61 记录的 6.17e-2 与 C++ 0.0039 的差距（185 vs 435 步，dt 计划
+  不同）是 RUN 档既有求解器配置差，非本轮内容。
+
+### 其他 round-84 记录
+
+- **NOREF-NEW 登记**：ex17 此前无任何 C++ 参考，本轮现编（`$HOME/mfem410_ser` 串行树，
+  g++ -O2）并留档 `ref/ex17_cpp_default.out`；snapshot 二进制 `$HOME/work/d84c/ex17_cpp`。
+- **并行 ranks2 观察记录（非债，该档无既有主张）**：pex27 PCG 26→38 it（4 个平均值行逐字
+  同）、pex16 chksum −9.9e-4 相对——r71-r73 并行分区/确定性改动族在未钉档上的漂移方向标。
+- **矩阵 §4 队列第 1 项**（examples/miniapps 三态台账）的本 examples 半边：本节 + 头部
+  round-84 计数表即为权威现状，**可关闭**（miniapps 半边维持 round-63/64/65 定档，待主会话
+  复核后落格）。
+- **⚠️ 会话事件**：本路工作期间 `fem-rs/data/` 工作树被清空（82 份 tracked `D`，非本路
+  所为，命令清单已交主会话）；本路 `tmp/d84c/run/data/` 内有开局完整副本（124 项）可复原。
+  本路 example 重跑均在该副本尚在/原 data/ 完好时完成，证据有效性不受影响，但**在 data/
+  恢复前任何复跑都会 panic**。

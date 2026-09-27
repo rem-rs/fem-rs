@@ -36,9 +36,13 @@ fichera 档、twist = BIT 两档；表中按文件归主档、备注记副档。
 RUN/BIT 副档。）
 
 **round 64 增量（4 文件，B/D 路）**：CRASH 2 → **0**（multidomain_nd/_rt 崩溃修复，转 RUN*）；
-navier_bifurcation RUN* → **RUN**（D658 裁定 + `-pc amg` 档）；trimmer DEV(阻塞) →
+navier_bifurcation RUN* → **RUN**（D658 裁决 + `-pc amg` 档）；trimmer DEV(阻塞) →
 **RUN(.mesh 对拍) + DEV(.vtk 诚实 exit(3))** 双档。净效应：RUN 43→44、RUN* 2→2（成员换为
 multidomain_nd/_rt，数值未逐位 → D667）、CRASH 2→0、DEV 21 不变（trimmer 主档仍 DEV）。
+
+**round 84 注记（C 路）**：miniapps 侧**本轮未重跑**，全部 100 文件维持 round-63/64/65 定档
+（r72 multidomain 三档、r73 trimmer 六档等后续增量节仍为权威）。examples 侧的台账刷新
+（86 行三态权威化 + 24 档抽样重验）见 `examples_ledger.md` §round 84 增量。
 
 ## 本轮 BIT 复跑（14 项，全部真对拍；8 项逐字节、4 项记录档复现、2 项拓扑字节同）
 
