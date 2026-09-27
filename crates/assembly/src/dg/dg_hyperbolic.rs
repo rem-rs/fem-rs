@@ -331,13 +331,14 @@ fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> (Box<dyn ReferenceElemen
     // historical (round-40 / D269) element choices.
     match mesh.element_type(0) {
         ElementType::Quad4 => {
-            assert_eq!(order, 1, "Quad4 only supports order=1 currently");
             // MFEM DG_FECollection(order, dim, BasisType::GaussLegendre) uses
             // the Gauss-Legendre nodal basis on [0,1]² — NOT the equally
             // spaced QuadQ1.  With GL nodes the mass matrix is diagonal
             // (C++ invmass = 36·I on this mesh; QuadQ1 gave a full 144/-72
-            // matrix → 10× larger dudt → NaN).
-            (Box::new(QuadL2GL::new(1)), ElemShape::Quad)
+            // matrix → 10× larger dudt → NaN).  D822-4: `QuadL2GL` is that
+            // tensor-GL element for every order — the old `assert_eq!(order, 1)`
+            // blocked ex18's C++ default tier (`-o 3`).
+            (Box::new(QuadL2GL::new(order as usize)), ElemShape::Quad)
         }
         ElementType::Tet4 => (ref_elem_vol(ElementType::Tet4, order), ElemShape::Tet),
         ElementType::Hex8 => (ref_elem_vol(ElementType::Hex8, order), ElemShape::Hex),
@@ -724,7 +725,15 @@ fn build_faces_3d(
 fn build_faces_2d(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec<InteriorFace>, Vec<BoundaryFace>) {
     let dp = ref_elem.n_dofs();
     let n_elems = mesh.n_elements() as u32;
-    let n_qp = ((2 * ref_elem.order() + 1) as usize).min(4).max(1);
+    // MFEM `HyperbolicFormIntegrator::AssembleFaceVector` (hyperbolic.cpp:224):
+    // rule order = 2·max_el_order + IntOrderOffset, with ex18's
+    // `IntOrderOffset = 1` (ex18.cpp:68/179); `IntegrationRules::
+    // SegmentIntegrationRule` then takes n = Order/2 + 1 Gauss-Legendre
+    // points on [0,1] (Σw = 1) ⇒ n = p + 1.  D822-4: the old
+    // `(2p+1).min(4)` gave 3 points at p = 1 where MFEM uses 2 (the source
+    // of the ~6e-6 relative residual the round-84 -o 1 ledger anchor carried
+    // against C++) and 4 at p = 2 where MFEM uses 3; only p = 3 coincided.
+    let n_qp = ref_elem.order() as usize + 1;
     let (face_pts, face_wts) = gauss_legendre_01(n_qp);
 
     // Detect element type from first element's node count

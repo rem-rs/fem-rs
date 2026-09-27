@@ -38,6 +38,22 @@
 //! Empirical teeth (round 84, `tmp/d84fix/`): both red on `24e00a8d`'s
 //! arithmetic (free stream max|z| = 4.330e-1; evolution deviation 2.5e-2
 //! relative), green with the fix.
+//!
+//! # D822-4 additions (round 85)
+//!
+//! The order-3 variants (`*_o3`) pin the same two properties through the
+//! Quad4 arm of `make_ref_elem`, which asserted `order == 1` before D822-4
+//! (red = panic, verified by stashing the fix).  The face quadrature rule
+//! is MFEM's (`2p + IntOrderOffset = 2p+1` rule order ⇒ `p+1` Gauss-Legendre
+//! points, hyperbolic.cpp:224 + intrules.cpp `SegmentIntegrationRule`);
+//! D822-4 also replaced the old `(2p+1).min(4)` rule, which used 3 points
+//! at p = 1 where MFEM uses 2 — the source of the ~6e-6 relative residual
+//! the round-84 `-o 1` ledger anchor carried against C++ (the "fp 排序"
+//! attribution is refuted: after the rule fix the end-to-end `-o 1` value
+//! matches C++ `0.061686586` to all 8 printed digits, and the step count
+//! is 184 = C++).  MFEM anchors (fresh runs, `$HOME/work/d85main/ex18/`):
+//! `-o 1` ⇒ `Solution error: 0.061686586`, default `-o 3` ⇒ `0.0039309262`;
+//! the fem-rs example reproduces both at C++'s 8 printed digits.
 
 use fem_assembly::dg::{DgHyperbolicConservationLaws, EulerFlux, RusanovFlux};
 use fem_io::mfem::read_mfem;
@@ -91,17 +107,24 @@ fn mesh_2x2() -> Mesh<2> {
 }
 
 fn build_op(mesh: &Mesh<2>) -> DgHyperbolicConservationLaws {
+    build_op_order(mesh, 1)
+}
+
+/// D822-4: the operator must accept any order on Quad4 (MFEM
+/// `DG_FECollection(order, 2)` is the tensor Gauss-Legendre L2 quad);
+/// `make_ref_elem` asserted `order == 1` before D822-4.
+fn build_op_order(mesh: &Mesh<2>, order: u8) -> DgHyperbolicConservationLaws {
     DgHyperbolicConservationLaws::new(
         mesh,
-        1,
+        order,
         Box::new(RusanovFlux { inner: EulerFlux { gamma: GAMMA } }),
         true, // ex18's volume term (MFEM HyperbolicFormIntegrator ∫F·∇v)
     )
 }
 
 /// The operator's vector layout: `(e·dp + j)·nq + eq`.
-fn state(u: &mut [f64], e: usize, j: usize, eq: usize) -> &mut f64 {
-    &mut u[(e * DP + j) * NQ + eq]
+fn state(u: &mut [f64], e: usize, dp: usize, j: usize, eq: usize) -> &mut f64 {
+    &mut u[(e * dp + j) * NQ + eq]
 }
 
 /// Free-stream preservation (MFEM-anchored exact property — see module doc).
@@ -156,20 +179,20 @@ fn ssprk3(op: &DgHyperbolicConservationLaws, dt: f64, steps: usize, u: &mut [f64
 /// Smooth, always-physical nonuniform state from an integer dof formula
 /// (d816c's u2 recipe, 2-D): no projection needed — the dof values ARE the
 /// state, so the pin exercises the operator in isolation.
-fn nonuniform_state() -> Vec<f64> {
-    let mut u = vec![0.0; N_ELEM * DP * NQ];
+fn nonuniform_state(dp: usize) -> Vec<f64> {
+    let mut u = vec![0.0; N_ELEM * dp * NQ];
     for e in 0..N_ELEM {
-        for j in 0..DP {
-            let g = e * DP + j;
+        for j in 0..dp {
+            let g = e * dp + j;
             let rho = 1.0 + 0.025 * (g % 5) as f64; // 1.000 .. 1.100
             let mx = 0.1 * (((g / 3) % 3) as f64 - 1.0); // -0.1, 0, 0.1
             let my = 0.05 * ((2 * ((g / 7) % 2)) as f64 - 1.0); // -0.05, 0.05
             let pr = 1.0 + 0.05 * (g % 7) as f64; // 1.00 .. 1.30
             let energy = pr / (GAMMA - 1.0) + 0.5 * rho * (mx * mx + my * my);
-            *state(&mut u, e, j, 0) = rho;
-            *state(&mut u, e, j, 1) = rho * mx;
-            *state(&mut u, e, j, 2) = rho * my;
-            *state(&mut u, e, j, 3) = energy;
+            *state(&mut u, e, dp, j, 0) = rho;
+            *state(&mut u, e, dp, j, 1) = rho * mx;
+            *state(&mut u, e, dp, j, 2) = rho * my;
+            *state(&mut u, e, dp, j, 3) = energy;
         }
     }
     u
@@ -182,21 +205,75 @@ fn rk3_evolution_end_state_pin_2d_quad() {
     let mesh = mesh_2x2();
     let op = build_op(&mesh);
 
-    let mut u = nonuniform_state();
+    let mut u = nonuniform_state(DP);
     // CFL = dt·c/h ≈ 0.005·1.5/0.5 = 0.015 — deeply inside the stable region,
     // so the only way this test moves is a real change of the flux arithmetic.
     ssprk3(&op, 5.0e-3, 40, &mut u);
 
     let norm: f64 = u.iter().map(|&v| v * v).sum::<f64>().sqrt();
-    // Observed with the D822-3 fix in place (round 84, tmp/d84fix/).  The
-    // bad-arithmetic value is 1.24310876736033418e1 — a 2.5e-2 relative
-    // deviation, nine orders above the tolerance.
-    const PIN: f64 = 12.1215111491817;
+    // Observed with the D822-3 fix + the D822-4 MFEM face rule (p+1 points).
+    // The pre-D822-4 rule (3 points at p = 1; MFEM uses 2) gave
+    // 12.12151111491816998 — that rule mismatch is exactly what made the
+    // round-84 `-o 1` example run diverge from C++ in the 7th digit; with the
+    // MFEM rule the end-to-end example matches C++ `0.061686586` to all 8
+    // printed digits (MFEM anchor, `$HOME/work/d85main/ex18/cpp_o1.out`).
+    // The bad-stride arithmetic (D822-3) is 1.24310876736033418e1 — a 2.5e-2
+    // relative deviation, nine orders above the tolerance.
+    const PIN: f64 = 12.1215196189671204;
     const RTOL: f64 = 1e-9;
     assert!(
         (norm - PIN).abs() <= RTOL * PIN.abs(),
         "RK3 end-state signature drifted: {norm:.17e} vs pinned {PIN:.17e} \
          (2-D Euler face-flux arithmetic changed — if intentional, re-pin \
          against an MFEM oracle run)"
+    );
+}
+
+// ─── D822-4: order-3 Quad4 variants (the C++ ex18 default tier) ──────────────
+
+/// Free-stream preservation through the order-3 Quad4 arm (QuadL2GL(3), 16
+/// dofs/element).  Red before D822-4: `make_ref_elem` panicked on
+/// `Quad4 only supports order=1 currently`.
+#[test]
+fn free_stream_preservation_2d_quad_o3() {
+    let mesh = mesh_2x2();
+    let op = build_op_order(&mesh, 3);
+    let dp = 16; // QuadL2GL(3): (3+1)²
+    assert_eq!(op.n_dofs(), N_ELEM * dp * NQ);
+
+    let u = vec![1.0, 0.0, 0.0, 2.5]
+        .into_iter()
+        .cycle()
+        .take(N_ELEM * dp * NQ)
+        .collect::<Vec<f64>>();
+    let mut z = vec![0.0; op.n_dofs()];
+    op.mult_residual(&u, &mut z);
+    let max_abs = z.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    assert!(
+        max_abs < 1e-12,
+        "free-stream preservation broken at order 3: max|z| = {max_abs:.3e}"
+    );
+}
+
+/// Order-3 SSP-RK3 end-state signature (same recipe as the order-1 pin).
+/// Red before D822-4 (panic); the pinned value is the D822-4 arithmetic's
+/// deterministic signature — MFEM parity for this tier is anchored by the
+/// end-to-end example run matching C++ `0.0039309262` (8 printed digits,
+/// 435 steps; `$HOME/work/d85main/ex18/cpp_default.out`).
+#[test]
+fn rk3_evolution_end_state_pin_2d_quad_o3() {
+    let mesh = mesh_2x2();
+    let op = build_op_order(&mesh, 3);
+    let dp = 16;
+
+    let mut u = nonuniform_state(dp);
+    ssprk3(&op, 5.0e-3, 40, &mut u);
+
+    let norm: f64 = u.iter().map(|&v| v * v).sum::<f64>().sqrt();
+    const PIN: f64 = 24.617851397643765;
+    const RTOL: f64 = 1e-9;
+    assert!(
+        (norm - PIN).abs() <= RTOL * PIN.abs(),
+        "RK3 order-3 end-state signature drifted: {norm:.17e} vs pinned {PIN:.17e}"
     );
 }

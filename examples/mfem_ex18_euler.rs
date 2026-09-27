@@ -11,9 +11,9 @@
 //!   2: Slow moving isentropic vortex (Minf=0.05, beta=1/50)
 //!   3: Moving sine wave (density perturbation)
 //!
-//! Usage:
+//! Usage (defaults mirror C++ ex18.cpp: order 3, refine 1, RK4, t=2, cfl 0.3):
 //! ```bash
-//! cargo run --example mfem_ex18_euler -- -p 1 -r 1 -o 1 -s 4 -no-vis
+//! cargo run --example mfem_ex18_euler -- -p 1 -r 1 -o 3 -s 4 -no-vis
 //! ```
 //!
 //! ## Reference
@@ -87,7 +87,9 @@ fn parse_args() -> Args {
         mesh: default_mesh_path(),
         problem: 1,
         refine: 1,
-        order: 1,
+        // D822-4: C++ ex18.cpp defaults to `order = 3` (ex18.cpp:70) — the
+        // Rust default used to be 1, a 1:1 consumer divergence.
+        order: 3,
         ode_solver: 4,
         t_final: 2.0,
         dt: -0.01,
@@ -110,7 +112,7 @@ fn parse_args() -> Args {
                 a.refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
             }
             "-o" | "--order" => {
-                a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(3);
             }
             "-s" | "--ode-solver" => {
                 a.ode_solver = it.next().and_then(|v| v.parse().ok()).unwrap_or(4);
