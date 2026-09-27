@@ -384,9 +384,111 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 h1_nodes = Some((fec.order, raw.clone(), nodes_ordering, fec.closed_uniform));
             }
         }
-        if is_l2_nodes && n_elem > 0 && raw.len() >= n_elem * dim {
-            // Discontinuous (L2) geometry: every element owns an independent
-            // set of `nodes_per_elem` geometry nodes (MFEM L2_T1_2D_P1 etc.).
+        if is_l2_nodes
+            && n_elem > 0
+            && dim == 3
+            && nodes_ordering == 1
+            && parse_nodal_fec(&fec_name).map(|f| f.order as usize) == Some(1)
+            && elem_types.iter().any(|&t| t == ElementType::Pyramid5)
+            && elem_types
+                .iter()
+                .all(|&t| matches!(t, ElementType::Pyramid5 | ElementType::Tet4))
+            && raw.len() == elem_types.iter().map(fused_row_dofs).sum::<usize>() * dim
+        {
+            // D817-3 — the **fused pyramid P1** arm of `L2_T1_3D_P1`:
+            // `L2_FECollection(1, 3, GaussLobatto)` gives PYRAMID the
+            // `L2_FuentesPyramidElement` with **8** dofs per element (not the
+            // H1 pyramid's 5; the apex carries no dof), and a pyramid uniform
+            // refinement produces a *mixed* fine mesh (6 Pyramid5 + 4 Tet4
+            // children per parent) whose file table is therefore **ragged**
+            // (8-dof pyramid rows, 4-dof tet rows).  This arm recognises that
+            // layout — `L2_T1_3D_P1`, `Ordering: 1`, every element a
+            // Pyramid5 (8) or Tet4 (4), the raw length exactly the row sum —
+            // and attaches:
+            //
+            // * the geometry table, element-major **fresh, unshared** dof ids
+            //   in the file's own Fuentes/`L2` dof order (`Ordering: 1`
+            //   byVDIM).  Pure-pyramid meshes get `nodes_per_elem = 8`; a
+            //   mixed pyr+tet table is ragged (`nodes_per_elem = 0`) under the
+            //   order-1 fused addressing rule of
+            //   `Mesh::geometry_row_range` (crates/mesh `simplex.rs`).
+            //   Consumers that evaluate these tables (the mesh-side fused
+            //   refinement transport, `amr::curved_pyramid`) read rows by
+            //   element type; a generic Bergot-pyramid table consumer must
+            //   not (the dof count differs — D306).
+            // * the vertex table, MFEM's own recovery
+            //   (`Mesh::Loader` → `SetVerticesFromNodes` →
+            //   `GridFunction::GetNodalValues`, `fem/gridfunc.cpp:377-419`):
+            //   vertex value = (element shape functions at the reference
+            //   vertex) · (element dof values), averaged over every element
+            //   reference.  For the Fuentes P1 the shape rows at the base
+            //   vertices are unit vectors at Fuentes dofs 0, 1, 3, 2 (the
+            //   (i, j) tensor order puts dof 2 at reference vertex (0, 1) and
+            //   dof 3 at (1, 1)!), while the **apex** — which carries no dof —
+            //   is the fixed combination
+            //   `CalcShape(0, 0, 1) = (−0.066987298107780702 ×4,
+            //   0.3169872981077807 ×4)`.  Tet rows are the identity.  The dot
+            //   products accumulate in ascending dof order (MFEM's
+            //   `Vector::operator*`), the mean divides once at the end.
+            let apex_row =
+                fem_element::lagrange::l2_fuentes_pyramid_p1_shapes_gauss_lobatto(0.0, 0.0, 1.0);
+            // 1) The geometry table.
+            let total: usize = elem_types.iter().map(|&t| fused_row_dofs(&t)).sum();
+            let all_pyr = elem_types.iter().all(|&t| t == ElementType::Pyramid5);
+            geometry = Some(GeometryData {
+                order: 1,
+                conn: (0..total as u32).collect(),
+                nodes_per_elem: if all_pyr { 8 } else { 0 },
+                coords: raw.clone(),
+                n_nodes: total,
+            });
+            // 2) Vertex reconstruction (SetVerticesFromNodes semantics).
+            coords = vec![0.0_f64; n_vert * dim];
+            let mut overlap = vec![0_usize; n_vert];
+            let mut row0 = 0_usize;
+            for e in 0..n_elem {
+                let et = elem_types[e];
+                let conn_e = &elem_conn[e];
+                if et == ElementType::Pyramid5 {
+                    // Reference-vertex shape rows: unit vectors at Fuentes
+                    // dofs (v0, v1, v2, v3) -> (0, 1, 3, 2), apex the fixed
+                    // `CalcShape(0, 0, 1)` combination.
+                    const VERTEX_DOFS: [usize; 4] = [0, 1, 3, 2];
+                    for (k, &v) in conn_e.iter().enumerate() {
+                        let (v, c_max) = (v as usize, dim);
+                        for c in 0..c_max {
+                            let mut dot = 0.0_f64;
+                            if k < 4 {
+                                dot = raw[(row0 + VERTEX_DOFS[k]) * dim + c];
+                            } else {
+                                for (d, &w) in apex_row.iter().enumerate() {
+                                    dot += w * raw[(row0 + d) * dim + c];
+                                }
+                            }
+                            coords[v * dim + c] += dot;
+                        }
+                        overlap[v] += 1;
+                    }
+                } else {
+                    // Tet4: the P1 shape rows are the identity.
+                    for (k, &v) in conn_e.iter().enumerate() {
+                        let v = v as usize;
+                        for c in 0..dim {
+                            coords[v * dim + c] += raw[(row0 + k) * dim + c];
+                        }
+                        overlap[v] += 1;
+                    }
+                }
+                row0 += fused_row_dofs(&et);
+            }
+            for (v, &ov) in overlap.iter().enumerate() {
+                if ov > 0 {
+                    for c in 0..dim {
+                        coords[v * dim + c] /= ov as f64;
+                    }
+                }
+            }
+        } else if is_l2_nodes && n_elem > 0 && raw.len() >= n_elem * dim {
             // This is how geometrically periodic meshes (periodic-square.mesh,
             // periodic-hexagon.mesh, ...) encode per-element geometry — the
             // same vertex index can map to different physical positions in
@@ -783,7 +885,62 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                     | fem_mesh::element_type::ElementType::Tet10
             )
         }) {
+            // A fused order-1 pyramid table's tet rows are *vertex-ordered*
+            // dof rows: `MarkForRefinement`'s longest-edge rotation moves the
+            // element's vertices, so the row must follow (MFEM keeps the pair
+            // consistent through `PrepareNodeReorder`/`DoNodeReorder`,
+            // mesh/mesh.cpp:3780-3812 — the refined mixed mesh refines the
+            // rotated tets against the permuted table and lands on the same
+            // r2 as the unrotated chain, oracle-verified).  H1 tables are
+            // re-attached to physical slots by the D43 mechanism below.
+            let fused_before = mesh.geometry.as_ref().map(|g| g.order == 1).unwrap_or(false);
+            let before: Vec<[NodeId; 4]> = (0..mesh.n_elements() as u32)
+                .filter(|&e| mesh.element_type(e) == fem_mesh::element_type::ElementType::Tet4)
+                .map(|e| {
+                    let mut n = [0u32; 4];
+                    n.copy_from_slice(mesh.element_nodes(e));
+                    n
+                })
+                .collect();
             fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
+            if fused_before {
+                // σ(k) = old local slot whose vertex now sits at new slot k,
+                // per rotated tet; then permute the tet rows in place.
+                let mut perms: Vec<(usize, [usize; 4])> = Vec::new();
+                let mut idx = 0usize;
+                let mut row0 = 0usize;
+                for e in 0..mesh.n_elements() as u32 {
+                    let et = mesh.element_type(e);
+                    let is_tet = et == fem_mesh::element_type::ElementType::Tet4;
+                    if is_tet {
+                        let old = before[idx];
+                        idx += 1;
+                        let mut n = [0u32; 4];
+                        n.copy_from_slice(mesh.element_nodes(e));
+                        let sigma = core::array::from_fn(|k| {
+                            old.iter().position(|&x| x == n[k]).unwrap_or(k)
+                        });
+                        if sigma != [0, 1, 2, 3] {
+                            perms.push((row0, sigma));
+                        }
+                    }
+                    row0 += fused_row_dofs(&et);
+                }
+                if !perms.is_empty() {
+                    if let Some(g) = mesh.geometry.as_mut() {
+                        let mut vals = g.coords.clone();
+                        for &(start, sigma) in &perms {
+                            for k in 0..4 {
+                                for c in 0..3 {
+                                    vals[(start + k) * 3 + c] =
+                                        g.coords[(start + sigma[k]) * 3 + c];
+                                }
+                            }
+                        }
+                        g.coords = vals;
+                    }
+                }
+            }
         }
         if mesh.geometry.is_none() {
             if let Some((p, raw, ord, _)) = &h1_nodes {
@@ -1508,15 +1665,13 @@ fn nodes_dof_values<const D: usize>(
                 // (the reader refuses such tables for the same reason), so
                 // writing one would re-label the values onto wrong positions.
                 ElementType::Line2 => {
-                    if order as usize > 2 {
-                        return Err(FemError::Mesh(format!(
-                            "write_mfem: cannot write the 1-D `nodes` section: an order-{order} \
-                             continuous table is interpolated on the closed Gauss-Lobatto points, \
-                             but the mesh's 1-D geometry is evaluated on the equispaced `SegPk` \
-                             lattice — two different point sets from order 3 on (D153/D816-3); \
-                             no `nodes` section was written"
-                        )));
-                    }
+                    // D817-4: every order can carry a curved table now — the
+                    // reader attaches order-3+ tables on the closed
+                    // Gauss-Lobatto lattice and `Mesh::element_jacobian`
+                    // evaluates them with `SegGllPk`, so re-ordering the
+                    // table's own values into MFEM's dof numbering (slot 0 =
+                    // v0, slot p = v1, interiors ascending) is exact for
+                    // every order.
                     let (slots, n_dofs) = line1d_slot_map(mesh, order as usize).map_err(|e| match e {
                         HexSlotErr::NotHex => FemError::Mesh(
                             "write_mfem: no MFEM H1 `nodes` numbering for this mesh".into(),
@@ -1673,16 +1828,14 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
         ElementType::Tri3 => fem_element::lagrange::H1TriPk::new(p).dof_coords(),
         ElementType::Prism6 => fem_element::lagrange::PrismPk::new(p).dof_coords(),
         ElementType::Tet4 => fem_element::lagrange::factory::H1TetPk::new(p).dof_coords(),
-        // D813-4: the assembler's 1-D element (`factory::ref_elem(Seg, p)`).
-        // Unlike the families above it is **equispaced**, not Gauss-Lobatto —
-        // the two lattices coincide at p <= 2 ({0,1} and {0,½,1} are both
-        // equispaced), which covers the only 1-D curved table any oracle
-        // needs (`data/periodic-segment.mesh`, P1); it is also the only case
-        // where MFEM's `L2_T1_1D_P*` table can be permuted onto these slots:
-        // from p = 3 on the file's Gauss-Lobatto lattice is genuinely a
-        // different point set, and both the reader (D153 warning) and the
-        // writer refuse loudly instead of re-ordering across families.
-        ElementType::Line2 => fem_element::lagrange::factory::SegPk::new(p).dof_coords(),
+        // D813-4 / D817-4: the 1-D `L2_T1_1D_P*` node lattice is the closed
+        // Gauss-Lobatto points, ascending (`L2_SegmentElement`, fe_l2.cpp —
+        // `VerifyOpen` maps the collection's closed basis onto the closed
+        // points).  Up to order 2 these coincide with the equispaced
+        // `SegPk` positions; from order 3 on they are `SegGllPk`'s — which is
+        // also what `Mesh::element_jacobian`'s order-3+ segment arm evaluates
+        // such tables with, so the slots line up on both sides.
+        ElementType::Line2 => fem_element::gll_basis::SegGllPk::new(p).dof_coords(),
         _ => return None,
     })
 }
@@ -1972,8 +2125,7 @@ fn skip_comment(line: &str) -> &str {
 
 /// Parse the polynomial order from an MFEM nodal FEC name, e.g.
 /// `Linear_2D` → 1, `Quadratic3D` → 2, `Cubic_2D` → 3, `H1_2D_P4` → 4.
-fn parse_nodal_fec_order(fec: &str) -> Option<u8> {
-    let f = fec.trim();
+fn parse_nodal_fec_order(fec: &str) -> Option<u8> {    let f = fec.trim();
     if f.starts_with("Linear_") || f.starts_with("LinearF") {
         return Some(1);
     }
@@ -2085,6 +2237,15 @@ const HEX_CORNERS: [[usize; 3]; 8] = [
 ];
 /// Square corners in the canonical (stored) face parameterisation `(a, b)`.
 const QUAD_CORNERS: [[i32; 2]; 4] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+
+/// Dof-row length of an order-1 **fused** `L2_T1_3D_P1` table row for `et`:
+/// `L2_FuentesPyramidElement(1, GaussLobatto)` has `(p+1)³ = 8` dofs per
+/// pyramid (`fe_l2.cpp:926-927` — the apex carries no dof, the four
+/// `z = a` cross-section points do), a tet row is the 4 reference corners
+/// (`L2_TetrahedronElement(1)`).  Shared by the reader's fused arm.
+fn fused_row_dofs(et: &ElementType) -> usize {
+    if *et == ElementType::Pyramid5 { 8 } else { 4 }
+}
 
 /// Outcome of the D41 hex geometry pass.
 enum HexGeom {
@@ -4966,14 +5127,14 @@ fn build_h1_1d_geometry(
         return None;
     }
     if p > 2 {
-        eprintln!(
-            "warning (D816-3): refusing the order-{p} continuous `nodes` geometry of a 1-D \
-             mesh — H1 interpolates on the closed Gauss-Lobatto points, which from order 3 on \
-             are a different point set than the equispaced lattice the mesh's geometry is \
-             evaluated with (the L2_T1_1D_P3+ limitation, D153); the mesh is read as \
-             straight-sided (vertex coordinates recovered)"
-        );
-        return None;
+        // D817-4: from order 3 on the closed Gauss-Lobatto dof positions are
+        // a different point set than the equispaced `SegPk` lattice
+        // (`0, 0.2764…, 0.7236…, 1` vs `0, ⅓, ⅔, 1`), so the attached table
+        // must be *evaluated* on the GLL lattice — `fem_element`'s
+        // `SegGllPk` (D816-3's requested 1-D GLL geometry evaluator) and
+        // `Mesh::element_jacobian`'s order-3+ segment arm do exactly that.
+        // The row layout is order-independent (slot 0 = v0, slot p = v1,
+        // interiors ascending).
     }
     let n_vert = mesh.n_nodes();
     let n_elems = mesh.n_elems();
@@ -6554,20 +6715,21 @@ elements\n1\n1 5 1 2 3 4 5 6 7 8\n\nboundary\n6\n1 3 1 2 3 4\n1 3 5 6 7 8\n1 3 1
                 );
             }
 
-            // p = 1, 2: the closed Gauss-Lobatto points {0, 1} / {0, ½, 1}
-            // *are* equispaced, so the file's table can be permuted onto the
-            // mesh's slots (the D813-4 oracle depends on p = 1).  p >= 3: the
-            // lattices are different point sets — the permutation must *not*
-            // exist, and both directions refuse loudly.
+            // Since D817-4 the mesh-side 1-D slots are the closed
+            // Gauss-Lobatto points themselves (`SegGllPk` — the geometry
+            // evaluator `Mesh::element_jacobian` uses for order-3+ segment
+            // tables), so the file's table permutes onto the mesh's slots at
+            // *every* order.  (Before, the mesh side was the equispaced
+            // `SegPk` lattice, which coincided only at p <= 2 — the D816-3
+            // refusal premise.)
             let mesh_slots = l2_geometry_slots(ElementType::Line2, p)
                 .unwrap_or_else(|| panic!("p={p}: no Line2 arm in l2_geometry_slots"));
             assert_eq!(mesh_slots.len(), ndof, "p={p}: mesh-side count");
-            assert_eq!(
-                lex_slot_permutation(&mesh_slots, &got).is_some(),
-                p <= 2,
-                "p={p}: the L2 segment lattice and the equispaced SegPk lattice \
-                 must coincide exactly at p <= 2 and never otherwise"
-            );
+            let perm = lex_slot_permutation(&mesh_slots, &got)
+                .unwrap_or_else(|| panic!("p={p}: the lattices must coincide"));
+            for (k, &m) in perm.iter().enumerate() {
+                assert_eq!(m, k, "p={p}: the two orders are both ascending");
+            }
             tables += 1;
         }
         assert_eq!(tables, 3, "p = 1, 2, 3");

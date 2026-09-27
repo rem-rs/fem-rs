@@ -2381,7 +2381,22 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
              straight-sided"
         );
     }
+    // D817-3: a fused order-1 pyramid `L2_T1_3D_P1` table (the Fuentes P1,
+    // 8 dofs per pyramid) *is* transported: children inherit the parent's P1
+    // field through MFEM's own refinement operator, stale-buffer replay and
+    // all (see `amr::curved_pyramid`).
+    let fused = super::curved_pyramid::l2_p1_pyramid_fused_geometry(mesh);
     let n_elems = mesh.n_elems();
+    // Row offset of every element's fused-table row (ragged 8/4 layout).
+    let fused_rows: Option<Vec<usize>> = fused.map(|_| {
+        let mut offs = Vec::with_capacity(n_elems);
+        let mut cur = 0usize;
+        for e in 0..n_elems as ElemId {
+            offs.push(cur);
+            cur += if mesh.element_type_at(e) == ElementType::Pyramid5 { 8 } else { 4 };
+        }
+        offs
+    });
     let mut coords = mesh.coords.clone();
     let mut em: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
     let next_node0 = mesh.n_nodes() as NodeId;
@@ -2551,6 +2566,11 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let mut new_types = Vec::<ElementType>::new();
     let mut new_offsets = Vec::<usize>::new();
     new_offsets.push(0); // start offset for first child
+    // D817-3 bookkeeping for the fused-table transport: producing element of
+    // every fine element, plus its explicit `tet_children` matrix when the
+    // producer is a tet (corner k / interior 4(rt+1)+k).
+    let mut fine_owner = Vec::<ElemId>::new();
+    let mut fine_explicit = Vec::<Option<usize>>::new();
 
     macro_rules! mid { ($a:expr,$b:expr) => { em[&edge_key($a,$b)] }; }
 
@@ -2565,8 +2585,29 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 // MFEM UniformRefinement3D_base (mesh.cpp): 4 corner tets +
                 // 4 interior tets from mv_all[rt], where rt is chosen by the
                 // best-aspect-ratio algorithm (rt_algo = 1) using the
-                // Jacobian at the tet centroid.
-                let rt = tet_select_rt_debug(mesh, ns);
+                // Jacobian at the tet centroid.  With a fused table present
+                // MFEM's element transformation reads the *nodes* grid
+                // function (`Mesh::GetElementTransformation`,
+                // mesh/mesh.cpp:434-467), so for a degenerate (e.g. flat)
+                // parent the rt decision sees the table values, not the
+                // compatibility vertices.
+                let rt = match (fused, fused_rows.as_ref()) {
+                    (Some(fg), Some(rows)) => {
+                        let row0 = rows[e as usize];
+                        // J[t][s] = X_{s+1}[t] − X_0[t]: the (constant) P1
+                        // Jacobian columns are the vertex differences.
+                        let mut j = [[0.0_f64; 3]; 3];
+                        let d0 = fg.conn[row0] as usize;
+                        for (t, row) in j.iter_mut().enumerate() {
+                            for (s, v) in row.iter_mut().enumerate() {
+                                let d1 = fg.conn[row0 + s + 1] as usize;
+                                *v = fg.coords[d1 * 3 + t] - fg.coords[d0 * 3 + t];
+                            }
+                        }
+                        tet_select_rt_from_j(&j)
+                    }
+                    _ => tet_select_rt_debug(mesh, ns),
+                };
                 let mv = match rt {
                     0 => [
                         [0, 5, 1, 2], [0, 5, 2, 4], [0, 5, 4, 3], [0, 5, 3, 1],
@@ -2583,11 +2624,14 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 for &ch in &[
                     [ns[0],m01,m02,m03],[m01,ns[1],m12,m13],[m02,m12,ns[2],m23],[m03,m13,m23,ns[3]],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                let pe = e;
+                for k in 0..4 { fine_owner.push(pe); fine_explicit.push(Some(k)); }
                 let e = [m01, m02, m03, m12, m13, m23];
                 for k in 0..4 {
                     let ch = [e[mv[k][0]], e[mv[k][1]], e[mv[k][2]], e[mv[k][3]]];
                     new_conn.extend_from_slice(&ch);
                     new_offsets.push(new_conn.len());
+                    fine_owner.push(pe); fine_explicit.push(Some(4 * (rt + 1) + k));
                 }
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
             }
@@ -2620,7 +2664,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                     [bc,f2,e10,f3,f5,e5,ns[6],e6],
                     [f4,bc,f3,e11,e7,f5,e6,ns[7]],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
-                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Hex8); }
+                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Hex8); fine_owner.push(e); fine_explicit.push(None); }
             }
             ElementType::Prism6 => {
                 // MFEM wedge_t::Edges: {0,1},{1,2},{2,0},{3,4},{4,5},{5,3},
@@ -2645,7 +2689,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                     [q0,m14,q1,m34,ns[4],m45],
                     [q2,q1,m25,m35,m45,ns[5]],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
-                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Prism6); }
+                for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Prism6); fine_owner.push(e); fine_explicit.push(None); }
             }
             ElementType::Pyramid5 => {
                 // MFEM UniformRefinement3D_base, PYRAMID branch (mesh.cpp:
@@ -2665,14 +2709,14 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                     [e4,e5,e6,e7,ns[4]],
                     [e7,e6,e5,e4,qf0],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
-                for _ in 0..6 { new_tags.push(tag); new_types.push(ElementType::Pyramid5); }
+                for _ in 0..6 { new_tags.push(tag); new_types.push(ElementType::Pyramid5); fine_owner.push(e); fine_explicit.push(None); }
                 for &ch in &[
                     [e0,e4,e5,qf0],
                     [e1,e5,e6,qf0],
                     [e2,e6,e7,qf0],
                     [e3,e7,e4,qf0],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
-                for _ in 0..4 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
+                for _ in 0..4 { new_tags.push(tag); new_types.push(ElementType::Tet4); fine_owner.push(e); fine_explicit.push(None); }
             }
             _ => {}
         }
@@ -2711,12 +2755,31 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         elem_tags: new_tags,
         elem_type: mesh.elem_type,
         face_conn: vec![], face_tags: vec![], face_type: ElementType::Tri3,
-        elem_types: Some(new_types), elem_offsets: Some(new_offsets),
+        elem_types: Some(new_types.clone()), elem_offsets: Some(new_offsets),
         face_types: None, face_offsets: None,
         face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
 vertex_parents: vec![],
 };
+    // D817-3: transport the fused pyramid `L2_T1_3D_P1` table — children
+    // inherit the parent P1 field through MFEM's refinement operator (the
+    // pyramid-blind embedding assignment and the stale `subX` replay
+    // included; see `amr::curved_pyramid`) — then rebuild the vertex table
+    // from the transported table (MFEM `UpdateNodes` →
+    // `SetVerticesFromNodes`), before the map-driven boundary rebuild (which
+    // reads no coordinates).
+    if let Some(fg) = fused {
+        let parent_types: Vec<ElementType> =
+            (0..n_elems as ElemId).map(|e| mesh.element_type_at(e)).collect();
+        let assign = super::curved_pyramid::assign_embeddings(
+            &new_types, &fine_owner, &parent_types, &fine_explicit,
+        );
+        let table = super::curved_pyramid::build_refined_l2_p1_fused_geometry(
+            mesh, fg, &new_types, &assign,
+        );
+        result.coords = super::curved_pyramid::set_vertices_from_nodes_fused(&result, &table);
+        result.geometry = Some(table);
+    }
     rebuild_3d_boundary(
         &mut result,
         mesh,

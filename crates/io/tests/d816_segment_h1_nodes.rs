@@ -14,12 +14,15 @@
 //!   (`crates/io/src/mfem.rs`), so a curved `H1_1D_P2` 1-D mesh round-trips
 //!   **byte for byte** against MFEM 4.10's own
 //!   `Mesh::Save(out, 16)` re-save — the round-77/80 oracle protocol;
-//! * `H1_1D_P3+` stays refused on both sides with the reason on record: the
+//! * `H1_1D_P3+` stayed refused on both sides with the reason on record: the
 //!   collection interpolates on the closed Gauss-Lobatto points, which from
 //!   order 3 on are a different point set than the equispaced `SegPk` lattice
-//!   the mesh's 1-D geometry is evaluated with (the `L2_T1_1D_P3+`
-//!   limitation, D153).  The reader keeps the vertex table (always correct —
-//!   `SetVerticesFromNodes` semantics) and reads the mesh straight-sided.
+//!   the mesh's 1-D geometry was evaluated with (the `L2_T1_1D_P3+`
+//!   limitation, D153).  **D817-4 reopened it**: `fem_element::gll_basis::
+//!   SegGllPk` is the 1-D GLL geometry evaluator that refusal asked for, so
+//!   the reader attaches the table and the writer emits it at every order
+//!   (the two updated teeth below pin the new behavior; the byte-level
+//!   oracle is in the D817-4 test).
 //!
 //! Fixtures (all MFEM 4.10 output, `$HOME/work/d81b/h1_1d_probe.cpp`):
 //!
@@ -33,7 +36,8 @@
 //!   `MakeCartesian1D(3)` + `SetCurvature(2, false)` twin, the writer-only
 //!   oracle (the table is built by hand in the test, proving the writer pulls
 //!   values through the table's own dof ids instead of assuming the file's);
-//! * `tests/data/d816_mfem_h1_1d_p3.mesh.txt` — the p = 3 refusal fixture;
+//! * `tests/data/d816_mfem_h1_1d_p3.mesh.txt` — the former refusal fixture,
+//!   now the attachment fixture;
 //! * `tests/fixtures/d816_mfem_h1seg_getelementdofs_p1to3.txt` — the
 //!   `GetElementDofs` layout + `H1_SegmentElement` node positions, pinned in
 //!   a unit test inside `crates/io/src/mfem.rs`.
@@ -244,16 +248,18 @@ fn d816_segment_h1_p2_straight_writer_matches_mfem_resave() {
 
 // ─── teeth ───────────────────────────────────────────────────────────────────
 
-/// `H1_1D_P3+` stays refused at *read* time: the collection's node lattice is
-/// the closed Gauss-Lobatto set, which from order 3 on differs from the
-/// equispaced `SegPk` lattice the geometry is evaluated with.  The mesh
-/// degrades to straight-sided with the vertex coordinates recovered — which
-/// are always correct — and the element/boundary tables are untouched.
+/// `H1_1D_P3` is attached since D817-4 (`SegGllPk` evaluates the closed
+/// Gauss-Lobatto lattice the collection interpolates on) — the table is
+/// carried with the same shared-dof layout as `P2`, and the vertex
+/// coordinates (the first NV dofs) stay exact.
 #[test]
-fn d816_segment_h1_p3_read_refuses_the_table_but_keeps_the_vertices() {
+fn d816_segment_h1_p3_read_attaches_the_table_and_keeps_the_vertices() {
     let file = read_mfem(Cursor::new(normalized(MFEM_H1_P3).as_bytes())).expect("read");
     let mesh = file.mesh1d.expect("1-D container");
-    assert!(mesh.geometry.is_none(), "the order-3 table must be refused");
+    let g = mesh.geometry.as_ref().expect("the order-3 table is attached");
+    assert_eq!(g.order, 3);
+    assert_eq!(g.nodes_per_elem, 4);
+    assert_eq!(g.n_nodes, 13, "5 vertex dofs + 2 interiors per element");
     assert_eq!(mesh.n_elems(), 4);
     assert_eq!(mesh.elem_nodes(3), &[3, 4]);
 
@@ -265,24 +271,21 @@ fn d816_segment_h1_p3_read_refuses_the_table_but_keeps_the_vertices() {
         dof[..5].iter().map(|v| v.to_bits()).collect::<Vec<_>>()
     );
 
-    // The subsequent write is a well-formed *straight* file (the curvature
-    // loss was already named loudly at read time).
+    // The subsequent write re-emits the table (byte-identical to MFEM's own
+    // re-save; the full precision-16 comparison lives in the D817-4 test).
     let mut buf: Vec<u8> = Vec::new();
-    write_mfem_nodes_1d(&mut buf, &mesh, NodesSpace::Continuous).expect("straight write");
+    write_mfem_nodes_1d(&mut buf, &mesh, NodesSpace::Continuous).expect("order-3 write");
     let text = normalized(&String::from_utf8(buf).expect("utf-8"));
-    assert!(
-        !text.contains("nodes\n"),
-        "a refused table must not leave a nodes section behind"
-    );
-    assert!(text.contains("vertices\n5\n1\n"), "straight coordinates block");
+    assert!(text.contains("H1_1D_P3"), "the order-3 section is written");
 }
 
-/// The writer must not accept an order-3+ 1-D table either (defence in
-/// depth against a future table source): the refusal names the lattice
-/// split instead of re-labelling values onto wrong positions.
+/// An order-3 1-D table is writable since D817-4: the writer re-labels the
+/// table's own values into MFEM's dof numbering (the slot layout is
+/// order-independent), and the GLL evaluation arm keeps the table meaningful.
+/// The byte-level oracle lives in the D817-4 test.
 #[test]
-fn d816_segment_h1_p3_writer_refuses() {
-    let dof: Vec<f64> = (0..13).map(|i| i as f64).collect();
+fn d816_segment_h1_p3_writer_emits_the_table() {
+    let dof: Vec<f64> = (0..28).map(|i| i as f64).collect();
     let mesh = Mesh::<1>::uniform(
         vec![0.0, 0.25, 0.5, 0.75, 1.0],
         vec![0, 1, 1, 2, 2, 3, 3, 4],
@@ -303,14 +306,10 @@ fn d816_segment_h1_p3_writer_refuses() {
         n_nodes: 28,
     });
     let mut buf: Vec<u8> = Vec::new();
-    let err = write_mfem_nodes_1d(&mut buf, &mesh, NodesSpace::Continuous)
-        .expect_err("an order-3 1-D table must not be writable");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("closed Gauss-Lobatto") && msg.contains("equispaced"),
-        "unexpected order-3 refusal diagnostic: {msg}"
-    );
-    assert!(buf.is_empty(), "a refused write must emit nothing");
+    write_mfem_nodes_1d(&mut buf, &mesh, NodesSpace::Continuous)
+        .expect("an order-3 1-D table is writable");
+    let text = normalized(&String::from_utf8(buf).expect("utf-8"));
+    assert!(text.contains("H1_1D_P3"));
 }
 
 /// The round-80 folded `L2_T1_1D_P1` table is still not writable as a

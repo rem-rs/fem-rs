@@ -323,3 +323,164 @@ impl ReferenceElement for L2FuentesPyramidPk {
         self.inner.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
     }
 }
+
+/// MFEM-arithmetic-exact shape evaluation of
+/// `L2_FuentesPyramidElement(1, BasisType::GaussLobatto)` — the **fused
+/// pyramid P1** behind an `L2_T1_3D_P1` `nodes` section of a pyramid mesh
+/// (D817-3).  Returns the 8 shape values in the element's DOF order
+/// (`o = k·4 + j·2 + i`).
+///
+/// [`L2FuentesPyramidPk`] evaluates `φ_m = Σ_o T⁻¹(m,o)·u_o` through a
+/// *nalgebra* inverse of the Vandermonde, which reproduces MFEM's values only
+/// to a few ulp.  The geometry-transport path (`crates/mesh` uniform
+/// refinement of an `L2_T1_3D_P1` pyramid table, and `crates/io`'s
+/// vertex-table reconstruction) compares against MFEM dumps **bit for bit**,
+/// so this port replays MFEM's own arithmetic end to end:
+///
+/// * `T(o, m) = u_o(node_m)` built column by column in MFEM's DOF order
+///   (`fe_l2.cpp:970-989`),
+/// * `Ti.Factor(T)` — `LUFactors::Factor` without LAPACK: partial pivoting on
+///   the **column-major** factor storage, row swaps applied to the full
+///   L+U rows, unit lower factor scaled by `1/a_ii`
+///   (`linalg/densemat.cpp:3415-3496`, this build has
+///   `MFEM_USE_LAPACK` disabled — `config/_config.hpp:74`),
+/// * `Ti.Mult(u, shape)` = `LSolve` + `USolve`
+///   (`linalg/kernels.hpp:1760-1804`),
+/// * the raw expansion `u_o` from [`l2_fuentes_raw_basis`] with the closed
+///   `z`-collapse factor `a = 0.78867513459481287`
+///   (`Poly_1D::GetPoints(1, GaussLegendre)[1]`, probe-printed).
+///
+/// Verified against MFEM 4.10 `CalcShape` dumps at the 8 nodes (unit vectors),
+/// the apex (`−0.066987298107780702 ×4`, `0.3169872981077807 ×4`) and
+/// `(0.5, 0, 0)` (`0.5, 0.5, 0…`) — `$HOME/work/d83a/t5`.
+pub fn l2_fuentes_pyramid_p1_shapes_gauss_lobatto(x: f64, y: f64, z: f64) -> [f64; 8] {
+    static LU: OnceLock<L1Lufac> = OnceLock::new();
+    let lu = LU.get_or_init(build_p1_lu_factors);
+    let mut sol = [0.0_f64; 8];
+    l2_fuentes_raw_basis(1, x, y, z, &mut sol);
+    // Ti.Mult(u, shape): y = x; LSolve; USolve (kernels.hpp:1760-1804).
+    // LSolve: X <- P X (the pivot swaps, in factor order), then L⁻¹X.
+    for i in 0..8 {
+        let p = lu.ipiv[i] as usize - 1;
+        sol.swap(i, p);
+    }
+    for j in 0..8 {
+        let x_j = sol[j];
+        for i in (j + 1)..8 {
+            sol[i] -= lu.data[i + j * 8] * x_j;
+        }
+    }
+    // USolve: U⁻¹X, back substitution.
+    for j in (0..8).rev() {
+        let x_j = sol[j] / lu.data[j + j * 8];
+        sol[j] = x_j;
+        for i in 0..j {
+            sol[i] -= lu.data[i + j * 8] * x_j;
+        }
+    }
+    sol
+}
+
+/// Column-major LU factors of the P1 Fuentes Vandermonde plus the pivot
+/// sequence (`LUFactors`, `linalg/sparsemat.hpp`), exactly as
+/// `LUFactors::Factor(8, 0.0)` produces them.
+struct L1Lufac {
+    /// Column-major `data[i + j*8]`, lower+upper packed.
+    data: [f64; 64],
+    /// 1-based pivot rows, MFEM's `ipiv`.
+    ipiv: [i32; 8],
+}
+
+/// `LUFactors::Factor` port (`linalg/densemat.cpp:3415-3496`, non-LAPACK arm,
+/// `TOL = 0.0`): partial pivoting over the column `i` of the column-major
+/// storage, full-row swaps, unit-lower scaling, Schur update in MFEM's loop
+/// order.
+fn build_p1_lu_factors() -> L1Lufac {
+    let nodes = l2_fuentes_pyramid_nodes(1, true);
+    debug_assert_eq!(nodes.len(), 8);
+    let mut data = [0.0_f64; 64];
+    let mut u = [0.0_f64; 8];
+    for (m, node) in nodes.iter().enumerate() {
+        l2_fuentes_raw_basis(1, node[0], node[1], node[2], &mut u);
+        for (o, &v) in u.iter().enumerate() {
+            data[o + m * 8] = v;
+        }
+    }
+    let mut ipiv = [0_i32; 8];
+    let m = 8usize;
+    for i in 0..m {
+        // pivoting
+        let mut piv = i;
+        let mut a = data[piv + i * m].abs();
+        for j in (i + 1)..m {
+            let b = data[j + i * m].abs();
+            if b > a {
+                a = b;
+                piv = j;
+            }
+        }
+        ipiv[i] = piv as i32 + 1;
+        if piv != i {
+            // swap rows i and piv in both L and U parts
+            for j in 0..m {
+                data.swap(i + j * m, piv + j * m);
+            }
+        }
+        let a_ii_inv = 1.0 / data[i + i * m];
+        for j in (i + 1)..m {
+            data[j + i * m] *= a_ii_inv;
+        }
+        for k in (i + 1)..m {
+            let a_ik = data[i + k * m];
+            for j in (i + 1)..m {
+                data[j + k * m] -= a_ik * data[j + i * m];
+            }
+        }
+    }
+    L1Lufac { data, ipiv }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::l2_fuentes_pyramid_p1_shapes_gauss_lobatto as shapes;
+
+    /// Nodality and the probe-dumped values (MFEM 4.10 `CalcShape`,
+    /// `$HOME/work/d83a/t5`, precision 17).
+    #[test]
+    fn d818_fuentes_p1_matches_mfem_calc_shape() {
+        let nodes = super::l2_fuentes_pyramid_nodes(1, true);
+        for (m, node) in nodes.iter().enumerate() {
+            let s = shapes(node[0], node[1], node[2]);
+            for (k, &v) in s.iter().enumerate() {
+                let want = if k == m { 1.0 } else { 0.0 };
+                assert_eq!(v, want, "node {m} shape {k}");
+            }
+        }
+        // The apex: the z = 1 collapse of the raw basis through Ti.
+        let s = shapes(0.0, 0.0, 1.0);
+        for k in 0..4 {
+            assert_eq!(s[k], -0.066987298107780702_f64, "apex shape {k}");
+        }
+        for k in 4..8 {
+            assert_eq!(s[k], 0.3169872981077807_f64, "apex shape {k}");
+        }
+        // Midpoint of the base edge (0,0,0)-(1,0,0).
+        let s = shapes(0.5, 0.0, 0.0);
+        assert_eq!(s[0], 0.5);
+        assert_eq!(s[1], 0.5);
+        assert!(s[2..].iter().all(|&v| v == 0.0));
+        // A generic interior point.
+        let s = shapes(0.25, 0.25, 0.25);
+        let want = [
+            0.30356120084098637_f64,
+            0.15178060042049318_f64,
+            0.15178060042049318_f64,
+            0.075890300210246564_f64,
+            0.14088324360345808_f64,
+            0.07044162180172904_f64,
+            0.07044162180172904_f64,
+            0.035220810900864534_f64,
+        ];
+        assert_eq!(s, want);
+    }
+}

@@ -342,7 +342,26 @@ impl<const D: usize> Mesh<D> {
         match self.geometry.as_ref() {
             None => self.element_type_at(e).nodes_per_element(),
             Some(g) if g.nodes_per_elem != 0 => g.nodes_per_elem,
-            Some(g) => h1_family_dofs(self.element_type_at(e), g.order),
+            Some(g) => self.geometry_ragged_row_len(e, g),
+        }
+    }
+
+    /// Row length of a **ragged** geometry table's row for element `e`.
+    ///
+    /// The default is the H1 family count ([`h1_family_dofs`], D624).  The
+    /// order-1 **fused L2** exception (D817-3) covers the ragged table the io
+    /// reader attaches for a mixed pyramid+tet mesh carrying an
+    /// `L2_T1_3D_P1` `nodes` section: `L2_FuentesPyramidElement(1)` gives
+    /// Pyramid5 rows of **8** dofs (not the H1 pyramid's 5).  Such a table is
+    /// element-major *fresh, unshared* dof ids — `n_nodes == conn.len()` —
+    /// while a continuous (D624) ragged table shares dofs, so its `n_nodes`
+    /// is strictly below `conn.len()`.
+    fn geometry_ragged_row_len(&self, e: ElemId, g: &GeometryData) -> usize {
+        let et = self.element_type_at(e);
+        if g.order == 1 && g.n_nodes == g.conn.len() && et == ElementType::Pyramid5 {
+            8
+        } else {
+            h1_family_dofs(et, g.order)
         }
     }
 
@@ -362,9 +381,9 @@ impl<const D: usize> Mesh<D> {
         }
         let mut start = 0usize;
         for k in 0..e {
-            start += h1_family_dofs(self.element_type_at(k), g.order);
+            start += self.geometry_ragged_row_len(k, g);
         }
-        (start, start + h1_family_dofs(self.element_type_at(e), g.order))
+        (start, start + self.geometry_ragged_row_len(e, g))
     }
 
     /// Element `e`'s high-order geometry row ([`Mesh::geometry_row_range`]).
@@ -467,6 +486,32 @@ impl<const D: usize> Mesh<D> {
         // measured here on a curved P3 tet as a 7.1e-2 error at the first edge
         // node — see `tests::tet_geometry_family_tests`.
         let factory: Box<dyn fem_element::ReferenceElement> = match et {
+            // D817-4: an order-3+ **1-D** geometry table sits on the closed
+            // Gauss-Lobatto points (`H1_1D_P*`/`L2_T1_1D_P*` — from order 3
+            // on a different point set than the equispaced `SegPk` lattice),
+            // so it must be evaluated with the GLL element, not the
+            // equispaced factory one.
+            ElementType::Line2
+                if geo_order >= 3 && self.geometry.as_ref().is_some_and(|g| g.order as usize == geo_order) =>
+            {
+                Box::new(fem_element::gll_basis::SegGllPk::new(geo_order))
+            }
+            // D817-3: a **fused pyramid P1** table (the io reader's
+            // `L2_T1_3D_P1` pyramid arm) holds 8-dof rows in the
+            // `L2_FuentesPyramidElement` dof order — evaluate it with that
+            // element, not the 5-dof order-1 H1 pyramid (whose basis array
+            // would index out of the 8-dof row).
+            ElementType::Pyramid5
+                if geo_order == 1
+                    && self
+                        .geometry
+                        .as_ref()
+                        .is_some_and(|g| g.order == 1 && self.geometry_row_len(e) == 8) =>
+            {
+                Box::new(
+                    fem_element::lagrange::pyramid_l2::L2FuentesPyramidPk::new_gauss_lobatto(1),
+                )
+            }
             // D347: a curved pyramid's table holds the **Fuentes** node order
             // (`set_curvature_pyramid5`, MFEM `SetCurvature`'s default
             // `pyr_type=1`); the layer-order equispaced `PyramidPk` that used

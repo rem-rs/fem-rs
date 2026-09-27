@@ -5,6 +5,7 @@ mod amr_inner;
 mod bisect;
 mod curved_hex;
 mod curved_prism;
+mod curved_pyramid;
 mod curved_quad;
 mod curved_tet;
 mod curved_tri;

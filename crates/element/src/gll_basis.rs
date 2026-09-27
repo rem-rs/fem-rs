@@ -38,6 +38,8 @@
 
 const MAX_P: usize = 16;
 
+use crate::reference::{QuadratureRule, ReferenceElement};
+
 /// `p + 1` Gauss-Lobatto-Legendre points on `[-1, 1]` (closed points).
 pub(crate) fn gll_nodes(p: usize) -> &'static [f64] {
     use std::sync::OnceLock;
@@ -358,6 +360,65 @@ impl ClosedBasis {
             o[i] = o[i - 1] - d[i];
         }
         o
+    }
+}
+
+/// A degree-`p` **nodal segment element on the closed Gauss-Lobatto points of
+/// `[0,1]`** — the 1-D geometry element behind MFEM's `H1_SegmentElement(p)`
+/// (`fem/fe/fe_h1.cpp:21`, dofs at `Poly_1D::ClosedPoints`, ascending) and the
+/// `L2_SegmentElement` nodal lattice (identical point set, D813-4).
+///
+/// This is the missing arm that kept `H1_1D_P3+` and `L2_T1_1D_P3+` `nodes`
+/// tables out of the reader and writer (D153/D816-3): up to order 2 the GLL
+/// points coincide with the equispaced [`crate::lagrange::factory::SegPk`]
+/// lattice, and from order 3 on (`0, 0.2764…, 0.7236…, 1` vs `0, ⅓, ⅔, 1`)
+/// they are a different point set — a table on that lattice must be
+/// *evaluated* on it.  Evaluation is MFEM's own `Poly_1D::Basis::Eval`
+/// ([`ClosedBasis`], barycentric with the stable centre split), so the values
+/// are bit-identical to `H1_SegmentElement::CalcShape`/`CalcDShape`.
+pub struct SegGllPk {
+    order: usize,
+    basis: ClosedBasis,
+}
+
+impl SegGllPk {
+    /// Degree-`p` closed-GLL segment element (`p + 1` dofs).
+    pub fn new(p: usize) -> Self {
+        Self { order: p, basis: ClosedBasis::new_01(p) }
+    }
+
+    /// The closed Gauss-Lobatto dof positions, ascending (the dof *order* of
+    /// MFEM's 1-D tables).
+    pub fn nodes(&self) -> &[f64] {
+        &self.basis.nodes
+    }
+}
+
+impl ReferenceElement for SegGllPk {
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.order + 1
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let v = self.basis.val_mfem(xi[0]);
+        values[..v.len()].copy_from_slice(&v);
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let v = self.basis.eval_mfem(xi[0]);
+        for (g, &dc) in grads.iter_mut().zip(v.dc.iter()) {
+            *g = dc;
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        crate::quadrature::seg_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.basis.nodes.iter().map(|&x| vec![x]).collect()
     }
 }
 
