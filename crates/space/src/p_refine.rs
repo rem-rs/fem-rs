@@ -44,6 +44,14 @@
 //!   `EnsureNCMesh` wedge mesh).  The element rows pair with
 //!   [`fem_element::lagrange::H1PrismPk`]'s slot order up to the space-level
 //!   face orientation convention (see `build_variable_order_dof_manager`).
+//! * 3D pyramids: conforming variable-order in MFEM's default
+//!   `H1_FuentesPyramidElement` entity order — 8 edge blocks in
+//!   `Geometry::Constants<PYRAMID>::Edges` order/direction, the base quad
+//!   face (face 0) in Fuentes' `(cp[i], cp[p−j])` j-reversed layout, 4
+//!   triangular side faces in `Faces` order at `H1TriPk` GLL barycentrics,
+//!   `(p−1)³` interior dofs (`fe_h1.cpp:1070-1150`).  MFEM-verified by probe
+//!   `tmp/d85c/pyr_hp_probe.cpp` (D824-A): rows, NDofs and the min-rule
+//!   constraints of a mixed-order pyramid triple on `EnsureNCMesh`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use fem_core::types::{DofId, NodeId};
@@ -137,13 +145,24 @@ fn interior_positions_1d(p: u8, gll: bool) -> Vec<f64> {
 }
 
 /// Whether the H¹ basis on `et` cells uses Gauss-Lobatto node sets (`true`
-/// for 2D tri/quad and 3D hex/prism — `H1TriPk`/`QuadQk`/`HexQk`/`H1PrismPk`)
-/// or equispaced (3D tet via `TetPk`).  Family-based since D824: a Quad8 row
-/// (8 nodes) is a SQUARE cell, not a hex, and a Tet10 row is a TET.
+/// for 2D tri/quad and 3D hex/prism/pyramid — `H1TriPk`/`QuadQk`/`HexQk`/
+/// `H1PrismPk`/`H1FuentesPyramidPk`) or equispaced (3D tet via `TetPk`).
+/// Family-based since D824: a Quad8 row (8 nodes) is a SQUARE cell, not a
+/// hex, and a Tet10 row is a TET.
+///
+/// The pyramid arm is D824-C (probe-pinned, not inherited): MFEM's default
+/// pyramid H¹ element is `H1_FuentesPyramidElement`, whose node table is
+/// built from `Poly1D::ClosedPoints(p, GaussLobatto)` (`fe_h1.cpp:1043`), and
+/// the probe dump `tmp/d85c/out_p311.txt` shows p3 edge-interior nodes at
+/// `0.5·(1 ∓ 1/√5)` — the closed GLL points, not the equispaced `1/3, 2/3`.
 fn elem_uses_gll(et: ElementType) -> bool {
-    match et.dim() {
-        2 => true,
-        3 => !matches!(et, ElementType::Tet4 | ElementType::Tet10),
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => false,
+        ElementType::Tri3 | ElementType::Tri6
+        | ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+        | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+        | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
+        | ElementType::Pyramid5 | ElementType::Pyramid13 => true,
         _ => false,
     }
 }
@@ -174,6 +193,9 @@ fn is_prism_row(et: ElementType) -> bool {
 }
 fn is_hex_row(et: ElementType) -> bool {
     matches!(et, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27)
+}
+fn is_pyramid_row(et: ElementType) -> bool {
+    matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13)
 }
 
 /// Extract the local-orientation edges of a 2D triangle: (0,1), (1,2), (2,0)
@@ -214,6 +236,19 @@ fn elem_local_edges(et: ElementType, ns: &[NodeId]) -> Vec<(NodeId, NodeId)> {
                 (ns[0], ns[4]), (ns[1], ns[5]), (ns[2], ns[6]), (ns[3], ns[7]),
             ]
         }
+        3 if is_pyramid_row(et) => {
+            // Pyramid: 8 edges in MFEM `Geometry::Constants<PYRAMID>::Edges`
+            // order and direction (fem/geom.cpp:1076): base (0,1) (1,2)
+            // (3,2) (0,3) — note the two reversed base edges — then the
+            // laterals (0,4) (1,4) (2,4) (3,4); the `H1_FuentesPyramidElement`
+            // edge-block order (fe_h1.cpp:1070-1102, probe
+            // `tmp/d85c/out_p311.txt`: the p3 row lists the (3,2)-edge dofs
+            // reversed against the stored ascending order).
+            vec![
+                (ns[0], ns[1]), (ns[1], ns[2]), (ns[3], ns[2]), (ns[0], ns[3]),
+                (ns[0], ns[4]), (ns[1], ns[4]), (ns[2], ns[4]), (ns[3], ns[4]),
+            ]
+        }
         3 => tet_edges(ns),
         _ => panic!("elem_local_edges: unsupported dimension for {et:?}"),
     }
@@ -243,6 +278,27 @@ fn prism_quad_faces(ns: &[NodeId]) -> Vec<[NodeId; 4]> {
         [ns[0], ns[1], ns[4], ns[3]],
         [ns[1], ns[2], ns[5], ns[4]],
         [ns[2], ns[0], ns[3], ns[5]],
+    ]
+}
+
+/// Base quad face of a pyramid (MFEM `Geometry::Constants<PYRAMID>` face 0),
+/// listed in the element's own corner cycle `(v0, v1, v2, v3)` — the frame
+/// the Fuentes base-face layout `(cp[i], cp[p−j])` lives in
+/// (`fe_h1.cpp:1112-1121`).
+fn pyramid_base_face(ns: &[NodeId]) -> [NodeId; 4] {
+    [ns[0], ns[1], ns[2], ns[3]]
+}
+
+/// Triangular side faces of a pyramid in MFEM
+/// `Geometry::Constants<PYRAMID>::Faces` order (faces 1..4):
+/// `(0,1,4) (1,2,4) (2,3,4) (3,0,4)` — the `H1_FuentesPyramidElement`
+/// tri-face block order (fe_h1.cpp:1123-1144).
+fn pyramid_tri_faces(ns: &[NodeId]) -> Vec<(NodeId, NodeId, NodeId)> {
+    vec![
+        (ns[0], ns[1], ns[4]),
+        (ns[1], ns[2], ns[4]),
+        (ns[2], ns[3], ns[4]),
+        (ns[3], ns[0], ns[4]),
     ]
 }
 
@@ -372,12 +428,17 @@ fn n_face_dofs_3d(ns_len: usize, p: u8) -> usize {
 /// Tet: (p-1)(p-2)(p-3)/6 (p≥4)
 /// Prism: (p-1)·(p-1)(p-2)/2 (p≥3)
 /// Hex: (p-1)³ (p≥2)
+/// Pyramid: (p-1)³ (p≥2, Fuentes' tensor bubble grid; Bergot would be
+/// `(p-2)(p-1)(2p-3)/6` — the hp builder is Fuentes like the fixed-order
+/// default, D347)
 fn n_volume_dofs_3d(et: ElementType, p: u8) -> usize {
     let p = p as usize;
     if is_tet_row(et) {
         if p >= 4 { (p - 1) * (p - 2) * (p - 3) / 6 } else { 0 }
     } else if is_prism_row(et) {
         if p >= 3 { (p - 1) * (p - 1) * (p - 2) / 2 } else { 0 }
+    } else if is_pyramid_row(et) {
+        if p >= 2 { (p - 1).pow(3) } else { 0 }
     } else if is_hex_row(et) {
         if p >= 2 { (p - 1).pow(3) } else { 0 }
     } else {
@@ -435,6 +496,18 @@ fn collect_face_variants<M: MeshTopology>(
                 let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
                 entry.0.insert(p);
             }
+        } else if is_pyramid_row(et) {
+            for face4 in [pyramid_base_face(&ns)] {
+                let face4 = canon_quad_face(face4);
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
+                entry.0.insert(p);
+            }
+            for (a, b, c) in pyramid_tri_faces(&ns) {
+                let key = FaceKey::new(a, b, c);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 3));
+                entry.0.insert(p);
+            }
         } else if is_prism_row(et) {
             for (a, b, c) in prism_tri_faces(&ns) {
                 let key = FaceKey::new(a, b, c);
@@ -454,8 +527,7 @@ fn collect_face_variants<M: MeshTopology>(
                 entry.0.insert(p);
             }
         } else {
-            panic!("collect_face_variants: unsupported element geometry {et:?} \
-                    (pyramid rows are not hp-supported)");
+            panic!("collect_face_variants: unsupported element geometry {et:?}");
         }
     }
     sets
@@ -473,10 +545,14 @@ fn collect_face_variants<M: MeshTopology>(
 /// [`detect_p_constraints`] to obtain the mixed-order (and, in 2D, hanging
 /// edge) constraints.
 ///
-/// Supported element geometries: 2D tri/quad, 3D tet/prism/hex (prisms in
-/// MFEM `H1_WedgeElement`'s entity order — the layout MFEM's variable-order
-/// `FiniteElementSpace::GetElementDofs` produces, probe
-/// `tmp/d174_prism_p_probe.cpp`).  The per-entity DOF lists use canonical
+/// Supported element geometries: 2D tri/quad, 3D tet/prism/hex/pyramid
+/// (prisms in MFEM `H1_WedgeElement`'s entity order — the layout MFEM's
+/// variable-order `FiniteElementSpace::GetElementDofs` produces, probe
+/// `tmp/d174_prism_p_probe.cpp`; pyramids in MFEM's default
+/// `H1_FuentesPyramidElement` entity order — edges in
+/// `Geometry::Constants<PYRAMID>::Edges` order/direction, base quad face
+/// first then 4 tri faces in `Faces` order, probe
+/// `tmp/d85c/pyr_hp_probe.cpp`).  The per-entity DOF lists use canonical
 /// (first-encountering element) face orientation, MFEM's space-level
 /// `var_face_dofs` convention: a consumer pairing element rows with a
 /// reference element slot-for-slot must apply the face orientation
@@ -618,10 +694,11 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         let et = mesh.element_type(e);
         assert!(
             (dim == 2 && (is_tri_row(et) || is_quad_row(et)))
-                || (dim == 3 && (is_tet_row(et) || is_prism_row(et) || is_hex_row(et))),
+                || (dim == 3 && (is_tet_row(et) || is_prism_row(et) || is_hex_row(et)
+                    || is_pyramid_row(et))),
             "build_variable_order_dof_manager: unsupported element geometry \
-             (dim {dim}, {et:?}; quadratic Tri6/Tet10/Hex20/Hex27/Prism15/Prism18 \
-             rows are supported since D824, Pyramid rows are not)"
+             (dim {dim}, {et:?}; quadratic Tri6/Tet10/Hex20/Hex27/Prism15/Prism18/\
+             Pyramid13 rows are supported since D824)"
         );
         // D824: the row's CORNER nodes are the vertex dofs — a quadratic row
         // (Quad8/Quad9/Tet10/Hex20/Hex27/Prism15/Prism18) must not donate its
@@ -652,6 +729,24 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 for face4 in hex_quad_faces(&ns) {
                     let face4 = canon_quad_face(face4);
                     let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                    if let Some((_, dofs)) = face_variants[&key].iter().find(|(p, _)| *p == p_e) {
+                        dofs_flat.extend_from_slice(dofs);
+                    }
+                }
+            } else if is_pyramid_row(et) {
+                // MFEM `Geometry::Constants<PYRAMID>::Faces` order: the base
+                // quad face (face 0) first, then the four triangular side
+                // faces (probe `tmp/d85c/out_p311.txt`: the p3 row runs
+                // `... | 4 base-face dofs | 4 tri-face dofs | 8 interior`).
+                for face4 in [pyramid_base_face(&ns)] {
+                    let face4 = canon_quad_face(face4);
+                    let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                    if let Some((_, dofs)) = face_variants[&key].iter().find(|(p, _)| *p == p_e) {
+                        dofs_flat.extend_from_slice(dofs);
+                    }
+                }
+                for (a, b, c) in pyramid_tri_faces(&ns) {
+                    let key = FaceKey::new(a, b, c);
                     if let Some((_, dofs)) = face_variants[&key].iter().find(|(p, _)| *p == p_e) {
                         dofs_flat.extend_from_slice(dofs);
                     }
@@ -727,13 +822,20 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         }
     }
 
-    // 3D face DOF coordinates: bilinear (hex/prism quad faces), equispaced
-    // barycentric (tet tri faces) or GLL barycentric (prism tri faces)
+    // 3D face DOF coordinates: bilinear (hex/prism quad faces), Fuentes
+    // j-reversed bilinear (pyramid base quad faces), equispaced barycentric
+    // (tet tri faces) or GLL barycentric (prism/pyramid tri faces)
     // interpolation at the variant's node positions.
     if dim == 3 {
-        // Face-local node lists per face key (from the first element seen).
-        let mut face_nodes4: HashMap<FaceKey, [NodeId; 4]> = HashMap::new();
-        let mut face_nodes3: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
+        // Face-local node lists per face key (from the first element seen),
+        // with the face's 1-D basis flag: quad faces — `true` when the face
+        // belongs to a pyramid (Fuentes `(cp[i], cp[p−j])` layout, j
+        // reversed) and `false` for the plain ascending GLL tensor of
+        // hex/prism quad faces; tri faces — `true` for the `H1TriPk` GLL
+        // barycentrics of prism/pyramid faces, `false` for the equispaced
+        // `TetPk` tri faces.
+        let mut face_nodes4: HashMap<FaceKey, ([NodeId; 4], bool)> = HashMap::new();
+        let mut face_nodes3: HashMap<FaceKey, ([NodeId; 3], bool)> = HashMap::new();
         for e in 0..n_elems as u32 {
             let et = mesh.element_type(e);
             let ns = elem_corners(et, mesh.element_nodes(e), mesh.geom_order() > 1);
@@ -741,33 +843,37 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 for face4 in hex_quad_faces(&ns) {
                     let face4 = canon_quad_face(face4);
                     face_nodes4.entry(FaceKey::new(face4[0], face4[1], face4[2]))
-                        .or_insert(face4);
+                        .or_insert((face4, false));
+                }
+            } else if is_pyramid_row(et) {
+                let face4 = canon_quad_face(pyramid_base_face(&ns));
+                face_nodes4.entry(FaceKey::new(face4[0], face4[1], face4[2]))
+                    .or_insert((face4, true));
+                for (a, b, c) in pyramid_tri_faces(&ns) {
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert(([a, b, c], true));
                 }
             } else if is_prism_row(et) {
                 for (a, b, c) in prism_tri_faces(&ns) {
-                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert(([a, b, c], true));
                 }
                 for face4 in prism_quad_faces(&ns) {
                     let face4 = canon_quad_face(face4);
                     face_nodes4.entry(FaceKey::new(face4[0], face4[1], face4[2]))
-                        .or_insert(face4);
+                        .or_insert((face4, false));
                 }
             } else {
                 for (a, b, c) in tet_faces(&ns) {
-                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert(([a, b, c], false));
                 }
             }
         }
-        // Prism tri faces place their dofs at the `H1TriPk` Gauss-Lobatto
-        // nodes (MFEM `H1_WedgeElement`); tet tri faces at the equispaced
-        // `TetPk` positions.
-        let prism = n_elems > 0 && is_prism_row(mesh.element_type(0));
-        let gll_all = gll_positions_01(p_max);
         for (key, variants) in &face_variants {
             for &(p, ref dofs) in variants {
                 if dofs.is_empty() { continue; }
-                if let Some(&n4) = face_nodes4.get(key) {
-                    // Quad face: GLL tensor (iy outer, ix inner), bilinear map.
+                if let Some(&(n4, pyr_face)) = face_nodes4.get(key) {
+                    // Quad face: GLL tensor (iy outer, ix inner), bilinear
+                    // map — with the y axis j-reversed for pyramid base
+                    // faces (Fuentes `cp[p−j]`, `fe_h1.cpp:1112-1121`).
                     let pos = interior_positions_1d(p, true);
                     let c: Vec<[f64; 3]> = (0..4).map(|i| {
                         let c = mesh.node_coords(n4[i]); [c[0], c[1], c[2]]
@@ -775,17 +881,17 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                     let n1 = pos.len();
                     for (j, &dof) in dofs.iter().enumerate() {
                         let (ix, iy) = (j % n1, j / n1);
-                        let (r, s) = (pos[ix], pos[iy]);
+                        let s = if pyr_face { pos[n1 - 1 - iy] } else { pos[iy] };
+                        let (r, t) = (pos[ix], s);
                         let base = dof as usize * dim;
                         for d in 0..dim {
-                            dof_coords[base + d] = (1.0 - r) * (1.0 - s) * c[0][d]
-                                + r * (1.0 - s) * c[1][d]
-                                + r * s * c[2][d]
-                                + (1.0 - r) * s * c[3][d];
+                            dof_coords[base + d] = (1.0 - r) * (1.0 - t) * c[0][d]
+                                + r * (1.0 - t) * c[1][d]
+                                + r * t * c[2][d]
+                                + (1.0 - r) * t * c[3][d];
                         }
                     }
-                    let _ = &gll_all;
-                } else if let Some(&n3) = face_nodes3.get(key) {
+                } else if let Some(&(n3, gll_face)) = face_nodes3.get(key) {
                     // Tri face: barycentric interpolation, dof list in the
                     // `H1TriPk`/TriPk running (j outer, i inner) order.
                     let pq = p as usize;
@@ -793,8 +899,11 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                         let c = mesh.node_coords(n3[i]); [c[0], c[1], c[2]]
                     }).collect();
                     // Reference (λ1, λ2) of the running-order interior nodes.
-                    let tri_pos: Vec<[f64; 2]> = if prism {
-                        // GLL: `H1TriPk`'s interior block, same running order.
+                    let tri_pos: Vec<[f64; 2]> = if gll_face {
+                        // GLL: `H1TriPk`'s interior block, same running order
+                        // (prism side faces and Fuentes pyramid side faces —
+                        // `fe_h1.cpp:1123-1144` normalises the same
+                        // `cp[i]/w` barycentrics as `H1_TriangleElement`).
                         H1TriPk::new(pq).dof_coords()[3 * pq..3 * pq + dofs.len()]
                             .iter().map(|rc| [rc[0], rc[1]]).collect()
                     } else {
@@ -932,6 +1041,37 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                               + r * (1.0 - s) * t * c[5][d]
                               + r * s * t * c[6][d]
                               + (1.0 - r) * s * t * c[7][d];
+                        }
+                        idx += 1;
+                    }
+                }
+            }
+        } else if dim == 3 && is_pyramid_row(et) {
+            // Pyramid interior: MFEM `H1_FuentesPyramidElement` bubble nodes
+            // (`fe_h1.cpp:1146-1157`) — GLL layers `cp[k]` outer, then the
+            // in-plane GLL tensor `(cp[i], cp[j])` with `i` fastest, all
+            // homothetic toward the apex:
+            // `P = (1−t)·bilinear_base(cp[i], cp[j]) + t·apex`.
+            let pq = p_e as usize;
+            let (g, _) = fem_element::quadrature::gauss_lobatto_arbitrary(pq + 1);
+            let c: Vec<[f64; 3]> = (0..5).map(|k| {
+                let x = mesh.node_coords(ns[k]);
+                [x[0], x[1], x[2]]
+            }).collect();
+            let mut idx = 0usize;
+            for &gk in &g[1..pq] {
+                let t = 0.5 * (gk + 1.0); // cp[k] on [0, 1]
+                for &gj in &g[1..pq] {
+                    let v = 0.5 * (gj + 1.0);
+                    for &gi in &g[1..pq] {
+                        let u = 0.5 * (gi + 1.0);
+                        let base = bubble_dofs[idx] as usize * dim;
+                        for d in 0..3 {
+                            let b = (1.0 - u) * (1.0 - v) * c[0][d]
+                                + u * (1.0 - v) * c[1][d]
+                                + u * v * c[2][d]
+                                + (1.0 - u) * v * c[3][d];
+                            dof_coords[base + d] = (1.0 - t) * b + t * c[4][d];
                         }
                         idx += 1;
                     }
@@ -1279,10 +1419,17 @@ pub fn detect_p_constraints<M: MeshTopology>(
 }
 
 /// One quad-face min-rule constraint: dof `dof` (the `j`-th dof of the
-/// order-`q` variant of quad face `face4`, `(iy outer, ix inner)` layout)
-/// interpolates the order-`p0` GLL trace over the face closure — vertices,
-/// oriented edge runs, face-interior dofs of the order-`p0` variant `dofs0`
-/// (empty when `p0 < 2`, where the grid has no interior nodes).
+/// order-`q` variant of quad face `face4`) interpolates the order-`p0` GLL
+/// trace over the face closure — vertices, oriented edge runs, face-interior
+/// dofs of the order-`p0` variant `dofs0` (empty when `p0 < 2`, where the
+/// grid has no interior nodes).
+///
+/// `reversed_y` selects the intra-block layout: `false` — the ascending GLL
+/// tensor `(iy outer, ix inner)` of hex/prism quad faces; `true` — the
+/// Fuentes pyramid base-face layout `(cp[i], cp[p−j])`, j reversed
+/// (`fe_h1.cpp:1112-1121`; probe `tmp/d85c/out_p311.txt` pins the p3
+/// weights: face dof 0 at `(cp[1], cp[p−1])` carries `(1−x)(1−y) = 0.2` on
+/// `v0`, not `0.5236`).
 fn quad_face_variant_constraint(
     dm: &DofManager,
     face4: [NodeId; 4],
@@ -1290,6 +1437,7 @@ fn quad_face_variant_constraint(
     q: u8,
     dof: DofId,
     j: usize,
+    reversed_y: bool,
     constraints: &mut Vec<PRefineConstraint>,
 ) {
     let (p0, dofs0) = master;
@@ -1300,7 +1448,8 @@ fn quad_face_variant_constraint(
     let ix = j % n1;
     // Tensor-product weights over the p0 grid:
     // parents = vertices, 4 edges, face-interior dofs of p0.
-    let (r, s) = (pos_q[ix], pos_q[iy]);
+    let sy = if reversed_y { pos_q[n1 - 1 - iy] } else { pos_q[iy] };
+    let (r, s) = (pos_q[ix], sy);
     let wx = lagrange_weights_at(&gll_positions_01(p0), r);
     let wy = lagrange_weights_at(&gll_positions_01(p0), s);
     let mut parents: Vec<(DofId, f64)> = Vec::new();
@@ -1346,8 +1495,9 @@ fn quad_face_variant_constraint(
 
 /// 3D face variant min-rule constraints: every higher-order face variant
 /// interpolates the lowest-order variant's face trace (tet faces: equispaced
-/// barycentric; hex and prism quad faces: GLL tensor product; prism tri
-/// faces: GLL barycentric via `H1TriPk`).
+/// barycentric; hex and prism quad faces: GLL tensor product; prism and
+/// pyramid tri faces: GLL barycentric via `H1TriPk`; pyramid base quad
+/// faces: GLL tensor product in Fuentes' j-reversed layout).
 ///
 /// All geometries follow MFEM's `VariableOrderMinimumRule` exactly: the
 /// master variant is the face's lowest **adjacent element order** (MFEM
@@ -1376,6 +1526,20 @@ fn detect_face_variant_constraints<M: MeshTopology>(
             for face4 in hex_quad_faces(&ns) {
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                face_low.entry(key)
+                    .and_modify(|v| { if p < *v { *v = p; } })
+                    .or_insert(p);
+            }
+        } else if is_pyramid_row(et) {
+            let face4 = canon_quad_face(pyramid_base_face(&ns));
+            let key = FaceKey::new(face4[0], face4[1], face4[2]);
+            face_canon4.entry(key).or_insert(face4);
+            face_low.entry(key)
+                .and_modify(|v| { if p < *v { *v = p; } })
+                .or_insert(p);
+            for (a, b, c) in pyramid_tri_faces(&ns) {
+                let key = FaceKey::new(a, b, c);
+                face_canon3.entry(key).or_insert([a, b, c]);
                 face_low.entry(key)
                     .and_modify(|v| { if p < *v { *v = p; } })
                     .or_insert(p);
@@ -1412,12 +1576,26 @@ fn detect_face_variant_constraints<M: MeshTopology>(
     // the order-`q` variant's j-th interior node.
     let mut tri_w_cache: HashMap<(u8, u8), Vec<Vec<f64>>> = HashMap::new();
 
-    // Face keys of prism, tet and hex faces.
+    // Face keys of prism, pyramid, tet and hex faces.
     for e in 0..n_elems as u32 {
         let et = mesh.element_type(e);
         let ns = elem_corners(et, mesh.element_nodes(e), mesh.geom_order() > 1);
-        if is_prism_row(et) {
-            for (a, b, c) in prism_tri_faces(&ns) {
+        if is_prism_row(et) || is_pyramid_row(et) {
+            // GLL tri faces (`H1_WedgeElement` sides / Fuentes pyramid
+            // sides) + quad faces (prism sides: ascending GLL tensor;
+            // pyramid base: Fuentes j-reversed layout).
+            let tri_faces = if is_prism_row(et) {
+                prism_tri_faces(&ns)
+            } else {
+                pyramid_tri_faces(&ns)
+            };
+            let quad_faces: Vec<([NodeId; 4], bool)> = if is_prism_row(et) {
+                prism_quad_faces(&ns).into_iter()
+                    .map(|f| (canon_quad_face(f), false)).collect()
+            } else {
+                vec![(canon_quad_face(pyramid_base_face(&ns)), true)]
+            };
+            for (a, b, c) in tri_faces {
                 let key = FaceKey::new(a, b, c);
                 let Some(variants) = dm.face_variants.get(&key) else { continue };
                 // MFEM stores zero-dof low-order variants (`MakeDofTable`),
@@ -1473,8 +1651,7 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                     }
                 }
             }
-            for face4 in prism_quad_faces(&ns) {
-                let face4 = canon_quad_face(face4);
+            for (face4, reversed_y) in quad_faces {
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let Some(variants) = dm.face_variants.get(&key) else { continue };
                 let Some(first_order) = variants.first().map(|(q, _)| *q) else { continue };
@@ -1488,7 +1665,8 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                     if *q <= p_low { continue; }
                     for (j, &dof) in dofs_q.iter().enumerate() {
                         quad_face_variant_constraint(
-                            dm, canon4, (p_low, &dofs0), *q, dof, j, constraints);
+                            dm, canon4, (p_low, &dofs0), *q, dof, j, reversed_y,
+                            constraints);
                     }
                 }
             }
@@ -1514,7 +1692,7 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                     if *q <= p_low { continue; }
                     for (j, &dof) in dofs_q.iter().enumerate() {
                         quad_face_variant_constraint(
-                            dm, face4, (p_low, &dofs0), *q, dof, j, constraints);
+                            dm, face4, (p_low, &dofs0), *q, dof, j, false, constraints);
                     }
                 }
             }
