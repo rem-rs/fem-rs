@@ -42,6 +42,14 @@
 //!   `oedge + e2v[E]` (`MfemTetRefineIds`, called from `amr_inner`).  As with
 //!   the hex/wedge, that numbering is used only where a written file pins it
 //!   down: geometry present **and** uniform refinement.
+//!
+//! **Order-1 discontinuous geometry** (`L2_T1_*_P1` — the per-element table
+//! `Mesh::SetCurvature(1, true)` writes and the folded encoding of periodic
+//! tet meshes) is the degenerate end of the same mechanism (D816-2): the
+//! refined table stays *fully discontinuous* (every fine element owns its own
+//! 4 corner dofs — [`build_refined_l2_p1_tet_geometry`]), and the refined
+//! `vertices` are replaced wholesale by the mean over the element references
+//! of those folded values ([`super::curved_hex::set_vertices_from_nodes`]).
 
 use std::collections::HashMap;
 
@@ -94,7 +102,7 @@ const MV_ALL: [[[usize; 4]; 4]; 3] = [
 /// (child `v` spans vertex `v` and the midpoints of its three edges, the
 /// vertices in ascending partner order); matrix `4·(rt+1)+k` is the `k`-th
 /// interior child of refinement type `rt` (`mv_all[rt][k]`).
-fn child_points(matrix: usize) -> [[f64; 3]; 4] {
+pub(crate) fn child_points(matrix: usize) -> [[f64; 3]; 4] {
     let mid = |ei: usize| {
         let (a, b) = EDGES[ei];
         [
@@ -217,6 +225,98 @@ impl<'a> TetPkGeometry<'a> {
         let (a, b) = EDGES[li];
         let (ra, rb) = (VERTS[a], VERTS[b]);
         self.eval_at(e, [0.5 * (ra[0] + rb[0]), 0.5 * (ra[1] + rb[1]), 0.5 * (ra[2] + rb[2])])
+    }
+}
+
+/// The mesh's geometry as a **discontinuous order-1 tet** table — the
+/// `L2_T1_*_P1` layout the MFEM reader produces for `Mesh::SetCurvature(1,
+/// true)` on a tet mesh and for folded periodic tets: 4 dofs per element in
+/// element-major rows of *fresh, unshared* dof ids, the row slot order being
+/// the mesh's own reference-tet vertex order (D816-2).
+///
+/// A *continuous* order-1 table does not match: its dofs are the vertices
+/// (shared ids, `n_nodes == n_vertices`), and the plain vertex averaging the
+/// refinement kernels already do is its exact transport.
+pub(crate) fn l2_p1_tet_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
+    if mesh.elem_type != ElementType::Tet4 {
+        return None;
+    }
+    let geo = mesh.geometry.as_ref()?;
+    if geo.order != 1 || geo.nodes_per_elem != 4 {
+        return None;
+    }
+    let n = mesh.n_elems() * 4;
+    if geo.conn.len() != n || geo.n_nodes != n {
+        return None;
+    }
+    for (e, row) in geo.conn.chunks_exact(4).enumerate() {
+        for (i, &d) in row.iter().enumerate() {
+            if d as usize != e * 4 + i {
+                return None; // shared dof: not the discontinuous layout
+            }
+        }
+    }
+    Some(geo)
+}
+
+/// Build the refined mesh's **order-1 discontinuous** [`GeometryData`] from
+/// the parent's `L2_T1_*_P1` tet table (D816-2).
+///
+/// MFEM refines the `nodes` grid function through its refinement operator:
+/// for every fine element the coarse element's own shape functions are
+/// evaluated at the fine dof reference points mapped into the parent frame
+/// (`FiniteElement::GetLocalInterpolation`).  For a linear parent that is the
+/// barycentric interpolation of the parent's 4 corner dofs at the child
+/// embedding's reference points ([`child_points`] — the `tet_children` point
+/// matrices; for an unrefined element ([`IDENTITY`]) the parent dofs are read
+/// back exactly).  Because the space is discontinuous the fine table stays
+/// fully discontinuous: fine element `fe` owns the fresh dof ids `4·fe .. 4·fe
+/// + 3`, **no dof sharing across the fine mesh** — a folded shared face keeps
+/// a different coordinate on each side.
+///
+/// Requires the fine elements to be emitted in MFEM's own child order with
+/// their embedding matrix recorded in `fine_parent` — for
+/// `refine_nonconforming_3d` that is the uniform case (`mfem_ids` built);
+/// the historical straight-side partial order mirrors the corner children, so
+/// its rows would not line up with the matrices.
+pub(crate) fn build_refined_l2_p1_tet_geometry(
+    parent_geo: &GeometryData,
+    fine_parent: &[(ElemId, u8)],
+) -> GeometryData {
+    const DPE: usize = 4;
+    let n_fine = fine_parent.len();
+    let mut conn = Vec::with_capacity(n_fine * DPE);
+    let mut coords = Vec::with_capacity(n_fine * DPE * 3);
+    for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
+        // Parent-frame reference point of each fine dof slot: the child's own
+        // reference vertices mapped through the embedding (the identity for an
+        // unrefined element, whose points are the reference tet's vertices).
+        let pts: [[f64; 3]; DPE] = if child == IDENTITY {
+            VERTS
+        } else {
+            child_points(child as usize)
+        };
+        for (k, p) in pts.iter().enumerate() {
+            // Barycentric weights of `p` — the parent's own P1 shape
+            // functions, accumulated in parent slot order.
+            let w = [1.0 - p[0] - p[1] - p[2], p[0], p[1], p[2]];
+            let mut xyz = [0.0_f64; 3];
+            for (j, &wj) in w.iter().enumerate() {
+                let dof = parent_geo.conn[pe as usize * DPE + j] as usize;
+                for c in 0..3 {
+                    xyz[c] += wj * parent_geo.coords[dof * 3 + c];
+                }
+            }
+            conn.push((fe * DPE + k) as NodeId);
+            coords.extend_from_slice(&xyz);
+        }
+    }
+    GeometryData {
+        order: 1,
+        nodes_per_elem: DPE,
+        conn,
+        n_nodes: n_fine * DPE,
+        coords,
     }
 }
 

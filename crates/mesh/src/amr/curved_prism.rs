@@ -131,6 +131,110 @@ fn child_map(child: usize) -> ([f64; 3], [[f64; 3]; 3]) {
 /// every evaluation lands exactly on a parent dof point).
 pub(crate) const IDENTITY: u8 = 8;
 
+/// The six wedge vertices in MFEM's `(x, y, z)` reference convention
+/// (`Geometry::Constants<PRISM>`: bottom triangle, top triangle).
+const MFEM_PRI_VERTS: [[f64; 3]; 6] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [0.0, 1.0, 1.0],
+];
+
+/// The mesh's geometry as a **discontinuous order-1 prism** table — the
+/// `L2_T1_*_P1` layout the MFEM reader produces for `Mesh::SetCurvature(1,
+/// true)` on a wedge mesh and for folded periodic prisms: 6 dofs per element
+/// in element-major rows of *fresh, unshared* dof ids, the row slot order
+/// being the mesh's own reference-wedge vertex order (D816-2).
+///
+/// A *continuous* order-1 table does not match: its dofs are the vertices
+/// (shared ids, `n_nodes == n_vertices`), and the plain vertex averaging the
+/// refinement kernels already do is its exact transport.
+pub(crate) fn l2_p1_prism_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
+    if mesh.elem_type != ElementType::Prism6 {
+        return None;
+    }
+    let geo = mesh.geometry.as_ref()?;
+    if geo.order != 1 || geo.nodes_per_elem != 6 {
+        return None;
+    }
+    let n = mesh.n_elems() * 6;
+    if geo.conn.len() != n || geo.n_nodes != n {
+        return None;
+    }
+    for (e, row) in geo.conn.chunks_exact(6).enumerate() {
+        for (i, &d) in row.iter().enumerate() {
+            if d as usize != e * 6 + i {
+                return None; // shared dof: not the discontinuous layout
+            }
+        }
+    }
+    Some(geo)
+}
+
+/// Build the refined mesh's **order-1 discontinuous** [`GeometryData`] from
+/// the parent's `L2_T1_*_P1` prism table (D816-2).
+///
+/// MFEM refines the `nodes` grid function through its refinement operator:
+/// for every fine element the coarse element's own shape functions are
+/// evaluated at the fine dof reference points mapped into the parent frame
+/// (`FiniteElement::GetLocalInterpolation`).  For a linear parent that is the
+/// parent's 6 linear dofs evaluated at the child embedding's reference points
+/// ([`MFEM_PRI_CHILDREN`] — the `pri_children` point matrices, in this file's
+/// `(x, y, z)` convention; for an unrefined element ([`IDENTITY`]) the parent
+/// dofs are read back exactly).  Because the space is discontinuous the fine
+/// table stays fully discontinuous: fine element `fe` owns the fresh dof ids
+/// `6·fe .. 6·fe + 5`, **no dof sharing across the fine mesh**.
+///
+/// Requires the fine elements to be emitted in MFEM's own child order with
+/// their child matrix recorded in `fine_parent` — for
+/// `refine_prism6_uniform` that is the uniform case (`mfem_ids` built); the
+/// historical straight-side order rotates the center children, so its rows
+/// would not line up with the matrices.
+pub(crate) fn build_refined_l2_p1_prism_geometry(
+    parent_geo: &GeometryData,
+    fine_parent: &[(ElemId, u8)],
+) -> GeometryData {
+    const DPE: usize = 6;
+    let n_fine = fine_parent.len();
+    let mut conn = Vec::with_capacity(n_fine * DPE);
+    let mut coords = Vec::with_capacity(n_fine * DPE * 3);
+    for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
+        // Parent-frame reference point of each fine dof slot: the child's own
+        // reference wedge vertices mapped through the embedding (the identity
+        // for an unrefined element).
+        let pts: [[f64; 3]; DPE] = if child == IDENTITY {
+            MFEM_PRI_VERTS
+        } else {
+            MFEM_PRI_CHILDREN[child as usize]
+        };
+        for (k, p) in pts.iter().enumerate() {
+            // The parent's own P1 wedge shape functions
+            // `tri_shape(x, y) · (1−z | z)`, accumulated in parent slot order.
+            let l0 = 1.0 - p[0] - p[1];
+            let hz = 1.0 - p[2];
+            let w = [l0 * hz, p[0] * hz, p[1] * hz, l0 * p[2], p[0] * p[2], p[1] * p[2]];
+            let mut xyz = [0.0_f64; 3];
+            for (j, &wj) in w.iter().enumerate() {
+                let dof = parent_geo.conn[pe as usize * DPE + j] as usize;
+                for c in 0..3 {
+                    xyz[c] += wj * parent_geo.coords[dof * 3 + c];
+                }
+            }
+            conn.push((fe * DPE + k) as NodeId);
+            coords.extend_from_slice(&xyz);
+        }
+    }
+    GeometryData {
+        order: 1,
+        nodes_per_elem: DPE,
+        conn,
+        n_nodes: n_fine * DPE,
+        coords,
+    }
+}
+
 /// Read-only view of an order-`p` (`p ≥ 2`) wedge [`GeometryData`] attached to
 /// a Prism6 mesh.
 ///

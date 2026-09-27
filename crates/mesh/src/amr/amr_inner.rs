@@ -1775,6 +1775,19 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
                 n_nodes: n_geom,
             }
         });
+        // D816-1: a folded order-1 table (`L2_T1_2D_P1`, e.g.
+        // `data/periodic-hexagon.mesh`) makes this a *curved* refinement in
+        // MFEM's sense (`Nodes != NULL`), so `UniformRefinement2D_base`'s
+        // closing `UpdateNodes` → `SetVerticesFromNodes` replaces the straight
+        // averages with the mean over the element references of the refined
+        // folded values.  On a seam those references legitimately disagree —
+        // the mean-of-compatibility-vertices the kernels computed above is not
+        // the same number (measured: max |diff| 0.5 after one refinement,
+        // 0.75 after two).  The geometry itself stays in the table; the
+        // vertices are only the compatibility block.
+        if let Some(table) = new_mesh.geometry.as_ref() {
+            new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, table);
+        }
     }
     new_mesh
 }
@@ -3123,6 +3136,9 @@ fn refine_nonconforming_3d_internal(
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_tet).
     let geo = super::curved_tet::TetPkGeometry::new(mesh);
+    // D816-2: a folded (or SetCurvature(1)) order-1 discontinuous table —
+    // transported to the children at the end of this function.
+    let l2_geo = super::curved_tet::l2_p1_tet_geometry(mesh);
     // MFEM's canonical new-vertex numbering (`oedge + e2v[E]`, see
     // `MfemTetRefineIds`).  D651: applied to *every* fully-refined (uniform)
     // tet mesh — straight-sided ones included.  The historical straight-side
@@ -3413,10 +3429,11 @@ fn refine_nonconforming_3d_internal(
         let mac = edge_midpoint_map.get(&edge_key(a, c)).copied();
 
         if let (Some(mab), Some(mbc), Some(mac)) = (mab, mbc, mac) {
-            if geo.is_some() {
+            if geo.is_some() || l2_geo.is_some() {
                 // MFEM `UniformRefinement3D_base` new_boundary: corner 0,
                 // center, corner 1, corner 2 (the center child with MFEM's
-                // rotated node order).
+                // rotated node order).  An order-1 discontinuous table is a
+                // `nodes`-carrying mesh in MFEM's sense too (D816-2).
                 new_face_conn.extend_from_slice(&[a, mab, mac]); new_face_tags.push(tag);
                 new_face_conn.extend_from_slice(&[mbc, mac, mab]); new_face_tags.push(tag);
                 new_face_conn.extend_from_slice(&[mab, b, mbc]); new_face_tags.push(tag);
@@ -3446,7 +3463,22 @@ fn refine_nonconforming_3d_internal(
         new_face_tags,
         ElementType::Tri3,
     );
-    if geo.is_some() {
+    if let Some(l2) = l2_geo {
+        if mfem_ids.is_some() {
+            // D816-2: uniform refinement of an order-1 discontinuous tet
+            // table.  Transport the folded per-element table (every fine
+            // element keeps its own 4 corner dofs — no averaging, no
+            // deduplication), then MFEM's closing `UpdateNodes` →
+            // `SetVerticesFromNodes`: the fine `vertices` are the mean over
+            // the element references of the refined folded values.  (A
+            // *partial* refinement keeps the historical child order whose
+            // rows do not line up with MFEM's embedding matrices — the table
+            // is dropped there, as before this fix.)
+            let table = super::curved_tet::build_refined_l2_p1_tet_geometry(l2, &fine_parent);
+            new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
+            new_mesh.geometry = Some(table);
+        }
+    } else if geo.is_some() {
         new_mesh.geometry =
             super::curved_tet::build_refined_tet_geometry(mesh, &new_mesh, &fine_parent);
     }
@@ -6043,6 +6075,9 @@ pub fn refine_prism6_uniform(
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_prism).
     let geo = super::curved_prism::PrismPkGeometry::new(mesh);
+    // D816-2: a folded (or SetCurvature(1)) order-1 discontinuous table —
+    // transported to the children at the end of this function.
+    let l2_geo = super::curved_prism::l2_p1_prism_geometry(mesh);
     // MFEM's canonical new-vertex numbering for a wedge mesh: a pure-prism
     // refinement creates **no** triangular face centers and **no** body
     // centers, and lays the fine vertices out as
@@ -6374,7 +6409,25 @@ pub fn refine_prism6_uniform(
         new_coords, new_conn, new_tags, ElementType::Prism6,
         new_face_conn, new_face_tags, mesh.face_type,
     );
-    if geo.is_some() {
+    if let Some(l2) = l2_geo {
+        if mfem_ids.is_some() {
+            // D816-2: uniform refinement of an order-1 discontinuous prism
+            // table.  Transport the folded per-element table (every fine
+            // element keeps its own 6 corner dofs — no averaging, no
+            // deduplication), then MFEM's closing `UpdateNodes` →
+            // `SetVerticesFromNodes`: the fine `vertices` are the mean over
+            // the element references of the refined folded values.  (A
+            // *partial* refinement keeps the historical child order whose
+            // rows do not line up with MFEM's child matrices — the table is
+            // dropped there, as before this fix.  The vertex replacement is
+            // safe before `rebuild_3d_boundary`'s second pass: for a
+            // table-carrying parent that pass resolves topologically through
+            // the midpoint / quad-face-center maps, never by coordinates.)
+            let table = super::curved_prism::build_refined_l2_p1_prism_geometry(l2, &fine_parent);
+            new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
+            new_mesh.geometry = Some(table);
+        }
+    } else if geo.is_some() {
         new_mesh.geometry =
             super::curved_prism::build_refined_prism_geometry(mesh, &new_mesh, &fine_parent);
     }

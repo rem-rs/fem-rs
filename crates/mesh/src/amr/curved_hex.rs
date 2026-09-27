@@ -568,11 +568,15 @@ pub(crate) fn build_refined_l2_p1_hex_geometry(
 /// the fold), so the mean is a *compatibility* value — the geometry itself is
 /// carried by the table, unchanged.
 ///
+/// Dimension-generic: the geometry table stores `D` components per dof (xy on
+/// a 2-D mesh, xyz on a 3-D one), so the same rule serves the 2-D folded
+/// `L2_T1_2D_P1` tables (D816-1) and the 3-D tet/prism ones (D816-2).
+///
 /// A vertex referenced by no element keeps 0.0 here (MFEM divides 0 by 0 and
 /// stores NaN; every vertex of a refined mesh is referenced).
-pub(crate) fn set_vertices_from_nodes(mesh: &Mesh<3>, geo: &GeometryData) -> Vec<f64> {
+pub(crate) fn set_vertices_from_nodes<const D: usize>(mesh: &Mesh<D>, geo: &GeometryData) -> Vec<f64> {
     let n = mesh.n_nodes();
-    let mut coords = vec![0.0_f64; n * 3];
+    let mut coords = vec![0.0_f64; n * D];
     let mut overlap = vec![0_usize; n];
     for fe in 0..mesh.n_elems() {
         let ns = mesh.elem_nodes(fe as ElemId);
@@ -580,16 +584,16 @@ pub(crate) fn set_vertices_from_nodes(mesh: &Mesh<3>, geo: &GeometryData) -> Vec
             // Slot `k` of the element's connectivity is slot `k` of its
             // geometry row (both follow the mesh's own slot order).
             let dof = geo.conn[fe * geo.nodes_per_elem + k] as usize;
-            for c in 0..3 {
-                coords[v as usize * 3 + c] += geo.coords[dof * 3 + c];
+            for c in 0..D {
+                coords[v as usize * D + c] += geo.coords[dof * D + c];
             }
             overlap[v as usize] += 1;
         }
     }
     for (v, &ov) in overlap.iter().enumerate() {
         if ov > 0 {
-            for c in 0..3 {
-                coords[v * 3 + c] /= ov as f64;
+            for c in 0..D {
+                coords[v * D + c] /= ov as f64;
             }
         }
     }
