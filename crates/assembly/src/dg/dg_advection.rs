@@ -440,6 +440,9 @@ pub fn assemble_advection_boundary<M: MeshTopology, S: FESpace<Mesh=M>, V: Vecto
 
     for f in mesh.face_iter() {
         if !tags.contains(&mesh.face_tag(f)) { continue; }
+        // D817-1: interior-coincident bdr entries get zero assembly (MFEM
+        // `GetBdrFaceTransformations` mesh.cpp:1312 INVALID ⇒ nullptr).
+        if mesh.bdr_face_true_interior(f) { continue; }
         let fnodes = mesh.face_nodes(f);
 
         // Find owning element
@@ -545,6 +548,9 @@ pub fn assemble_advection_boundary_full<M: MeshTopology, S: FESpace<Mesh=M>, V: 
 
     for f in mesh.face_iter() {
         if !tags.contains(&mesh.face_tag(f)) { continue; }
+        // D817-1: interior-coincident bdr entries get zero assembly (MFEM
+        // `GetBdrFaceTransformations` mesh.cpp:1312 INVALID ⇒ nullptr).
+        if mesh.bdr_face_true_interior(f) { continue; }
         let fnodes = mesh.face_nodes(f);
 
         let elem = find_face_elem(mesh, f, fnodes);

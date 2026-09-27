@@ -247,6 +247,9 @@ impl VectorBoundaryAssembler {
         let face_ids: Vec<u32> = mesh
             .face_iter()
             .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            // D817-1: skip interior-coincident bdr entries (MFEM
+            // `GetBdrFaceTransformations` mesh.cpp:1312 INVALID ⇒ nullptr).
+            .filter(|&f| !mesh.bdr_face_true_interior(f))
             .collect();
 
         #[cfg(feature = "parallel")]
@@ -291,6 +294,7 @@ impl VectorBoundaryAssembler {
         let face_ids: Vec<u32> = mesh
             .face_iter()
             .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .filter(|&f| !mesh.bdr_face_true_interior(f)) // D817-1 (mesh.cpp:1312)
             .collect();
 
         #[cfg(feature = "parallel")]

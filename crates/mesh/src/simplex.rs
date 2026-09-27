@@ -39,6 +39,17 @@ fn local_face_verts(dim: usize, elem_type: ElementType) -> Vec<Vec<usize>> {
             vec![0, 3, 7, 4], // x=-1 (left)
             vec![1, 2, 6, 5], // x= 1 (right)
         ],
+        // Pyramid faces (MFEM FaceVert: quad base v0-v3, apex v4; the
+        // D817-1 true-interior detection and `build_face_to_elem`/
+        // `remove_internal_boundaries` consume this arm — pyramid meshes
+        // previously produced no faces here at all).
+        (3, ElementType::Pyramid5) => vec![
+            vec![0, 1, 2, 3], // base quad
+            vec![0, 1, 4],    // apex tris
+            vec![1, 2, 4],
+            vec![2, 3, 4],
+            vec![3, 0, 4],
+        ],
         _ => vec![],
     }
 }
@@ -3601,6 +3612,30 @@ impl<const D: usize> Mesh<D> {
         self.face_to_elem.as_ref()
     }
 
+    /// MFEM `FaceIsTrueInterior` for a boundary-listed face: the entry's
+    /// vertex set is registered by two element-local faces (both sides exist
+    /// in this mesh).  One connectivity scan per query; boundary-assembly
+    /// skips call it once per boundary entry (`MeshTopology` override below).
+    pub fn bdr_face_true_interior(&self, f: FaceId) -> bool {
+        let mut fset: Vec<u32> = self.bface_nodes(f).to_vec();
+        fset.sort_unstable();
+        let mut matches = 0usize;
+        for e in 0..self.n_elems() {
+            let verts = self.element_nodes(e as ElemId);
+            for fv in &local_face_verts(D, self.element_type(e as ElemId)) {
+                let mut eset: Vec<u32> = fv.iter().map(|&i| verts[i]).collect();
+                eset.sort_unstable();
+                if eset == fset {
+                    matches += 1;
+                    if matches >= 2 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
 
     // ─── Additional low-level API for meshing/ examples ──
 
@@ -3786,6 +3821,10 @@ impl<const D: usize> MeshTopology for Mesh<D> {
     }
 
     fn face_tag(&self, face: FaceId) -> i32 { self.face_tags[face as usize] }
+
+    fn bdr_face_true_interior(&self, face: FaceId) -> bool {
+        Mesh::bdr_face_true_interior(self, face)
+    }
 
     fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>) {
         if let Some(ref f2e) = self.face_to_elem {
@@ -4035,6 +4074,65 @@ mod tests {
         let m = Mesh::<2>::unit_square_tri(4);
         let tags = m.unique_boundary_tags();
         assert_eq!(tags, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn bdr_face_true_interior_synthetic_2d() {
+        // D817-1: two triangles sharing the diagonal (1,2) of
+        // `unit_square_tri(1)`; appending the shared edge to the boundary
+        // section creates an interior-coincident boundary entry — the shape
+        // of MFEM's `FaceIsTrueInterior` (mesh.cpp:1312 INVALID path).
+        let mut m = Mesh::<2>::unit_square_tri(1);
+        assert_eq!(m.n_faces(), 4);
+        m.face_conn.extend_from_slice(&[1, 2]);
+        m.face_tags.push(9);
+        let diag = (m.n_faces() - 1) as FaceId;
+        assert!(m.bdr_face_true_interior(diag), "shared diagonal edge");
+        for f in 0..m.n_faces() as FaceId - 1 {
+            assert!(!m.bdr_face_true_interior(f), "outer edge {f}");
+        }
+        // Same answer through the `MeshTopology` trait (assembly consumes it
+        // through `dyn MeshTopology`).
+        use crate::MeshTopology as _;
+        assert!(MeshTopology::bdr_face_true_interior(&m, diag));
+    }
+
+    #[test]
+    fn bdr_face_true_interior_synthetic_3d() {
+        // Two hexes side by side.  `make_cartesian_3d(.., sfc_ordering=true)`
+        // permutes the mesh node ids, so the shared face is derived from the
+        // elements' local Hex8 face table: the one vertex set that both
+        // elements register.  Appending it to the boundary section creates
+        // the interior-coincident entry; a stored outer face stays false.
+        let m0 = Mesh::<3>::make_cartesian_3d(2, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, true);
+        let mut m = m0;
+        let faces_of = |m: &Mesh<3>, e: ElemId| -> Vec<Vec<NodeId>> {
+            let verts = m.element_nodes(e);
+            local_face_verts(3, ElementType::Hex8)
+                .iter()
+                .map(|fv| {
+                    let mut v: Vec<NodeId> = fv.iter().map(|&i| verts[i]).collect();
+                    v.sort_unstable();
+                    v
+                })
+                .collect()
+        };
+        let f0 = faces_of(&m, 0);
+        let f1 = faces_of(&m, 1);
+        let shared = f0.iter().find(|s| f1.contains(s)).expect("shared plane").clone();
+        let outer = f0.iter().find(|s| !f1.contains(s) && **s != shared).expect("outer").clone();
+        m.face_conn.extend_from_slice(&shared);
+        m.face_tags.push(9);
+        let shared_face = (m.n_faces() - 1) as FaceId;
+        m.face_conn.extend_from_slice(&outer);
+        m.face_tags.push(9);
+        let outer_face = (m.n_faces() - 1) as FaceId;
+        assert!(m.bdr_face_true_interior(shared_face));
+        assert!(!m.bdr_face_true_interior(outer_face));
+        // Every pre-existing (true boundary) face must stay false.
+        for f in 0..shared_face {
+            assert!(!m.bdr_face_true_interior(f));
+        }
     }
 
     #[test]

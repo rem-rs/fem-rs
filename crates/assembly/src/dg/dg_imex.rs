@@ -140,6 +140,12 @@ pub fn build_bdr_face_locs(mesh: &Mesh<2>) -> Vec<BdrFaceLoc> {
         if ns.len() != 2 {
             continue;
         }
+        // D817-1: interior-coincident bdr entries get zero assembly (MFEM
+        // `GetBdrFaceTransformations` mesh.cpp:1312 INVALID ⇒ nullptr); ex41
+        // and pex41/pex9 consume this list for their bdr K blocks.
+        if mesh.bdr_face_true_interior(f) {
+            continue;
+        }
         let key = (ns[0].min(ns[1]), ns[0].max(ns[1]));
         if let Some(&(e1, e1_inf)) = edge_map.get(&key) {
             out.push(BdrFaceLoc { e1, e1_inf });

@@ -2203,9 +2203,13 @@ impl Assembler {
         tags:        &[i32],
         quad_order:  u8,
     ) -> Vec<f64> {
+        // D817-1: MFEM `GetBdrFaceTransformations` (mesh.cpp:1312) answers
+        // INVALID for a boundary element whose face is true interior, and its
+        // callers skip the nullptr — zero bdr assembly on such entries.
         let face_ids: Vec<u32> = mesh
             .face_iter()
             .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .filter(|&f| !mesh.bdr_face_true_interior(f))
             .collect();
 
         #[cfg(feature = "parallel")]
@@ -2254,6 +2258,7 @@ impl Assembler {
         let face_ids: Vec<u32> = mesh
             .face_iter()
             .filter(|&f| tags.contains(&mesh.face_tag(f)))
+            .filter(|&f| !mesh.bdr_face_true_interior(f)) // D817-1 (mesh.cpp:1312)
             .collect();
 
         #[cfg(feature = "parallel")]

@@ -106,6 +106,11 @@ impl DgElasticityAssembler {
             if tag == 0 || !dirichlet_set.contains(&tag) {
                 continue;
             }
+            // D817-1: interior-coincident bdr entries get zero assembly
+            // (MFEM `GetBdrFaceTransformations` mesh.cpp:1312 INVALID).
+            if mesh.bdr_face_true_interior(f) {
+                continue;
+            }
             let elem = match face_to_elem.get(&f) {
                 Some(&e) => e,
                 None => continue,

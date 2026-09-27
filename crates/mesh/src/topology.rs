@@ -60,6 +60,19 @@ pub trait MeshTopology: Send + Sync {
     /// or `(elem_a, Some(elem_b))` for interior faces (when tracked).
     fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>);
 
+    /// MFEM `Mesh::FaceIsTrueInterior` for a *boundary-listed* face: the
+    /// entry's vertex set is registered by two element faces, i.e. the stored
+    /// boundary element lies on a face both of whose sides exist in this mesh
+    /// (interior-coincident — the shape of a periodically identified seam kept
+    /// in the `boundary` section, or a deliberately listed interface face).
+    ///
+    /// MFEM's `GetBdrFaceTransformations` (mesh.cpp:1312) answers INVALID for
+    /// such a boundary element, so its callers (every bdr-face integration in
+    /// `BilinearForm`/`LinearForm`/`NonlinearForm`) skip it — zero boundary
+    /// assembly.  Default `false` keeps the historical behaviour for meshes
+    /// that cannot answer the question.
+    fn bdr_face_true_interior(&self, _face: FaceId) -> bool { false }
+
     /// Physical coordinates of the two endpoints of a boundary face, taken
     /// from the **owning element's per-element geometry** when the mesh carries
     /// one (curved / geometrically-periodic meshes), else `None` so the caller
@@ -219,6 +232,7 @@ impl MeshTopology for Box<dyn MeshTopology + Send + Sync + 'static> {
     fn face_nodes(&self, face: FaceId) -> &[NodeId] { (**self).face_nodes(face) }
     fn face_tag(&self, face: FaceId) -> i32 { (**self).face_tag(face) }
     fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>) { (**self).face_elements(face) }
+    fn bdr_face_true_interior(&self, face: FaceId) -> bool { (**self).bdr_face_true_interior(face) }
     fn n_edges(&self) -> usize { (**self).n_edges() }
     fn edge_nodes(&self, eid: EdgeId) -> &[NodeId] { (**self).edge_nodes(eid) }
     fn edge_elements(&self, eid: EdgeId) -> (ElemId, Option<ElemId>) { (**self).edge_elements(eid) }

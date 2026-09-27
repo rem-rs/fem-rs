@@ -143,7 +143,15 @@ pub(crate) fn wg_face_measure<M: MeshTopology + ?Sized>(
 /// Boundary face → owning element, through the DG layer's single
 /// implementation ([`crate::dg::dg_base::build_face_elem_map`]).
 pub(crate) fn wg_boundary_face_map<M: MeshTopology>(mesh: &M) -> HashMap<u32, u32> {
-    crate::dg::dg_base::build_face_elem_map(mesh, mesh.dim() as usize)
+    let mut map = crate::dg::dg_base::build_face_elem_map(mesh, mesh.dim() as usize);
+    // D817-1: interior-coincident bdr entries get zero assembly (MFEM
+    // `GetBdrFaceTransformations` mesh.cpp:1312 INVALID ⇒ nullptr).
+    let true_interior: Vec<u32> =
+        map.keys().copied().filter(|&f| mesh.bdr_face_true_interior(f)).collect();
+    for f in true_interior {
+        map.remove(&f);
+    }
+    map
 }
 
 #[cfg(test)]

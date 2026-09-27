@@ -187,6 +187,11 @@ impl DgAssembler {
                         return None;
                     }
                 }
+                // D817-1: interior-coincident bdr entries get zero assembly
+                // (MFEM `GetBdrFaceTransformations` mesh.cpp:1312 INVALID).
+                if mesh.bdr_face_true_interior(f) {
+                    return None;
+                }
                 face_to_elem.get(&f).copied().map(|e| (f, e))
             })
             .collect();

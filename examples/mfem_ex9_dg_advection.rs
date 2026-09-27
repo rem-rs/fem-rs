@@ -327,9 +327,11 @@ fn run_3d(args: Args, mesh: Mesh<3>) {
     // *true interior* — on the periodically identified cube every one of the
     // file's 54 boundary entries is interior-coincident, so C++ ex9 charges
     // no boundary term at all (probed: K·u0 matches the no-bdr assembly).
-    // An empty tag set = no Dirichlet boundary = exactly what a fully
-    // periodic mesh has; `rhs_bc` stays zero (inflow data is 0 on ex9).
-    let bc_tags: Vec<i32> = Vec::new();
+    // D817-1: that semantic now lives in the assembly traversal itself
+    // (`MeshTopology::bdr_face_true_interior` skip), so the example passes
+    // the mesh's real tag set like any other run and the 54 entries are
+    // skipped by machinery — `rhs_bc` stays zero (inflow data is 0 on ex9).
+    let bc_tags: Vec<i32> = mesh.unique_boundary_tags();
     let inflow_g = |x: &[f64]| dg_inflow_bc(problem, x);
     let vel_bdr = {
         let bb_min_c = bb_min.clone();
