@@ -4470,6 +4470,40 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十三轮（round 83）：D817-3 金字塔 fused P1 + D817-4 一维 GLL（Lane A）+ D809-2 前提被驳真修（Lane B）+ D817-2 阴性钉（Lane C）+ 主会话 D814-5 转纪律 + 两账本整合——三路并行全交付
+
+**开局 HEAD = round 82 末笔 `ecc0c564`（已推送）；树净；C: 52G。** 三路代理 + 主会话（㉛ 主树文件互斥）：
+Lane A = `crates/io/**`+`crates/mesh/**`+`crates/element/**`（D818-* 号段）；Lane B = `crates/assembly/src/mixed/**`（D819-*）；
+Lane C = `crates/space/**`（D820-*，无新债）；主会话 = 矩阵/账本/HANDOVER + D814-5 + 整合。
+
+### Lane A（D817-3 + D817-4）· **关闭**
+- **D817-3 fused pyramid P1**：MFEM 语义钉死 = `L2_T1_3D_P1` 金字塔臂 = `L2_FuentesPyramidElement(1,GL)`，8 dof/元、apex 无 dof、`Ti.Factor(T)` 无 LAPACK 列主序 LU + LSolve/USolve。三个 MFEM 固有怪癖 1:1 移植并逐位钉死（①embedding `(k/8,k%8)` 错配/tet 子元 `(0,0)` 平面退化 ②release `Mult` 越界读 `subX` 残值确定性 ③顶点 apex 行 `CalcShape(0,0,1)` 固定组合）。修 = `pyramid_l2.rs` 精确求值器 + `io/mfem.rs` fused 读取臂/顶点重建/DoNodeReorder 同步 + `amr/curved_pyramid.rs`（新）+ `amr_inner.rs`/`simplex.rs`。**r0→r1→r2 与 reread 链 vs oracle 逐位 0 差**；修前顶点全零/整表丢弃。
+- **D817-4 一维 GLL**：`SegGllPk`（= `Poly_1D::Basis::Eval`）；放开 `H1_1D_P3+`/`L2_T1_1D_P3+` 读写 + `element_jacobian` Line2≥3 GLL 臂；**曲 P3 读→写 == MFEM 重存逐字节**。
+
+### Lane B（D809-2）· **关闭（前提被驳 ⑥ + 真修）**
+- **前提被驳**：MFEM 4.10 产不出 Quad8/Quad9 网格单元（自有格式拒码 8+、细化恒 4 顶点、高阶走 Nodes、Gmsh type-16 abort）。按实证收窄：Gmsh type-10 → MFEM 自家 reader 认证 → `data/d819_quad9_curved.msh` 真夹具。
+- **真修潜伏错配**：mixed 装配 (Quad8|Quad9,各阶) 臂错走 8-dof `QuadSerendipityPk`（与空间侧 tensor 编号、D581 先例、9 行几何×8 基矛盾）→ 改 `QuadQk`；MFEM oracle 单元阵 ≤1e-12；**修前 3/4 红**。HCurl 向量臂阴性钉。
+
+### Lane C（D817-2）· **关闭（阴性钉）**
+- MFEM `L2_T1_*_P2/P3` 文件 dof 序 = `OpenPoints(p,GL)` tensor-lex（i 最快；角点在 lex 槽 [0,2,8,6] 等，fe_l2.cpp:93-98/310-315）——**fem-rs 读取器 D153 置换读取时已重排到 factory ring 序 ⇒ 本来就正确**。造表探针产 3 份折叠夹具入库（p2/p3）；有牙 = 换 build_tensor 角点序红 6.7e-1。唯一源码改动 = l2.rs caveat 注释转已验证结论。
+
+### 主会话（D814-5 + 账本整合）
+- **D814-5 转纪律**：曲面 tet 夹具须 `Save(out,16)` 显式写 connectivity（`MakeCartesian3D` 的 `Finalize(true)` 静默旋顶点序、顶点/体积一致检验不出几何差）——固化入矩阵 §7。
+- **D818-3 处理**：Lane C 三夹具入库触发两账本——写者账本刻意重生成（diff 恰 3 新行全 `write_err disc_geo`，106 既有 digest 零移动）；真内合账本对 3 新文件补跑 MFEM 探针（12/12、12/12、54/54 = NBE，fem-rs 逐份一致）更新期望表。
+- **⑯ 审计**：三路测试全部亲跑复核；pro-iga T 样条调研路（fem-pro 侧，独立）同期完成——OpenTspline/GrapeTec 调研 + 2 真 bug 修复（插入点放置/边界传播）+ 18 性质测试，166 全绿，fem-pro `78fb948`。
+
+### 大门（round 83 冻结树，主树 ㉗）
+十 crate：`--lib`(debug) **10 靶/2660/0/5**（基线 2659 + Lane A 新 lib 测试）、`--tests`(release) **353 靶/4375/0/30**（基线 348/4354 + 恰 5 新靶：A×3/B×1/C×1）、`--doc` **10/9/0/95**；examples **rc=0/0 非 vendor**；pro **rc=0**；fem-py **rc=0**。锚点：ex9-2D stdout 剥离逐字节/final 1.0000000050e-08、ex14 311 行逐字节、ex27 双档 IDENTICAL、ex9-3D init 逐字节/stdout 0 实质差（读取臂被改后全部重验）。
+
+### 新债（round 83 登记）
+- **D818-1**：移植的 MFEM 金字塔细化 embedding 缺陷语义——上游若修，两侧须同步开关（r1 tet 子元平面退化是 MFEM 现行为）。
+- **D818-2**：fused 表寻址的结构判据边界（识别条件与 L2_T1 直线 tet 的 4-dof 臂互斥性未穷尽）。
+- **D819-A（高优）**：fem_space 侧 Quad8/Quad9 cell 完全未接线（`build_pk`/`build_p1`/`h1_field_element`）⇒ mixed 端到端在这些 cell 不可达。
+- **D819-B**：hcurl 支持 Quad8 cell 但缺 Quad9。
+- **D819-C**：io 私造 MFEM 格式码 8-14（mfem.rs:26-65），真 MFEM 拒读 ⇒ 不可移植写出。
+- **D819-D**：postproc `flux_recovery.rs:89` 私有同名表按 D819 同裁决复核。
+- （D817-1..4 本轮全关；D809-2/D814-5 关闭；D809-1/D113-2/D113-3/§1.5 三 LAT 维持）
+
 ## 第八十二轮（round 82）：D817-1 内合 bdr 元素零装配语义下沉（Mesh 层 + 装配 bdr 遍历 11 站）——主会话单路
 
 **开局 HEAD = round 81 末笔 `9f900d5e`（已推送）；树净；C: 68G。** round-82 头号候选开工（HANDOVER §〇 ①）。
