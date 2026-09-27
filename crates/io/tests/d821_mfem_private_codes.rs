@@ -121,46 +121,53 @@ fn d821_read_refuses_private_codes() {
 
 /// A mesh whose cells have no derived MFEM encoding is refused loudly — no
 /// private code file may be emitted (pre-D819-C, a Quad8 cell wrote
-/// `1 10 <8 ids>` and a Tri6 cell `1 9 <6 ids>`; MFEM aborts on both).
+/// `1 10 <8 ids>` and a Hex20 cell `1 12 <20 ids>`; MFEM aborts on both).
+///
+/// (Round 84's Tri6 refusal case moved to the green side with D821-1: the
+/// row-geometry cells Line3/Tri6/Tet10/Hex27/Prism18 now export as their base
+/// code plus the synthesised `L2_T1` `nodes` section — see the d825 tests.)
 #[test]
 fn d821_write_refuses_underivable_high_order_cells() {
-    for (name, et, npe) in [("Quad8", ElementType::Quad8, 8usize), ("Tri6", ElementType::Tri6, 6)] {
-        let coords = vec![0.0; npe * 2];
-        let mesh = Mesh::<2>::uniform(
-            coords,
-            (0..npe as u32).collect(),
-            vec![1],
-            et,
-            vec![],
-            vec![],
-            ElementType::Line2,
-        );
-        let err = write_mfem_nodes(&mut Vec::new(), &mesh, None, NodesSpace::Discontinuous)
-            .expect_err("a private code must not be emitted")
-            .to_string();
+    // Quad8 is a 2-D cell; Hex20/Prism15/Pyramid13 are 3-D cells.
+    for (name, et, npe, dim3) in [
+        ("Quad8", ElementType::Quad8, 8usize, false),
+        ("Hex20", ElementType::Hex20, 20, true),
+        ("Prism15", ElementType::Prism15, 15, true),
+        ("Pyramid13", ElementType::Pyramid13, 13, true),
+    ] {
+        let err = if dim3 {
+            let mesh3 = Mesh::<3>::uniform(
+                vec![0.0; npe * 3],
+                (0..npe as u32).collect(),
+                vec![1],
+                et,
+                vec![],
+                vec![],
+                ElementType::Quad4,
+            );
+            let scratch = Mesh::<2>::unit_square_tri(1);
+            write_mfem_nodes(&mut Vec::new(), &scratch, Some(&mesh3), NodesSpace::Discontinuous)
+                .expect_err("a private code must not be emitted")
+                .to_string()
+        } else {
+            let mesh = Mesh::<2>::uniform(
+                vec![0.0; npe * 2],
+                (0..npe as u32).collect(),
+                vec![1],
+                et,
+                vec![],
+                vec![],
+                ElementType::Line2,
+            );
+            write_mfem_nodes(&mut Vec::new(), &mesh, None, NodesSpace::Discontinuous)
+                .expect_err("a private code must not be emitted")
+                .to_string()
+        };
         assert!(
             err.contains(name) && err.contains("0-7"),
             "{name}: refusal must name the type and the format rule, got: {err}"
         );
     }
-    // Hex20 is a 3-D cell: same refusal through the 3-D entry point.
-    let mesh3 = Mesh::<3>::uniform(
-        vec![0.0; 20 * 3],
-        (0..20).collect(),
-        vec![1],
-        ElementType::Hex20,
-        vec![],
-        vec![],
-        ElementType::Quad4,
-    );
-    let scratch = Mesh::<2>::unit_square_tri(1);
-    let err = write_mfem_nodes(&mut Vec::new(), &scratch, Some(&mesh3), NodesSpace::Discontinuous)
-        .expect_err("a private code must not be emitted")
-        .to_string();
-    assert!(
-        err.contains("Hex20") && err.contains("0-7"),
-        "Hex20: refusal must name the type and the format rule, got: {err}"
-    );
 }
 
 // ─── write side: the derived Quad9 encoding ─────────────────────────────────
@@ -260,17 +267,81 @@ fn d821_quad9_exports_topology_identical() {
     );
 }
 
-/// A Quad9 mesh under the *continuous* space request is refused (the H1
-/// numbering is not derived) rather than silently written with the wrong
-/// family — the refusal keeps the Discontinuous export the only path.
+/// A Quad9 mesh under the *continuous* space request exports the derived
+/// `H1_2D_P2` numbering (D821-2 — this case refused before the derivation;
+/// the refusal premise is retired by it).  For the single-cell fixture with
+/// corner ids 0..4 the H1 dof order `[vertices | edges | interior]` equals the
+/// fem-rs Quad9 slot order, so the nine dof rows are the node coordinates in
+/// slot order; MFEM probe `tmp/d84fixB/probe_high_order.cpp` (families
+/// `quad9h1`/`quad9h1b`) verifies the read-back numbering, the shared-edge dof
+/// of two adjacent cells and the Save/Load round-trip.
 #[test]
-fn d821_quad9_continuous_space_is_refused() {
+fn d821_quad9_continuous_space_exports() {
     let mesh = quad9_mesh();
-    let err = write_mfem_nodes(&mut Vec::new(), &mesh, None, NodesSpace::Continuous)
-        .expect_err("continuous Quad9 numbering is not derived")
-        .to_string();
+    let mut bytes = Vec::new();
+    write_mfem_nodes(&mut bytes, &mesh, None, NodesSpace::Continuous)
+        .expect("the derived continuous Quad9 numbering exports");
+
+    if let Ok(path) = std::env::var("D821_DUMP") {
+        std::fs::write(&path, &bytes).expect("dump written file");
+    }
+
+    let text = String::from_utf8(bytes.clone()).unwrap();
     assert!(
-        err.contains("Quad9") && err.contains("Discontinuous"),
-        "refusal must name the family and the derived path, got: {err}"
+        text.contains("elements\n1\n1 3 0 1 2 3\n"),
+        "element row must be the SQUARE corner prefix, got:\n{text}"
+    );
+    assert!(
+        text.contains("FiniteElementCollection: H1_2D_P2"),
+        "nodes collection must be H1_2D_P2, got:\n{text}"
+    );
+    // The nine dof lines in H1 order = slot order for this fixture.
+    let want_lines = [
+        "0 0",     // dof 0 = vertex 0
+        "2 0",     // dof 1 = vertex 1
+        "2 1",     // dof 2 = vertex 2
+        "0 1",     // dof 3 = vertex 3
+        "1 0",     // dof 4 = edge (0,1)
+        "2 1.25",  // dof 5 = edge (1,2)
+        "1 1.25",  // dof 6 = edge (2,3)
+        "0 0.5",   // dof 7 = edge (3,0)
+        "1 0.625", // dof 8 = cell interior
+    ];
+    let values_start = text
+        .find("Ordering: 1\n")
+        .expect("nodes header") + "Ordering: 1\n".len();
+    let got_lines: Vec<&str> = text[values_start..]
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(got_lines.len(), 9, "nine dof lines, got:\n{text}");
+    for (i, (got, want)) in got_lines.iter().zip(want_lines).enumerate() {
+        let g: Vec<f64> = got
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().unwrap())
+            .collect();
+        let w: Vec<f64> = want
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().unwrap())
+            .collect();
+        assert!(
+            g.len() == 2 && (g[0] - w[0]).abs() < 1e-13 && (g[1] - w[1]).abs() < 1e-13,
+            "dof {i}: got {got:?}, want {want:?}"
+        );
+    }
+
+    // Read back: the same base topology plus an order-2 H1 geometry table
+    // whose dof coordinates are the original node coordinates bit for bit.
+    let back = read_mfem(std::io::Cursor::new(bytes)).expect("read back");
+    let m2 = back.mesh2d.expect("2-D container");
+    assert_eq!(m2.elem_type, ElementType::Quad4, "base cell type");
+    let geo = m2.geometry.as_ref().expect("geometry table");
+    assert_eq!(geo.order, 2, "geometry order");
+    assert_eq!(geo.nodes_per_elem, 9, "nodes per element");
+    let original: Vec<f64> = quad9_mesh().coords.clone();
+    assert_eq!(
+        geo.coords.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        original.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "geometry coordinates must round-trip bit for bit"
     );
 }

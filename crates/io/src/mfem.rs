@@ -98,25 +98,67 @@ fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
 ///   the four corner ids plus a 9-dof `L2_T1_2D_P2` `nodes` row synthesised
 ///   from the cell's own connectivity.  Probe-verified TOPOLOGY-IDENTICAL
 ///   against MFEM 4.10 (`tmp/d84b/probe_quad9.cpp`).
+/// * the other five row-geometry cells ([`ElementType::Line3`],
+///   [`ElementType::Tri6`], [`ElementType::Tet10`], [`ElementType::Hex27`],
+///   [`ElementType::Prism18`], D821-1) the same way, each with its own
+///   probe-verified permutation onto MFEM's `L2_T1_*_P2` file order
+///   (`tmp/d84fixB/probe_high_order.cpp`).
 /// * every other high-order type is refused loudly: no exact MFEM encoding is
 ///   derived for it yet.  Quad8 is a serendipity cell — MFEM has no 8-dof
-///   quad `nodes` family, so any encoding would be lossy; Tri6/Tet10/Line3/
-///   Hex20/Hex27/Prism15/Prism18/Pyramid13 need the same base+`nodes`
-///   derivation, each with its own verified permutation (D821).
+///   quad `nodes` family (the quad lattice is the 9-dof tensor), so any
+///   encoding would be lossy; Hex20/Prism15 have the same dof-count gap and
+///   the order-2 pyramid needs a 27-dof Fuentes payload a 13-node row cannot
+///   fill (D825-4).
 fn mfem_elem_row(et: ElementType) -> FemResult<(u32, usize)> {
     if let Some(code) = elem_type_to_mfem_code(et) {
         return Ok((code, et.nodes_per_element()));
     }
-    match et {
-        ElementType::Quad9 => Ok((3, 4)),
-        _ => Err(FemError::Mesh(format!(
-            "write_mfem: no MFEM encoding for {et:?} cells — the .mesh format has geometry \
-             codes 0-7 only, and a high-order cell is written as its base code plus a `nodes` \
-             section.  Only Quad9 (SQUARE + L2_T1_2D_P2, D819-C) is derived so far; emitting \
-             the private high-order codes 8-14 this writer once used would produce a file \
-             real MFEM refuses to read."
-        ))),
+    // D821-1: a row-geometry cell emits its base code and the corner prefix;
+    // the full order-2 connectivity travels in the `nodes` payload the
+    // pre-flight above has already resolved.
+    if let Some(row) = row_geometry_row(et) {
+        return Ok(row);
     }
+    Err(FemError::Mesh(format!(
+        "write_mfem: no MFEM encoding for {et:?} cells — the .mesh format has geometry \
+         codes 0-7 only, and a high-order cell is written as its base code plus a `nodes` \
+         section.  The row-geometry cells Line3/Tri6/Quad9/Tet10/Hex27/Prism18 are derived \
+         (D819-C, D821-1); {et:?} has no exact MFEM `nodes` family (Quad8 is the serendipity \
+         quad — the quad `nodes` lattice is the 9-dof tensor, not 8; Hex20/Prism15 have the \
+         same dof-count gap; the order-2 pyramid would need the 27-dof Fuentes payload a \
+         13-node row cannot fill, D825-2), so emitting the private high-order codes 8-14 \
+         this writer once used would produce a file real MFEM refuses to read."
+    )))
+}
+
+/// What one `elements`-section row emits for a **row-geometry cell** `et`
+/// (D819-C for the Quad9 cell, D821-1 for the other five): the base geometry
+/// code and the corner prefix.  `None` for every type whose connectivity row
+/// is not itself the order-2 geometry.
+fn row_geometry_row(et: ElementType) -> Option<(u32, usize)> {
+    Some(match et {
+        ElementType::Line3   => (1, 2),
+        ElementType::Tri6    => (2, 3),
+        ElementType::Quad9   => (3, 4),
+        ElementType::Tet10   => (4, 4),
+        ElementType::Hex27   => (5, 8),
+        ElementType::Prism18 => (6, 6),
+        _ => return None,
+    })
+}
+
+/// The base element type of a row-geometry cell — the family whose `L2_T1_*_P2`
+/// node lattice the `nodes` payload is written in (D821-1).
+fn row_geometry_base(et: ElementType) -> Option<ElementType> {
+    Some(match et {
+        ElementType::Line3   => ElementType::Line2,
+        ElementType::Tri6    => ElementType::Tri3,
+        ElementType::Quad9   => ElementType::Quad4,
+        ElementType::Tet10   => ElementType::Tet4,
+        ElementType::Hex27   => ElementType::Hex8,
+        ElementType::Prism18 => ElementType::Prism6,
+        _ => return None,
+    })
 }
 
 /// Parsed MFEM mesh data (supports 1D, 2D and 3D files; D813-4 added the 1-D
@@ -622,22 +664,38 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 //    family, and neither the permutation nor this loop is
                 //    per-element).
                 let n_local_verts = l2_geometry_slots(et0, 1).map_or(0, |s| s.len());
+                // D825: the geometry-table slot that carries reference vertex
+                // `k`.  Every family's table lists its vertices first (table
+                // slot `k` is vertex `k`) — except the segment, whose
+                // order-`p` slots ascend [v0, mid…, v1], so the second
+                // endpoint sits at the **last** slot, not slot 1.  (Surfaced
+                // by the row-geometry exports: a written Line3/Line2 mesh
+                // reloads as SEGMENT rows over an `L2_T1_1D_P2` field, where
+                // the old slot-1 fold handed vertex 1 the midside's
+                // coordinates.)
+                let vertex_slots: Vec<usize> = match et0 {
+                    ElementType::Line2 => (0..n_local_verts)
+                        .map(|k| if k == 0 { 0 } else { npe - 1 })
+                        .collect(),
+                    _ => (0..n_local_verts).collect(),
+                };
                 coords = vec![0.0_f64; n_vert * dim];
                 let mut overlap = vec![0_usize; n_vert];
                 for e in 0..n_elem {
-                    for k in 0..n_local_verts {
+                    for (k, &slot) in vertex_slots.iter().enumerate() {
                         if k >= elem_conn[e].len() {
                             continue;
                         }
+                        // Vertex `k` is the k-th id of the element row (the
+                        // rows list their vertices first); its value sits at
+                        // the row's *table* slot `slot`.
                         let v = elem_conn[e][k] as usize;
                         if v >= n_vert {
                             continue;
                         }
-                        // `k` is the vertex index in the element's
-                        // connectivity, which is also its reference slot (the
-                        // vertices come first in every element family), so the
-                        // file's L2 index of that vertex is `perm[k]`.
-                        let kl = perm[k];
+                        // The file's L2 index of that table slot is
+                        // `perm[slot]`.
+                        let kl = perm[slot];
                         for c in 0..dim {
                             coords[v * dim + c] += raw[(e * npe + kl) * dim + c];
                         }
@@ -1328,6 +1386,43 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
     // check, so the write loop below cannot walk off the connectivity.
     let face_nv: Vec<usize> = check_boundary_tables(mesh)?;
 
+    // D821-1: a row-geometry mesh is written in MFEM's own **post-compaction**
+    // numbering.  On load MFEM drops every vertex no element or boundary row
+    // references (`RemoveUnusedVertices`, mesh.cpp) and renumbers the rest in
+    // ascending id order — for a row-geometry mesh that is the corner set
+    // only (the midsides are `nodes` dofs, not vertices), so MFEM's
+    // `Mesh::Printer` writes `vertices / <corner count>` and rows carrying
+    // the compacted corner ids (measured: MFEM's re-save of the round-84
+    // Quad9 output prints `vertices\n4` where the fem-rs node table holds
+    // 9 nodes).  Emitting the raw node-table count instead produced a file
+    // MFEM had to repair on load — and one the fem-rs reader (which keeps a
+    // written count verbatim, D600) could not size an H1 space over.  The
+    // table below maps `id -> compacted id`; `None` keeps the raw ids.
+    let vertex_remap: Option<Vec<u32>> =
+        if nodes.is_some() && row_geometry_row(*elem_type).is_some() {
+            let (_, n_emit) = row_geometry_row(*elem_type)
+                .expect("row-geometry row checked above");
+            let stride = elem_type.nodes_per_element();
+            let mut ids: Vec<u32> = Vec::new();
+            for ei in 0..n_elems {
+                let offset = ei * stride;
+                ids.extend_from_slice(&conn[offset..offset + n_emit]);
+            }
+            let mut off = 0usize;
+            for (fi, &nvf) in face_nv.iter().enumerate() {
+                if let Ok((_, emit)) = mfem_face_row(mesh.face_type_at(fi as u32), true) {
+                    debug_assert!(emit <= nvf, "boundary prefix emission overruns the face row");
+                    ids.extend_from_slice(&mesh.face_conn[off..off + emit]);
+                }
+                off += nvf;
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            Some(ids)
+        } else {
+            None
+        };
+
     writeln!(writer, "MFEM mesh v1.0\n")?;
     // `Mesh::Printer` always prefixes the serial conforming format with the
     // geometry-type comment block (`mesh/mesh.cpp:12521-12531`), whatever the
@@ -1385,15 +1480,16 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
         // Uniform element type.  D819-C: MFEM element rows carry the *base*
         // geometry code and the vertex prefix of the connectivity only
         // (`ReadElementWithoutAttr` reads `GetNVertices()` entries,
-        // mesh.cpp:5002-5016); the Quad9 arm relies on the `nodes` payload
-        // the pre-flight above has already resolved.
+        // mesh.cpp:5002-5016); the row-geometry arms rely on the `nodes`
+        // payload the pre-flight above has already resolved.  D821-1: for a
+        // row-geometry mesh the prefix carries the compacted corner ids.
         let (code, n_emit) = mfem_elem_row(*elem_type)?;
         for ei in 0..n_elems {
             let offset = ei * npe;
             let tag = if !elem_tags.is_empty() { elem_tags[ei] } else { 1 };
             write!(writer, "{tag} {code}")?;
             for j in 0..n_emit {
-                write!(writer, " {}", conn[offset + j])?;
+                write!(writer, " {}", remap_vertex(vertex_remap.as_deref(), conn[offset + j]))?;
             }
             writeln!(writer)?;
         }
@@ -1404,7 +1500,7 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
     // Each record is `<attr> <mfem geometry code> <n1> ... <nn>`, with the code
     // and the node count taken from the face's own geometric type (D126).  A
     // high-order face type needs the resolved `nodes` payload (D819-C).
-    write_boundary_section(writer, mesh, &face_nv, nodes.is_some())?;
+    write_boundary_section(writer, mesh, &face_nv, nodes.is_some(), vertex_remap.as_deref())?;
 
     // Vertices section
     //
@@ -1412,8 +1508,10 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
     // mesh with a `nodes` grid function emits `vertices / <n>` followed by the
     // `nodes` section instead (`Mesh::Printer`), because the geometry is then
     // fully described by the node dof values and even the space dimension is
-    // carried by the section's `VDim` (`mesh/mesh_readers.cpp:105-110`).
-    writeln!(writer, "\nvertices\n{n_nodes}")?;
+    // carried by the section's `VDim`.  D821-1: for a row-geometry mesh the
+    // count is MFEM's post-compaction corner count (see `vertex_remap`).
+    let n_vert_out = vertex_remap.as_ref().map_or(n_nodes, |m| m.len());
+    writeln!(writer, "\nvertices\n{n_vert_out}")?;
     if let Some((order, n_dofs, values)) = nodes.as_ref() {
         // The section's collection name counts the *topological* dimension
         // (`H1_2D_P3` for a surface, even though the values carry 3
@@ -1547,62 +1645,272 @@ fn zero_subnormal(s: f64) -> f64 {
     }
 }
 
-/// The `nodes` payload of a **Quad9-cell** mesh, synthesised exactly from the
-/// mesh's own element rows (D819-C).
+/// The `nodes` payload of a **row-geometry cell** mesh — a mesh whose element
+/// rows carry the full order-2 geometry (the Gmsh second-order imports:
+/// Line3/Tri6/Quad9/Tet10/Hex27/Prism18), synthesised from the mesh's own
+/// tables (D819-C for the Quad9 cell, D821-1 for the other five).
 ///
-/// MFEM has no element code for a 9-node quad: the `.mesh` encoding of such a
-/// cell is a SQUARE row (four corner ids) plus a 9-dof-per-element Q2 `nodes`
-/// section.  The fem-rs Quad9 slot order — corners counter-clockwise, then the
-/// bottom / right / top / left edge midsides, then the centre (the Gmsh
-/// type-10 order, which is also the tensor entity order) — permutes into MFEM's
-/// lexicographic `L2_T1_2D_P2` dof order (ix fastest) as
-/// `FEMRS_TO_LEX[fem-rs slot] = lex dof`, verified end-to-end against MFEM 4.10
-/// (`tmp/d84b/probe_quad9.cpp`: the read-back mesh is one SQUARE cell with a
-/// 9-dof order-2 `L2_T1_2D_P2` nodes field whose dof coordinates equal the
-/// original node coordinates, and MFEM's own save/load round-trip preserves
-/// it).
+/// MFEM has no element code for any of these cells: the `.mesh` encoding is a
+/// base row (the corner prefix, [`row_geometry_row`]) plus an order-2
+/// `nodes` section.  Each family's slot order permutes into MFEM's
+/// `L2_T1_<dim>D_P2` file dof order by matching reference coordinates
+/// ([`row_geometry_slots`] against [`mfem_l2_slots`] of the base family),
+/// probe-verified end-to-end against MFEM 4.10
+/// (`tmp/d84fixB/probe_high_order.cpp`: every read-back mesh is
+/// topology-identical, its nodes field equals the original node coordinates
+/// point for point, and MFEM's own Save/Load preserves it):
 ///
-/// Only the **discontinuous** space is derived: the element-owned table is
-/// exact without any global dof numbering, and it is the encoding MFEM reads
-/// back faithfully.  A continuous (H1) table for Quad9 rows would need the
-/// shared edge/face numbering derived and probe-verified first — refused until
-/// then rather than guessed.
-fn quad9_conn_nodes<const D: usize>(
+/// * `Quad9` — fem-rs [v0 v1 v2 v3 e01 e12 e23 e30 centre] → lex
+///   `FEMRS_TO_LEX = [0, 2, 8, 6, 1, 5, 7, 3, 4]` (the round-84 derivation);
+/// * `Tri6` — [v0 v1 v2 e01 e12 e20] → L2-triangle order [v0 e01 v1 e20 e12
+///   v2], perm [0, 2, 5, 1, 4, 3];
+/// * `Line3` — the row is the Gmsh type-8 order [v0 v1 mid] while the file
+///   lattice ascends [v0 mid v1]: the file order is `slots [0, 2, 1]`;
+/// * `Tet10` — [v0 v1 v2 v3 e01 e02 e03 e12 e13 e23] → the (k,j,i) barycentric
+///   loop [v0 e01 v1 e02 e12 v2 e03 e13 e23 v3], perm [0, 2, 5, 9, 1, 3, 6,
+///   4, 7, 8];
+/// * `Hex27` — the H1 entity order (vertices, `CUBE::Edges`, `FaceVert`,
+///   centre) → tensor-lex, perm computed by [`lex_slot_permutation`];
+/// * `Prism18` — the mesh's layer-major lattice (the H1 triangle order
+///   inside every layer) → the wedge's layer-major order (the *L2* triangle
+///   order inside every layer): the tri permutation [0, 2, 5, 1, 4, 3] applied
+///   per 6-slot block.
+///
+/// **Continuous space**: only the Quad9 cell has a derived H1 numbering
+/// ([`quad9_h1_conn_nodes`], D821-2); the other five refuse until their shared
+/// entity numbering is derived (D825-2).
+fn row_geometry_conn_nodes<const D: usize>(
     mesh: &Mesh<D>,
     space: NodesSpace,
+    et: ElementType,
 ) -> FemResult<Option<(u8, usize, Vec<f64>)>> {
     match space {
-        NodesSpace::Continuous => Err(FemError::Mesh(
-            "write_mfem: a Quad9-cell mesh has no derived continuous (H1) `nodes` numbering — \
-             write it with NodesSpace::Discontinuous (the exact per-element L2_T1_2D_P2 \
-             encoding, D819-C)"
-                .into(),
-        )),
+        NodesSpace::Continuous => {
+            if et == ElementType::Quad9 {
+                return quad9_h1_conn_nodes(mesh).map(Some);
+            }
+            Err(FemError::Mesh(format!(
+                "write_mfem: a {et:?}-cell mesh has no derived continuous (H1) `nodes` \
+                 numbering — the family's shared edge/face dof numbering is registered as \
+                 D825-1; write it with NodesSpace::Discontinuous (the exact per-element \
+                 L2 encoding, D821-1)"
+            )))
+        }
         NodesSpace::Discontinuous => {
-            // fem-rs slot → MFEM `L2_T1_2D_P2` lex dof.  Composed from the two
-            // pinned orders: fem-rs [v0 v1 v2 v3 e01 e12 e23 e30 centre]
-            // against lex [(0,0) (0.5,0) (1,0) (0,0.5) (0.5,0.5) (1,0.5)
-            //               (0,1) (0.5,1) (1,1)].
-            const FEMRS_TO_LEX: [usize; 9] = [0, 2, 8, 6, 1, 5, 7, 3, 4];
-            let npe = 9usize;
+            let npe = et.nodes_per_element();
             let n_elems = mesh.n_elements();
             debug_assert_eq!(
                 mesh.conn.len(),
                 n_elems * npe,
-                "quad9_conn_nodes: uniform Quad9 stride expected (check_element_tables ran)"
+                "row_geometry_conn_nodes: uniform row-geometry stride expected"
             );
+            let base = row_geometry_base(et).ok_or_else(|| {
+                FemError::Mesh(format!("write_mfem: {et:?} is not a row-geometry cell"))
+            })?;
+            let factory = row_geometry_slots(et).ok_or_else(|| {
+                FemError::Mesh(format!("write_mfem: {et:?} is not a row-geometry cell"))
+            })?;
+            let mfem = mfem_l2_slots(base, 2).ok_or_else(|| {
+                FemError::Mesh(format!(
+                    "write_mfem: no `L2_T1` node table for the {base:?} family"
+                ))
+            })?;
+            let perm = lex_slot_permutation(&factory, &mfem).ok_or_else(|| {
+                FemError::Mesh(format!(
+                    "write_mfem: the {et:?} slot order is not on the {base:?} family's \
+                     order-2 `L2_T1` lattice, so it cannot be re-ordered into MFEM's file \
+                     numbering"
+                ))
+            })?;
+            // Value source: an attached geometry table when one is present
+            // (the read side attaches a clone of the element rows, and the
+            // assembler evaluates the geometry through it — 按表), else the
+            // mesh's own node table through the element rows.
+            let geo = mesh.geometry.as_ref();
+            if let Some(g) = geo {
+                if g.nodes_per_elem == 0 {
+                    return Err(FemError::Mesh(
+                        "write_mfem: the mesh carries a ragged (mixed-element) geometry \
+                         table; a row-geometry mesh must be uniform (D627)"
+                            .into(),
+                    ));
+                }
+                if g.order != 2 || g.nodes_per_elem != npe || g.conn.len() != n_elems * npe {
+                    return Err(FemError::Mesh(format!(
+                        "write_mfem: the mesh's geometry table (order {}, {} nodes/elem) \
+                         does not match its {et:?} rows ({} nodes/elem) — refusing to guess \
+                         which one carries the geometry",
+                        g.order,
+                        g.nodes_per_elem,
+                        npe
+                    )));
+                }
+            }
+            let src = |slot: usize| -> &[f64] {
+                match geo {
+                    Some(g) => {
+                        let n = g.conn[slot] as usize;
+                        &g.coords[n * D..(n + 1) * D]
+                    }
+                    None => {
+                        let n = mesh.conn[slot] as usize;
+                        &mesh.coords[n * D..(n + 1) * D]
+                    }
+                }
+            };
             let mut values = vec![0.0f64; n_elems * npe * D];
             for e in 0..n_elems {
-                let row = &mesh.conn[e * npe..(e + 1) * npe];
-                for (f, &lex) in FEMRS_TO_LEX.iter().enumerate() {
-                    let n = row[f] as usize;
-                    values[(e * npe + lex) * D..(e * npe + lex) * D + D]
-                        .copy_from_slice(&mesh.coords[n * D..n * D + D]);
+                for (d, &s) in perm.iter().enumerate() {
+                    values[(e * npe + d) * D..(e * npe + d + 1) * D]
+                        .copy_from_slice(src(e * npe + s));
                 }
             }
             Ok(Some((2u8, n_elems * npe, values)))
         }
     }
+}
+
+/// The reference-element DOF coordinates of a row-geometry cell's **own slot
+/// order** — the factory element `Mesh::element_jacobian` evaluates the mesh's
+/// connectivity with (every one of these cells is exactly order 2).  `None`
+/// for non-row-geometry types.
+fn row_geometry_slots(et: ElementType) -> Option<Vec<Vec<f64>>> {
+    use fem_element::lagrange::factory::{HexQk, QuadQk};
+    Some(match et {
+        // The fem-rs Line3 row is the Gmsh type-8 order — corners first, the
+        // midside last (`gmsh_node_permutation`: Gmsh and fem-rs coincide for
+        // Line3; the d819-C Quad9 fixture's boundary row [v0 v1 mid] pins the
+        // same convention) — *not* the ascending lattice the 1-D geometry
+        // tables (and `L2_T1_1D_P2`) use.  The permutation onto the file order
+        // is therefore [0, 2, 1].
+        ElementType::Line3 => vec![vec![0.0], vec![1.0], vec![0.5]],
+        ElementType::Tri6 => fem_element::lagrange::H1TriPk::new(2).dof_coords(),
+        ElementType::Quad9 => QuadQk::new(2).dof_coords(),
+        ElementType::Tet10 => fem_element::lagrange::factory::H1TetPk::new(2).dof_coords(),
+        ElementType::Hex27 => HexQk::new(2).dof_coords(),
+        ElementType::Prism18 => fem_element::lagrange::PrismPk::new(2).dof_coords(),
+        _ => return None,
+    })
+}
+
+/// D821-2: the **continuous** (`H1_2D_P2`) `nodes` payload of a Quad9-cell
+/// mesh.
+///
+/// MFEM numbers an order-2 H1 space on SQUARE cells
+/// `[vertices | edges | cell interiors]` (`FiniteElementSpace::
+/// GetElementDofs`).  On load, MFEM's `RemoveUnusedVertices` compacts the
+/// file's vertex ids to the referenced corners **in ascending id order**, the
+/// edges
+/// are enumerated element-wise in `SQUARE::Edges` local order (first encounter
+/// wins, the corner-pair key sorted), and every cell interior is private:
+///
+/// ```text
+///   corner slot s (0..4) -> dof = rank of the corner's node id among all
+///                                corners (the compacted vertex id)
+///   edge slot 4 + k      -> dof = NV + E, E the mesh edge of local edge
+///                                QUAD_EDGES[k] (slots 4..8 run e01 e12 e23
+///                                e30, the same local order)
+///   centre slot 8        -> dof = NV + NE + e
+/// ```
+///
+/// So for a single cell with corner ids already 0..4 the dof order *is* the
+/// fem-rs slot order — but the sharing is what the numbering is about: two
+/// adjacent cells claim the same edge dof (probe family `quad9h1b`,
+/// `tmp/d84fixB/probe_high_order.cpp`: `GetElementDofs` of the two cells
+/// return `[0 1 2 3 | 6 7 8 9 | 13]` and `[1 4 5 2 | 10 11 12 7 | 14]`, the
+/// shared edge carrying one dof), and the read-back space has exactly
+/// NV + NE + NE dofs.  A shared dof written by two elements must describe one
+/// physical point — a disagreement means the mesh geometry is not continuous
+/// and is refused, mirroring the table writer's guard.
+fn quad9_h1_conn_nodes<const D: usize>(mesh: &Mesh<D>) -> FemResult<(u8, usize, Vec<f64>)> {
+    let npe = 9usize;
+    let n_elems = mesh.n_elements();
+    debug_assert_eq!(
+        mesh.conn.len(),
+        n_elems * npe,
+        "quad9_h1_conn_nodes: uniform Quad9 stride expected"
+    );
+    // The corners of every cell (the ids the `elements` rows carry — these are
+    // the ids MFEM compacts its vertex table to).
+    let mut corners: Vec<[u32; 4]> = Vec::with_capacity(n_elems);
+    for e in 0..n_elems {
+        let row = &mesh.conn[e * npe..(e + 1) * npe];
+        corners.push([row[0], row[1], row[2], row[3]]);
+    }
+    // Compacted vertex numbering: the referenced corners in ascending id
+    // order (`Mesh::RemoveUnusedVertices` keeps the referenced vertices in
+    // their original order), so a corner's vertex dof is the rank of its id.
+    let mut vertex_ids: Vec<u32> = corners.iter().flat_map(|c| c.iter().copied()).collect();
+    vertex_ids.sort_unstable();
+    vertex_ids.dedup();
+    let nv = vertex_ids.len();
+    // Mesh edges in MFEM's enumeration: element traversal, local
+    // `SQUARE::Edges` order, first encounter wins, the corner-pair key sorted.
+    let mut edge_ids: HashMap<[u32; 2], usize> = HashMap::new();
+    for c in &corners {
+        for &[la, lb] in QUAD_EDGES.iter() {
+            let (a, b) = (c[la], c[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len();
+            edge_ids.entry(key).or_insert(next);
+        }
+    }
+    let n_edges = edge_ids.len();
+    let n_dofs = nv + n_edges + n_elems;
+    let mut values = vec![0.0f64; n_dofs * D];
+    let mut filled = vec![false; n_dofs];
+    for (e, c) in corners.iter().enumerate() {
+        let row = &mesh.conn[e * npe..(e + 1) * npe];
+        // Vertex slots 0..4: dof = compacted vertex id.
+        for &v in c.iter() {
+            let rank = match vertex_ids.binary_search(&v) {
+                Ok(r) => r,
+                Err(_) => unreachable!("corner id is in the vertex table by construction"),
+            };
+            put_quad9_h1_dof::<D>(rank, v, &mut values, &mut filled, mesh)?;
+        }
+        // Edge slots 4..8 follow `QUAD_EDGES`'s local order (e01 e12 e23 e30).
+        for (k, &[la, lb]) in QUAD_EDGES.iter().enumerate() {
+            let (a, b) = (c[la], c[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let ei = edge_ids[&key];
+            put_quad9_h1_dof::<D>(nv + ei, row[4 + k], &mut values, &mut filled, mesh)?;
+        }
+        // Interior slot 8: private to the cell.
+        put_quad9_h1_dof::<D>(nv + n_edges + e, row[8], &mut values, &mut filled, mesh)?;
+    }
+    debug_assert!(
+        filled.iter().all(|&f| f),
+        "quad9_h1_conn_nodes: every H1 dof is claimed by construction"
+    );
+    Ok((2u8, n_dofs, values))
+}
+
+/// Write one Quad9 H1 dof's coordinate, with the shared-dof consistency guard
+/// (a dof claimed twice must describe one physical point — last writer wins,
+/// as MFEM's own `ProjectCoefficient` resolves overlaps).
+fn put_quad9_h1_dof<const D: usize>(
+    g: usize,
+    node: u32,
+    values: &mut [f64],
+    filled: &mut [bool],
+    mesh: &Mesh<D>,
+) -> FemResult<()> {
+    let n = node as usize;
+    let v = &mesh.coords[n * D..(n + 1) * D];
+    let dst = &mut values[g * D..(g + 1) * D];
+    if filled[g] {
+        if (0..D).any(|c| !approx_eq(dst[c], v[c])) {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: continuous Quad9 `nodes` dof {g} is claimed by two elements \
+                 with different coordinates — the mesh geometry is not continuous"
+            )));
+        }
+    } else {
+        filled[g] = true;
+    }
+    dst.copy_from_slice(v);
+    Ok(())
 }
 
 /// The `nodes` dof values of `mesh`, laid out for [`write_nodes_section`], plus
@@ -1642,8 +1950,8 @@ fn quad9_conn_nodes<const D: usize>(
 /// L2-triangle order for the wedge), which is a permutation of the mesh's own
 /// slot order.
 ///
-/// D819-C: a Quad9-cell mesh reaches [`quad9_conn_nodes`] before the
-/// geometry-table gate below.
+/// D819-C/D821-1: a row-geometry cell mesh reaches [`row_geometry_conn_nodes`]
+/// before the geometry-table gate below.
 fn nodes_dof_values<const D: usize>(
     mesh: &Mesh<D>,
     space: NodesSpace,
@@ -1667,13 +1975,13 @@ fn nodes_dof_values<const D: usize>(
             )));
         }
     }
-    // D819-C: a Quad9 *cell* mesh's geometry lives in its own 9-node rows
-    // (Gmsh type-10 import; the geometry table `attach_second_order_geometry`
-    // attaches is a clone of those rows), so its encoding is derived from the
-    // element table directly — before the geometry-table gate below, which
-    // would silently classify a table-free Quad9 mesh as straight-sided and
-    // drop every midside node.
-    if et == ElementType::Quad9 {
+    // D819-C/D821-1: a row-geometry *cell* mesh's geometry lives in its own
+    // order-2 rows (Gmsh type-8/9/10/11/12/13 import; the geometry table
+    // `attach_second_order_geometry` attaches is a clone of those rows), so
+    // its encoding is derived from the element table directly — before the
+    // geometry-table gate below, which would silently classify a table-free
+    // row-geometry mesh as straight-sided and drop every midside node.
+    if row_geometry_row(et).is_some() {
         let n_elems = mesh.n_elements();
         for e in 1..n_elems as u32 {
             if mesh.element_type_at(e) != et {
@@ -1684,7 +1992,7 @@ fn nodes_dof_values<const D: usize>(
                 )));
             }
         }
-        return quad9_conn_nodes(mesh, space);
+        return row_geometry_conn_nodes(mesh, space, et);
     }
     // D812-1: MFEM's emission rule is `Nodes != NULL`, *not* `order > 1`
     // (`mesh/mesh.cpp:12551` writes the section unconditionally when the mesh
@@ -2163,11 +2471,14 @@ fn approx_eq(a: f64, b: f64) -> bool {
 /// records can never overlap or overrun.  The MFEM geometry code comes from the
 /// face's own type via [`elem_type_to_mfem_code`] — extended, D819-C, with the
 /// vertex-prefix emission for high-order face types ([`mfem_face_row`]).
+/// `vertex_remap` is the row-geometry compaction table (D821-1, see
+/// [`remap_vertex`]).
 fn write_boundary_section<W: Write, const D: usize>(
     writer: &mut W,
     mesh: &Mesh<D>,
     face_nv: &[usize],
     has_nodes: bool,
+    vertex_remap: Option<&[u32]>,
 ) -> FemResult<()> {
     writeln!(writer, "\nboundary\n{}", face_nv.len())?;
     let mut off = 0usize;
@@ -2178,7 +2489,7 @@ fn write_boundary_section<W: Write, const D: usize>(
         let tag = if !mesh.face_tags.is_empty() { mesh.face_tags[fi] } else { 1 };
         write!(writer, "{tag} {code}")?;
         for j in 0..n_emit {
-            write!(writer, " {}", mesh.face_conn[off + j])?;
+            write!(writer, " {}", remap_vertex(vertex_remap, mesh.face_conn[off + j]))?;
         }
         writeln!(writer)?;
         off += nvf;
@@ -2216,6 +2527,18 @@ fn mfem_face_row(et: ElementType, has_nodes: bool) -> FemResult<(u32, usize)> {
         (None, _) => Err(FemError::Mesh(format!(
             "write_mfem: unsupported boundary face type {et:?} (no MFEM geometry code)"
         ))),
+    }
+}
+
+/// A vertex id in MFEM's post-compaction numbering when the mesh is a
+/// row-geometry mesh (`Some(table)` — the sorted distinct corner ids, so the
+/// compacted id is the rank), the raw id otherwise (D821-1).
+fn remap_vertex(remap: Option<&[u32]>, id: u32) -> u32 {
+    match remap {
+        Some(table) => table
+            .binary_search(&id)
+            .expect("emitted vertex id is in the compacted table") as u32,
+        None => id,
     }
 }
 
