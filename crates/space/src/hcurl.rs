@@ -1086,7 +1086,10 @@ pub struct HCurlSpace<M: MeshTopology> {
 impl<M: MeshTopology> HCurlSpace<M> {
     /// Construct an H(curl) space of the given order on `mesh`.
     ///
-    /// Supports ND1 (order 1) and NDk (order k >= 2) for Tri3/Tri6, Quad4/Quad8, Tet4/Tet10, Hex8/Hex20.
+    /// Supports ND1 (order 1) and NDk (order k >= 2) for Tri3/Tri6, Quad4/Quad8/Quad9, Tet4/Tet10, Hex8/Hex20.
+    /// (D820/D819: a Quad8/Quad9 mesh cell is a geometry row label on the one
+    /// SQUARE geometry — it takes the Quad4 tables verbatim: the row's first
+    /// 4 nodes are the vertices the edge keys read.)
     pub fn new(mesh: M, order: u8) -> Self {
         Self::build(mesh, order, false)
     }
@@ -1165,7 +1168,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         &TRI_EDGES_ND1
                     }
                 }
-                ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => &QUAD_EDGES,
                 ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
                 ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
                 ElementType::Prism6 => &PRISM_EDGES,
@@ -1326,7 +1329,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 let cell_type = mesh.element_type(e);
                 match (dim, cell_type) {
                     (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => (k * (k - 1)) as u32,
-                    (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => {
+                    (2, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9)
+                        if k >= 2 =>
+                    {
                         (2 * k * (k - 1)) as u32
                     }
                     (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => {
@@ -1374,7 +1379,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         &TRI_EDGES_ND1
                     }
                 }
-                ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => &QUAD_EDGES,
                 ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
                 ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
                 ElementType::Prism6 => &PRISM_EDGES,
@@ -1673,7 +1678,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
             // Interior DOFs (NDk, k>=3 for Tet, k>=2 for others).
             let interior_count: u32 = match (dim, cell_type) {
                 (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => (k * (k - 1)) as u32,
-                (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => (2 * k * (k - 1)) as u32,
+                (2, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9) if k >= 2 => {
+                    (2 * k * (k - 1)) as u32
+                }
                 (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => {
                     (k * (k - 1) * (k - 2) / 2) as u32
                 }
@@ -1895,7 +1902,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             ];
                         }
                     }
-                    (2, ElementType::Quad4 | ElementType::Quad8) => {
+                    (2, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9) => {
                         let n_interior = 2 * nd * (nd - 1);
                         let coords =
                             quad_coords.get_or_insert_with(|| QuadND::new(nd).dof_coords());
@@ -2377,7 +2384,14 @@ impl<M: MeshTopology> HCurlSpace<M> {
         // `ND_QuadrilateralElement::Project` dispatches to `ProjectIntegrated`
         // for the integrated type (`fe_nd.hpp:68`), so every DOF is the
         // sub-cell line integral `∫ f·(Jᵀt) ds` — not a point value.
-        if self.quad_igll && self.cell_type == ElementType::Quad4 {
+        // D820: the igll variant covers every SQUARE-cell label (Quad4/8/9) —
+        // the collection choice is orthogonal to the geometry row label.
+        if self.quad_igll
+            && matches!(
+                self.cell_type,
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            )
+        {
             let el = fem_element::nedelec::QuadND::new_integrated_gll(k);
             let functionals = el.integrated_functionals();
             let r = result.as_slice_mut();
@@ -2494,7 +2508,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     r[bub0] = (x1[0] - x0[0]) * fv[0] + (x1[1] - x0[1]) * fv[1];
                     r[bub1] = (x2[0] - x0[0]) * fv[0] + (x2[1] - x0[1]) * fv[1];
                 }
-            } else if matches!(self.cell_type, ElementType::Quad4 | ElementType::Quad8) {
+            } else if matches!(
+                self.cell_type,
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            ) {
                 // QuadND2 interior slots (8..12): x-comp point values at the
                 // reference (t_m, 1/2) with tangent J(1,0); y-comp at (1/2, t_m)
                 // with tangent J(0,1) — bilinear map through the 4 corners.
@@ -2582,7 +2599,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
             }
         } else if self.dim == 2
             && k >= 3
-            && matches!(self.cell_type, ElementType::Quad4 | ElementType::Quad8)
+            && matches!(
+                self.cell_type,
+                ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            )
         {
             // Quad NDk (k >= 3) interior DOFs (D765): point values at the
             // MFEM `FE::Nodes` sites of `ND_QuadrilateralElement(k)` with each

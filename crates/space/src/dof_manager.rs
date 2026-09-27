@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use fem_core::types::{DofId, ElemId, FaceId, NodeId};
+use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_element::lagrange::PyramidBasisType;
 use fem_element::ReferenceElement;
@@ -46,6 +47,109 @@ fn get_edge_dofs_pk(
         (0..n_dofs).map(|_| { let d = *next; *next += 1; d }).collect()
     });
     if a == key.0 { dofs.clone() } else { let mut r = dofs.clone(); r.reverse(); r }
+}
+
+// ─── D820: vertex set of meshes with quadratic-quad geometry rows ────────────
+
+/// The mesh's *vertex* node set when quadratic-quad geometry rows are present,
+/// or `None` when every element row is a plain (vertex-only) row.
+///
+/// MFEM has a single `Geometry::SQUARE`: a fem-rs `Quad8` (serendipity) or
+/// `Quad9` (tensor-Q2) mesh cell is a *geometry row label* (D243; round-83
+/// adjudication D819), and the mesh MFEM builds from such a file carries
+/// exactly **4 vertices per cell** — the row's corner nodes; the remaining
+/// row nodes belong to the order-2 `Nodes` grid function, never to the vertex
+/// table.  Every H¹ space on such a mesh therefore numbers vertex dofs over
+/// the corner set only, whatever the polynomial order.
+///
+/// The corner set is the union of the first 4 nodes of every Quad8/Quad9 row
+/// and *all* nodes of every other element row, returned in ascending node
+/// id — the same numbering MFEM's Gmsh reader assigns the mesh vertices
+/// (probe `tmp/d84a/h1_probe.cpp`: fixture `data/d819_quad9_curved.msh`,
+/// nodes {0,2,4,10,12,14} → vertices 0..5).
+fn quadratic_quad_corner_view<M: MeshTopology>(mesh: &M) -> Option<Vec<NodeId>> {
+    let n_elems = mesh.n_elements();
+    let mut is_vertex = vec![false; mesh.n_nodes()];
+    let mut any_quad_row = false;
+    for e in 0..n_elems as u32 {
+        if matches!(
+            mesh.element_type(e),
+            ElementType::Quad8 | ElementType::Quad9
+        ) {
+            any_quad_row = true;
+            // Slot contract (D243): vertices first — slots 0..3 are corners.
+            for &n in mesh.element_nodes(e).iter().take(4) {
+                is_vertex[n as usize] = true;
+            }
+        } else {
+            for &n in mesh.element_nodes(e) {
+                is_vertex[n as usize] = true;
+            }
+        }
+    }
+    if !any_quad_row {
+        return None;
+    }
+    Some(
+        (0..is_vertex.len() as u32)
+            .filter(|&n| is_vertex[n as usize])
+            .collect(),
+    )
+}
+
+/// `physical node → vertex dof` plumbing shared by the P1 / Q2 / quad-Pk
+/// builders: `Identity` is the historical convention (vertex dof = node id),
+/// `View` compacts physical node ids to consecutive vertex dofs through a
+/// vertex list (MFEM's NC `UpdateVertices` order, or the D820 corner view).
+struct VertexDofMap {
+    view: Option<Vec<NodeId>>,
+    node_to_dof: HashMap<NodeId, DofId>,
+}
+
+impl VertexDofMap {
+    fn new(view: Option<Vec<NodeId>>) -> Self {
+        let node_to_dof = match &view {
+            Some(v) => v.iter().enumerate().map(|(d, &n)| (n, d as DofId)).collect(),
+            None => HashMap::new(),
+        };
+        VertexDofMap { view, node_to_dof }
+    }
+
+    /// MFEM `NVDofs`: the vertex list length, or the whole node table when
+    /// every node is a vertex.
+    fn n_vertices(&self, n_nodes: usize) -> usize {
+        self.view.as_ref().map_or(n_nodes, |v| v.len())
+    }
+
+    fn dof_of(&self, node: NodeId) -> DofId {
+        match &self.view {
+            None => node,
+            Some(_) => self.node_to_dof[&node],
+        }
+    }
+
+    fn node_of(&self, dof: DofId) -> NodeId {
+        match &self.view {
+            None => dof,
+            Some(v) => v[dof as usize],
+        }
+    }
+
+    /// The `phys_to_vertex_dof` table.  Under a view: the view's node → dof
+    /// table.  Under the identity convention: `full_identity = true` returns
+    /// the explicit `node → node` table over all `n_nodes` nodes (the
+    /// historical `build_q2_quad` table, which `hanging_2d` indexes
+    /// directly), `false` an empty table (the historical `build_p1` value —
+    /// consumers fall back to `node as dof`, behaviour unchanged).
+    fn phys_map(&self, n_nodes: usize, full_identity: bool) -> HashMap<NodeId, DofId> {
+        match &self.view {
+            Some(_) => self.node_to_dof.clone(),
+            None if full_identity => {
+                (0..n_nodes as NodeId).map(|n| (n, n)).collect()
+            }
+            None => HashMap::new(),
+        }
+    }
 }
 
 // ─── FaceKey ─────────────────────────────────────────────────────────────────
@@ -508,9 +612,14 @@ impl DofManager {
                         Self::build_pk(mesh, 2, pyr)
                     }
                 } else if mesh.n_elements() > 0
-                    && mesh.element_nodes(0).len() == 4
                     && topo_dim == 2
+                    && matches!(
+                        mesh.element_type(0),
+                        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+                    )
                 {
+                    // D820: Quad8/Quad9 rows share the Quad4 tensor numbering
+                    // (one SQUARE geometry, D819).
                     Self::build_q2_quad(mesh)
                 } else {
                     Self::build_pk(mesh, 2, pyr)
@@ -527,16 +636,33 @@ impl DofManager {
                     if npe == 8 || npe == 20 || npe == 27 { return Self::build_pk_hex(mesh, order); }
                 }
                 if mesh.n_elements() > 0 {
-                    let npe = mesh.element_nodes(0).len();
-                    if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
+                    // D820: Quad8/Quad9 rows share the Quad4 tensor numbering
+                    // (one SQUARE geometry, D819).
+                    if topo_dim == 2
+                        && matches!(
+                            mesh.element_type(0),
+                            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+                        )
+                    {
+                        return Self::build_pk_quad(mesh, order);
+                    }
                 }
                 Self::build_pk(mesh, 3, pyr)
             }
             _ => {
                 // General arbitrary-order path for p >= 4
                 if mesh.n_elements() > 0 {
+                    // D820: Quad8/Quad9 rows share the Quad4 tensor numbering
+                    // (one SQUARE geometry, D819).
+                    if topo_dim == 2
+                        && matches!(
+                            mesh.element_type(0),
+                            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+                        )
+                    {
+                        return Self::build_pk_quad(mesh, order);
+                    }
                     let npe = mesh.element_nodes(0).len();
-                    if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
                     if npe == 8 || npe == 20 || npe == 27 { return Self::build_pk_hex(mesh, order); }
                     if npe == 6 || npe == 15 || npe == 18 { return Self::build_prism_h1(mesh, order); }
                     if npe == 5 || npe == 13 {
@@ -591,9 +717,31 @@ impl DofManager {
         let n_elems = mesh.n_elements();
         let dim = mesh.dim() as usize;
 
-        // Check if all elements have the same number of nodes.
-        let first_npe = if n_elems > 0 { mesh.element_nodes(0).len() } else { 0 };
-        let is_mixed = (0..n_elems as u32).any(|e| mesh.element_nodes(e).len() != first_npe);
+        // D820 (D819-A): a Quad8/Quad9 mesh cell is a geometry row label on
+        // MFEM's single SQUARE geometry — its row's trailing nodes belong to
+        // the order-2 `Nodes` grid function, so P1 numbers only the 4 corner
+        // vertices of such rows (MFEM probe: H1(1) NDofs = NV = compacted
+        // corner set).  Plain meshes keep the identity convention
+        // (vertex dof = node id) bit-for-bit.
+        let corner_view = quadratic_quad_corner_view(mesh);
+        let vmap = VertexDofMap::new(corner_view);
+
+        // Per-element P1 slice: the 4 corner nodes of a quadratic-quad row,
+        // every node of all other rows.  Rows of unequal slice length (mixed
+        // meshes) are addressed through `elem_dof_offsets`.
+        let slice_of = |e: ElemId| -> &[NodeId] {
+            let nodes = mesh.element_nodes(e);
+            if matches!(
+                mesh.element_type(e),
+                ElementType::Quad8 | ElementType::Quad9
+            ) {
+                nodes.split_at(nodes.len().min(4)).0
+            } else {
+                nodes
+            }
+        };
+        let first_npe = if n_elems > 0 { slice_of(0).len() } else { 0 };
+        let is_mixed = (0..n_elems as u32).any(|e| slice_of(e).len() != first_npe);
 
         let mut dofs_flat = Vec::new();
         let mut elem_dof_offsets = if is_mixed { Some(Vec::with_capacity(n_elems + 1)) } else { None };
@@ -603,31 +751,32 @@ impl DofManager {
         }
 
         for e in 0..n_elems as u32 {
-            let nodes = mesh.element_nodes(e);
-            for &n in nodes {
-                dofs_flat.push(n);
+            for &n in slice_of(e) {
+                dofs_flat.push(vmap.dof_of(n));
             }
             if let Some(ref mut offsets) = elem_dof_offsets {
                 offsets.push(dofs_flat.len());
             }
         }
 
-        // DOF coordinates = node coordinates.
-        let mut dof_coords = Vec::with_capacity(n_nodes * dim);
-        for n in 0..n_nodes as u32 {
-            dof_coords.extend_from_slice(mesh.node_coords(n));
+        // DOF coordinates: vertex-view node coordinates (all nodes under the
+        // identity convention).
+        let n_vertex = vmap.n_vertices(n_nodes);
+        let mut dof_coords = Vec::with_capacity(n_vertex * dim);
+        for d in 0..n_vertex as u32 {
+            dof_coords.extend_from_slice(mesh.node_coords(vmap.node_of(d)));
         }
 
         let dofs_per_elem = if is_mixed { 0 } else { first_npe };
 
         DofManager {
-            order: 1, n_dofs: n_nodes, dofs_flat, dofs_per_elem,
-            elem_dof_offsets, dof_coords, dim, n_vertex_dofs: n_nodes,
+            order: 1, n_dofs: n_vertex, dofs_flat, dofs_per_elem,
+            elem_dof_offsets, dof_coords, dim, n_vertex_dofs: n_vertex,
             edge_dof_map: HashMap::new(),
-            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: vmap.phys_map(n_nodes, false), edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
-            bubble_dof_start: n_nodes,
+            bubble_dof_start: n_vertex,
             n_volume_dofs: 0,
             elem_orders: None,
             edge_variants: HashMap::new(),
@@ -721,38 +870,38 @@ impl DofManager {
     /// - Position 8: interior DOF (one per element, not shared)
     ///
     /// DOF ordering matches [`fem_element::QuadQ2`].
+    ///
+    /// D820: quadratic-quad rows (`Quad8`/`Quad9`, the D819 geometry row
+    /// labels) share this tensor numbering — one SQUARE geometry — with the
+    /// vertex dofs taken over the rows' 4 corner nodes
+    /// ([`Self::quadratic_quad_corner_view`]).
     fn build_q2_quad<M: MeshTopology>(mesh: &M) -> Self {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
         let dim     = mesh.dim() as usize;
         assert_eq!(mesh.topological_dim() as usize, 2, "build_q2_quad requires 2-D elements");
 
-        // MFEM vertex-view ordering: if the mesh carries an NC vertex view
-        // (top-level nodes first, then non-top-level nodes in SFC/leaf order —
-        // MFEM UpdateVertices), vertex DOF `d` refers to physical node
-        // `view[d]`.  This is how the global DOF ids line up with MFEM on
-        // non-conforming meshes.
-        let vertex_view: Option<&[NodeId]> = mesh.nc_vertex_view();
+        // Effective vertex view, in decreasing precedence:
+        // 1. MFEM vertex-view ordering: if the mesh carries an NC vertex view
+        //    (top-level nodes first, then non-top-level nodes in SFC/leaf
+        //    order — MFEM UpdateVertices), vertex DOF `d` refers to physical
+        //    node `view[d]`.  This is how the global DOF ids line up with
+        //    MFEM on non-conforming meshes.
+        // 2. D820 corner view: a Quad8/Quad9-row mesh has 4 vertices per cell
+        //    (the row's corner nodes); the vertex dofs are their compacted
+        //    set, not the whole geometry node table.
+        let view = mesh
+            .nc_vertex_view()
+            .map(|v| v.to_vec())
+            .or_else(|| quadratic_quad_corner_view(mesh));
+        let vmap = VertexDofMap::new(view);
         // Number of vertex DOFs = vertex-view length when present.  The mesh
         // node table may contain extra (preserved) nodes that are not part of
         // any element — e.g. edge-midpoint history kept for the NC constraint
         // walk — and those must NOT become DOFs (MFEM: vertex table only
         // covers nodes used by elements).
-        let n_vertex = vertex_view.map_or(n_nodes, |v| v.len());
-        let node_to_dof: std::collections::HashMap<NodeId, DofId> = match vertex_view {
-            Some(view) => view
-                .iter()
-                .enumerate()
-                .map(|(d, &n)| (n, d as DofId))
-                .collect(),
-            None => (0..n_nodes as NodeId).map(|n| (n, n as DofId)).collect(),
-        };
-        let vertex_phys = |dof: DofId| -> NodeId {
-            match vertex_view {
-                Some(view) => view[dof as usize],
-                None => dof,
-            }
-        };
+        let n_vertex = vmap.n_vertices(n_nodes);
+        let vertex_phys = |dof: DofId| -> NodeId { vmap.node_of(dof) };
 
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut next_dof = n_vertex as DofId;
@@ -767,16 +916,19 @@ impl DofManager {
         // edge numbering vs MFEM and change the GS-smoother sweep order).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            assert_eq!(ns.len(), 4, "build_q2_quad requires Quad4 elements");
+            assert!(
+                ns.len() >= 4,
+                "build_q2_quad requires Quad4/Quad8/Quad9 corner-first rows"
+            );
             let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
             let base = e as usize * dofs_per_elem;
 
             // Vertex DOFs (positions 0–3) — via the vertex view so the ids
             // match MFEM's ordering on NC meshes.
-            dofs_flat[base]     = node_to_dof[&n0];
-            dofs_flat[base + 1] = node_to_dof[&n1];
-            dofs_flat[base + 2] = node_to_dof[&n2];
-            dofs_flat[base + 3] = node_to_dof[&n3];
+            dofs_flat[base]     = vmap.dof_of(n0);
+            dofs_flat[base + 1] = vmap.dof_of(n1);
+            dofs_flat[base + 2] = vmap.dof_of(n2);
+            dofs_flat[base + 3] = vmap.dof_of(n3);
 
             // Edge midpoint DOFs (positions 4–7)
             // Ordering: bottom (n0,n1), right (n1,n2), top (n2,n3), left (n3,n0)
@@ -813,12 +965,33 @@ impl DofManager {
             dof_coords[d as usize * dim .. d as usize * dim + dim].copy_from_slice(c);
         }
 
-        // Edge midpoints.
+        // Edge midpoints.  D820: on a Quad8/Quad9-row mesh the row's slots
+        // 4..8 *are* the four edge-midpoint geometry nodes in the same
+        // (bottom/right/top/left) order — use their (curved-surface) node
+        // coordinates when available instead of the chord midpoint.
+        let quad_row = |e: u32| -> bool {
+            matches!(
+                mesh.element_type(e),
+                ElementType::Quad8 | ElementType::Quad9
+            )
+        };
         for (&EdgeKey(a, b), &dof_id) in &edge_map {
             let ca = mesh.node_coords(a);
             let cb = mesh.node_coords(b);
             let base = dof_id as usize * dim;
             for d in 0..dim { dof_coords[base + d] = 0.5 * (ca[d] + cb[d]); }
+        }
+        for e in 0..n_elems as u32 {
+            if !quad_row(e) {
+                continue;
+            }
+            let ns = mesh.element_nodes(e);
+            let base = e as usize * dofs_per_elem;
+            for k in 0..4 {
+                let dof_id = dofs_flat[base + 4 + k] as usize;
+                let c = mesh.geom_coords_of(ns[4 + k]);
+                dof_coords[dof_id * dim .. dof_id * dim + dim].copy_from_slice(c);
+            }
         }
 
         // Interior DOFs: element centroids.
@@ -840,16 +1013,7 @@ impl DofManager {
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_vertex, edge_dof_map: edge_map,
             edge_dof2_map: HashMap::new(),
-            phys_to_vertex_dof: match vertex_view {
-                Some(view) => view
-                    .iter()
-                    .enumerate()
-                    .map(|(d, &n)| (n, d as DofId))
-                    .collect(),
-                None => (0..n_nodes as NodeId)
-                    .map(|n| (n, n as DofId))
-                    .collect(),
-            },
+            phys_to_vertex_dof: vmap.phys_map(n_nodes, true),
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
@@ -1691,13 +1855,23 @@ impl DofManager {
         let dim = mesh.dim() as usize;
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
+        // D820: Quad8/Quad9 rows (the D819 geometry row labels) share the
+        // tensor numbering; their vertex dofs live on the rows' 4 corner
+        // nodes, not the whole order-2 node table (MFEM probe: H1(3) NDofs
+        // counts NV = 6 on the 2-cell curved Quad9 fixture).
+        let view = mesh
+            .nc_vertex_view()
+            .map(|v| v.to_vec())
+            .or_else(|| quadratic_quad_corner_view(mesh));
+        let vmap = VertexDofMap::new(view);
+        let n_vertex = vmap.n_vertices(n_nodes);
         let edge_dofs_per = p - 1;
         let interior_dofs_per = (p - 1) * (p - 1);
         let n_verts = 4;
         let n_edges = 4;
         let dofs_per_elem = n_verts + n_edges * edge_dofs_per + interior_dofs_per;
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
-        let mut next_dof = n_nodes as DofId;
+        let mut next_dof = n_vertex as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
         // Two-phase DOF assignment, matching MFEM FiniteElementSpace::Construct:
@@ -1709,10 +1883,12 @@ impl DofManager {
         // DOFs at 1373.. instead of 9281..).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            assert!(ns.len() >= 4);
+            assert!(
+                ns.len() >= 4,
+                "build_pk_quad requires Quad4/Quad8/Quad9 corner-first rows"
+            );
             let base = e as usize * dofs_per_elem;
-            dofs_flat[base] = ns[0]; dofs_flat[base + 1] = ns[1];
-            dofs_flat[base + 2] = ns[2]; dofs_flat[base + 3] = ns[3];
+            for k in 0..4 { dofs_flat[base + k] = vmap.dof_of(ns[k]); }
             let edges = [(ns[0], ns[1]), (ns[1], ns[2]), (ns[2], ns[3]), (ns[3], ns[0])];
             let mut off = 4;
             for &(a, b) in &edges {
@@ -1732,9 +1908,9 @@ impl DofManager {
 
         let n_dofs = next_dof as usize;
         let mut dof_coords = vec![0.0; n_dofs * dim];
-        for n in 0..n_nodes as u32 {
-            let c = mesh.node_coords(n);
-            let base = n as usize * dim;
+        for d in 0..n_vertex as u32 {
+            let c = mesh.node_coords(vmap.node_of(d));
+            let base = d as usize * dim;
             dof_coords[base..base + dim].copy_from_slice(c);
         }
         for (&EdgeKey(a, b), dofs) in &edge_pk_map {
@@ -1778,8 +1954,10 @@ impl DofManager {
 
         DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem, elem_dof_offsets: None, dof_coords, dim,
-            n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
+            n_vertex_dofs: n_vertex,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(),
+            phys_to_vertex_dof: vmap.phys_map(n_nodes, false),
+            edge_pk_map,
             face_pk_map: HashMap::new(), quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
             edge_variants: HashMap::new(),

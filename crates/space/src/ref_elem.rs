@@ -232,7 +232,12 @@ pub fn h1_simplex_slots(elem_type: ElementType, order: u8) -> Box<dyn ReferenceE
 /// to.
 pub fn gll_tensor(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match elem_type {
-        ElementType::Quad4 => Box::new(QuadQk::new(order as usize)),
+        // D820 (D819): the serendipity `Quad8` and complete `Quad9` cell rows
+        // are geometry labels on the one SQUARE geometry — they share the
+        // `Quad4` tensor family, exactly the D581 hex pattern.
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+            Box::new(QuadQk::new(order as usize))
+        }
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             Box::new(HexQk::new(order as usize))
         }
@@ -350,8 +355,17 @@ pub fn h1_field_element(
         // (D761: the missing arm panicked on a production-reachable path —
         // the estimator over curved tet meshes).
         (ElementType::Tet4 | ElementType::Tet10, _) => h1_simplex_slots(elem_type, order),
-        (ElementType::Quad4, 0) => Box::new(P0Tensor { dim: 2 }),
-        (ElementType::Quad4, _) => gll_tensor(elem_type, order),
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 0) => {
+            Box::new(P0Tensor { dim: 2 })
+        }
+        // D820 (D819): Quad8 (serendipity) and Quad9 (tensor-Q2) mesh cells
+        // are geometry row labels on MFEM's single SQUARE geometry —
+        // `H1_FECollection(p, 2)` builds the tensor `H1_QuadrilateralElement(p)`
+        // on all of them, so they route with `Quad4` (the D581 hex pattern on
+        // quads).  Pre-fix this combination panicked.
+        (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, _) => {
+            gll_tensor(elem_type, order)
+        }
         (ElementType::Hex8, 0) => Box::new(P0Tensor { dim: 3 }),
         (ElementType::Hex8, 1) => fixed_order_tensor(elem_type, order),
         (ElementType::Hex8, _) => gll_tensor(elem_type, order),
