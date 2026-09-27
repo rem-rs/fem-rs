@@ -4470,6 +4470,27 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十二轮（round 82）：D817-1 内合 bdr 元素零装配语义下沉（Mesh 层 + 装配 bdr 遍历 11 站）——主会话单路
+
+**开局 HEAD = round 81 末笔 `9f900d5e`（已推送）；树净；C: 68G。** round-82 头号候选开工（HANDOVER §〇 ①）。
+
+### D817-1 · **关闭**（全量金标账先行 ㉚，有牙验证 纪律(c)）
+- **MFEM 真值（源码 + 探针双证）**：`Mesh::GetBdrFaceTransformations`（mesh.cpp:1312）对 `FaceIsTrueInterior(fn)` 或 `faces_info[fn].NCFace >= 0` 的 bdr 元素置 `Geometry::INVALID` ⇒ 返回 nullptr；`BilinearForm`（bilinearform.cpp:729 等 6 处）/`LinearForm`/`NonlinearForm` 的 bdr 循环全部跳过 nullptr ⇒ **零装配**。`FaceIsTrueInterior = FaceIsInterior || Elem2Inf >= 0`（serial 语义：面的两侧单元都在本网格）。
+- **全量金标账（改前 ㉚）**：MFEM 4.10 探针 `$HOME/work/d817/d817_probe.cpp`（逐文件隔离跑，防 mfem-crash 中断）扫全 **106 份 `data/*.mesh`**：**恰 4 份有内合 bdr** —— d525_pyramid_pair **2/10**、d667_refined_curved **96/352**、multidomain-hex **24/88**、periodic-cube **54/54**；其余 85 份 ok 全 0、16 份 NURBS 不适用、**d445_one_pyramid MFEM 4.10 自身加载即 SIGSEGV**（`r31_meshread` 同崩；D113-2 金字塔脆弱家族又一实例，单列无真值）。账本留档 `tmp/d817/golden_account.txt`（WSL `$HOME/work/d817/`）。**消费方枚举**：4 份的非 ex9 消费方均不做父网格 bdr 面积分（d667 → 体装配 `accumulate_vector_bilinear_element`；navier_tgv → 无 bdr 积分器[空 ess attr]；multidomain → 仅本质 BC 标记路径[MFEM bdr_attr_marker 同样不跳，两侧一致]）⇒ **爆炸半径 = 零金标扰动**。
+- **修（Mesh 层）**：`MeshTopology::bdr_face_true_interior(face) -> bool`（默认 `false` = 无法回答的 mesh 保持历史行为；`Box<dyn>` 转发）+ `Mesh<D>` 固有实现（连通性扫描：bdr 条目 vertex 排序集被 ≥2 个元素局部面注册即内合；每次查询 O(NE)，跳过点每 bdr 条目调一次）+ trait override。**顺带补真缺口**：`local_face_verts` 的 **Pyramid5 臂**（基 quad v0-v3 + 4 apex tri，MFEM FaceVert 序）——金字塔网格此前返回空面表，`build_face_to_elem`/`remove_internal_boundaries` 在金字塔网格上本就查无面。
+- **修（装配层 11 站，⑰ 全量收口）**：`assembler.rs::assemble_boundary_linear`/`assemble_boundary_bilinear`（`face_ids` 收集处过滤 ⇒ serial+parallel 双臂同滤）、`boundary/vector_boundary.rs` 双入口、`dg/dg_advection.rs::assemble_advection_boundary{,_full}`、`dg/dg.rs::boundary_pairs`、`dg/dg_elasticity.rs` 应力 SIP 环、`dg/dg_imex.rs::build_bdr_face_locs`（ex41/pex41/pex9 的 bdr K 源）、`wg/mod.rs::wg_boundary_face_map`（wg 三模块单点）。**刻意不动**（附 MFEM 对应关系核查）：本质 BC/Dirichlet 标记（`bdr_attr_marker` 路径 MFEM 不跳）、contact、ZZ-transfer 通量泛函、`face_edge_table`/`build_face_elem_map` 表构建。
+- **ex9-3D 去空 tag 集**：`run_3d` 的 `bc_tags: Vec<i32> = Vec::new()` 改 `mesh.unique_boundary_tags()`——54 内合条目由机械跳过，注释更新。
+- **红→绿 + 有牙（纪律 (c)）**：修后 `d817_bdr_true_interior`（assembly）2/2 绿——periodic-cube 全 tag bdr 装配 **K 空 pattern + RHS 恒零**（体装配活性对照防假绿）；普通网格无操作（单位方格边界质量 = 周长 4，加/不加合成内合条目同值；tag-9 单独装配 = 空 pattern）；mesh 层 2 个合成单测（2-D 共享对角线 [1,2]——生成器 n2/n3 与源码目读反了，实跑钉正；3-D sfc 排序 hex 用元素局部面表求交）。**pre-fix worktree**（`9f900d5e` + cp 夹具 + vendor，㉗ 合规）跑同款行为探针：**红 `boundary K must be empty — got 144 nonzeros`** ⇒ 有牙实证；worktree 用后即删。
+- **io 全量账钉**：`crates/io/tests/d817r82_bdr_true_interior_ledger.rs` 钉 106 份逐份计数 = MFEM 探针值（4 阳性 + 其余 0 + 7 份 reader 拒绝[= d812r77 read_err 行] + d445 自证 0）。首跑即红出 **Pyramid5 面表缺口**（d525 got 0 expected 2）→ 补臂后绿。
+- **大门（主树 ㉗）**：lib(debug) **10 靶/2659/0/5**（round-81 2657 + 恰 2 新 mesh 单测）、tests(release) **348 靶/4359/0/30**（346/4354 + 恰 2 新靶 + 5 通过：assembly 2 + io 1 + mesh lib 2）、doc **10/9/0/95**（= 基线）、examples **rc=0 / 0 非 vendor 警告**（28 条全 vendor）、pro **rc=0**、fem-py **rc=0**。
+- **锚点全保**：ex9-3D r2-o3 **init.gf 逐字节 = C++** + stdout 唯一差异 = `--mesh` 路径回声（= round-81 Rust r2 输出 0 差 ⇒ 机械跳过与空集版本逐字节同轨）；r0 档同（0 实质差）；ex9-2D **重跑 C++ 真值**（存档 `ex9cpp/ex9-final.gf` 已被后续运行覆写损坏 197 行，按 ㉙ 实跑取代：`$HOME/work/d76main/ex9_rerun/`）stdout 剥离后逐字节、final max|Δ| = **1.0000000050e-08**（= 在案 RK4+CG 漂移）；ex14 **311 行逐字节**（剥 C++ 12 行 Options 前缀）；ex27 default + `-dbc 2.5` 双档 **IDENTICAL**。
+
+### 大门数字与提交
+提交链：本笔（代码 12 文件 +417/−4）→ docs 笔。证据目录：`tmp/d817/`（`run_r2/`、`run_r0/`、`run_2d/`、`anchor/`、gate 日志 ×5、`golden_account.txt` 同 `d817_probe.cpp` 于 fem-pro 侧 `tmp/d817/`）。
+
+### 债务状态
+**D817-1 关闭**；D817-2/3/4 维持（见 round 81 登记）；D814-3 wg 体路径（维持"先造 oracle 再改"）、D809-2、D814-5 维持。
+
 ## 第八十一轮（round 81）：D816-1/2 折叠表 2-D 顶点真红 + tet/prism 传播（Lane A）+ D816-3 一维 H1 读写（Lane B）+ D815-2 hyperbolic 3-D 面（Lane C）+ 主会话 D816-4 L2 dof 坐标表感知 + ex9-3D 周期链上线（D815-3 实质闭合）
 
 **开局 HEAD = round 80 末笔 `8ba7202c`（已推送）；树净；C: 96%（47G）。** 三路代理 + 主会话：
