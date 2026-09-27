@@ -588,16 +588,24 @@ fn d825_row_geometry_table_path_matches_rows() {
     );
 }
 
-// ─── Pyramid13: refusal, naming the real reason ─────────────────────────────
+// ─── Pyramid13: the round-85 split (D825-2) ──────────────────────────────────
 
-/// The order-2 pyramid container is fine (probe family `pyr`: a PYRAMID row
-/// with an `L2_T1_3D_P2` section loads, and `L2_FuentesPyramidElement(2)` has
-/// `(p+1)³ = 27` dofs) — but a 13-node row cannot fill the 27-dof Fuentes
-/// lattice (the Fuentes nodes are the a-shifted tensor points, not the
-/// equispaced Gmsh set; the fused P1 semantics of D817-3 do not extend), so
-/// the export refuses loudly instead of writing a partial payload.
+/// Round 84 refused the 13-node pyramid for both spaces: "a 13-node row
+/// cannot fill the 27-dof Fuentes lattice".  **D825-2 superseded the
+/// discontinuous arm**: the Fuentes payload is not a permutation of the row
+/// but a *synthesis from the five corners* — MFEM's own
+/// `SetCurvature(2, true, 3, byVDIM)` on a straight pyramid fills the 27
+/// dofs with the straight P1 map at the Fuentes nodal points (probe
+/// `tmp/d85b/probe_pyr_gen.txt`, max deviation 5.6e-17), so a straight row
+/// now exports (pinned end-to-end in `d825_row_geometry_h1`).  This test
+/// keeps the two halves of that split pinned: the discontinuous export goes
+/// through, and the continuous space stays refused (MFEM's continuous
+/// pyramid container is the 15-dof H1 Fuentes element, probe
+/// `tmp/d85b/probe_pyr_gen_h1.txt`; D827-3).
 #[test]
-fn d825_pyramid13_high_order_refused() {
+fn d825_pyramid13_l2_exported_h1_refused() {
+    // All-zero coordinates: every midsides sits at its exact midpoint, i.e.
+    // the row is straight and the corner-only synthesis is exact.
     let mesh = Mesh::<3>::uniform(
         vec![0.0; 13 * 3],
         (0..13 as u32).collect(),
@@ -608,13 +616,24 @@ fn d825_pyramid13_high_order_refused() {
         ElementType::Tri3,
     );
     let scratch = Mesh::<2>::unit_square_tri(1);
-    for space in [NodesSpace::Discontinuous, NodesSpace::Continuous] {
-        let err = write_mfem_nodes(&mut Vec::new(), &scratch, Some(&mesh), space)
-            .expect_err("a 13-node pyramid must not be written")
-            .to_string();
-        assert!(
-            err.contains("Pyramid13") && err.contains("0-7"),
-            "refusal must name the type and the format rule, got: {err}"
-        );
-    }
+    let mut bytes = Vec::new();
+    write_mfem_nodes(&mut bytes, &scratch, Some(&mesh), NodesSpace::Discontinuous)
+        .expect("a straight pyramid exports its 27-dof Fuentes container");
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains("elements\n1\n1 7 0 1 2 3 4\n"),
+        "PYRAMID corner row:\n{text}"
+    );
+    assert!(
+        text.contains("FiniteElementCollection: L2_T1_3D_P2"),
+        "collection:\n{text}"
+    );
+
+    let err = write_mfem_nodes(&mut Vec::new(), &scratch, Some(&mesh), NodesSpace::Continuous)
+        .expect_err("the continuous pyramid space stays refused")
+        .to_string();
+    assert!(
+        err.contains("Pyramid13") && err.contains("H1_3D_P2") && err.contains("D827-3"),
+        "the continuous refusal must name the H1 Fuentes container, got: {err}"
+    );
 }

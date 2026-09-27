@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult, NodeId};
-use fem_element::lagrange::{H1PrismSlot, PRISM_EDGES};
+use fem_element::lagrange::{H1PrismSlot, L2FuentesPyramidPk, PRISM_EDGES};
 use fem_element::ReferenceElement;
 use fem_mesh::{
     element_type::ElementType,
@@ -106,9 +106,7 @@ fn elem_type_to_mfem_code(et: ElementType) -> Option<u32> {
 /// * every other high-order type is refused loudly: no exact MFEM encoding is
 ///   derived for it yet.  Quad8 is a serendipity cell — MFEM has no 8-dof
 ///   quad `nodes` family (the quad lattice is the 9-dof tensor), so any
-///   encoding would be lossy; Hex20/Prism15 have the same dof-count gap and
-///   the order-2 pyramid needs a 27-dof Fuentes payload a 13-node row cannot
-///   fill (D825-4).
+///   encoding would be lossy; Hex20/Prism15 have the same dof-count gap.
 fn mfem_elem_row(et: ElementType) -> FemResult<(u32, usize)> {
     if let Some(code) = elem_type_to_mfem_code(et) {
         return Ok((code, et.nodes_per_element()));
@@ -122,27 +120,30 @@ fn mfem_elem_row(et: ElementType) -> FemResult<(u32, usize)> {
     Err(FemError::Mesh(format!(
         "write_mfem: no MFEM encoding for {et:?} cells — the .mesh format has geometry \
          codes 0-7 only, and a high-order cell is written as its base code plus a `nodes` \
-         section.  The row-geometry cells Line3/Tri6/Quad9/Tet10/Hex27/Prism18 are derived \
-         (D819-C, D821-1); {et:?} has no exact MFEM `nodes` family (Quad8 is the serendipity \
-         quad — the quad `nodes` lattice is the 9-dof tensor, not 8; Hex20/Prism15 have the \
-         same dof-count gap; the order-2 pyramid would need the 27-dof Fuentes payload a \
-         13-node row cannot fill, D825-2), so emitting the private high-order codes 8-14 \
-         this writer once used would produce a file real MFEM refuses to read."
+         section.  The row-geometry cells Line3/Tri6/Quad9/Tet10/Hex27/Prism18/Pyramid13 \
+         are derived (D819-C, D821-1, D825-2); {et:?} has no exact MFEM `nodes` family \
+         (Quad8 is the serendipity quad — the quad `nodes` lattice is the 9-dof tensor, \
+         not 8; Hex20/Prism15 have the same dof-count gap), so emitting the private \
+         high-order codes 8-14 this writer once used would produce a file real MFEM \
+         refuses to read."
     )))
 }
 
 /// What one `elements`-section row emits for a **row-geometry cell** `et`
-/// (D819-C for the Quad9 cell, D821-1 for the other five): the base geometry
-/// code and the corner prefix.  `None` for every type whose connectivity row
-/// is not itself the order-2 geometry.
+/// (D819-C for the Quad9 cell, D821-1 for the other five, D825-2 for the
+/// pyramid): the base geometry code and the corner prefix.  `None` for every
+/// type whose connectivity row is not itself the order-2 geometry.
 fn row_geometry_row(et: ElementType) -> Option<(u32, usize)> {
     Some(match et {
-        ElementType::Line3   => (1, 2),
-        ElementType::Tri6    => (2, 3),
-        ElementType::Quad9   => (3, 4),
-        ElementType::Tet10   => (4, 4),
-        ElementType::Hex27   => (5, 8),
-        ElementType::Prism18 => (6, 6),
+        ElementType::Line3     => (1, 2),
+        ElementType::Tri6      => (2, 3),
+        ElementType::Quad9     => (3, 4),
+        ElementType::Tet10     => (4, 4),
+        ElementType::Hex27     => (5, 8),
+        ElementType::Prism18   => (6, 6),
+        // D825-2: the pyramid's `nodes` payload is the 27-dof Fuentes container
+        // synthesised from these five corners.
+        ElementType::Pyramid13 => (7, 5),
         _ => return None,
     })
 }
@@ -157,6 +158,24 @@ fn row_geometry_base(et: ElementType) -> Option<ElementType> {
         ElementType::Tet10   => ElementType::Tet4,
         ElementType::Hex27   => ElementType::Hex8,
         ElementType::Prism18 => ElementType::Prism6,
+        _ => return None,
+    })
+}
+
+/// The row slots holding a row-geometry cell's **corners**, in the base
+/// family's local vertex order — D820-1's probe-pinned table
+/// (`tmp/d84fixA`): every family is the row prefix except the layer-major
+/// prism, whose corners sit at slots [0, 1, 2, 12, 13, 14] (the bottom and
+/// top triangle vertices of the `PrismPk` lattice).
+fn row_geometry_corner_slots(et: ElementType) -> Option<&'static [usize]> {
+    Some(match et {
+        ElementType::Line3     => &[0, 1],
+        ElementType::Tri6      => &[0, 1, 2],
+        ElementType::Quad9     => &[0, 1, 2, 3],
+        ElementType::Tet10     => &[0, 1, 2, 3],
+        ElementType::Hex27     => &[0, 1, 2, 3, 4, 5, 6, 7],
+        ElementType::Prism18   => &[0, 1, 2, 12, 13, 14],
+        ElementType::Pyramid13 => &[0, 1, 2, 3, 4],
         _ => return None,
     })
 }
@@ -1403,10 +1422,16 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
             let (_, n_emit) = row_geometry_row(*elem_type)
                 .expect("row-geometry row checked above");
             let stride = elem_type.nodes_per_element();
+            // The referenced vertex set is the *corner* set — for the
+            // layer-major prism row the corners are not the row prefix
+            // ([`row_geometry_corner_slots`], D820-1).
+            let corner_slots = row_geometry_corner_slots(*elem_type)
+                .map_or((0..n_emit).collect::<Vec<usize>>(), |s| s.to_vec());
+            debug_assert_eq!(corner_slots.len(), n_emit, "corner slots vs emission count");
             let mut ids: Vec<u32> = Vec::new();
             for ei in 0..n_elems {
                 let offset = ei * stride;
-                ids.extend_from_slice(&conn[offset..offset + n_emit]);
+                ids.extend(corner_slots.iter().map(|&s| conn[offset + s]));
             }
             let mut off = 0usize;
             for (fi, &nvf) in face_nv.iter().enumerate() {
@@ -1488,8 +1513,16 @@ fn write_mfem_mesh_nodes<W: Write, const D: usize>(
             let offset = ei * npe;
             let tag = if !elem_tags.is_empty() { elem_tags[ei] } else { 1 };
             write!(writer, "{tag} {code}")?;
-            for j in 0..n_emit {
-                write!(writer, " {}", remap_vertex(vertex_remap.as_deref(), conn[offset + j]))?;
+            // D825-2: the emitted ids are the cell's *corners* — for the
+            // layer-major prism row those sit at slots [0, 1, 2, 12, 13, 14],
+            // not in the row prefix (`row_geometry_corner_slots`); emitting
+            // the raw prefix would put midside ids outside the compacted
+            // vertex table and MFEM would abort on load.
+            let corner_slots = row_geometry_corner_slots(*elem_type)
+                .map_or((0..n_emit).collect::<Vec<usize>>(), |s| s.to_vec());
+            debug_assert_eq!(corner_slots.len(), n_emit, "corner slots vs emission count");
+            for &s in corner_slots.iter() {
+                write!(writer, " {}", remap_vertex(vertex_remap.as_deref(), conn[offset + s]))?;
             }
             writeln!(writer)?;
         }
@@ -1674,29 +1707,51 @@ fn zero_subnormal(s: f64) -> f64 {
 /// * `Prism18` — the mesh's layer-major lattice (the H1 triangle order
 ///   inside every layer) → the wedge's layer-major order (the *L2* triangle
 ///   order inside every layer): the tri permutation [0, 2, 5, 1, 4, 3] applied
-///   per 6-slot block.
+///   per 6-slot block;
+/// * `Pyramid13` (D825-2) — no permutation at all: MFEM's pyramid curvature
+///   container is the **Fuentes** pyramid (`L2_T1_3D_P2`, 27 dofs per
+///   element — probe `tmp/d85b/probe_pyr_gen.txt`), a payload the 13-node row
+///   does not slot into; the 27 values are *synthesised* from the five
+///   corners ([`pyramid13_fuentes_conn_nodes`]).
 ///
-/// **Continuous space**: only the Quad9 cell has a derived H1 numbering
-/// ([`quad9_h1_conn_nodes`], D821-2); the other five refuse until their shared
-/// entity numbering is derived (D825-2).
+/// **Continuous space**: `H1_<dim>D_P2` for every row-geometry family
+/// (D825-1) — Quad9 through [`quad9_h1_conn_nodes`], Line3 through
+/// [`line3_h1_conn_nodes`], the four 2-D/3-D families with 6+ slots through
+/// [`row_geometry_h1_conn_nodes`] (the mixed-mesh entity engine, whose
+/// consumer slot orders are exactly the row orders), and Pyramid13 still
+/// refused (MFEM's continuous pyramid container is the 15-dof H1 Fuentes
+/// element — probe `tmp/d85b/probe_pyr_gen_h1.txt`; D827-3).
 fn row_geometry_conn_nodes<const D: usize>(
     mesh: &Mesh<D>,
     space: NodesSpace,
     et: ElementType,
 ) -> FemResult<Option<(u8, usize, Vec<f64>)>> {
     match space {
-        NodesSpace::Continuous => {
-            if et == ElementType::Quad9 {
-                return quad9_h1_conn_nodes(mesh).map(Some);
-            }
-            Err(FemError::Mesh(format!(
-                "write_mfem: a {et:?}-cell mesh has no derived continuous (H1) `nodes` \
-                 numbering — the family's shared edge/face dof numbering is registered as \
-                 D825-1; write it with NodesSpace::Discontinuous (the exact per-element \
-                 L2 encoding, D821-1)"
-            )))
-        }
+        NodesSpace::Continuous => match et {
+            ElementType::Quad9 => quad9_h1_conn_nodes(mesh).map(Some),
+            ElementType::Line3 => line3_h1_conn_nodes(mesh).map(Some),
+            ElementType::Tri6 | ElementType::Tet10 | ElementType::Hex27
+            | ElementType::Prism18 => row_geometry_h1_conn_nodes(mesh, et).map(Some),
+            ElementType::Pyramid13 => Err(FemError::Mesh(
+                "write_mfem: a Pyramid13-cell mesh has no derived continuous (H1) `nodes` \
+                 numbering — MFEM's own continuous pyramid container is the H1_3D_P2 Fuentes \
+                 element (15 dofs per element, probe tmp/d85b/probe_pyr_gen_h1.txt), whose \
+                 payload a 13-node row does not fill (D827-3); write it with \
+                 NodesSpace::Discontinuous (the exact per-element 27-dof L2_T1_3D_P2 Fuentes \
+                 encoding, D825-2)"
+                    .into(),
+            )),
+            other => Err(FemError::Mesh(format!(
+                "write_mfem: {other:?} is not a row-geometry cell"
+            ))),
+        },
         NodesSpace::Discontinuous => {
+            // D825-2: the pyramid's discontinuous container is not a
+            // permutation of the row (13 slots vs the 27 Fuentes dofs) — it is
+            // a synthesis from the five corners.
+            if et == ElementType::Pyramid13 {
+                return pyramid13_fuentes_conn_nodes(mesh).map(Some);
+            }
             let npe = et.nodes_per_element();
             let n_elems = mesh.n_elements();
             debug_assert_eq!(
@@ -1867,17 +1922,17 @@ fn quad9_h1_conn_nodes<const D: usize>(mesh: &Mesh<D>) -> FemResult<(u8, usize, 
                 Ok(r) => r,
                 Err(_) => unreachable!("corner id is in the vertex table by construction"),
             };
-            put_quad9_h1_dof::<D>(rank, v, &mut values, &mut filled, mesh)?;
+            put_h1_dof::<D>(rank, v, &mut values, &mut filled, mesh, ElementType::Quad9)?;
         }
         // Edge slots 4..8 follow `QUAD_EDGES`'s local order (e01 e12 e23 e30).
         for (k, &[la, lb]) in QUAD_EDGES.iter().enumerate() {
             let (a, b) = (c[la], c[lb]);
             let key = if a < b { [a, b] } else { [b, a] };
             let ei = edge_ids[&key];
-            put_quad9_h1_dof::<D>(nv + ei, row[4 + k], &mut values, &mut filled, mesh)?;
+            put_h1_dof::<D>(nv + ei, row[4 + k], &mut values, &mut filled, mesh, ElementType::Quad9)?;
         }
         // Interior slot 8: private to the cell.
-        put_quad9_h1_dof::<D>(nv + n_edges + e, row[8], &mut values, &mut filled, mesh)?;
+        put_h1_dof::<D>(nv + n_edges + e, row[8], &mut values, &mut filled, mesh, ElementType::Quad9)?;
     }
     debug_assert!(
         filled.iter().all(|&f| f),
@@ -1886,15 +1941,16 @@ fn quad9_h1_conn_nodes<const D: usize>(mesh: &Mesh<D>) -> FemResult<(u8, usize, 
     Ok((2u8, n_dofs, values))
 }
 
-/// Write one Quad9 H1 dof's coordinate, with the shared-dof consistency guard
-/// (a dof claimed twice must describe one physical point — last writer wins,
-/// as MFEM's own `ProjectCoefficient` resolves overlaps).
-fn put_quad9_h1_dof<const D: usize>(
+/// Write one continuous-H1 dof's coordinate, with the shared-dof consistency
+/// guard (a dof claimed twice must describe one physical point — last writer
+/// wins, as MFEM's own `ProjectCoefficient` resolves overlaps).
+fn put_h1_dof<const D: usize>(
     g: usize,
     node: u32,
     values: &mut [f64],
     filled: &mut [bool],
     mesh: &Mesh<D>,
+    family: ElementType,
 ) -> FemResult<()> {
     let n = node as usize;
     let v = &mesh.coords[n * D..(n + 1) * D];
@@ -1902,7 +1958,7 @@ fn put_quad9_h1_dof<const D: usize>(
     if filled[g] {
         if (0..D).any(|c| !approx_eq(dst[c], v[c])) {
             return Err(FemError::Mesh(format!(
-                "write_mfem: continuous Quad9 `nodes` dof {g} is claimed by two elements \
+                "write_mfem: continuous {family:?} `nodes` dof {g} is claimed by two elements \
                  with different coordinates — the mesh geometry is not continuous"
             )));
         }
@@ -1911,6 +1967,244 @@ fn put_quad9_h1_dof<const D: usize>(
     }
     dst.copy_from_slice(v);
     Ok(())
+}
+
+/// D825-1: the **continuous** (`H1_1D_P2`) `nodes` payload of a Line3-cell
+/// mesh.
+///
+/// A 1-D H1 space numbers `[v0 | v1 | the segment's own edge dof]` (probe
+/// `tmp/d85b/probe_h1_line3.txt`: three cartesian segments give
+/// `NDofs = NV + NE = 4 + 3 = 7` with `GetElementDofs` = `[0 1 4] [1 2 5]
+/// [2 3 6]` — slot 2 carries `NV + e`).  Segments share endpoints but never an
+/// edge, so every element contributes exactly one private edge dof; the
+/// vertex dofs are the compacted corner ranks (as in [`vertex_remap`]).
+fn line3_h1_conn_nodes<const D: usize>(mesh: &Mesh<D>) -> FemResult<(u8, usize, Vec<f64>)> {
+    let npe = 3usize;
+    let n_elems = mesh.n_elements();
+    debug_assert_eq!(
+        mesh.conn.len(),
+        n_elems * npe,
+        "line3_h1_conn_nodes: uniform Line3 stride expected"
+    );
+    let mut vertex_ids: Vec<u32> = Vec::with_capacity(n_elems * 2);
+    for e in 0..n_elems {
+        let row = &mesh.conn[e * npe..(e + 1) * npe];
+        vertex_ids.push(row[0]);
+        vertex_ids.push(row[1]);
+    }
+    vertex_ids.sort_unstable();
+    vertex_ids.dedup();
+    let nv = vertex_ids.len();
+    let n_dofs = nv + n_elems;
+    let mut values = vec![0.0f64; n_dofs * D];
+    let mut filled = vec![false; n_dofs];
+    for e in 0..n_elems {
+        let row = &mesh.conn[e * npe..(e + 1) * npe];
+        put_h1_dof::<D>(rank_of(row[0], &vertex_ids), row[0], &mut values, &mut filled, mesh, ElementType::Line3)?;
+        put_h1_dof::<D>(rank_of(row[1], &vertex_ids), row[1], &mut values, &mut filled, mesh, ElementType::Line3)?;
+        put_h1_dof::<D>(nv + e, row[2], &mut values, &mut filled, mesh, ElementType::Line3)?;
+    }
+    debug_assert!(
+        filled.iter().all(|&f| f),
+        "line3_h1_conn_nodes: every H1 dof is claimed by construction"
+    );
+    Ok((2u8, n_dofs, values))
+}
+
+/// The rank of `id` in the ascending deduplicated `vertex_ids` table — the
+/// compacted vertex id MFEM assigns in `RemoveUnusedVertices`.
+fn rank_of(id: u32, vertex_ids: &[u32]) -> usize {
+    match vertex_ids.binary_search(&id) {
+        Ok(r) => r,
+        Err(_) => unreachable!("corner id is in the vertex table by construction"),
+    }
+}
+
+/// D825-1: the **continuous** (`H1_*D_P2`) `nodes` payload of a
+/// Tri6/Tet10/Hex27/Prism18-cell mesh — the multi-family generalisation of
+/// [`quad9_h1_conn_nodes`].
+///
+/// MFEM numbers an order-2 H1 space `[vertices | edges | faces | interiors]`
+/// (`FiniteElementSpace::GetElementDofs`): vertex dofs are the mesh's
+/// (post-`RemoveUnusedVertices` compacted) vertex ids, edge blocks of `p-1`
+/// dofs follow the first-encounter edge enumeration in each family's local
+/// `Edges` order ordered from the lower-id endpoint, face blocks are sized by
+/// the face geometry (`var_face_dofs`), interiors are private (`bdofs`).
+/// That engine exists once — [`mixed_h1_engine`] — and every one of these row
+/// families *is* its base family's order-2 H1 slot order ([`row_geometry_slots`]:
+/// Tri6 = `H1TriPk(2)`, Tet10 = `H1TetPk(2)`, Hex27 = `HexQk(2)` topological
+/// order, Prism18 = the layer-major `PrismPk(2)` the engine re-lays into), so
+/// running the engine over the corner rows ([`row_geometry_corner_slots`],
+/// renumbered to MFEM's compacted vertex ids, matching [`vertex_remap`])
+/// returns the file dof of every row slot directly.
+///
+/// Probe truth (`tmp/d85b/probe_h1_truth.cpp`, cartesian meshes,
+/// `SetCurvature(2, false, …)`): tri6 2×1 `NDofs = 6 + 9` with the shared
+/// diagonal edge one dof (`elem0 = 0 4 3 6 7 8`, `elem1 = 4 0 1 6 9 10`),
+/// tet10 6-tet cube `NDofs = 8 + 19` (no face/interior dofs at P2),
+/// hex27 2×1×1 `NDofs = 12 + 20 + 11 + 2` with the shared face's edge and
+/// face dofs single (`elem1` reuses `13 17 21 22 34`), prism18 2×1×1
+/// `NDofs = 12 + 21 + 12` (quad-face blocks only).  The fem-rs exports are
+/// held against these exact tables by `crates/io/tests/d825_row_geometry_h1.rs`.
+fn row_geometry_h1_conn_nodes<const D: usize>(
+    mesh: &Mesh<D>,
+    et: ElementType,
+) -> FemResult<(u8, usize, Vec<f64>)> {
+    let npe = et.nodes_per_element();
+    let n_elems = mesh.n_elements();
+    let corner_slots = row_geometry_corner_slots(et)
+        .expect("row-geometry cell checked by the dispatcher");
+    debug_assert_eq!(
+        mesh.conn.len(),
+        n_elems * npe,
+        "row_geometry_h1_conn_nodes: uniform row-geometry stride expected"
+    );
+    // MFEM's compacted vertex numbering: the referenced corners in ascending
+    // id order (`RemoveUnusedVertices`), so a corner's vertex dof is the rank
+    // of its node id.
+    let mut vertex_ids: Vec<u32> = Vec::with_capacity(n_elems * corner_slots.len());
+    for e in 0..n_elems {
+        let row = &mesh.conn[e * npe..(e + 1) * npe];
+        vertex_ids.extend(corner_slots.iter().map(|&s| row[s]));
+    }
+    vertex_ids.sort_unstable();
+    vertex_ids.dedup();
+    let nv = vertex_ids.len();
+    // The engine numbers vertices by node id (`MixedSlot::Vertex(v) =>
+    // ns[v]`) and reads only the base family's corner positions, so it is fed
+    // the corner rows — reordered into the base family's local vertex order —
+    // with the compacted ids, and `n_nodes` set to the compacted count.  Its
+    // per-element dof rows come back in the consumer family's p = 2 slot
+    // order, which is exactly the mesh's own row order ([`row_geometry_slots`]).
+    let base = row_geometry_base(et).expect("row-geometry cell checked by the dispatcher");
+    let rows: Vec<(ElementType, Vec<NodeId>)> = (0..n_elems)
+        .map(|e| {
+            let r = &mesh.conn[e * npe..(e + 1) * npe];
+            let corners: Vec<NodeId> = corner_slots
+                .iter()
+                .map(|&s| rank_of(r[s], &vertex_ids) as NodeId)
+                .collect();
+            (base, corners)
+        })
+        .collect();
+    let rows_mesh = MixedMeshRows { rows, n_nodes: nv, dim: D };
+    let (engine_rows, _keys, n_dofs) =
+        mixed_h1_engine(&rows_mesh, 2).map_err(|why| {
+            FemError::Mesh(format!(
+                "write_mfem: cannot write the continuous {et:?} `nodes` section: {why}"
+            ))
+        })?;
+    let mut values = vec![0.0f64; n_dofs * D];
+    let mut filled = vec![false; n_dofs];
+    for (e, erow) in engine_rows.iter().enumerate() {
+        let row = &mesh.conn[e * npe..(e + 1) * npe];
+        for (s, &g) in erow.iter().enumerate() {
+            put_h1_dof::<D>(g as usize, row[s], &mut values, &mut filled, mesh, et)?;
+        }
+    }
+    debug_assert!(
+        filled.iter().all(|&f| f),
+        "row_geometry_h1_conn_nodes: every H1 dof is claimed by construction"
+    );
+    Ok((2u8, n_dofs, values))
+}
+
+/// D825-2: the discontinuous `L2_T1_3D_P2` `nodes` payload of a Pyramid13-cell
+/// mesh — MFEM's Fuentes pyramid curvature container.
+///
+/// MFEM's own generator (`Mesh::SetCurvature(2, true, 3, byVDIM)` on a
+/// straight pyramid: `tmp/d85b/probe_pyr_gen.txt`) fills the container with
+/// the **straight P1 pyramid map evaluated at the 27 L2 Fuentes nodal
+/// points** — max deviation 5.6e-17 over an asymmetric pyramid — and those
+/// points are exactly `L2FuentesPyramidPk::new_gauss_lobatto(2)`'s lattice
+/// (`node_o = (cp[i](1 − a·cp[k]), cp[j](1 − a·cp[k]), a·cp[k])`, `cp` the
+/// closed Gauss-Lobatto points {0, ½, 1}, `a` the largest Gauss-Legendre
+/// point of the order-`p` rule, `fe_l2.cpp:944-973`; dof order
+/// `o = k(p+1)² + j(p+1) + i`).  The synthesis below reproduces that from the
+/// five corners alone — which is also all a *straight* 13-node row
+/// determines: the guard refuses a row whose midsides leave their edge
+/// midpoints, because a curved pyramid's 27-dof Fuentes payload is not
+/// derivable from a 13-node row without the inverted least-squares fit
+/// (D827-4).
+///
+/// The container is per-element private (probe: `GetElementDofs` = `0..26`),
+/// so there is no sharing guard.  The written element rows carry the base
+/// PYRAMID code 7 and the corner prefix ([`row_geometry_row`]), and a
+/// negatively-wound row is flipped by MFEM on load (`CheckElementOrientation`'s
+/// PYRAMID branch swaps vertices 1 and 3, `mesh/mesh.cpp:7346` — the
+/// storage-order stance of D663/D676).
+fn pyramid13_fuentes_conn_nodes<const D: usize>(
+    mesh: &Mesh<D>,
+) -> FemResult<(u8, usize, Vec<f64>)> {
+    const NPE: usize = 13;
+    const NPTS: usize = 27;
+    let n_elems = mesh.n_elements();
+    debug_assert_eq!(
+        mesh.conn.len(),
+        n_elems * NPE,
+        "pyramid13_fuentes_conn_nodes: uniform Pyramid13 stride expected"
+    );
+    let nodal = L2FuentesPyramidPk::new_gauss_lobatto(2).dof_coords();
+    debug_assert_eq!(nodal.len(), NPTS, "the Fuentes P2 nodal point count");
+    // The Pyramid13 row's midsides: Gmsh type-19 order — base edges
+    // (0,1),(1,2),(2,3),(3,0) then the four laterals to the apex (the
+    // d84fixA/pyr13 fixture convention; same *edges* as MFEM's
+    // `Constants<PYRAMID>::Edges`, midpoints included).
+    const MIDSIDE_EDGES: [[usize; 2]; 8] = [
+        [0, 1],
+        [1, 2],
+        [2, 3],
+        [3, 0],
+        [0, 4],
+        [1, 4],
+        [2, 4],
+        [3, 4],
+    ];
+    let mut values = vec![0.0f64; n_elems * NPTS * D];
+    for e in 0..n_elems {
+        let row = &mesh.conn[e * NPE..(e + 1) * NPE];
+        let corners: [[f64; D]; 5] =
+            std::array::from_fn(|v| mesh.coords[row[v] as usize * D..row[v] as usize * D + D]
+                .try_into()
+                .expect("D components per coordinate"));
+        // Straight-side guard: every midsides node must sit at its edge
+        // midpoint, else the row is curved and the corner-only synthesis
+        // would silently drop the curvature.
+        for (k, &[la, lb]) in MIDSIDE_EDGES.iter().enumerate() {
+            let n = row[5 + k] as usize;
+            for d in 0..D {
+                let mid = 0.5 * (corners[la][d] + corners[lb][d]);
+                if !approx_eq(mesh.coords[n * D + d], mid) {
+                    return Err(FemError::Mesh(format!(
+                        "write_mfem: a curved Pyramid13 mesh has no derived `nodes` synthesis \
+                         — the 27-dof Fuentes payload is derived from the five corners of a \
+                         *straight* pyramid, but element {e}'s edge-{k} midsides node \
+                         deviates from the midpoint (D827-4)"
+                    )));
+                }
+            }
+        }
+        for (p, xi) in nodal.iter().enumerate() {
+            // The closed Fuentes lattice keeps z = a·cp[k] < 1 (a is the
+            // largest Gauss-Legendre point), so 1 - z never vanishes.
+            let s = 1.0 - xi[2];
+            let (xp, yp) = (xi[0] / s, xi[1] / s);
+            let lam = [
+                (1.0 - xp) * (1.0 - yp),
+                xp * (1.0 - yp),
+                xp * yp,
+                (1.0 - xp) * yp,
+            ];
+            for c in 0..D {
+                let mut v = xi[2] * corners[4][c];
+                for (i, &l) in lam.iter().enumerate() {
+                    v += s * l * corners[i][c];
+                }
+                values[(e * NPTS + p) * D + c] = v;
+            }
+        }
+    }
+    Ok((2u8, n_elems * NPTS, values))
 }
 
 /// The `nodes` dof values of `mesh`, laid out for [`write_nodes_section`], plus

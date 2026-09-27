@@ -125,15 +125,20 @@ fn d821_read_refuses_private_codes() {
 ///
 /// (Round 84's Tri6 refusal case moved to the green side with D821-1: the
 /// row-geometry cells Line3/Tri6/Tet10/Hex27/Prism18 now export as their base
-/// code plus the synthesised `L2_T1` `nodes` section — see the d825 tests.)
+/// code plus the synthesised `L2_T1` `nodes` section — see the d825 tests.
+/// Round 85 moved Pyramid13 to the green side the same way with D825-2: the
+/// PYRAMID base row plus the 27-dof `L2_T1_3D_P2` Fuentes container
+/// (`d825_row_geometry_h1::d825_pyramid13_exports_fuentes_l2`, pinned against
+/// MFEM's own `SetCurvature` oracle), so the refusal here shrinks to the
+/// dof-count-gap families Quad8/Hex20/Prism15.)
 #[test]
 fn d821_write_refuses_underivable_high_order_cells() {
-    // Quad8 is a 2-D cell; Hex20/Prism15/Pyramid13 are 3-D cells.
+    // Quad8 is a 2-D cell; Hex20/Prism15 are 3-D cells.  (Pyramid13 was
+    // refused here until D825-2 derived its Fuentes export.)
     for (name, et, npe, dim3) in [
         ("Quad8", ElementType::Quad8, 8usize, false),
         ("Hex20", ElementType::Hex20, 20, true),
         ("Prism15", ElementType::Prism15, 15, true),
-        ("Pyramid13", ElementType::Pyramid13, 13, true),
     ] {
         let err = if dim3 {
             let mesh3 = Mesh::<3>::uniform(
