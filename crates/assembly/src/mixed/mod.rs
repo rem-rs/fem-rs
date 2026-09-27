@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
+use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::HexSerendipityPk};
 use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
 use fem_element::nedelec::{QuadND, QuadND2, QuadNDk, HexNDk, PrismND1, PrismNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1352,7 +1352,9 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// `assembler::ref_elem_vol_h1`, i.e. MFEM `H1_FECollection` semantics
 /// (Gauss-Lobatto nodes, DOFs ordered vertices → edges → interior):
 /// `QuadQk`/`HexQk` for tensor elements, `H1TriPk` for triangles,
-/// `QuadSerendipityPk`/`HexSerendipityPk` for serendipity elements,
+/// `HexSerendipityPk` for the serendipity hex cell label (the D819 rule:
+/// `Quad8`/`Quad9` cells are tensor `QuadQk` — only the hex keeps a
+/// serendipity-family arm, mirroring the D581 pattern),
 /// `H1TetPk`/`H1PrismPk`/`H1PyramidPk` for the rest.
 ///
 /// D31 stage A (GLL alignment): the hex entries at orders 2/3 were the last
@@ -1423,9 +1425,27 @@ pub fn ref_elem_vol_with_pyramid_basis(
         (ElementType::Quad4, 1) => Box::new(QuadQk::new(1)),
         (ElementType::Quad4, 2) => Box::new(QuadQk::new(2)),
         (ElementType::Quad4, 3) => Box::new(QuadQk::new(3)),
-        (ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadSerendipityPk::new(1)),
-        (ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadSerendipityPk::new(2)),
-        (ElementType::Quad8 | ElementType::Quad9, 3) => Box::new(QuadSerendipityPk::new(3)),
+        // D819: the quadratic quad *cell* labels route to the same tensor Qk
+        // family as Quad4 — never to the serendipity element.  MFEM has a
+        // single `Geometry::SQUARE` (probe `tmp/d83b/p1_refine.cpp`:
+        // `MakeCartesian2D` + uniform/general refinement keep 4-vertex
+        // SQUAREs forever; `SetCurvature(2)` carries high order in a 9-dof/e
+        // Nodes field), and its Gmsh reader accepts only the *complete* quad
+        // codes (3/10/36/...; the 8-node serendipity code 16 aborts in
+        // `GmshReader::GetGeometryAndOrder`, `mesh/gmsh.cpp:677`), so a Quad8/
+        // Quad9 cell is a *geometry* row label (fem-rs D243: serendipity /
+        // tensor-Q2 isoparametric map), not a field family.  The field family
+        // follows the D581 hex precedent — one cell geometry, one tensor H¹
+        // family — which is also what the space side numbers these cells with
+        // (`DofManager::build_pk`, mesh `h1_family_dofs`: `QuadQk`).  The
+        // serendipity element (`H1Ser_FECollection` / `QuadSerendipityPk`,
+        // 8 dofs at p=2 vs the tensor 9) is a *collection* choice no fem-rs
+        // space numbers with; the previous `QuadSerendipityPk` arms here
+        // disagreed with every one of those sources and with the space's own
+        // element-dof counts (9 rows over an 8-basis matrix on a Quad9 cell).
+        (ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadQk::new(1)),
+        (ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadQk::new(2)),
+        (ElementType::Quad8 | ElementType::Quad9, 3) => Box::new(QuadQk::new(3)),
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Hex8, 2) => Box::new(HexQ2),
         (ElementType::Hex8, 3) => Box::new(HexQ3),
@@ -1444,8 +1464,10 @@ pub fn ref_elem_vol_with_pyramid_basis(
             Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
         }
         (ElementType::Quad4, o) => Box::new(QuadQk::new(o as usize)),
+        // D819: tensor Qk on the quadratic quad cell labels too — see the
+        // fixed-order block above.
         (ElementType::Quad8 | ElementType::Quad9, o) => {
-            Box::new(QuadSerendipityPk::new(o as usize))
+            Box::new(QuadQk::new(o as usize))
         }
         (ElementType::Hex8, o) => Box::new(HexQk::new(o as usize)),
         (ElementType::Hex20, o) => Box::new(HexSerendipityPk::new(o as usize)),
