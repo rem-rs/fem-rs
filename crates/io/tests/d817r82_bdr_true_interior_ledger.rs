@@ -35,6 +35,10 @@ const MFEM_TRUE_INTERIOR: &[(&str, u32)] = &[
     ("d667_refined_curved.mesh", 96), // NBE=352: refined curved hex interfaces
     ("multidomain-hex.mesh", 24),    // NBE=88: the subdomain interface faces
     ("periodic-cube.mesh", 54),      // NBE=54: every stored entry (ex9-3D)
+    // Round 83 fixtures (probed when they entered the corpus, counts = NBE):
+    ("periodic-square-p2.mesh", 12), // NBE=12: curved folded variants keep
+    ("periodic-square-p3.mesh", 12), //   their boundary entries in the file,
+    ("periodic-cube-p2.mesh", 54),   //   all interior-coincident after stitch
 ];
 
 /// Files the reader legitimately refuses — same rows as the D812-1 write

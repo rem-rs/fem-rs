@@ -89,9 +89,12 @@ multidomain-hex.mesh	ok	c34a01a768832ac4ddbe9fbbe106229b656b1b00f39976d80b5c8f80
 nc-nurbs3d.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
 nc3-nurbs.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
 octahedron.mesh	ok	f36c4ddc85f9dc701d1197b22e9a22e7fbb7eda7edf474052b51bb9f75a09645	406	43	0	1	0	-
+periodic-cube-p2.mesh	write_err		0	0	1	2	0	disc_geo (continuous writer refuses a folded table)
 periodic-cube.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
 periodic-hexagon.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
 periodic-segment.mesh	ok	55c38228bf60a548f26694552be95239c429d2ff64315a4e933e92ab4d3a01ba	405	45	1	1	1	-
+periodic-square-p2.mesh	write_err		0	0	1	2	0	disc_geo (continuous writer refuses a folded table)
+periodic-square-p3.mesh	write_err		0	0	1	3	0	disc_geo (continuous writer refuses a folded table)
 periodic-square.mesh	write_err		0	0	1	1	0	disc_geo (continuous writer refuses a folded table)
 pipe-nurbs-2d.mesh	ok	a133ab697f24ad362445d04f2d15d3b486bc2fb2455ca1b7b54163a08ff814c9	319	36	0	1	0	-
 pipe-nurbs-log.mesh	ok	9f50c80904353fe2bfad7a860b06dcdcc3c1ed38b2cf56eb26b5b03daaa26546	470	47	0	1	0	-
