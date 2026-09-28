@@ -1155,7 +1155,6 @@ impl DofManager {
         }
 
         let n_dofs = next_dof as usize;
-        let n_edge_dofs = edge_map.len();
 
         // DOF coordinates: vertices via the view, edge dofs via the row
         // midside node ids (recorded per edge key).
