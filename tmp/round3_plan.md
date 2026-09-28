@@ -4470,6 +4470,36 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十八轮（round 88）：MFEM 上游知会线（Lane A，一撤案一成稿）+ D820-3 余项细化传播（Lane B，两真缺陷）+ D821-3/4（Lane C，两真缺陷）+ 主会话维持项清点——三路并行全交付
+
+**开局 HEAD = round-87 终稿 `6919547a`；C: 42G。** 三路主树文件互斥（㉛）：Lane A = `tmp/d88a/`（纯文档+探针）；Lane B = `crates/mesh/**`（D832-1）；Lane C = `crates/io/glvis.rs`+`assembly/postproc/flux_recovery.rs`（D821-3/4）。主会话 = 维持项清点 + 整合。
+
+### Lane A（上游知会线）· **一撤案一成稿**
+- **报告 1 撤案（⑥ 本轮实例——r87 的"MFEM 缺口"是本会话自己的夹具伪影）**：r87 的 `d820_quad9_periodic_square.msh` 把 type-8 边界段写成 **(角,中,角)**，违反 Gmsh 规范 **(角,角,中)**——MFEM 按规范把 (3,3) 读成 midside，`CreatePeriodicVertexMapping`（bdr 角点 only，mesh.cpp:6249-6266）自然收不到 ⇒ "12/13 未折" 全由此起。instrumented harness（`instrument_real.cpp`：逐 bdr 元 dump vertices）+ KDTree/合并逻辑逐一排除 ⇒ **MFEM 4.10 无缺陷**：修正夹具上 quad9 周期方 NV=9/H1(1)=9/H1(2)=36（=torus 真值=fem-rs 钉）、3D hex27 H1(2)=216=6³ 交叉验证（`corrected_quad9_out.txt`/`h27_out.txt`）。夹具已按规范重生成（`9ad7a79d`），d820 三钉保持绿；r87 的 MakePeriodic 上游候选**撤回**（census round-88 更正节 + d820 测试文档改写）。
+- **报告 2 成稿（成立）**：Gmsh 二阶金字塔读侧缺陷（type 19 不在 type 表 → `MFEM_ABORT` `gmsh.cpp:613/677`；type 14 路径 14 个 stump 值按 `lex[i]` 写进 15-dof `H1_3D_P2`（:1284-1302 假设 FE dof=Gmsh 节点数）⇒ 逐 slot 错位 + 第 15 次读 `ho_el_nodes[e][14]` 越界 = 未初始化内存；直边对照 max err=1.2）。`tmp/d88a/report2_gmsh_pyramid_issue.md` 英文成稿 + `gmsh_pyramid_repro.cpp`（公共 API 单文件）**WSL 实编译、14/19 两模式输出逐字核实**（`repro14_out.txt`/`repro19_out.txt`，md 内嵌代码 diff=VERBATIM_MATCH）；order-3（118=40 vs 37）同族为源码级观察。
+
+### Lane B（D832-1）· **关闭（D820-3 余项：细化传播两真缺陷）**
+- **MFEM 双分支 oracle**（修正夹具重跑）：refine→fold 与 fold→refine 两序 **H1 36/144/324 精确命中**（nodes 转 `L2_T1_2D_P2` 逐元 own-side 324=36×9）；D809-2"4 顶点子元+order-2 nodes"语义与周期折叠加细化解耦 ⇒ MFEM 即数值 oracle。
+- **缺陷 1**：`linear_view` 带走整个源表 ⇒ Quad9 行非角节点成 **27 个僵尸顶点**（细化后 V=63≠36，僵尸还进几何表顶点块）。修 = 顶点表紧凑化到被引用 corner 集。
+- **缺陷 2（功能毒性）**：周期合并网格细化几何取折叠顶点表 ⇒ seam 子单元行不连贯（shoelace 0.5/1.25/3.25 应 0.25；二次细化跨 seam 内插错位 470≠576）。修 = 新 `is_periodic_merged_2d`（D808-3 谓词 mesh 侧孪生）+ 周期父网格细化几何改**逐元 own-side 行**；非周期共享 dof 路径逐位不变。
+- 3 网格级钉红→绿（stash 复红）；`d113` 手工 lin_parent 对齐新语义；fem-mesh **517/0**。新债 **D832-2**（3-D 周期合并网格同款 wrapped-frame 隐患，curved_hex 需同款分支）。
+
+### Lane C（D821-3/4）· **关闭（两真缺陷已修）**
+- **D821-3**：`glvis.rs` 几何码裁决 (a) 真缺陷——协议真值三方实证（MFEM `Element::Type`/`Geometry::Type` 对 fem-rs 全族数值一致；MFEM `Mesh::Print` 流 quad 行写 `1 3`；GLVis master `lib/stream_reader.cpp` 就是 MFEM 文本读取——**所谓二进制协议/fetsize 全网 0 命中，"GLVis uses tri for quad" 无出处**）。修 = `GlvisElemType` 全 MFEM 表（Quad4/8/9→Square=3；**顺带修 Hexahedron=7→5**（7=PYRAMID 同源错值，无外部消费者）；Polygon 拒绝）。有牙红→绿。
+- **D821-4 → D833-1**：flux_recovery 弯曲 quad 臂真缺陷（MFEM `ComputeElementFlux` oracle：修前 flux[0]=1 vs 1.2、能量 6.4 vs 6.4083）——修 = quad 臂加 `geom_order>1 && 行长==ref_elem(g).n_dofs()` 门 → 委托 `element_jacobian_at`（ξ'=(ξ+1)/2 链式回乘 J×½/det×¼）；**直边/无表逐位中性**（bit_probe_BEFORE/AFTER 逐位相同；带表直格 4 ulp 上同构路径，控制测试钉 MFEM 1e-12）。3 测红→绿。
+- fem-io **377/0**、fem-assembly **1305/0**。
+
+### 主会话（维持项清点）· **落盘**
+`tmp/ledger/d_number_census.txt` round-88 节：D824-B/D827-2/D818-2 维持（设计选择/记录/防御性）；D818-1 并入上游联动清单；**D822-1 拆分**——(a) 停机语义 HYPOTHESIS 并入 D634/D753 族线、(b) sol.gf 表示差+失实注记并 examples 清理线（P3）；D822-2 维持（P3 化妆品）。另落 r88 更正节（MakePeriodic 撤案全文）。
+
+### 大门与提交
+大门（主树 ㉗）：lib(debug) **10/2665/0/5**（+1 lib 单测）、tests(release) **368/4469/0/30**（=r87 366/4462 + 恰 2 新靶 +7 通过）、doc **10/9/0/95**、examples **0/0 非 vendor**、pro rc=0、fem-py rc=0。锚点：ex9-2D（--mesh 豁免）/ex14 0 差/**ex27 双档 0 差**/ex18 双档 8 位/ex9-3D init 逐字节 + stdout 0 差（mesh 细化被改后全组重验）。提交链：`9ad7a79d`（夹具更正）→ `f8eb94ba`（D821-3/4）→ `72b11dc7`（D832-1）→ docs。证据：`tmp/d88a|d88b|d88c/` + `tmp/d87main/`（修正探针复跑）。
+
+### 债务状态
+**D820-3 余项（细化传播）、D821-3、D821-4（→D833-1）、D829-1/2（r87）、D814-3 关闭**；**MakePeriodic 上游候选撤回**（⑥ 本轮实例：探针夹具伪影）；Gmsh type-14 上游报告成稿待发。新债 **D832-2**（3-D 周期 wrapped-frame）。维持：D824-B、D827-2、D818-1/2、D822-1（拆分后两余项）、D822-2。
+
+
+
 ## 第八十七轮（round 87）：D820-3 周期×Quad9（主会话，两真缺陷 + MFEM 缺口）+ D829-1/2 hp 余项（Lane A）+ D814-3 wg 体路径（Lane B）——三路并行全交付
 
 **开局 HEAD = round-86 终稿 `1bdb9497`；C: 36G；WSL 正常。** 三路主树文件互斥（㉛）：主会话 = mesh/space（D820-3，dof_manager.rs 本轮归主会话）；Lane A = `p_refine.rs`（D829-1/2）；Lane B = `assembly/src/wg/**`（D814-3）。
@@ -4501,6 +4531,7 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
 
 ### 债务状态
 **D820-3、D829-1、D829-2（阴性钉）、D814-3 关闭**；**MFEM 上游知会候选 +2**（MakePeriodic 角点 only+传递漏合并；Gmsh type-14 金字塔读侧缺陷[r86]）。维持：D824-B、D827-2、D818-1/2、D821-1..4 余项、D822-1/2。
+
 
 ## 第八十六轮（round 86）：§4-4 逐号定性（主会话）+ D827-1 混合族 hp 边基（Lane A）+ D827-3/4 金字塔导出余项（Lane B）——三路并行全交付
 
