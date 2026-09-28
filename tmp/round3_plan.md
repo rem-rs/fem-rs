@@ -4470,6 +4470,32 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第九十一轮（round 91）：D837-1 假设否证 + NC 叶子序真修（Lane A）+ D839-2 SC 实现（主会话+调试代理，两数学 bug）+ RUN→BIT 第三波（Lane B：ex33/ex26 star 升 BIT）——三路并行全交付
+
+**开局 HEAD = round-90 终稿 `13b21d09`；三路主树文件互斥（㉛）；并发限 2（Lane C 首派败后由主会话接手 D839-2 并派调试代理）。**
+
+### Lane A（D837-1）· **登记否证（⑤）+ mesh 真修**
+- **D837-1 假设否证**：`data/star.mesh` 是 20 个直边 QUAD，ex6 走 NC aniso 路径（非 tri 闭包）；C++ 探针 `GeneralRefinement` 后 **NV=86 NE=65 与 Rust 完全一致**；ex6 打的 76 = `GetTrueVSize()`（86−10 悬挂约束 dof），Rust 打的是 `space.n_dofs()`=86 ⇒ 分歧 = unknowns 打印口径 + 悬挂 dof true-dof 压缩，非 mesh 细分。
+- **mesh 真修（顺藤挖出）**：MFEM NC 细化按 `CollectLeafElements`（SQUARE+ISO 走 **Hilbert 子序**）输出元素、顶点按 `UpdateVertices`（top-level 先、叶子序首见编号）；Rust 原为创建序 ⇒ `amr_inner.rs` 新增 `reorder_quad_refinement_mfem`（复用 `init_root_states_quad` Hilbert 态机）接入 NC quad 两路径。**ex6 unknowns 12 轮逐轮 = C++（31/76/101/…/3331）**；3 网格级钉（EL/V/悬挂=10、批 2 NV141/NE110+元素序）红→绿。fem-mesh **534/0**。ex6 打印改真 dof 口径（主会话授权行）。
+- **新债**：D843-1（无状态 API 批≥2 节点 id 差，逐位需状态化）、D843-2（边界段顺序 vs face-id 序）、**D843-3（P1：悬挂 dof true-dof 压缩，落地后 ex6 冲 BIT）**。
+
+### 主会话 + 调试代理（D839-2）· **关闭**
+- **实现**：`form_linear_system_condensed`（mult-1 元素私有 dof 精确逐元 Schur 消元 + `recover_condensed_interior` 回代）+ ex29 `-sc` 接线（reduced 高度打印 + PCG + 恢复）。
+- **调试代理抓出两个主会话数学 bug**：①A_ii⁻¹ 从未真正计算（Gauss-Jordan 无单位增广 ⇒ inv≈I；pivot 只换单元素非整行）；②恢复内环把 A_ii⁻¹ 逐行乘标量（应先组整向量 s 再乘）。另修正测试基准稠密消去的缺失主元归一化。**修后 A_red vs 精确 Schur ≤ 2.7e-15、解差 2.3e-13**；ex29 `-sc -o 3` 与 C++ 全 console 一致（32×32、5 步 (B r,r) 逐值、ARF 0.0135923、误差两行同值）；默认档逐字节不变。fem-assembly **1306/0**。
+
+### Lane B（RUN→BIT 第三波）· **关闭（+2 BIT）**
+- **ex33 升 BIT（两配置逐字节）**：C++ 无 LAPACK 用预计算 AAA 系数表（Rust 运行时 AAA 差 ~1e-7 = r61 末位差源）⇒ 改逐位同表 + legacy rtol sqrt + FirstAndLast 打印 + %g 化。
+- **ex26 star 默认档升 BIT**：仅 `Device::Print` 两行格式差；**tri P4 层级/PA/Chebyshev/幂法（GlibcRand 12345）全链路逐位一致**。hex 档豁免 6 行（幂法轨迹差）——探针证明 fine 对角 sorted multiset 4.4e-16 ⇒ **Rust hex-P4 H1 dof 序是 MFEM 的置换** ⇒ D842-3（crates/space）。
+- **ex10 分层分诊**：第 3 层（Options 回声/打印/Newton 格式/norm_goal 语义/atol hack 删除）+ 第 2 层根因 = 内层 MINRES 预条件差 ⇒ crates/solver 新增 `solve_minres_dsmoother`（MFEM 左预条件 MINRES+DSmoother(1) 逐位移植，**D842-1 oracle pin 绿**）；第 1 层切线公式差 ⇒ **D842-2**（crates/assembly）。
+- fem-solver **451/0**、fem-amg 全绿。
+
+### 大门与提交
+大门（主树 ㉗）：lib(debug) **10/2665/0/5**、tests(release) **374/4488/0/30**（=r90 371/4483 + 恰 3 新靶 +13 通过）、doc **10/9/0/95**、examples **0 错误**（非 vendor 代码警告 0；LNK4044 环境件）、pro rc=0、fem-py rc=0。锚点：ex9-2D（--mesh 豁免）/**ex14 323 行 = C++**/ex27 双档 0 差/ex18 双档 8 位/**ex9-3D init 逐字节 + stdout 0 差**/**ex6 unknowns 12 轮 = C++**。提交链：`1ac10d2c`（D839-1）→ `b4362991`（D634）→ `66a3a5fb`（D835）→ `18c40351` → `41b5bf8c`（D839-2）→ `acf7a89f`（D837-1+NC 叶子序）→ `64edcd27`（RUN→BIT 三波）→ docs → 本笔。证据：`tmp/d91a|d91b|d90e|d90main/`。
+
+### 债务状态
+**D837-1（否证+NC 叶子序真修）、D839-2、D634 族（ex33/ex26 star/ex10 第 2/3 层）关闭**；**BIT 档计 13**（ex17、ex14、ex33 两配置、ex26 star）。新债：**D842-1（pin 绿关闭）/D842-2/D842-3、D843-1/2/3**。**D837-1 新结论**：ex6 完整 BIT 只差 D843-3（悬挂 dof true-dof 压缩）。
+
+
 ## 第九十轮（round 90）：D634 族收尾（Lane A：ex14 升 BIT + ex4 完全定性 + ex6 假设否证）+ D835-1/2（Lane B，两真缺陷）+ D836 撤案与 D839-1（Lane C + 主会话）——RUN 收敛第二波
 
 **开局 HEAD = round-89 终稿 `9099e647`；C: 39G。** 三路主树文件互斥（㉛）：Lane A = `examples/{ex4,ex6,ex14}`+`crates/solver`（分诊指向时）；Lane B = `crates/mesh/**`（D835）；Lane C = `examples/{ex29,ex39,pex29,pex31,ex31_dump}`（D836 去块）。主会话 = 维持项清点（r88 已落）+ D839-1 + 整合。
