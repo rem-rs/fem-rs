@@ -20,7 +20,7 @@
 
 
 use std::f64::consts::PI;
-use fem_assembly::assembler::Assembler;
+use fem_assembly::assembler::{Assembler, CondensedLinearSystem};
 use fem_assembly::postproc::coefficient::FnMatrixCoeff;
 use fem_assembly::standard::{DomainSourceIntegrator, TensorDiffusionIntegrator};
 use fem_assembly::{ElimPolicy, eliminate_ess_tdofs};
@@ -90,18 +90,45 @@ fn main() {
     });
     let diff = TensorDiffusionIntegrator { sigma };
     let src = DomainSourceIntegrator::new(|_x: &[f64]| 1.0);
-    let mut a_mat = Assembler::assemble_bilinear(&space, &[&diff], qo);
-    let mut rhs = Assembler::assemble_linear(&space, &[&src], qo);
+    // D839-2: `-sc` mirrors MFEM `a.EnableStaticCondensation()` — interior
+    // (bubble) dofs are eliminated per element and the solve runs on the
+    // trace(+ess) system; `RecoverFEMSolution`'s back-substitution is
+    // `recover_condensed_interior`.  At order 1 there are no bubbles and the
+    // flag is a no-op (same as MFEM).
+    let mut condensed: Option<CondensedLinearSystem> = None;
+    let mut a_mat_opt: Option<fem_linalg::CsrMatrix<f64>> = None;
+    let mut rhs_opt: Option<Vec<f64>> = None;
+    let solve_len = if args.static_cond {
+        let mut sys = Assembler::form_linear_system_condensed(
+            &space, &[&diff], &[&src], qo, &ess_bdr,
+        );
+        let x_bc = vec![0.0; sys.reduced.nrows];
+        let ess_reduced: Vec<u32> = ess_bdr
+            .iter()
+            .map(|&d| sys.reduced_id[d as usize])
+            .collect();
+        eliminate_ess_tdofs(&mut sys.reduced, &ess_reduced, &x_bc, &mut sys.reduced_rhs, ElimPolicy::DiagOne);
+        println!("Size of linear system: {}", sys.reduced.nrows);
+        let n = sys.reduced.nrows;
+        condensed = Some(sys);
+        n
+    } else {
+        let mut a_mat = Assembler::assemble_bilinear(&space, &[&diff], qo);
+        let mut rhs = Assembler::assemble_linear(&space, &[&src], qo);
 
-    // 10. Dirichlet BCs — homogeneous, so this is the D706 core entry under
-    // the DIAG_ONE policy: `apply_dirichlet_symmetric` (row/col zeroing +
-    // diagonal = 1) was already the per-dof kernel, and the former explicit
-    // "fix diagonal for CG" re-wrote the very same A(r,r) = 1 that the kernel
-    // installs; the projection values are read from a zero `x` (D739).
-    let x_bc = vec![0.0; n_dofs];
-    eliminate_ess_tdofs(&mut a_mat, &ess_bdr, &x_bc, &mut rhs, ElimPolicy::DiagOne);
+        // 10. Dirichlet BCs — homogeneous, so this is the D706 core entry under
+        // the DIAG_ONE policy: `apply_dirichlet_symmetric` (row/col zeroing +
+        // diagonal = 1) was already the per-dof kernel, and the former explicit
+        // "fix diagonal for CG" re-wrote the very same A(r,r) = 1 that the kernel
+        // installs; the projection values are read from a zero `x` (D739).
+        let x_bc = vec![0.0; n_dofs];
+        eliminate_ess_tdofs(&mut a_mat, &ess_bdr, &x_bc, &mut rhs, ElimPolicy::DiagOne);
 
-    println!("Size of linear system: {}", a_mat.nrows);
+        println!("Size of linear system: {}", a_mat.nrows);
+        a_mat_opt = Some(a_mat);
+        rhs_opt = Some(rhs);
+        n_dofs
+    };
 
     // 11. PCG + GS smoother
     // MFEM ex29: PCG(*A, M, B, X, 1, 200, 1e-12, 0.0) — the legacy helper
@@ -110,8 +137,18 @@ fn main() {
     // `1e-12·nom0`).  The raw 1e-12 meant `1e-24·nom0`: C++ stopped at
     // iteration 7, this kept going to 11 (D634).
     let cfg = SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 200, verbose: true, ..Default::default() };
-    let mut x = vec![0.0; n_dofs];
-    solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg).expect("PCG");
+    let x_full = if let Some(sys) = condensed.as_ref() {
+        // SC: solve the reduced system, then recover the bubbles
+        // (MFEM `RecoverFEMSolution`).
+        let mut xr = vec![0.0; solve_len];
+        solve_pcg_gssmoother(&sys.reduced, &sys.reduced_rhs, &mut xr, &cfg).expect("PCG");
+        fem_assembly::assembler::recover_condensed_interior(sys, &xr)
+    } else {
+        let mut x = vec![0.0; solve_len];
+        solve_pcg_gssmoother(a_mat_opt.as_ref().unwrap(), rhs_opt.as_ref().unwrap(), &mut x, &cfg).expect("PCG");
+        x
+    };
+    let x = x_full;
 
     // 13. L2 error (MFEM ComputeL2Error uses intorder = 2*order + 3)
     let err_qo = (2 * order + 3) as u8; // = 9 for order 3 (matches C++ 5-point Gauss)

@@ -4687,3 +4687,289 @@ mod tests {
 
 
 }
+
+// ─── Static condensation (MFEM `BilinearForm::EnableStaticCondensation`) ────
+// ─── Static condensation (MFEM `BilinearForm::EnableStaticCondensation`) ───
+
+/// Per-element bubble recovery data for [`form_linear_system_condensed`].
+///
+/// Interior ("bubble") dofs are element-private, so the recovery
+/// `x_i = A_ii⁻¹ (b_i − A_is x_s)` is unambiguous per element.
+pub struct ElementInteriorRecovery {
+    /// The element's trace (kept) dofs, full ids, in element-row order.
+    pub trace_dofs: Vec<DofId>,
+    /// The element's interior dofs, full ids, in element-row order.
+    pub interior_dofs: Vec<DofId>,
+    /// `A_ii` inverse, row-major `k × k`, `k = interior_dofs.len()`.
+    pub a_ii_inv: Vec<f64>,
+    /// `A_is` row-major, `k × t`, `t = trace_dofs.len()`.
+    pub a_is: Vec<f64>,
+    /// `b_i`, length `k`.
+    pub b_i: Vec<f64>,
+}
+
+/// The condensed linear system over trace (+essential) dofs.
+pub struct CondensedLinearSystem {
+    pub reduced: CsrMatrix<f64>,
+    pub reduced_rhs: Vec<f64>,
+    /// Full dof id → reduced row id (`u32::MAX` for eliminated interiors).
+    pub reduced_id: Vec<u32>,
+    /// Interior recoveries in element order (elements with interiors only).
+    pub recoveries: Vec<ElementInteriorRecovery>,
+    /// The full (uncondensed) dof count.
+    pub n_full: usize,
+}
+
+/// `FormLinearSystem` with static condensation (MFEM
+/// `BilinearForm::EnableStaticCondensation` + `FormLinearSystem`).
+///
+/// Assembles `A`/`b` through the ordinary scalar path, then eliminates each
+/// element's interior dofs on the **global** system
+/// (`A_tt − A_ti A_ii⁻¹ A_it`, `b_t − A_ti A_ii⁻¹ b_i` per element block) and
+/// drops the interior rows/cols.  The interior set is the **element-private**
+/// dofs (multiplicity 1 in `element_dofs`) that are not essential — a superset
+/// of MFEM's FE-interior ("bubble") dofs that coincides with it whenever the
+/// essential dofs cover the boundary entities; eliminating an element-private
+/// dof through its owning element's block is exact, so the kept-dof system and
+/// solution are identical either way.  Essential dofs stay in the reduced
+/// system — apply [`eliminate_ess_tdofs`] to the result exactly like the
+/// uncondensed path.  [`recover_condensed_interior`] back-substitutes the
+/// eliminated dofs.
+impl Assembler {
+pub fn form_linear_system_condensed<S: FESpace>(
+    space: &S,
+    bilinear: &[&dyn BilinearIntegrator],
+    linear: &[&dyn LinearIntegrator],
+    quad_order: u8,
+    ess_dofs: &[DofId],
+) -> CondensedLinearSystem {
+    let n_full = space.n_dofs();
+    let mut a = Assembler::assemble_bilinear(space, bilinear, quad_order);
+    let mut b = Assembler::assemble_linear(space, linear, quad_order);
+
+    // Interior classification: element-private dofs (multiplicity 1) that
+    // are not essential.
+    let ess_set: std::collections::HashSet<DofId> = ess_dofs.iter().copied().collect();
+    let mut mult = vec![0u32; n_full];
+    for e in 0..space.mesh().n_elements() as u32 {
+        for &d in space.element_dofs(e) {
+            mult[d as usize] += 1;
+        }
+    }
+    let is_interior = |d: DofId| mult[d as usize] == 1 && !ess_set.contains(&d);
+
+    let mut recoveries: Vec<ElementInteriorRecovery> = Vec::new();
+
+    // Pass 1: extract every element's block from the ORIGINAL system (before
+    // any modification — later elements' Schur subtractions would otherwise
+    // pollute earlier elements' trace-trace blocks and double-eliminate).
+    struct Block {
+        trace: Vec<DofId>,
+        interior: Vec<DofId>,
+        m: Vec<f64>,
+        b_e: Vec<f64>,
+    }
+    let mut blocks: Vec<Block> = Vec::new();
+    for e in 0..space.mesh().n_elements() as u32 {
+        let dofs: Vec<DofId> = space.element_dofs(e).to_vec();
+        let (trace, interior): (Vec<DofId>, Vec<DofId>) =
+            dofs.iter().copied().partition(|&d| !is_interior(d));
+        if interior.is_empty() {
+            continue;
+        }
+        let k = interior.len();
+        let t = trace.len();
+        let w = k + t;
+        let all: Vec<DofId> = trace.iter().copied().chain(interior.iter().copied()).collect();
+        let mut m = vec![0.0_f64; w * w];
+        for (rr, &dr) in all.iter().enumerate() {
+            for (cc, &dc) in all.iter().enumerate() {
+                m[rr * w + cc] = a.get(dr as usize, dc as usize);
+            }
+        }
+        let b_e: Vec<f64> = all.iter().map(|&d| b[d as usize]).collect();
+        blocks.push(Block { trace, interior, m, b_e });
+    }
+
+    // Pass 2: per-block A_ii inverse + recovery record, then subtract this
+    // block's Schur correction from the global system.
+    for blk in &blocks {
+        let (trace, interior, m, b_e) = (&blk.trace, &blk.interior, &blk.m, &blk.b_e);
+        let k = interior.len();
+        let t = trace.len();
+        let w = k + t;
+
+        // A_ii inverse: Gauss–Jordan with identity augmentation and partial
+        // pivoting (full-row swaps).  The left half is reduced to I while the
+        // right half accumulates A_ii⁻¹.
+        let w2 = 2 * k;
+        let mut aug = vec![0.0_f64; k * w2];
+        for i in 0..k {
+            for j in 0..k {
+                aug[i * w2 + j] = m[(t + i) * w + (t + j)];
+            }
+            aug[i * w2 + (k + i)] = 1.0;
+        }
+        for col in 0..k {
+            let piv = (col..k).fold(col, |best, rr| {
+                if aug[rr * w2 + col].abs() > aug[best * w2 + col].abs() {
+                    rr
+                } else {
+                    best
+                }
+            });
+            assert!(
+                aug[piv * w2 + col].abs() > 0.0,
+                "form_linear_system_condensed: singular A_ii block"
+            );
+            if piv != col {
+                for j in 0..w2 {
+                    aug.swap(piv * w2 + j, col * w2 + j);
+                }
+            }
+            let pv = aug[col * w2 + col];
+            for j in 0..w2 {
+                aug[col * w2 + j] /= pv;
+            }
+            for rr in 0..k {
+                if rr == col {
+                    continue;
+                }
+                let f = aug[rr * w2 + col];
+                if f != 0.0 {
+                    for j in 0..w2 {
+                        aug[rr * w2 + j] -= f * aug[col * w2 + j];
+                    }
+                }
+            }
+        }
+        let mut a_ii_inv = vec![0.0_f64; k * k];
+        for i in 0..k {
+            for j in 0..k {
+                a_ii_inv[i * k + j] = aug[i * w2 + k + j];
+            }
+        }
+
+        // Recovery record (a_is/b_i are the block's own values; the Schur
+        // subtraction only touches trace entries).
+        let mut a_is = vec![0.0_f64; k * t];
+        for l in 0..k {
+            for c in 0..t {
+                a_is[l * t + c] = m[(t + l) * w + c];
+            }
+        }
+        let b_i: Vec<f64> = b_e[t..].to_vec();
+        recoveries.push(ElementInteriorRecovery {
+            trace_dofs: trace.clone(),
+            interior_dofs: interior.clone(),
+            a_ii_inv: a_ii_inv.clone(),
+            a_is: a_is.clone(),
+            b_i: b_i.clone(),
+        });
+
+        // Global elimination: A(t,t) -= A(t,i)·A_ii⁻¹·A(i,t),
+        // b(t) -= A(t,i)·A_ii⁻¹·b(i).  Two-level sums: the (l,m) inner
+        // product runs over the element's interior dofs.
+        for i in 0..t {
+            for c in 0..t {
+                let mut s = 0.0;
+                for l in 0..k {
+                    let a_ti = m[i * w + (t + l)];
+                    for mm in 0..k {
+                        s += a_ti * a_ii_inv[l * k + mm] * m[(t + mm) * w + c];
+                    }
+                }
+                let entry = a.get_mut(trace[i] as usize, trace[c] as usize);
+                *entry -= s;
+            }
+            let mut db = 0.0;
+            for l in 0..k {
+                let a_ti = m[i * w + (t + l)];
+                for mm in 0..k {
+                    db += a_ti * a_ii_inv[l * k + mm] * b_e[t + mm];
+                }
+            }
+            b[trace[i] as usize] -= db;
+        }
+    }
+
+    // Drop the interior rows/cols; compact keeping full-dof ascending order.
+    let mut reduced_id = vec![u32::MAX; n_full];
+    let mut r = 0u32;
+    for d in 0..n_full {
+        if !is_interior(d as DofId) {
+            reduced_id[d] = r;
+            r += 1;
+        }
+    }
+    let n_reduced = r as usize;
+    let mut coo = CooMatrix::new(n_reduced, n_reduced);
+    for rr in 0..n_full {
+        if is_interior(rr as DofId) {
+            continue;
+        }
+        let ri = reduced_id[rr] as usize;
+        for kk in a.row_ptr[rr]..a.row_ptr[rr + 1] {
+            let cc = a.col_idx[kk] as usize;
+            if is_interior(cc as DofId) {
+                continue;
+            }
+            coo.add(ri, reduced_id[cc] as usize, a.values[kk]);
+        }
+    }
+    let reduced = coo.into_csr();
+    let reduced_rhs: Vec<f64> = (0..n_full)
+        .filter(|&d| !is_interior(d as DofId))
+        .map(|d| b[d])
+        .collect();
+
+    CondensedLinearSystem {
+        reduced,
+        reduced_rhs,
+        reduced_id,
+        recoveries,
+        n_full,
+    }
+}
+}
+
+/// Back-substitute the element bubbles
+/// (`x_i = A_ii⁻¹ (b_i − A_is x_s)`); trace/essential entries are copied
+/// from `x_reduced` by the same kept-set compaction used at assembly time.
+pub fn recover_condensed_interior(sys: &CondensedLinearSystem, x_reduced: &[f64]) -> Vec<f64> {
+    let mut is_interior = vec![false; sys.n_full];
+    for rec in &sys.recoveries {
+        for &d in &rec.interior_dofs {
+            is_interior[d as usize] = true;
+        }
+    }
+    let mut x = vec![0.0_f64; sys.n_full];
+    let mut red = 0u32;
+    for d in 0..sys.n_full {
+        if !is_interior[d as usize] {
+            x[d as usize] = x_reduced[red as usize];
+            red += 1;
+        }
+    }
+    for rec in &sys.recoveries {
+        let t = rec.trace_dofs.len();
+        let k = rec.interior_dofs.len();
+        // s = b_i − A_is·x_s (length k), then x_i = A_ii⁻¹·s.
+        let mut s = vec![0.0_f64; k];
+        for (i, si) in s.iter_mut().enumerate() {
+            *si = rec.b_i[i];
+            for j in 0..t {
+                *si -= rec.a_is[i * t + j] * x[rec.trace_dofs[j] as usize];
+            }
+        }
+        for (i, &d) in rec.interior_dofs.iter().enumerate() {
+            let mut xi = 0.0;
+            for l in 0..k {
+                xi += rec.a_ii_inv[i * k + l] * s[l];
+            }
+            x[d as usize] = xi;
+        }
+    }
+    x
+}
+
