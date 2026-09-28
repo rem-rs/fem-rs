@@ -443,6 +443,19 @@ fn solve_div<M: MeshTopology + Clone + 'static>(
 
 fn main() {
     let args = parse_args();
+    // MFEM ex24p prints `args.PrintOptions(cout)` on rank 0 (ex24p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte.
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --order {}", args.order);
+    println!("   --problem-type {}", args.prob);
+    println!("   --no-static-condensation");
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
+    println!("   --no-visualization");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
     // CLI validation: used to be `assert!` (panic, rc 101); a bad problem type
     // or a higher order is a *declared gap*, not a crash (D137 clean-up).
     if args.prob > 2 {

@@ -614,8 +614,60 @@ fn l1_rho_increment(
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
+/// Format an f64 like C++ `os << value` with default precision (6 significant
+/// digits, scientific notation with a 2-digit signed exponent when the decimal
+/// exponent is < -4 or >= 6) — MFEM's OptionsParser::WriteValue prints option
+/// doubles this way, e.g. 1e-6 → "1e-06", 0.0001 → "0.0001", 1.0 → "1".
+fn cpp_double(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let exp = v.abs().log10().floor() as i32;
+    let (body, sci) = if exp < -4 || exp >= 6 {
+        let mant = v / 10f64.powi(exp);
+        (format!("{mant:.5}"), true)
+    } else {
+        let decimals = (5 - exp).max(0) as usize;
+        (format!("{v:.decimals$}"), false)
+    };
+    let mut s = body;
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    if sci {
+        format!("{s}e{}{:02}", if exp < 0 { "-" } else { "+" }, exp.abs())
+    } else {
+        s
+    }
+}
+
 fn main() {
     let args = parse_args();
+    // C++ ex37 echoes the parsed options (`args.PrintOptions(mfem::out)`,
+    // ex37.cpp:185) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true; the -vis/-pv flags are accepted but have
+    // no GLVis/ParaView output, so both always echo their disabled branch).
+    println!("Options used:");
+    println!("   --refine {}", args.ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --alpha-step-length {}", cpp_double(args.alpha));
+    println!("   --alpha-growth-rate {}", cpp_double(args.growth));
+    println!("   --epsilon-thickness {}", cpp_double(args.epsilon));
+    println!("   --max-it {}", args.max_it);
+    println!("   --rel-tol {}", cpp_double(args.ntol));
+    println!("   --abs-tol {}", cpp_double(args.itol));
+    println!("   --volume-fraction {}", cpp_double(args.vol_frac));
+    println!("   --lambda {}", cpp_double(args.lambda));
+    println!("   --mu {}", cpp_double(args.mu));
+    println!("   --psi-min {}", cpp_double(args.rho_min));
+    println!("   --no-visualization");
+    println!("   --no-paraview");
 
     // 1. Create mesh + refine (C++: MakeCartesian2D + UniformRefinement ×ref_levels)
     let base = make_default_mesh();

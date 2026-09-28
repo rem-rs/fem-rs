@@ -66,9 +66,56 @@ fn build_pressure_mass(
     coo.into_csr()
 }
 
+/// Format an f64 like C++ `os << value` with default precision (6 significant
+/// digits, scientific notation with a 2-digit signed exponent when the decimal
+/// exponent is < -4 or >= 6) — MFEM's OptionsParser::WriteValue prints option
+/// doubles this way, e.g. 1e-6 → "1e-06", 0.0001 → "0.0001", 1.0 → "1".
+fn cpp_double(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let exp = v.abs().log10().floor() as i32;
+    if exp < -4 || exp >= 6 {
+        let mant = v / 10f64.powi(exp);
+        let mut s = format!("{:.5}", mant);
+        if s.contains('.') {
+            while s.ends_with('0') {
+                s.pop();
+            }
+            if s.ends_with('.') {
+                s.pop();
+            }
+        }
+        format!("{s}e{}{:02}", if exp < 0 { "-" } else { "+" }, exp.abs())
+    } else {
+        let decimals = (5 - exp).max(0) as usize;
+        let mut s = format!("{v:.decimals$}");
+        if s.contains('.') {
+            while s.ends_with('0') {
+                s.pop();
+            }
+            if s.ends_with('.') {
+                s.pop();
+            }
+        }
+        s
+    }
+}
+
 fn main() {
     let args = Args::parse();
-    println!("=== MFEM ex19: Incompressible neo-Hookean hyperelasticity ===");
+    // C++ ex19 prints `args.PrintOptions(cout)` (ex19.cpp:219) as its very
+    // first output; the echo mirrors OptionsParser::PrintOptions byte-for-byte
+    // (replaces this port's former ad-hoc banner line).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine {}", args.refine);
+    println!("   --order {}", args.order);
+    println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
+    println!("   --relative-tolerance {}", cpp_double(args.rel_tol));
+    println!("   --absolute-tolerance {}", cpp_double(args.abs_tol));
+    println!("   --newton-iterations {}", args.max_iter);
+    println!("   --shear-modulus {}", cpp_double(args.mu));
 
     // 1. Read mesh (2D or 3D)
     let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");

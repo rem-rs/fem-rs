@@ -69,6 +69,38 @@ fn nr(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
 }
 
+/// Format an f64 like C++ `os << value` with default precision (6 significant
+/// digits, scientific notation with a 2-digit signed exponent when the decimal
+/// exponent is < -4 or >= 6) — MFEM's OptionsParser::WriteValue prints option
+/// doubles this way, e.g. 1e-6 → "1e-06", 0.0001 → "0.0001", 1.0 → "1".
+fn cpp_double(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let exp = v.abs().log10().floor() as i32;
+    let (body, sci) = if exp < -4 || exp >= 6 {
+        let mant = v / 10f64.powi(exp);
+        (format!("{mant:.5}"), true)
+    } else {
+        let decimals = (5 - exp).max(0) as usize;
+        (format!("{v:.decimals$}"), false)
+    };
+    let mut s = body;
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    if sci {
+        format!("{s}e{}{:02}", if exp < 0 { "-" } else { "+" }, exp.abs())
+    } else {
+        s
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let n_workers: usize = std::env::args()
@@ -76,6 +108,21 @@ fn main() {
         .and_then(|i| std::env::args().nth(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
+
+    // MFEM ex19p prints `args.PrintOptions(cout)` on rank 0 (ex19p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte. Note: C++ default --order
+    // is 2, this port's default is 1 (RUN-档 divergence).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine-serial {}", args.refine);
+    println!("   --refine-parallel 0");
+    println!("   --order {}", args.order);
+    println!("   --no-visualization");
+    println!("   --relative-tolerance {}", cpp_double(args.rel_tol));
+    println!("   --absolute-tolerance {}", cpp_double(args.abs_tol));
+    println!("   --newton-iterations {}", args.max_iter);
+    println!("   --shear-modulus {}", cpp_double(args.mu));
 
     println!("=== fem-rs mfem_pex19: Parallel Incompressible Hyperelastic ===");
     println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.refine, args.order);

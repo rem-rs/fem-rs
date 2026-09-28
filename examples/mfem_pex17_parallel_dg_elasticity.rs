@@ -87,6 +87,20 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
 
+    // MFEM ex17p prints `args.PrintOptions(cout)` on rank 0 (ex17p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte. Note: C++ default
+    // --refine-serial is -1 (auto), this port's default is 0 (RUN-档).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine-serial {}", args.refine);
+    println!("   --refine-parallel 1");
+    println!("   --order {}", args.order);
+    println!("   --alpha {}", args.alpha);
+    println!("   --kappa {}", args.kappa);
+    println!("   --amg-for-systems");
+    println!("   --no-visualization");
+
     println!("=== fem-rs mfem_pex17: Parallel DG Elasticity (SIP) ===");
     println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.refine, args.order);
 

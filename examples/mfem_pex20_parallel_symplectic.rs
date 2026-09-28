@@ -175,6 +175,20 @@ fn main() {
     let args = parse_args();
     assert!(args.prob <= 4, "problem type must be 0..4");
 
+    // MFEM ex20p prints `args.PrintOptions(cout)` on rank 0 (ex20p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true; this port has no GLVis/GnuPlot output).
+    println!("Options used:");
+    println!("   --order {}", args.order);
+    println!("   --problem-type {}", args.prob);
+    println!("   --number-of-steps {}", args.nsteps);
+    println!("   --time-step {}", args.dt);
+    println!("   --mass {}", args.mass);
+    println!("   --spring-const {}", args.spring);
+    println!("   --no-visualization");
+    println!("   --no-gnuplot");
+
     let launcher = ThreadLauncher::new(WorkerConfig::new(args.ranks));
     launcher.launch(move |comm| {
         let rank = comm.rank();

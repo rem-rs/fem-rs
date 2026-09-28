@@ -47,6 +47,22 @@ fn main() {
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(1);
 
+    // MFEM ex5p prints `args.PrintOptions(cout)` on rank 0 (ex5p.cpp:106)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte. Note: C++ default --refine is -1 (auto), this port's
+    // default is 1 — the echo prints the actually applied value.
+    println!("Options used:");
+    println!("   --mesh ../data/star.mesh");
+    println!("   --refine {ref_levels}");
+    println!("   --order 1");
+    println!("   --serial-format");
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
+    println!("   --no-visualization");
+    println!("   --no-adios2-streams");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     println!("=== fem-rs mfem_pex5: Parallel Mixed Darcy (RT1 + L2P1) ===");
     println!(
         "  Workers: {}, Mesh: star.mesh x{} (1:1 MFEM ex5p, -r {})",

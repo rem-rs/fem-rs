@@ -56,6 +56,19 @@ fn main() {
     let order_refs: usize = arg(&args, "-or").unwrap_or(2);
     let par_refs: usize = arg(&args, "-rp").unwrap_or(2);
 
+    // MFEM ex26p prints `args.PrintOptions(cout)` on rank 0 (ex26p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte. Note: C++ default
+    // --geometric-refinements is 0, this port's -rp default is 2 (RUN-档).
+    println!("Options used:");
+    println!("   --mesh data/star.mesh");
+    println!("   --geometric-refinements {par_refs}");
+    println!("   --order-refinements {order_refs}");
+    println!("   --device cpu");
+    println!("   --no-visualization");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     // 1. Serial mesh (star.mesh — ex26p default) + uniform refine ≤ 1000 elems.
     let mfem = read_mfem_file("data/star.mesh").expect("failed to read data/star.mesh");
     let mut mesh: Mesh<2> = mfem.mesh2d.expect("star.mesh must be 2-D");

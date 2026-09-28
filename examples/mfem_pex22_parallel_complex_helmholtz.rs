@@ -25,6 +25,29 @@ fn main() {
     let freq = a.iter().position(|x| x == "--freq").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let omega = 2.0 * std::f64::consts::PI * freq;
 
+    // MFEM ex22p prints `args.PrintOptions(cout)` on rank 0 (ex22p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (physics coefficients are the
+    // C++ defaults, which this port hardcodes; --frequency -1 is the C++
+    // sentinel default while this port applies a concrete frequency).
+    println!("Options used:");
+    println!("   --mesh data/inline-quad.mesh");
+    println!("   --refine-serial 1");
+    println!("   --refine-parallel 1");
+    println!("   --order 1");
+    println!("   --problem-type 0");
+    println!("   --stiffness-coef 0");
+    println!("   --mass-coef 1");
+    println!("   --damping-coef 20");
+    println!("   --permeability 1");
+    println!("   --permittivity 1");
+    println!("   --conductivity 20");
+    println!("   --frequency {freq}");
+    println!("   --hermitian");
+    println!("   --no-visualization");
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
+
     let mfem = read_mfem_file("data/inline-quad.mesh").expect("failed to read inline-quad.mesh");
     let mesh = Arc::new(mfem.mesh2d.expect("inline-quad.mesh must be 2D"));
     let result = Arc::new(Mutex::new(None));

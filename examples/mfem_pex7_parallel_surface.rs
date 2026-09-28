@@ -38,6 +38,21 @@ fn main() {
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(2);
 
+    // MFEM ex7p prints `args.PrintOptions(cout)` on rank 0 (ex7p.cpp:82)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte. Note (documented in the header): C++ defaults are
+    // --elem 1/--order 2; this port runs the Tri3 P1 path (--elem 0/--order 1).
+    println!("Options used:");
+    println!("   --elem 0");
+    println!("   --order 1");
+    println!("   --refine {ref_levels}");
+    println!("   --refine-locally 0");
+    println!("   --no-visualization");
+    println!("   --snap-at-the-end");
+    println!("   --device cpu");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     println!("=== fem-rs mfem_pex7: Parallel Screened Poisson on the Unit Sphere (Tri3 P1) ===");
 
     // Sphere mesh: octahedron + uniform surface refinement + radial snap.

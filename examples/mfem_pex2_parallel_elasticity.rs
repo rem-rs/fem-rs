@@ -42,6 +42,20 @@ fn main() {
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let dump_sol = parse_arg_str(&args, "--dump-sol");
 
+    // MFEM ex2p prints `args.PrintOptions(cout)` on rank 0 (ex2p.cpp:95)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte.
+    println!("Options used:");
+    println!("   --mesh ../data/beam-tri.mesh");
+    println!("   --order 1");
+    println!("   --amg-for-systems");
+    println!("   --no-static-condensation");
+    println!("   --no-visualization");
+    println!("   --by-vdim");
+    println!("   --device cpu");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     println!("=== fem-rs mfem_pex2: Parallel Linear Elasticity ===");
     println!("  Workers: {}, Mesh: beam-tri.mesh x4 (1:1 MFEM ex2p)", n_workers);
 

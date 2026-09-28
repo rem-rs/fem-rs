@@ -25,6 +25,21 @@ use fem_solver::fmt_g;
 
 fn main() {
     let args = parse_args();
+    // MFEM ex5 echoes the parsed options (`args.PrintOptions(cout)`, ex5.cpp:82)
+    // followed by `device.Print()` before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true).
+    println!("Options used:");
+    match args.mesh {
+        Some(ref m) => println!("   --mesh {m}"),
+        None => println!("   --mesh ../data/star.mesh"),
+    }
+    println!("   --order {}", args.order);
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
+    println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
     let mesh = read_mfem_file(args.mesh.as_deref().unwrap_or("../data/star.mesh")).unwrap();
     let mesh: Mesh<2> = mesh.mesh2d.unwrap();
     let dim = 2;

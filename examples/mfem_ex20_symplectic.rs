@@ -123,6 +123,10 @@ fn main() {
     println!("   --time-step {dt}");
     println!("   --mass {m}");
     println!("   --spring-const {k}");
+    // MFEM ENABLE pairs print the long_name whose value is true
+    // (OptionsParser::PrintOptions); default run: --no-visualization/--no-gnuplot.
+    println!("   {}", if visualization { "--visualization" } else { "--no-visualization" });
+    println!("   {}", if gnuplot { "--gnuplot" } else { "--no-gnuplot" });
     // 2. Create and Initialize the Symplectic Integration Solver
     //    (MFEM: SIAVSolver siaSolver(order); GradT P; NegGradV F; siaSolver.Init(P,F);)
     let sia_solver = SiavSolver::new(order as usize);

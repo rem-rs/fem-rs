@@ -175,6 +175,24 @@ impl Args {
 fn main() {
     let args = Args::parse();
 
+    // MFEM ex15p prints `args.PrintOptions(cout)` on rank 0 (ex15p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (all C++ default values are
+    // also this port's defaults).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --problem {}", args.problem);
+    println!("   --nfeatures {}", args.nfeatures);
+    println!("   --order {}", args.order);
+    println!("   --max-err {}", args.max_elem_error);
+    println!("   --hysteresis {}", args.hysteresis);
+    println!("   --ref-levels {}", args.ref_levels);
+    println!("   --nc-limit {}", args.nc_limit);
+    println!("   --t-final {}", args.t_final);
+    println!("   --estimator {}", args.estimator);
+    println!("   --no-visualization");
+    println!("   --no-visit-datafiles");
+
     let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
     let mesh0: Mesh<2> = mfem.mesh2d.expect("expected 2D mesh");
     // C++: serial uniform refinement before partitioning.

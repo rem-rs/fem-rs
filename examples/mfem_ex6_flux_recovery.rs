@@ -36,6 +36,20 @@ use fem_space::{
 
 fn main() {
     let args = Args::parse();
+    // MFEM ex6 echoes the parsed options (`args.PrintOptions(cout)`, ex6.cpp:84)
+    // followed by `device.Print()` before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true, so no_vis => --no-visualization).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --order {}", args.order);
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
+    println!("   --max-dofs {}", args.max_dofs);
+    println!("   {}", if args._ls_zz { "--ls-zz" } else { "--no-ls-zz" });
+    println!("   {}", if args._no_vis { "--no-visualization" } else { "--visualization" });
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
     let t0 = Instant::now();
 
     // ── 1. Read the mesh ──────────────────────────────────────────────────────

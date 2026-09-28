@@ -75,6 +75,23 @@ fn main() {
     };
     let is_1to1 = run.mesh_n.is_none();
 
+    // MFEM ex1p prints `args.PrintOptions(cout)` on rank 0 (ex1p.cpp:131)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte (1:1 mode only — the `--n` framework self-test has no
+    // C++ counterpart run).
+    if is_1to1 {
+        println!("Options used:");
+        println!("   --mesh ../data/star.mesh");
+        println!("   --order {}", run.order);
+        println!("   --no-static-condensation");
+        println!("   --no-partial-assembly");
+        println!("   --no-full-assembly");
+        println!("   --device cpu");
+        println!("   --no-visualization");
+        println!("Device configuration: cpu");
+        println!("Memory configuration: host-std");
+    }
+
     let partitioner_name = match (use_metis, use_streaming) {
         (false, false) => "contiguous",
         (false, true)  => "contiguous+streaming",

@@ -90,6 +90,23 @@ fn main() {
     // *serial* ex3 default (`star.mesh`) rather than reading a 3-D mesh as 2-D
     // (`beam-tet` has no `mesh2d`, which used to panic on the default run).
     // Comparisons with the C++ must pass the same 2-D `-m <mesh>` on both sides.
+    // MFEM ex3p prints `args.PrintOptions(cout)` on rank 0 (ex3p.cpp:117)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte (1:1 default-run mode only — the `--n`/`-m` variants have
+    // no C++ counterpart run).
+    if mesh_file.is_none() && n == 16 {
+        println!("Options used:");
+        println!("   --mesh data/star.mesh");
+        println!("   --order {order}");
+        println!("   --frequency {freq}");
+        println!("   --no-static-condensation");
+        println!("   --no-partial-assembly");
+        println!("   --conforming");
+        println!("   --device cpu");
+        println!("   {}", if visualization { "--visualization" } else { "--no-visualization" });
+        println!("Device configuration: cpu");
+        println!("Memory configuration: host-std");
+    }
     let base_mesh: Mesh<2> = if let Some(ref path) = mesh_file {
         read_mfem_file(path).expect("failed to read MFEM mesh")
             .mesh2d.expect("MFEM mesh must be 2D")

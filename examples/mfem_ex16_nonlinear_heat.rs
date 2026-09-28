@@ -336,6 +336,29 @@ fn main() {
     // C++ ex16.cpp:94-143 — 1. Parse command-line options.
     let args = parse_args();
 
+    // C++ ex16.cpp:148 — `args.PrintOptions(cout)` echoes the parsed options
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte (ENABLE pair prints the long_name whose value is true:
+    // solve_implicit_state=false prints "--implicit-slope"; MFEM 4.10 ID 23 =
+    // SDIRK33, the only integrator this port implements).
+    println!("Options used:");
+    if args.mesh_file.is_empty() {
+        println!("   --mesh data/star.mesh");
+    } else {
+        println!("   --mesh {}", args.mesh_file);
+    }
+    println!("   --refine {}", args.ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --ode-solver 23");
+    println!("   --t-final {}", args.t_final);
+    println!("   --time-step {}", args.dt);
+    println!("   --alpha {}", args.alpha);
+    println!("   --kappa {}", args.kappa);
+    println!("   {}", if args.solve_implicit_state { "--implicit-state" } else { "--implicit-slope" });
+    println!("   --no-visualization");
+    println!("   --no-visit-datafiles");
+    println!("   --visualization-steps 5");
+
     // C++ ex16.cpp:147-148 — 2. Read the mesh from the given mesh file.
     let mfem_file = if args.mesh_file.is_empty() {
         let path = {

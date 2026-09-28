@@ -358,6 +358,26 @@ impl ImexOperator for ImexEvolution {
 
 fn main() {
     let args = parse_args();
+    // C++ ex41 echoes the parsed options (`args.PrintOptions(cout)`,
+    // ex41.cpp:323) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pairs print the
+    // long_name whose value is true: no paraview/visit output and ascii
+    // datafiles are not implemented, while cg=false ⇒ "--discontinuous-galerkin").
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --problem {}", args.problem);
+    println!("   --refine {}", args.ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --ode-solver {}", args.ode_solver_type);
+    println!("   --t-final {}", args.t_final);
+    println!("   --time-step {}", args.dt);
+    println!("   --diffusion-coeff {}", args.diffusion_term);
+    println!("   --no-paraview-datafiles");
+    println!("   --visualization-steps {}", args.vis_steps);
+    println!("   --no-visualization");
+    println!("   --ascii-datafiles");
+    println!("   --no-visit-datafiles");
+    println!("   {}", if args.cg { "--continuous-galerkin" } else { "--discontinuous-galerkin" });
 
     // 2. Read the mesh (geometrically periodic meshes supported).
     let mf = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");

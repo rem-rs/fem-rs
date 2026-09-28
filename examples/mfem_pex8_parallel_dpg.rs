@@ -86,6 +86,14 @@ fn main() {
     let order: usize = parse_arg(&args, "-o").unwrap_or(1);
     let _diag: bool = args.iter().any(|a| a == "--diag");
 
+    // MFEM ex8p prints `args.PrintOptions(cout)` on rank 0 (ex8p.cpp:74)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte (ex8p registers only mesh/order/visualization options).
+    println!("Options used:");
+    println!("   --mesh ../data/star.mesh");
+    println!("   --order {order}");
+    println!("   --no-visualization");
+
     println!("=== fem-rs mfem_pex8: Parallel DPG Poisson (H1 + trace + L2) ===");
 
     // Mesh: star.mesh → quad→tri (the parallel trace path is Tri3) +

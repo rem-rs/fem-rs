@@ -53,6 +53,17 @@ use fem_examples::rational_approximation::compute_partial_fraction_approximation
 use fem_examples::rational_approximation::{rational_approximation_aaa, weighted_poly_product};
 fn main() {
     let args = parse_args();
+    // C++ ex33 echoes the parsed options (`args.PrintOptions(cout)`,
+    // ex33.cpp:128) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --order {}", args.order);
+    println!("   --refs {}", args.refs);
+    println!("   --alpha {}", args.alpha);
+    println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
+    println!("   {}", if args.verification { "--verification" } else { "--no-verification" });
 
     // ── 2. Compute the rational expansion coefficients (ex33.hpp) ──────────
     let power_of_laplace = args.alpha.floor() as i32;

@@ -73,6 +73,20 @@ fn singular_function(p: &[f64]) -> f64 {
 fn main() {
     let args = parse_args();
 
+    // MFEM ex30p prints `args.PrintOptions(cout)` on rank 0 (ex30p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (all C++ default values are
+    // also this port's defaults; threshold 1e-3 prints as "0.001").
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --order {}", args.order);
+    println!("   --nc-limit {}", args.nc_limit);
+    println!("   --max-elems {}", args.max_elems);
+    println!("   --error {}", args.threshold);
+    println!("   --enriched_order {}", args.enriched_order);
+    println!("   --nonconforming-simplices");
+    println!("   --no-visualization");
+
     let launcher = ThreadLauncher::new(WorkerConfig::new(args.np));
     launcher.launch(move |comm| {
         let mfem = read_mfem_file(&args.mesh_file).expect("failed to read mesh");

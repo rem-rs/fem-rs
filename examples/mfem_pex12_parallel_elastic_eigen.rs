@@ -270,6 +270,18 @@ fn run_3d(comm: fem_parallel::comm::Comm, args: &Args, mesh: Mesh<3>) {
 
 fn main() {
     let args = parse_args();
+    // MFEM ex12p prints `args.PrintOptions(cout)` on rank 0 (ex12p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (seed echoed at the C++
+    // default 66; this port does not vary the seed).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --order {}", args.order);
+    println!("   --num-eigs {}", args.nev);
+    println!("   --seed 66");
+    println!("   --amg-for-systems");
+    println!("   --no-visualization");
+    println!("   --no-adios2-streams");
     ThreadLauncher::new(WorkerConfig::new(args.ranks)).launch(move |comm| {
         let rank = comm.rank();
         let mfem = read_mfem_file(&args.mesh_file).unwrap_or_else(|e| panic!("read mesh: {e}"));

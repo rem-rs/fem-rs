@@ -69,6 +69,27 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
 
+    // MFEM ex10p prints `args.PrintOptions(cout)` on rank 0 (ex10p.cpp:225)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte. Note: this port's defaults differ from the C++ defaults
+    // for --refine-serial (0 vs 2), --order (1 vs 2), --t-final (0.5 vs 300)
+    // and --time-step (0.1 vs 3) — an established RUN-档 divergence; the echo
+    // prints the actually applied values.
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine-serial {}", args.ref_levels);
+    println!("   --refine-parallel 0");
+    println!("   --order {}", args.order);
+    println!("   --ode-solver 23");
+    println!("   --t-final {}", args.t_final);
+    println!("   --time-step {}", args.dt);
+    println!("   --viscosity {}", args.viscosity);
+    println!("   --shear-modulus {}", args.mu);
+    println!("   --bulk-modulus {}", args.K);
+    println!("   --adaptive-lin-rtol");
+    println!("   --no-visualization");
+    println!("   --visualization-steps 1");
+
     println!("=== fem-rs mfem_pex10: Parallel Hyperelastic Dynamics ===");
     println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.ref_levels, args.order);
 

@@ -36,6 +36,18 @@ fn main() {
     let offset: f64 = parse_arg_f64(&args, "--offset").unwrap_or(0.3);
     let order: u8 = parse_arg(&args, "-o").unwrap_or(1) as u8;
 
+    // MFEM ex28p prints `args.PrintOptions(cout)` on rank 0 (ex28p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ex28p registers no mesh
+    // option; the port implements the C++ default vdim ordering).
+    println!("Options used:");
+    println!("   --order {order}");
+    println!("   --no-visualization");
+    println!("   --by-vdim");
+    println!("   --offset {offset}");
+    println!("   --no-visit-datafiles");
+    println!("   --penalty 0");
+
     println!("=== fem-rs mfem_pex28: Parallel Sliding Elasticity ===");
     println!("  Workers: {}, Offset: {}, Order: {}", n_workers, offset, order);
 

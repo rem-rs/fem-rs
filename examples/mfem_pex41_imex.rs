@@ -263,6 +263,29 @@ fn merge_csr_mfem_plus_eq(
 fn main() {
     let args = parse_args();
 
+    // MFEM ex41p prints `args.PrintOptions(cout)` on rank 0 (ex41p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pairs print the
+    // long_name whose value is true; paraview/visit/adios2 output and ascii
+    // datafiles are not implemented, while cg=false ⇒ "--discontinuous-galerkin").
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --problem {}", args.problem);
+    println!("   --refine-serial {}", args.ser_ref_levels);
+    println!("   --refine-parallel {}", args.par_ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --ode-solver {}", args.ode_solver_type);
+    println!("   --t-final {}", args.t_final);
+    println!("   --time-step {}", args.dt);
+    println!("   --diffusion-coeff {}", args.diffusion_term);
+    println!("   --no-paraview-datafiles");
+    println!("   --no-visit-datafiles");
+    println!("   --no-adios2-streams");
+    println!("   --ascii-datafiles");
+    println!("   --visualization-steps {}", args.vis_steps);
+    println!("   --no-visualization");
+    println!("   --discontinuous-galerkin");
+
     let mf = read_mfem_file(&args.mesh_file).expect("failed to read mesh");
     let mut mesh: Mesh<2> = mf.mesh2d.expect("expected 2D mesh");
     for _ in 0..args.ser_ref_levels {

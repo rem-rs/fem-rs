@@ -94,7 +94,19 @@ fn parse_args() -> Args {
 fn main() {
     let args = parse_args();
 
-    // 鈹€鈹€ 2. Rational expansion coefficients (ex33.hpp, computed per-rank) 鈹€鈹€鈹€鈹€
+    // MFEM ex33p prints `args.PrintOptions(cout)` on rank 0 (ex33p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --order {}", args.order);
+    println!("   --refs {}", args.refs);
+    println!("   --alpha {}", args.alpha);
+    println!("   --no-visualization");
+    println!("   --no-verification");
+
+    // ── 2. Rational expansion coefficients (ex33.hpp, computed per-rank) ────
     let power_of_laplace = args.alpha.floor() as i32;
     let exponent_to_approximate = args.alpha - power_of_laplace as f64;
     let integer_order = exponent_to_approximate.abs() <= 1e-12;

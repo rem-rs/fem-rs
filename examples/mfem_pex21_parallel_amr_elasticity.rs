@@ -57,6 +57,16 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
 
+    // MFEM ex21p prints `args.PrintOptions(cout)` on rank 0 (ex21p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte.
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine-serial {}", args.refine);
+    println!("   --order {}", args.order);
+    println!("   --no-static-condensation");
+    println!("   --no-visualization");
+
     println!("=== fem-rs mfem_pex21: Parallel AMR Elasticity ===");
     println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.refine, args.order);
 

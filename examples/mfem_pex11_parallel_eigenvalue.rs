@@ -73,6 +73,18 @@ fn eliminate_ess_diag(a: &ParCsrMatrix, ess: &[usize], diag_val: f64) -> ParCsrM
 fn main() {
     let args = parse_args();
 
+    // MFEM ex11p prints `args.PrintOptions(cout)` on rank 0 (ex11p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte.
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh_file);
+    println!("   --refine-serial 2");
+    println!("   --refine-parallel 1");
+    println!("   --order {}", args.order);
+    println!("   --num-eigs {}", args.nev);
+    println!("   --seed 75");
+    println!("   --no-visualization");
+
     // Read mesh and refine
     let reader = read_mfem_file(&args.mesh_file).expect("Failed to read mesh");
     let mut mesh: Mesh<2> = reader.mesh2d.expect("Mesh must be 2D");

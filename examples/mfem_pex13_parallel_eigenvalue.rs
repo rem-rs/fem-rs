@@ -49,6 +49,22 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
 
+    // MFEM ex13p prints `args.PrintOptions(cout)` on rank 0 (ex13p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte. Note: C++ default
+    // --refine-serial is 2, this port's default is 0 (RUN-档 divergence).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine-serial {}", args.ser_ref_levels);
+    println!("   --refine-parallel 1");
+    println!("   --order {}", args.order);
+    println!("   --num-eigs {}", args.nev);
+    println!("   --conforming");
+    println!("   --no-visualization");
+    println!("   --device cpu");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     println!("=== fem-rs mfem_pex13: Parallel Maxwell Eigenvalue ===");
     println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.ser_ref_levels, args.order);
 

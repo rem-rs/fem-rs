@@ -982,6 +982,24 @@ fn full_ess_edge_keys<M: MeshTopology>(full_mesh: &M, prob: Prob, dim: usize) ->
 
 fn main() {
     let args = parse_args();
+    // MFEM ex25p prints `args.PrintOptions(cout)` on rank 0 (ex25p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (the port implements the PA
+    // default of the C++ --partial-assembly pair; serial MFEM registers no
+    // --umfpack option, so none is echoed).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("../data/inline-quad.mesh"));
+    println!("   --order {}", args.order);
+    println!("   --problem {}", args.iprob.min(4));
+    println!("   --refinements-serial {}", args.ser_ref_levels);
+    println!("   --refinements-parallel {}", args.par_ref_levels);
+    println!("   --permeability {}", args.mu);
+    println!("   --permittivity {}", args.eps);
+    println!("   --frequency {}", args.freq);
+    println!("   {}", if args.herm_conv { "--hermitian" } else { "--no-hermitian" });
+    println!("   --no-visualization");
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
     ThreadLauncher::new(WorkerConfig::new(args.ranks)).launch(move |comm| {
         let is_root = comm.is_root();
         let mut out = String::new();

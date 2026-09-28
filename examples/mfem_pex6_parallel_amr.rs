@@ -55,6 +55,26 @@ fn main() {
     // C++ ex6p: `if (do_rebalance) pmesh->Rebalance();` after each refine.
     let do_rebalance = !args.iter().any(|a| a == "--no-rebalance");
 
+    // MFEM ex6p prints `args.PrintOptions(cout)` on rank 0 (ex6p.cpp:122)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte (the port always runs the smooth-RT/rebalance path of the
+    // C++ defaults, so those ENABLE pairs are echoed at their defaults).
+    println!("Options used:");
+    println!("   --mesh ../data/star.mesh");
+    println!("   --order 1");
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
+    println!("   --reorder-mesh 0");
+    println!("   --nonconforming-simplices");
+    println!("   --max-dofs {max_dofs}");
+    println!("   --smooth-rt");
+    println!("   --no-p-refine");
+    println!("   --rebalance");
+    println!("   --no-restart");
+    println!("   --no-visualization");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     println!("=== fem-rs mfem_pex6: Parallel AMR Poisson (H1 P1, ZZ + Dörfler 0.7) ===");
 
     // Read + serially refine star.mesh identically on every rank (replicated

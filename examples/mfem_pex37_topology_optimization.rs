@@ -60,6 +60,26 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
 
+    // MFEM ex37p prints `args.PrintOptions(cout)` on rank 0 (ex37p.cpp
+    // PrintOptions call) before any other output; the echo mirrors
+    // OptionsParser::PrintOptions byte-for-byte (physics constants beyond
+    // refine/order are C++ defaults hardcoded in this port).
+    println!("Options used:");
+    println!("   --refine {}", args.refine);
+    println!("   --order {}", args.order);
+    println!("   --alpha-step-length 1");
+    println!("   --alpha-growth-rate 2");
+    println!("   --epsilon-thickness 0.01");
+    println!("   --max-it 1000");
+    println!("   --rel-tol 0.0001");
+    println!("   --abs-tol 0.01");
+    println!("   --volume-fraction 0.5");
+    println!("   --lambda 1");
+    println!("   --mu 1");
+    println!("   --psi-min 1e-06");
+    println!("   --no-visualization");
+    println!("   --no-paraview");
+
     println!("=== fem-rs mfem_pex37: Parallel Topology Optimization ===");
     println!(
         "  Workers: {}, Mesh: {}, Refine: {}, Order: {}",

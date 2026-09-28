@@ -727,8 +727,26 @@ fn main() {
         Prob::Lshape=>"data/l-shape.mesh", Prob::Fichera=>"data/fichera.mesh",
         Prob::LoadSrc=>"data/inline-quad.mesh",
     });
-    println!("--mesh {mesh_file} --order {} --prob {} --refinements {} --freq {}",
-             args.order, args.iprob.min(4), args.ref_levels, args.freq);
+    // C++ ex25 prints `device.Print()` (Device/Memory configuration) BEFORE the
+    // `args.PrintOptions(cout)` echo (ex25.cpp:240); the block below mirrors
+    // OptionsParser::PrintOptions byte-for-byte (ENABLE pair prints the
+    // long_name whose value is true; replaces this port's former ad-hoc
+    // single-line option summary). The serial MFEM build registers no
+    // --umfpack option, so none is echoed.
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+    println!("Options used:");
+    println!("   --mesh {mesh_file}");
+    println!("   --order {}", args.order);
+    println!("   --problem {}", args.iprob.min(4));
+    println!("   --refinements {}", args.ref_levels);
+    println!("   --permeability {}", args.mu);
+    println!("   --permittivity {}", args.eps);
+    println!("   --frequency {}", args.freq);
+    println!("   {}", if args.herm_conv { "--hermitian" } else { "--no-hermitian" });
+    println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
+    println!("   --no-partial-assembly");
+    println!("   --device cpu");
     let mfem_data = mfem::read_mfem_file(mesh_file).expect("mesh");
     let dim = if mfem_data.mesh3d.is_some() { 3 } else { 2 };
     let (pml_lo, pml_hi) = pml_vals(&prob);
