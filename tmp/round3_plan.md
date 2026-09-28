@@ -4470,6 +4470,38 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第九十轮（round 90）：D634 族收尾（Lane A：ex14 升 BIT + ex4 完全定性 + ex6 假设否证）+ D835-1/2（Lane B，两真缺陷）+ D836 撤案与 D839-1（Lane C + 主会话）——RUN 收敛第二波
+
+**开局 HEAD = round-89 终稿 `9099e647`；C: 39G。** 三路主树文件互斥（㉛）：Lane A = `examples/{ex4,ex6,ex14}`+`crates/solver`（分诊指向时）；Lane B = `crates/mesh/**`（D835）；Lane C = `examples/{ex29,ex39,pex29,pex31,ex31_dump}`（D836 去块）。主会话 = 维持项清点（r88 已落）+ D839-1 + 整合。
+
+### Lane A（D634 族收尾）· **关闭（ex14 升 BIT，第 10 个 BIT 档）**
+- **ex14 升 BIT**：源码定位 ex14.cpp:88-100（kappa 修正 → PrintOptions → device.Print）⇒ 手写 12 行 Options+Device 块（值动态取自 Args；`--kappa` 打修正后值 4；`-no-vis/-e/--eta` 由静默忽略改解析存储）⇒ **323 行 vs 现编 C++ `cmp` 逐字节一致**（含 ARF 0.956044）；旧 311 行锚退役。
+- **ex4 完全定性**：两处空白偏差修复（unknowns 行前多余空行、误差行后缺空行，ex4.cpp:131/231 逐字对源）⇒ 665 行对拍：1-604 + 663-665 逐字节、**605-661（57 行）= 两侧各自 7.8e-19…1.94e-16 的浮点求和序噪声**（远低于 1e-12·nom0 停机面）、662 行 ARF 第 6 位差。豁免清单 `tmp/d90a/ex4_exempt_lines.tsv`（58 行）产出。维持 RUN（残差=纯噪声）。
+- **ex6 假设否证（⑤）**：`--max-dofs/--no-ls-zz` 旗标**早已实现且与 C++ 一致**；真根因 = AMR tri **闭包细分顶点数 76 vs 86**（`crates/mesh` tri bisection/closure 与 MFEM `LocalRefinement` 不同；iter0 ZZ 估计器两侧 6 位全同、标记 15/20 相同）⇒ 新债 **D837-1（P1）**。ex6 维持 RUN。
+- 单测基线漂移分诊（主会话协作）：`regression_solution_norm` 9.8798（2026-08-05 老 D805 罚项语义产物）→ 现值 9.6346677759 经 **L2 probe**（P1 DG n=8 L2 误差 1.0e-2 = 正确量级）确证正确 ⇒ 基线更新且绿。
+
+### Lane B（D835-1/2）· **关闭（round-89 登记一处被驳一处证实）**
+- **D835-1 真病（登记"无害"被驳）**：仿射网格上共享面 dof 的 trilinear 求值因角点累加序 **1 ulp 逐位不同**（p2 6/54、p3 48/216）⇒ face dof 改按排序角四元组共享（MFEM H1 语义），interior 保持逐元；计数 397→**343 = MFEM H1(2)**、p3 1216→1000、2³ 137→125；3 钉红→绿。
+- **D835-2 真病**：hex8_uniform 直周期父丢 order-1 快照（缝跨中点错位、内翻）；aniso 任何几何表都不传输 ⇒ own-side 内核重构为帧式（`HexFrame`，D832-2 行为逐位不变）+ 两路径补齐；**非周期直网格逐位不变**；5 钉红→绿（MFEM oracle 复用 d832 数）。
+- fem-mesh **531/0**（基线 523+8）；新债 **D840-1**（tet4/prism6/pyramid5 同款缺口）、**D840-2**（aniso 曲面无 MFEM oracle）。
+
+### Lane C（D836）· **裁决：登记全部驳回（⑥——r89 的方法缺陷：只 grep 示例源未追库实现）**
+MFEM 4.10 `OptionsParser::ParseCheck()` **内部调 `PrintOptions(os)`**（general/optparser.cpp，rank 0）⇒ 六个 C++ 原型默认档**全部打印 Options 块**（实跑证实，`tmp/d90c/cpp/` 快照）⇒ 块保留（原本即正确），曾删四文件逐字节恢复，净代码 0。**ex31_dump 裁决材料**：其 C++ 对应物 = 自定义 `tools/ex31_cpp_helper/ex31_dump.cpp`（非 stock ex31.cpp），以 Options 块开头而 Rust harness 不打——比对器只比 dump 文件不影响 BIT；待补块（登记）。对拍：ex29/ex4/pex29 块逐字节同；ex39/ex31 仅 mesh 路径豁免；**新债 D839-1**（pex31 缺 `--hypre-ams/--no-visualization` 两行）、**D839-2**（ex29/pex29 `-sc` 解析不消费）。
+
+### 主会话（D839-1 + ex14 基线裁决）
+- **D839-1 修复**：pex31 Options 块补 `--hypre-ams/--no-visualization`（MFEM ENABLE 对语义）⇒ 块 = C++ 除 mesh 路径行外全等。
+- ex14 单测基线漂移分诊（见 Lane A 条）+ D836-1..6 撤案入 census（round-90 更正节）。
+
+### 会话事件
+- **rustup 工具链损坏与修复**：round 中段 stable 工具链 rust-std 半装（E0463 can't find crate std）——rustup 自动更新与并发构建互抢；辗转（重装被 downloads 缓存损坏/Defender 吞下载/目录残留三连）后由用户完成 `rustc 1.98.1 48a229cea` 安装。**附带效应**：新构建启用 `linker_messages` lint（LNK4044 /ffast-math）——examples 门出现一批无 `-->` 的链接器 lint 行（环境件，非代码，记录）。**教训：rustup 状态先 `rustc --version` 单查再动作；并发 rustup 会互相抢 rename。**
+
+### 大门与提交
+大门（主树 ㉗）：lib(debug) **10/2665/0/5**、tests(release) **371/4483/0/30**（=r89 369/4475 + 恰 2 新靶 +8 通过）、doc **10/9/0/95**、examples **0 错误**；非 vendor 警告 = 0 代码警告（LNK4044 linker lint 为新 1.98.1 构建[48a229cea]新增 lint，环境件）；pro rc=0、fem-py rc=0。锚点：ex9-2D（--mesh 豁免）/**ex14 323 行全量 = C++**/ex27 双档 0 差/ex18 双档 8 位/**ex9-3D init 逐字节 + stdout 0 差**。提交链：`cafbc939`…（r89）→ `1ac10d2c`（D839-1+census 更正）→ `b4362991`（D634 族）→ `66a3a5fb`（D835-1/2）→ `18c40351`（警告清零）→ docs → 本笔。证据：`tmp/d90a|d90b|d90c/` + `tmp/d89main/`（C++ 二进制资产移交 Lane C）。
+
+### 债务状态
+**D822-2（Options 族）、D835-1/2、D839-1 关闭**；**D836-1..6 登记驳回**（六例原本一致）；**D822-1a 余项 = D837-1**（ex6 AMR 闭包细分，P1，下一波头号）。新债 D839-2（-sc 不消费）、D840-1/2。**BIT 档计 11**（+ex17、+ex14）。
+
+
 ## 第八十九轮（round 89）：D822-1a 停机语义族（Lane A，ex17 升 BIT）+ D832-2 3-D 周期细化（Lane B）+ D822-2 Options 审计（Lane C 重派）+ D838 ex7 Tri6 空间（主会话）——RUN 收敛线四债关闭
 
 **开局 HEAD = round-88 终稿 `ad515bcf`；C: 42G。** 三路主树文件互斥（㉛）：Lane A = `crates/solver`+`examples/ex17`；Lane B = `crates/mesh/amr`（D832-2）；Lane C = `examples/**`（排除 ex17/ex9/ex14/ex18/ex27 系与 BIT 档）。主会话 = 维持项清点（r88 已落）+ ex7 分诊修复（D838）+ 整合。
