@@ -32,6 +32,7 @@ use fem_core::{ElemId, NodeId};
 
 use crate::element_type::ElementType;
 use crate::simplex::{GeometryData, Mesh};
+use crate::topology::MeshTopology;
 
 /// Reference coordinates ([0,1]²) of the 4 vertices of a Quad4 in MFEM
 /// `Geometry::Constants<SQUARE>` order: `0=(0,0) 1=(1,0) 2=(1,1) 3=(0,1)`.
@@ -166,6 +167,63 @@ impl<'a> QuadQkGeometry<'a> {
 /// the dof's index within the edge, measured from its lower-id node.
 type EdgeKey = (NodeId, NodeId, usize);
 
+/// Whether the mesh is a *periodically merged* mesh in the sense of the
+/// space-side D808-3 predicate (`DofManager::is_periodic_merged`): some
+/// element's folded corner node is not in the element's own geometry row,
+/// i.e. the row still addresses the pre-merge node table.  On such a mesh
+/// the shared-dof refinement below would inherit the **folded (wrapped)
+/// vertex frame** for the row's corner values, and the wrapped frame is not a
+/// coherent isoparametric cell (measured on the D832 periodic Quad9 torus:
+/// child row corner-shoelace areas 0.5 / 1.25 / 3.25 instead of 0.25).
+pub(crate) fn is_periodic_merged_2d(mesh: &Mesh<2>) -> bool {
+    for e in 0..mesh.n_elems() as u32 {
+        let gn = mesh.geometry_nodes(e);
+        for &v in mesh.elem_nodes(e) {
+            if !gn.contains(&v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Build the refined mesh's [`GeometryData`] for a *periodically merged*
+/// parent: fully per-element own-side rows, each one the prolongation of that
+/// element's **own** order-`p` row — MFEM's `MakePeriodic` semantics, whose
+/// nodal space on a periodic mesh is converted to discontinuous `L2_T1` so
+/// every element keeps the coordinates of its own side of a seam (MFEM 4.10
+/// probe `tmp/d88b`: refined periodic quad9 nodes = `L2_T1_2D_P2`,
+/// `NDofs = 36·9 = 324`).  No dof is shared — across a periodic seam even a
+/// *vertex* has two legitimate own-side images, so the shared-dof table
+/// (which keys vertex dofs by fine mesh node) cannot represent both.
+fn build_periodic_own_side_quad_geometry(pq: &QuadQkGeometry, fine: &Mesh<2>) -> GeometryData {
+    let p = pq.order;
+    let dpe = pq.dpe;
+    let n_elems = fine.n_elems();
+    let mut conn = Vec::with_capacity(n_elems * dpe);
+    let mut coords = Vec::with_capacity(n_elems * dpe * 2);
+    for fe in 0..n_elems as ElemId {
+        let pe = fe / 4;
+        let child = fe % 4;
+        let v = MFEM_SQUARE_VERTS[child as usize];
+        let origin = [0.5 * v[0], 0.5 * v[1]];
+        for o in 0..dpe {
+            let r = pq.ref01[o];
+            let xi = [origin[0] + 0.5 * r[0], origin[1] + 0.5 * r[1]];
+            let x = pq.eval_at(pe, xi);
+            conn.push((fe as usize * dpe + o) as NodeId);
+            coords.extend_from_slice(&x);
+        }
+    }
+    GeometryData {
+        order: p as u8,
+        conn,
+        nodes_per_elem: dpe,
+        n_nodes: n_elems * dpe,
+        coords,
+    }
+}
+
 /// Build the refined mesh's [`GeometryData`] from the parent's order-`p` quad
 /// geometry.
 ///
@@ -185,11 +243,20 @@ type EdgeKey = (NodeId, NodeId, usize);
 /// the point coincides with a parent dof (in particular every dof of the child
 /// vertices) and the standard order-`p` interpolation otherwise, i.e. MFEM's
 /// `GetLocalInterpolation`.
+///
+/// A [periodically merged](is_periodic_merged_2d) parent takes the own-side
+/// per-element path ([`build_periodic_own_side_quad_geometry`]) instead — the
+/// shared table's vertex block is the fine *folded* vertex table, whose values
+/// put every seam-adjacent child row into the wrapped frame.
 pub(crate) fn build_refined_quad_geometry(parent: &Mesh<2>, fine: &Mesh<2>) -> Option<GeometryData> {
     let pq = QuadQkGeometry::new(parent)?;
     let p = pq.order;
     let dpe = pq.dpe;
     debug_assert_eq!(fine.n_elems(), 4 * parent.n_elems());
+
+    if is_periodic_merged_2d(parent) {
+        return Some(build_periodic_own_side_quad_geometry(&pq, fine));
+    }
 
     // Index-space corner of each local vertex: (0,0), (p,0), (p,p), (0,p).
     let vix: [[usize; 2]; 4] = [[0, 0], [p, 0], [p, p], [0, p]];

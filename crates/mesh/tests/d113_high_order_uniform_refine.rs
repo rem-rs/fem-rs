@@ -633,7 +633,11 @@ fn check_family_2d(
     assert_eq!(geo.conn.len(), fine.n_elems() * dpe, "{name}: row layout");
 
     // Equivalent `X4 + nodes` parent (the linear view, built by hand) must
-    // refine to the identical geometry.
+    // refine to the identical geometry.  D832-1: the elem-type route compacts
+    // its linear view to the referenced corner set, so the hand-made parent is
+    // built the same way — one vertex universe for both routes, which the
+    // shared-dof numbering pin below needs.  The geometry table is
+    // self-contained (its conn indexes its own coords) and stays as-is.
     let mut lin_parent = parent.clone();
     lin_parent.elem_type = linear;
     let corners = match linear {
@@ -645,7 +649,25 @@ fn check_family_2d(
     for e in 0..parent.n_elems() as u32 {
         conn.extend_from_slice(&parent.elem_nodes(e)[..corners]);
     }
-    lin_parent.conn = conn;
+    {
+        let mut used = vec![false; parent.n_nodes()];
+        for &n in &conn {
+            used[n as usize] = true;
+        }
+        let mut new_id = vec![u32::MAX; parent.n_nodes()];
+        let mut coords = Vec::with_capacity(parent.coords.len());
+        for (i, is_used) in used.iter().enumerate() {
+            if *is_used {
+                new_id[i] = (coords.len() / 2) as u32;
+                coords.extend_from_slice(&parent.coords[i * 2..(i + 1) * 2]);
+            }
+        }
+        for n in conn.iter_mut() {
+            *n = new_id[*n as usize];
+        }
+        lin_parent.conn = conn;
+        lin_parent.coords = coords;
+    }
     let lin_fine = refine_uniform(&lin_parent);
     let g1 = fine.geometry.as_ref().unwrap();
     let g2r = lin_fine.geometry.as_ref().expect("linear-view refinement keeps geometry");
