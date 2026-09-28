@@ -9,7 +9,12 @@
 //! point) comes from the family's shared isoparametric face path
 //! (`super::wg_face_point` / `super::wg_face_measure`, i.e.
 //! `dg_base::face_point_geom`); see [`super`] for what the pre-D810-1 chord
-//! route got wrong.
+//! route got wrong.  The **volume** path (D814-3) likewise takes its geometry
+//! from the family's shared isoparametric source —
+//! `fem_mesh::transformation::element_jacobian_at`, i.e. MFEM
+//! `ElementTransformation::Jacobian()`/`Transform()` — so body and face terms
+//! see the same element on a curved mesh.  Truth:
+//! `tmp/d87b/d814_probe.cpp` + `crates/assembly/tests/d831_wg_volume_geometry.rs`.
 
 use nalgebra::DMatrix;
 use fem_element::{
@@ -18,23 +23,10 @@ use fem_element::{
 use fem_element::quadrature::{tri_rule, tet_rule};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
+use fem_mesh::transformation::element_jacobian_at;
 use fem_space::fe_space::FESpace;
 
 use super::{wg_boundary_face_map, wg_face_measure, wg_face_point, wg_face_rule};
-
-// ─── Local helpers (mirrored from crate internals) ─────────────────────────
-
-/// Element Jacobian from the element's **vertices** (the volume path's
-/// geometry — the D808-4-class residual registered in [`super`]).
-fn local_jac<M: MeshTopology>(mesh: &M, nodes: &[u32], dim: usize) -> (DMatrix<f64>, f64) {
-    let x0 = mesh.node_coords(nodes[0]);
-    let mut jac = DMatrix::zeros(dim, dim);
-    for i in 0..dim { let xi = mesh.node_coords(nodes[1 + i]);
-        for d in 0..dim { jac[(d, i)] = xi[d] - x0[d]; }
-    }
-    let det = jac.determinant();
-    (jac, det)
-}
 
 // ─── Weak gradient matrix ──────────────────────────────────────────────────
 
@@ -54,20 +46,24 @@ fn weak_gradient_matrix<M: MeshTopology>(
     let n_s = dim * n_ss;
 
     let qr = if dim == 2 { tri_rule(quad_order) } else { tet_rule(quad_order) };
-    let nodes = mesh.element_nodes(e);
-    let (jac, det_j) = local_jac(mesh, nodes, dim);
-    if det_j.abs() < 1e-30 { return (DMatrix::zeros(n_v, n_s), DMatrix::zeros(n_s, n_s)); }
-    let jit = jac.clone().try_inverse().unwrap().transpose();
 
     let mut G = DMatrix::zeros(n_v, n_s);
     let mut Ms = DMatrix::zeros(n_s, n_s);
     let mut pv = vec![0.0; n_v];
-    let _gv = vec![0.0; n_v * dim];
     let mut ps = vec![0.0; n_ss];
     let mut gsp = vec![0.0; n_ss * dim];
 
     for (pt, &w) in qr.points.iter().zip(qr.weights.iter()) {
+        // D814-3: the body path's geometry is the element's own order-`g`
+        // isoparametric map at this QP (MFEM `ElementTransformation::
+        // Jacobian()`), not the element's vertex chords — on a curved mesh the
+        // vertex route is O(h) from the map the face terms already use
+        // (pre-fix `local_jac`, now gone; oracle `d831_wg_volume_geometry`).
+        let (jac, _xp) = element_jacobian_at(mesh, e, pt, dim);
+        let det_j = jac.determinant();
+        if det_j.abs() < 1e-30 { continue; }
         let wq = w * det_j.abs();
+        let jit = jac.try_inverse().unwrap().transpose();
         ref_v.eval_basis(pt, &mut pv);
         if use_const_basis {
             // P_0 on sigma: basis = 1, gradient = 0

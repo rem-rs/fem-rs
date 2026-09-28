@@ -37,12 +37,23 @@
 //! `face_point_geom`/`face_point_geom_3d` entry by entry (plus the in-repo
 //! per-element divergence identity and the straight-mesh pins).
 //!
-//! Registered residual (not fixed here): the **volume** path of all three
-//! modules still builds its element Jacobian from the element's vertices
-//! (`local_jac`) and interpolates the physical point affinely, so on a curved
-//! mesh the volume term is inconsistent with the (now isoparametric) face term
-//! — the D808-4/D783 class, in `wg`: `weak_gradient_matrix` /
-//! `weak_curl_matrix` / the Stokes body-force loop.  See `tmp/d78c/README.md`.
+//! The **volume** path of all three modules (D814-3, round 87) took the same
+//! road the face path took: its element Jacobian was built from the element's
+//! vertices (`local_jac`) and the Stokes body force interpolated the physical
+//! point affinely — exact only on a straight mesh, silently `O(h)`-wrong on a
+//! mesh carrying an order-`g` geometry table, and inconsistent with the (now
+//! isoparametric) face term of the very same assembly (the D808-4/D783 class).
+//! MFEM has no weak-Galerkin integrator to port (`Mixed*Weak*Integrator` are
+//! integration-by-parts *mixed* integrators), so the round built the oracle
+//! first: `tmp/d87b/d814_probe.cpp` dumps MFEM 4.10's own
+//! `ElementTransformation::Jacobian()/Weight()/Transform()` per element-QP on
+//! the same straight/curved fixtures, and
+//! `crates/assembly/tests/d831_wg_volume_geometry.rs` pins the vertex route's
+//! round-off agreement on straight meshes (the negative pin), its 0.2–0.8
+//! relative failure on curved ones (the teeth), and the modules' volume
+//! blocks to `fem_mesh::transformation::element_jacobian_at` — the single
+//! isoparametric source D787/D810-1 already use.  The whole family now sees
+//! one element per mesh, body and face alike.
 
 pub mod wg_maxwell;
 pub mod wg_stokes;
