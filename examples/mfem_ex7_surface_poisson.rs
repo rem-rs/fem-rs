@@ -53,6 +53,17 @@ use fem_solver::GSSmoother;
 
 fn main() {
     let args = Args::parse();
+    // MFEM ex7 echoes the parsed options (`args.PrintOptions(cout)`, ex7.cpp:68)
+    // before any other output; the echo mirrors OptionsParser::PrintOptions
+    // byte-for-byte (ENABLE pair prints the long_name whose value is true, so
+    // `always_snap == false` prints the false-branch name "--snap-at-the-end").
+    println!("Options used:");
+    println!("   --elem {}", args.elem_type);
+    println!("   --order {}", args.order);
+    println!("   --refine {}", args.ref_levels);
+    println!("   --refine-locally {}", args.amr);
+    println!("   {}", if args.no_vis { "--no-visualization" } else { "--visualization" });
+    println!("   {}", if args.always_snap { "--always-snap" } else { "--snap-at-the-end" });
     let t0 = std::time::Instant::now();
     let is_quad = args.elem_type == 1;
 
@@ -93,20 +104,20 @@ fn main() {
         snap_nodes(&mut mesh);
     }
 
-    // Quad9: H1Space order=2 on Quad4 mesh → 9 DOFs per element via
-    // DofManager::build_q2_quad.  The assembler reads 4 corner nodes and
-    // computes the 9 Q2 coordinates internally.
-
+    // ── 3. Define H1 space ──────────────────────────────────────────────────
+    // Quad9/Tri6: order=2 — the true P2 space matching the row topology and
+    // the P2 assembly bases (MFEM ex7 builds H1(order) on the same rows).
+    // The old Tri6 hack (order=1 over all row nodes as "one DOF per node")
+    // died when D819-A/D820-1/D832-1 corrected H1(1)-on-rows to MFEM's
+    // corner-view semantics (3 dofs/element), which the 6-dof P2 assembler
+    // cannot consume (round-88 Lane C found the resulting rc=101).
     let use_quad9 = is_quad && args.order >= 2;
     let n_elems = mesh.n_elems();
     let n_nodes = mesh.n_nodes();
     let elem_name = if is_quad { "quads" } else { "triangles" };
     eprintln!("  Mesh: {} nodes, {} {} on unit sphere", n_nodes, n_elems, elem_name);
 
-    // ── 3. Define H1 space ──────────────────────────────────────────────────
-    // Tri6: use order=1 (DOFs = mesh nodes, assembly uses P2 bases).
-    // Quad9: use order=2 to match the 9-node element topology.
-    let h1_order = if use_tri6 { 1 } else if use_quad9 { 2 } else { args.order.min(1) };
+    let h1_order = if use_tri6 || use_quad9 { 2 } else { args.order.min(1) };
     let mut space = H1Space::new(mesh, h1_order);
     // Snap edge-midpoint and centroid DOF coordinates to the sphere surface.
     // DofManager builds straight-line averages; for the sphere geometry we

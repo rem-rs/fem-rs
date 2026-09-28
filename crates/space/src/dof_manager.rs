@@ -679,6 +679,17 @@ impl DofManager {
                     // D820: Quad8/Quad9 rows share the Quad4 tensor numbering
                     // (one SQUARE geometry, D819).
                     Self::build_q2_quad(mesh)
+                } else if mesh.n_elements() > 0
+                    && topo_dim == 2
+                    && mesh.element_type(0) == ElementType::Tri6
+                {
+                    // D838 (round 89): Tri6 rows take the row-aware P2 build —
+                    // vertex dofs = the compacted corner set, edge dofs = the
+                    // row's own midside nodes.  The old build_pk route assumed
+                    // a Tri3 mesh (every node a vertex) and minted *fresh*
+                    // edge dofs on top of the row midsides, double-counting
+                    // them (ex7: 450 dofs with 192 zero rows instead of 258).
+                    Self::build_q2_tri(mesh)
                 } else {
                     Self::build_pk(mesh, 2, pyr)
                 }
@@ -1074,6 +1085,117 @@ impl DofManager {
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_nodes + n_edge_dofs,
+            n_volume_dofs: 0,
+            elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
+        }
+    }
+
+    /// Row-aware P2 build for Tri6 meshes (D838, round 89) — the triangle
+    /// analogue of [`Self::build_q2_quad`]: vertex dofs are the compacted
+    /// corner set (NC view first, then the D820 corner view), edge dofs are
+    /// the row's own midside nodes keyed by their corner pair, and there are
+    /// no interior dofs at order 2.  The legacy `build_pk` route assumed a
+    /// Tri3 mesh (every node a vertex) and minted fresh edge dofs on top of
+    /// the row midsides — double-counting them (ex7: 450 dofs, 192 zero rows).
+    fn build_q2_tri<M: MeshTopology>(mesh: &M) -> Self {
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+        let dim = mesh.dim() as usize;
+        assert_eq!(mesh.topological_dim() as usize, 2, "build_q2_tri requires 2-D elements");
+
+        // Same vertex-view precedence as build_q2_quad (NC view, then the
+        // D820 corner view over the Tri6 rows).
+        let view = mesh
+            .nc_vertex_view()
+            .map(|v| v.to_vec())
+            .or_else(|| quadratic_row_corner_view(mesh));
+        let vmap = VertexDofMap::new(view);
+        let n_vertex = vmap.n_vertices(n_nodes);
+        let vertex_phys = |dof: DofId| -> NodeId { vmap.node_of(dof) };
+
+        let dofs_per_elem = 6; // 3 corners + 3 edge mids; no interior at P2.
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
+        let mut edge_mid: HashMap<EdgeKey, NodeId> = HashMap::new();
+        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
+        let mut next_dof = n_vertex as DofId;
+
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(
+                ns.len() >= 6,
+                "build_q2_tri requires Tri6 corner-first rows"
+            );
+            let (n0, n1, n2) = (ns[0], ns[1], ns[2]);
+            let base = e as usize * dofs_per_elem;
+
+            // Vertex dofs (positions 0–2) via the vertex view.
+            dofs_flat[base] = vmap.dof_of(n0);
+            dofs_flat[base + 1] = vmap.dof_of(n1);
+            dofs_flat[base + 2] = vmap.dof_of(n2);
+
+            // Edge-mid dofs (positions 3–5): the row's own midside nodes,
+            // keyed by their corner pair — shared edges resolve to one dof.
+            let edges = [(n0, n1, ns[3]), (n1, n2, ns[4]), (n2, n0, ns[5])];
+            for (k, &(a, b, mid)) in edges.iter().enumerate() {
+                let key = EdgeKey::new(a, b);
+                let dof = *edge_map.entry(key).or_insert_with(|| {
+                    let d = next_dof; next_dof += 1; d
+                });
+                dofs_flat[base + 3 + k] = dof;
+                // Consistency guard: another element's row must present the
+                // same midside node for the same corner pair (D353 class).
+                if let Some(&first) = edge_mid.get(&key) {
+                    assert!(first == mid, "build_q2_tri: edge {a}-{b} carries two different midside nodes ({first} vs {mid})");
+                } else {
+                    edge_mid.insert(key, mid);
+                }
+            }
+        }
+
+        let n_dofs = next_dof as usize;
+        let n_edge_dofs = edge_map.len();
+
+        // DOF coordinates: vertices via the view, edge dofs via the row
+        // midside node ids (recorded per edge key).
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+        for d in 0..n_vertex as u32 {
+            let phys = vertex_phys(d);
+            let c = mesh.node_coords(phys);
+            dof_coords[d as usize * dim .. d as usize * dim + dim].copy_from_slice(c);
+        }
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let corners = [(ns[0], ns[1]), (ns[1], ns[2]), (ns[2], ns[0])];
+            for (k, &(a, b)) in corners.iter().enumerate() {
+                let key = EdgeKey::new(a, b);
+                if let Some(&dof) = edge_map.get(&key) {
+                    let mid = ns[3 + k];
+                    let c = mesh.node_coords(mid);
+                    dof_coords[dof as usize * dim .. dof as usize * dim + dim].copy_from_slice(c);
+                }
+            }
+        }
+
+        // P2 edge map (position = the single midside dof) for discrete
+        // operators, mirroring build_q2_quad's edge_dof_map.
+        DofManager {
+            order: 2,
+            n_dofs,
+            dofs_flat,
+            dofs_per_elem,
+            elem_dof_offsets: None,
+            dof_coords,
+            dim,
+            n_vertex_dofs: n_vertex,
+            edge_dof_map: edge_map,
+            edge_dof2_map: HashMap::new(),
+            phys_to_vertex_dof: vmap.phys_map(n_nodes, false),
+            edge_pk_map: HashMap::new(),
+            face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
+            bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
             edge_variants: HashMap::new(),
