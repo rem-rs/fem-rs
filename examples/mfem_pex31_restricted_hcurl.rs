@@ -505,8 +505,18 @@ fn main() {
         let kappa = args.freq * PI;
 
         if is_root {
-            out.push_str(&format!("Options used:\n   --mesh {}\n   --refine-serial {}\n   --refine-parallel {}\n   --order {}\n   --frequency {}\n\n",
-                args.mesh_file, args.ser_ref_levels, args.par_ref_levels, args.order, args.freq));
+            let vis = if args.visualization { "--visualization" } else { "--no-visualization" };
+            out.push_str(&format!("Options used:
+   --mesh {}
+   --refine-serial {}
+   --refine-parallel {}
+   --order {}
+   --frequency {}
+   --hypre-ams
+   {}
+
+",
+                args.mesh_file, args.ser_ref_levels, args.par_ref_levels, args.order, args.freq, vis));
         }
 
         // 1. Serial mesh, refined (rs + rp) times before partitioning.

@@ -82,3 +82,16 @@ D822-2  维持（P3 化妆品）：Options 回声族（ex14 缺 C++ 全部 12 �
 # h27_out.txt）。d820 夹具已按规范重生成，钉全部保持绿。
 # Gmsh type-14 金字塔读侧缺陷的 upstream 候选 **成立维持**（成稿 tmp/d88a/report2_gmsh_pyramid_issue.md，
 # repro 已实编译逐字核实）。
+
+# ── round 90 更正（Lane C 源码终审）──
+# r89 登记的 D836-1..6（"Rust 单方 Options 回声 6 例"）**全部驳回**：
+# 六个 C++ 原型字面虽无 PrintOptions，但 MFEM 4.10 `OptionsParser::ParseCheck()`
+# 内部调 PrintOptions(os)（general/optparser.cpp，rank 0）——六例默认档 C++ 实跑
+# 全部打印 Options 块（tmp/d90c/cpp/ 快照）。r89 只 grep 示例源未追库实现，方法缺陷。
+# 处置：块保留（原本即正确），四文件曾删已逐字节恢复，净代码 0。
+# 实际新债：**D839-1**（pex31 Options 块缺 --hypre-ams/--no-visualization 两行——已修，
+# 修后块 = C++ 除 mesh 路径行外全等）；**D839-2**（ex29/pex29 -sc 解析不消费，
+# C++ ex29.cpp:151/ex29p.cpp:174 EnableStaticCondensation——真功能缺口待修）。
+# ex31_dump.rs：C++ 对应物 = tools/ex31_cpp_helper/ex31_dump.cpp（自定义工具非 stock
+# ex31.cpp），其 stdout 以 Options 块开头而 Rust harness 不打——比对器只比 dump 文件
+# 故不影响 BIT；主会话裁决：待补块对齐（登记于 D836-3 附注）。
