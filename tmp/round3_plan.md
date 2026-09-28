@@ -4470,6 +4470,38 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十七轮（round 87）：D820-3 周期×Quad9（主会话，两真缺陷 + MFEM 缺口）+ D829-1/2 hp 余项（Lane A）+ D814-3 wg 体路径（Lane B）——三路并行全交付
+
+**开局 HEAD = round-86 终稿 `1bdb9497`；C: 36G；WSL 正常。** 三路主树文件互斥（㉛）：主会话 = mesh/space（D820-3，dof_manager.rs 本轮归主会话）；Lane A = `p_refine.rs`（D829-1/2）；Lane B = `assembly/src/wg/**`（D814-3）。
+
+### 主会话（D820-3）· **关闭（两真缺陷 + MFEM 缺口上游候选）**
+周期×Quad9（Gmsh type-10 行网格）从未对拍过——首轮探针即爆出两真缺陷 + 一个 MFEM 4.10 本体缺口：
+- **探针语义**：MFEM `MakePeriodic`（mesh.cpp:6205）折**角点 only**（`CreatePeriodicVertexMapping` 收 `GetBdrElementVertices`，行 midside 从不合并）且**双平移传递在四角交汇处漏合并**（(3,3) 角未折：12/13）⇒ 3×3 quad9 torus 上 MFEM H1(2)=45 ≠ torus 真值 36。**上游上报候选**（与 D827-4 的 Gmsh type-14 缺陷同族）。按 D61 先例：钉 torus 拓扑真值。
+- **缺陷①（mesh）**：`make_periodic` 的 remap 不追链——(0,0)→(3,0)→(3,3) 两层链在紧凑编号单趟里读未解析目标 ⇒ **连通性写进 u32::MAX**。修 = 路径压缩到不动点（kept 集合不变 ⇒ 既有场景逐位不变）。
+- **缺陷②（space）**：`build_periodic` 的 relabel 假设**展开视图 dof==node**——行网格 build_p1/build_q2_quad 紧凑角点视图（order-1：16 dof / 49 节点）直接越界 panic；单例窗口 `n_uf_nodes..uf.n_dofs` 漏掉低于 n_uf_nodes 的实体 dof。修 = 顶点按 `uf.n_vertex_dofs == n_uf_nodes` 分派（node-addressed 走原路；compact 按 fold 目标分组给稠密 first-touch id）+ 单例从 **dofs_flat** 枚举。
+- **中期回归（自查抓住）**：第一版单例用全 id 域枚举，把 ex27（Quad4 + order-3 几何快照，几何行 16 节点 vs conn 4 角点）的 **1447 个非 dof 几何 id** 误收 ⇒ 2462 unknowns + NaN。修 = 从 `dofs_flat` 枚举（真实 dof 集合）⇒ ex27 恢复 302/双档 0 差。教训：全 id 域 ≠ dof 域（几何快照非角点节点从来不是 dof）。
+- **钉**：`d820_quad9_periodic` 3 测（连通性链自由 + H1 9/36/81 torus 计数 + 商完整性/缝合并）——两缺陷 stash 复红均验证（mesh 牙需网格级断言：空间构建走包装器视图会掩盖连通性毒性）。3×3 夹具入库（LF 自证）。
+
+### Lane A（D829-1/2）· **关闭**
+- **D829-1**：同序混合族共享变体基 = **sticky-GLL**（任一 GLL 族使用者即 GLL、全 tet 才等距）——MFEM 探针（GL/CU collection 翻转单变体全部 dof 位）证"单变体基 = collection 级基"；fem-rs 忠实翻译取 sticky OR ⇒ 基为族集合纯函数、文件序不变。新测 1（双夹具 47 坐标位级 + 私边防过度统一）stash 复红。
+- **D829-2**：hex×pyr 共享底面——新探针证 MFEM 槽级本就文件序依赖（建面元素布局）而**物理级不变**（QuadDofOrd 补偿）；fem-rs 现实现等价正确 ⇒ **阴性钉收账，未改码**。
+- fem-space 644/0；d827 7/7 等硬约束全绿。新测试 4 + 夹具 2。
+
+### Lane B（D814-3）· **关闭（oracle 造出 → 真缺陷已修）**
+- **MFEM 对应物普查**：MFEM 无 WG 积分器（`Mixed*Weak*Integrator` 是另一概念）；oracle 按处方落在体路径实际消费的几何层 = `ElementTransformation::Jacobian/Weight/Transform`，在与 fem-rs 逐单元相同的夹具上 dump 4 份 gold。
+- **真缺陷**：弯曲网格上体路径顶点路线 J 偏 0.78–0.82、W 偏 0.19–0.23、x 偏 6.6e-2（直边逐位 0 = 阴性）。修 = 三模块体路径逐 QP `element_jacobian_at`（照 D787/D810-1 先例），删 3 份 `local_jac` + Stokes 仿射插值；装配级绑定修前 3.2e-2..8.5e-2/体力 rhs 3.8e-1 → 修后全 0.000e0。
+- 10 测红→绿（stash 复红验证）；fem-assembly **1302/0**；wg 既有 7/7。
+
+### 会话事件（本轮两次，均处置）
+- **古老 stash 误弹**：bisect 时 `git stash pop` 弹出 months 前的 `ex4-ads-preconditioner` WIP（非本会话产物），冲突落在工作树（UU×2 + DU 历史产物若干）。处置 = 冲突路径回 HEAD、DU 按删除决议、Lane B 未提交编辑逐 hunk 甄别无损。**教训入 ⑯ 族：bisect 用 `git checkout <commit> -- path`，禁盲目 `git stash pop`；`git checkout HEAD --` 多 pathspec 含坏路径会整体中止（部分恢复假象）。**
+- **ex27 锚回归自查**：上述 2462/NaN 即锚点回归被本轮自查网住（双档金标 diff 548 行）——修复后 302/0 差恢复。
+
+### 大门与提交
+大门（主树 ㉗）：lib(debug) **10/2664/0/5**、tests(release) **366/4462/0/30**（=r86 363/4445 + 恰 3 新靶[d820_quad9_periodic 3 + d829 4 + d831 10 = +17 通过]、doc 10/9/0/95、examples 0/0、pro rc=0、fem-py rc=0。锚点：ex9-2D/ex14/ex27 双档 0 差/ex18 双档 8 位/ex9-3D 全保。提交链：`41aa6357`（D820-3 主体）→ `770e8e9b`（D829-1/2）→ `dc815cbe`（D814-3）→ `fc6751b6`（D820-3 单例修正）→ docs。证据：`tmp/d87main|d87a|d87b/`。
+
+### 债务状态
+**D820-3、D829-1、D829-2（阴性钉）、D814-3 关闭**；**MFEM 上游知会候选 +2**（MakePeriodic 角点 only+传递漏合并；Gmsh type-14 金字塔读侧缺陷[r86]）。维持：D824-B、D827-2、D818-1/2、D821-1..4 余项、D822-1/2。
+
 ## 第八十六轮（round 86）：§4-4 逐号定性（主会话）+ D827-1 混合族 hp 边基（Lane A）+ D827-3/4 金字塔导出余项（Lane B）——三路并行全交付
 
 **开局 HEAD = round-85 终稿 `fe0d9a4e`；C: 34G；WSL 正常。** 三路主树文件互斥（㉛）：主会话 = 文档/账本（§4-4）；Lane A = `crates/space/**`（D827-1）；Lane B = `crates/io/**`（D827-3/4）。
