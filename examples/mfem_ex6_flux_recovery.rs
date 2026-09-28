@@ -90,8 +90,14 @@ fn main() {
         space = H1Space::new(mesh.clone(), order);
         let cdofs = space.n_dofs();
 
+        // MFEM ex6.cpp:193 prints `fespace.GetTrueVSize()`: constrained
+        // hanging-node dofs are interpolated, not unknowns (D837-1 round-91
+        // probe: iter1 star.mesh has 86 vertices of which 10 hang => C++
+        // prints 76 = 86 - 10).
+        let n_true = cdofs - hanging_constraints.len();
+
         println!("\nAMR iteration {}", it);
-        println!("Number of unknowns: {}", cdofs);
+        println!("Number of unknowns: {}", n_true);
 
         // Assemble RHS: b(v) = ∫ 1·v dx.
         let mut rhs = Assembler::assemble_linear(&space, &[&source], quad_rhs);
@@ -161,8 +167,8 @@ fn main() {
         // Print ZZ estimator diagnostics.
         let gf = GridFunction::new(&space, u.clone());
         let indicators = zz_estimator_nodal(&gf, &hanging_constraints);
-        // Check max DOFs.
-        if cdofs > max_dofs {
+        // Check max DOFs (MFEM compares the same true-dof count, ex6.cpp:216).
+        if n_true > max_dofs {
             println!("Reached the maximum number of dofs. Stop.");
             break;
         }

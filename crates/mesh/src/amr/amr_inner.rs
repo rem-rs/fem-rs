@@ -3649,6 +3649,135 @@ fn init_root_states_quad(mesh: &Mesh<2>) -> Vec<u8> {
     states
 }
 
+/// Reorder a freshly refined Quad4 connectivity into MFEM's leaf element
+/// order and renumber the new nodes into MFEM's vertex order (D837-1).
+///
+/// MFEM `Mesh::NonconformingRefinement` rebuilds the fine `Mesh` from the
+/// NCMesh tree, so
+///
+/// 1. elements appear in `NCMesh::CollectLeafElements` order: depth-first over
+///    the old leaves (the flat mesh's element ids *are* the previous leaf
+///    order), expanding iso-refined (`Refinement::XY`) quads in
+///    `quad_hilbert_child_order[state]` while X/Y-refined quads keep natural
+///    child-slot order (no SFC table for those); child states follow
+///    `quad_hilbert_child_state[state]` (X/Y children inherit the parent's
+///    state), and
+/// 2. vertices are numbered by `NCMesh::UpdateVertices`: the "top level"
+///    (input) nodes keep their ids, then every new node takes the next free
+///    id at its first appearance when scanning the new leaf sequence element
+///    by element, local node order (exactly the vertex ids of MFEM's fine
+///    mesh — verified element-by-element against serial MFEM 4.10 on
+///    `data/star.mesh`, see `tmp/d91a/`).
+///
+/// `dir_of(e)` reports the batch refinement direction of old element `e`
+/// (`None` = unrefined).  `conn` holds the refined rows grouped by old
+/// element in child-slot order (1 row per unrefined element, 2 per X/Y split,
+/// 4 per iso split); `tags`, `coords` and `face_conn` match that numbering.
+/// Everything is permuted/renumbered in place to the MFEM order.
+///
+/// Stateless caveat (D843-1): the per-leaf Hilbert state is
+/// [`init_root_states_quad`] (exact `NCMesh::InitRootState` port on meshes
+/// that were never refined; leaf-level recovery of the same rule otherwise)
+/// and *input* nodes are treated as top level, so from the second batch on
+/// the node ids match MFEM only up to the permutation of the previous batch's
+/// midpoints — the element *order* stays exact.  Bit-exact multi-batch
+/// numbering needs the stateful [`NCStateQuad`] path.
+fn reorder_quad_refinement_mfem(
+    mesh: &Mesh<2>,
+    conn: &mut Vec<NodeId>,
+    tags: &mut Vec<i32>,
+    coords: &mut Vec<f64>,
+    face_conn: &mut [NodeId],
+    dir_of: &dyn Fn(ElemId) -> Option<QuadRefineDir>,
+) {
+    let n_old = mesh.n_elems();
+    if n_old == 0 {
+        return;
+    }
+    let n_old_nodes = mesh.n_nodes() as NodeId;
+    let states = init_root_states_quad(mesh);
+
+    // 1. Leaf sequence = permutation of the new rows + per-new-leaf states.
+    let mut row_order: Vec<usize> = Vec::with_capacity(conn.len() / 4);
+    let mut off = 0usize;
+    for e in 0..n_old as ElemId {
+        let st = states[e as usize] as usize;
+        match dir_of(e) {
+            None => {
+                row_order.push(off);
+                off += 1;
+            }
+            Some(QuadRefineDir::Both) => {
+                // CollectLeafElements: SQUARE + XY -> Hilbert child order.
+                for &ch in &QUAD_HILBERT_CHILD_ORDER[st] {
+                    row_order.push(off + ch as usize);
+                }
+                off += 4;
+            }
+            Some(_) => {
+                // No SFC table for X/Y splits: natural child-slot order.
+                row_order.push(off);
+                row_order.push(off + 1);
+                off += 2;
+            }
+        }
+    }
+    debug_assert_eq!(off, conn.len() / 4, "row grouping out of sync");
+
+    // 2. UpdateVertices numbering: input nodes keep their ids, new nodes are
+    //    numbered by first appearance over the leaf sequence × local nodes.
+    let n_new = coords.len() / 2 - n_old_nodes as usize;
+    let mut remap = vec![NodeId::MAX; n_new];
+    let mut next = n_old_nodes;
+    for &r in &row_order {
+        for k in 0..4 {
+            let n = conn[r * 4 + k];
+            if n >= n_old_nodes {
+                let slot = (n - n_old_nodes) as usize;
+                if remap[slot] == NodeId::MAX {
+                    remap[slot] = next;
+                    next += 1;
+                }
+            }
+        }
+    }
+    debug_assert_eq!(next as usize, coords.len() / 2, "unmapped new nodes");
+
+    // 3. Permute rows/tags, apply the node remap.
+    let old_conn = std::mem::take(conn);
+    conn.reserve(old_conn.len());
+    let old_tags = std::mem::take(tags);
+    tags.reserve(old_tags.len());
+    for &r in &row_order {
+        for k in 0..4 {
+            let n = old_conn[r * 4 + k];
+            conn.push(if n >= n_old_nodes { remap[(n - n_old_nodes) as usize] } else { n });
+        }
+        tags.push(old_tags[r]);
+    }
+
+    // 4. Coordinates follow the node ids; faces keep their order (MFEM's
+    //    boundary segments follow NCMesh *face* ids — a different order, see
+    //    D843-2) but their new midpoints must be renumbered too.
+    let old_coords = std::mem::take(coords);
+    coords.resize(old_coords.len(), 0.0);
+    let n0d = n_old_nodes as usize * 2;
+    coords[..n0d].copy_from_slice(&old_coords[..n0d]);
+    for (slot, &mapped) in remap.iter().enumerate() {
+        if mapped != NodeId::MAX {
+            let src = n0d + slot * 2;
+            let dst = mapped as usize * 2;
+            coords[dst] = old_coords[src];
+            coords[dst + 1] = old_coords[src + 1];
+        }
+    }
+    for n in face_conn.iter_mut() {
+        if *n >= n_old_nodes {
+            *n = remap[(*n - n_old_nodes) as usize];
+        }
+    }
+}
+
 /// Non-conforming (hanging-node) refinement for a 2-D Quad4 mesh.
 ///
 /// Each marked Quad4 element is split into **4 child Quad4s** by bisecting
@@ -3656,6 +3785,9 @@ fn init_root_states_quad(mesh: &Mesh<2>) -> Vec<u8> {
 /// may become non-conforming: every new midpoint node on an edge shared with
 /// an unrefined element becomes a hanging node constrained by
 /// `u[mid] = 0.5 * (u[a] + u[b])`.
+///
+/// The fine mesh comes out in MFEM's leaf order with MFEM's vertex numbering
+/// ([`reorder_quad_refinement_mfem`]).
 ///
 /// # Returns
 /// `(new_mesh, constraints)`.
@@ -3799,6 +3931,16 @@ pub fn refine_nonconforming_quad(
             new_face_tags.push(tag);
         }
     }
+
+    // ── 6. MFEM leaf order + vertex numbering (D837-1) ────────────────────────
+    reorder_quad_refinement_mfem(
+        mesh,
+        &mut new_conn,
+        &mut new_tags,
+        &mut new_coords,
+        &mut new_face_conn,
+        &|e| marked_set.contains(&e).then_some(QuadRefineDir::Both),
+    );
 
     let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Quad4,
@@ -7170,6 +7312,16 @@ pub fn refine_nonconforming_quad_aniso(
             new_face_tags.push(tag);
         }
     }
+
+    // ── MFEM leaf order + vertex numbering (D837-1) ──────────────────────────
+    reorder_quad_refinement_mfem(
+        mesh,
+        &mut new_conn,
+        &mut new_elem_tags,
+        &mut new_coords,
+        &mut new_face_conn,
+        &|e| marked_map.get(&e).copied(),
+    );
 
     let mut new_mesh = Mesh::<2>::uniform(
         new_coords,
