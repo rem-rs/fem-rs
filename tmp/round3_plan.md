@@ -4470,6 +4470,34 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第八十九轮（round 89）：D822-1a 停机语义族（Lane A，ex17 升 BIT）+ D832-2 3-D 周期细化（Lane B）+ D822-2 Options 审计（Lane C 重派）+ D838 ex7 Tri6 空间（主会话）——RUN 收敛线四债关闭
+
+**开局 HEAD = round-88 终稿 `ad515bcf`；C: 42G。** 三路主树文件互斥（㉛）：Lane A = `crates/solver`+`examples/ex17`；Lane B = `crates/mesh/amr`（D832-2）；Lane C = `examples/**`（排除 ex17/ex9/ex14/ex18/ex27 系与 BIT 档）。主会话 = 维持项清点（r88 已落）+ ex7 分诊修复（D838）+ 整合。
+
+### Lane A（D822-1a）· **关闭（ex17 升 BIT）**
+ex17 三层根因全定位（全部 example 侧，crates/ 零改动）：①`L2Space` 默认 GaussLegendre 基 vs C++ `BasisType::GaussLobatto`（A/b 异基；修前 A 条目在 Q(√3) 域实证）；②对称 GS 扫掠依赖 dof 全局序——MFEM byNODES vs fem-rs interleaved ⇒ 解前 `P A Pᵀ` 置换；③legacy `PCG()` 的 `SetRelTol(sqrt(RTOLERANCE))` 双轨——示例传 rtol² 又被平方 ⇒ 有效阈值 1e-24 vs C++ 1e-12。**修后 767 it = C++、768 行 (B r,r) 轨迹逐字一致、ARF 0.982095、‖u_h‖ 80.594732 = C++。**族审计阴性成文：pcg/gmres/minres 停机 = MFEM solvers.cpp:919 `rel_tol²·nom0` 一致。锚点全绿（solver 全局敏感路径重验）。新债 D834-1/2/3（均随本修关闭）。fem-solver 450/0。
+
+### Lane B（D832-2）· **关闭**
+3-D 周期合并网格细化几何真病两处（linear_view 顶点表 + wrapped-frame 共享 dof 表），MFEM 双分支 oracle 精确（refine-fold/fold-refine 均 H1 216/1728/5832，nodes own-side 1728/5832）。修 = `is_periodic_merged_3d` + `build_periodic_own_side_hex_geometry`（逐细元 own-side 行 prolongation）+ `periodic_p1_hex_geometry` 快照识别；6 钉红→绿（4 红）。fem-mesh **523/0**。新债 D835-1（set_curvature_hex8 逐元分配）、D835-2（NC 部分路径无 own-side 传输）。
+
+### Lane C（D822-2，重派后完成）· **关闭**
+Options 回声族逐例审计矩阵（领地 1:1 对 68）：A 已一致 27、**B「C++ 打印而 Rust 缺」35 全修**（块与 `args.PrintOptions(cout)` 逐字节；ENABLE 对打真值 long_name、新增 `cpp_double` 复刻 ostream 6 位有效数字）、C「Rust 打印而 C++ 不打」6 仅登记 **D836-1..6**。**⑥ 核对：ex14 登记属实不驳**（ex14.cpp:90 确调 PrintOptions）；ex38 rc=242 = 声明式 `MFEM_SKIP_RETURN_VALUE`、ex39 rc=134 = 环境工件（均非缺陷）。并行 25 颗 C++ 参考现编现跑（mpiexec -np 2 全 rc=0，快照 `tmp/d89c/pex/`）。**附带抓到 P1：ex7 默认档 rc=101**（见主会话 D838）。examples 构建 0 错误。
+
+### 主会话（D838）· **关闭（Lane C 附带抓到的 P1）**
+ex7 默认档 rc=101 panic（Tri6 行 6 dofs vs 空间 3 dofs）根因 = **Tri6 的 order-2 空间从未行感知接线**：`build_pk` 走 Tri3 旧假设（全节点=顶点）+新造边 dof ⇒ 450 dofs、192 行零对角（SSOR panic）；而 ex7 的 order-1-over-all-nodes 旧 hack 也已被 D819-A 角点视图语义击穿（3 dofs 不可供 6-dof P2 装配）。修 = 新 `build_q2_tri`（顶点=紧凑角点集、边 dof=行自有 midside 按 corner pair 键控 + D353 类一致性 guard；258 = MFEM P2 计数）+ ex7 Tri6 路径改 order 2。PCG 20 步收敛 rc=0；调试埋点全删。
+
+### 会话事件
+- **并发上限**：3 路并行触发 user/model 并发限 ⇒ Lane C 首派即败、Lane A 中途阵亡（WIP 埋点+分析脚本遗留）。处置 = Lane A 续作代理承接 WIP（埋点/Dump/轨迹全部复用，HEAD 重跑验证未过期）+ Lane C 排队重派。**教训：并发限 2，三路需排程。**
+- **主会话 RUN 批量采集撞 Lane C 领地**（㉜ 自纠）：examples 为 Lane C 领地后立即停手，已编译的 10 例 C++ 二进制与快照移交（`$HOME/work/d89main/cpp` + `tmp/d89main/`）。
+- **用户更正采纳**："RUN 档从未与 C++ 对比" 表述错误——r61 建账即对现编 C++ 全面比过（RUN = 比过但有已登记残差），后续 "0 diff vs r61" 是漂移稳定性证据。收敛叙事修正：剩余工作 = 修已定性残差族，非首次对拍。
+
+### 大门与提交
+大门（主树 ㉗）：lib(debug) **10/2665/0/5**、tests(release) **369/4475/0/30**（=r88 368/4469 + 恰 1 新靶[d832_hex_periodic_refine 6] + 6 通过）、doc **10/9/0/95**、examples **0/0 非 vendor**、pro rc=0、fem-py rc=0。锚点：ex9-2D（--mesh 豁免）/ex14 0 差/ex27 双档 0 差/ex18 双档 8 位/ex9-3D init 逐字节 + stdout 0 差（solver+examples+dof_manager 均被改后全组重验）。提交链：`cafbc939`（D832-2）→ `281db026`（D822-1a）→ `17a319c8`（D838）→ `61bbed90`（D822-2）→ docs。证据：`tmp/d89a|d89b|d89c|d89main/`。
+
+### 债务状态
+**D822-1a、D822-2、D832-2、D838 关闭**；D822-1b（sol.gf 表示差）并 examples 清理线。新债 **D834-1/2/3（随 Lane A 修关闭）、D835-1/2、D836-1..7（D836-7 = ex7 已随 D838 关闭）**。维持：D824-B、D827-2、D818-1/2、D824-B。
+
+
 ## 第八十八轮（round 88）：MFEM 上游知会线（Lane A，一撤案一成稿）+ D820-3 余项细化传播（Lane B，两真缺陷）+ D821-3/4（Lane C，两真缺陷）+ 主会话维持项清点——三路并行全交付
 
 **开局 HEAD = round-87 终稿 `6919547a`；C: 42G。** 三路主树文件互斥（㉛）：Lane A = `tmp/d88a/`（纯文档+探针）；Lane B = `crates/mesh/**`（D832-1）；Lane C = `crates/io/glvis.rs`+`assembly/postproc/flux_recovery.rs`（D821-3/4）。主会话 = 维持项清点 + 整合。
