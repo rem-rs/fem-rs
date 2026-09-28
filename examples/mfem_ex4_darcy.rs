@@ -74,7 +74,9 @@ fn main() {
 
     let space = HDivSpace::new(mesh, rt_order);
     let n_dofs = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {n_dofs}");
+    // MFEM ex4.cpp prints this WITHOUT a leading newline (cout << "Number of
+    // finite element unknowns: " << ... << endl, ex4.cpp:131) — no blank line.
+    println!("Number of finite element unknowns: {n_dofs}");
 
     // 6. Essential (Dirichlet) boundary DOFs — all external boundaries.
     //    BC: F·n = <projected exact normal component> (or 0 when -no-bc).
@@ -153,7 +155,10 @@ fn main() {
         vec![(k * p[0]).cos() * (k * p[1]).sin(),
              (k * p[1]).cos() * (k * p[0]).sin()]
     });
+    // MFEM ex4.cpp:231: `cout << "\n|| F_h - F ||_{L^2} = " << err << '\n' << endl`
+    // — a blank line before AND after the error line.
     println!("\n|| F_h - F ||_{{L^2}} = {}", fem_solver::fmt_g(l2_err));
+    println!();
 
     // 14. Save the refined mesh and solution (matches MFEM ex4 output files).
     //     MFEM: ofstream precision(8); mesh->Print(mesh_ofs); x.Save(sol_ofs);

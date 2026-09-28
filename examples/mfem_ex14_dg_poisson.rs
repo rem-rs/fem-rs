@@ -26,6 +26,35 @@ fn main() {
     let args = parse_args();
     let dim = 2usize;
 
+    // MFEM ex14: kappa = (order+1)^2 when negative (penalty parameter).
+    // Computed BEFORE the options echo: PrintOptions is called after the kappa
+    // adjustment (ex14.cpp:88-90), so the echoed `--kappa` is the adjusted one.
+    let kappa: f64 = if args.kappa < 0.0 {
+        (args.order as f64 + 1.0).powi(2)
+    } else {
+        args.kappa
+    };
+
+    // MFEM ex14 echoes the parsed options (`args.PrintOptions(cout)`,
+    // ex14.cpp:90) followed by `device.Print()` (ex14.cpp:94) before reading
+    // the mesh; the echo mirrors OptionsParser::PrintOptions byte-for-byte
+    // (D822-2, D687 precedent).  The enable/disable pairs print the long_name
+    // of the active side, so pa=false => --no-partial-assembly and
+    // no_vis=true => --no-visualization.  f64 values format like `cout`
+    // default precision for the anchored cases (-1, 4, 0).
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("data/star.mesh"));
+    println!("   --refine {}", args.ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --sigma {}", args.sigma);
+    println!("   --kappa {}", kappa);
+    println!("   --eta {}", args.eta);
+    println!("   --no-partial-assembly");
+    println!("   {}", if args.no_vis { "--no-visualization" } else { "--visualization" });
+    println!("   --device cpu");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
+
     let mut mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
@@ -44,13 +73,6 @@ fn main() {
     for _ in 0..ref_levels {
         mesh = refine_uniform(&mesh);
     }
-
-    // MFEM ex14: kappa = (order+1)^2 when negative (penalty parameter).
-    let kappa: f64 = if args.kappa < 0.0 {
-        (args.order as f64 + 1.0).powi(2)
-    } else {
-        args.kappa
-    };
 
     let quad_order = args.order * 2 + 1;
 
@@ -98,6 +120,8 @@ struct Args {
     order: u8,
     sigma: f64,
     kappa: f64,
+    eta: f64,
+    no_vis: bool,
 }
 
 fn parse_args() -> Args {
@@ -107,6 +131,8 @@ fn parse_args() -> Args {
         order: 1,
         sigma: -1.0,
         kappa: -1.0,
+        eta: 0.0,
+        no_vis: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -126,11 +152,13 @@ fn parse_args() -> Args {
             }
             "-e" | "--eta" => {
                 // BR2 penalty (eta > 0) is not implemented; ex14 default is 0.
-                let eta: f64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                if eta > 0.0 {
+                a.eta = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if a.eta > 0.0 {
                     panic!("mfem_ex14_dg_poisson: BR2 (eta > 0) is not implemented");
                 }
             }
+            "-no-vis" | "--no-visualization" => a.no_vis = true,
+            "-vis" | "--visualization" => a.no_vis = false,
             _ => {}
         }
     }
