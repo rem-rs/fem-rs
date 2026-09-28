@@ -21,8 +21,8 @@
 
 use fem_assembly::{DgElasticityAssembler, InteriorFaceList};
 use fem_io::mfem::{read_mfem_file, write_mfem_gf_file};
-use fem_solver::{solve_pcg_gssmoother, solve_gmres_gssmoother, SolverConfig};
-use fem_space::{fe_space::FESpace, L2Space};
+use fem_solver::{solve_pcg_gssmoother, solve_gmres_gssmoother, PrintLevel, SolverConfig};
+use fem_space::{fe_space::FESpace, L2Basis, L2Space};
 use fem_mesh::{refine_uniform, element_type::ElementType, topology::MeshTopology};
 
 // ─── Dirichlet BC (InitDisplacement): u = [0, -0.2·x] ────────────────────────
@@ -94,8 +94,13 @@ fn main() {
     let alpha = args.alpha;
     println!("  kappa: {}, alpha: {}", kappa, alpha);
 
-    // C++ ex17.cpp:164-171 — 4. DG vector FE space
-    let space = L2Space::new(mesh.clone(), order);
+    // C++ ex17.cpp:164-171 — 4. DG vector FE space.
+    //     C++: DG_FECollection fec(order, dim, BasisType::GaussLobatto) — the
+    //     Gauss-Lobatto node placement (corner dofs for P1).  D834-1: the
+    //     GaussLegendre default here assembles A in the open-GL barycentric
+    //     basis (TriL2GL), whose P1 Lagrange coefficients live in Q(√3) —
+    //     a different operator from MFEM's (767 → 1269 PCG iterations).
+    let space = L2Space::new_with_basis(mesh.clone(), order, L2Basis::GaussLobatto);
     let n_elem = mesh.n_elems() as usize;
     let n_scalar = space.n_dofs();
     let n_total = dim * n_scalar;
@@ -137,27 +142,58 @@ fn main() {
     );
 
     // C++ ex17.cpp:244-263 — 11. Solve (PCG for α=-1, GMRES otherwise)
-    //     C++: PCG/GMRES with GSSmoother, rtol²=1e-12, max_iter=5000
+    //     C++: PCG(A, M, B, X, 3, 5000, rtol*rtol, 0.0) — the *legacy* free
+    //     function (solvers.cpp:1067) does SetRelTol(sqrt(RTOLERANCE)) before
+    //     the CGSolver applies rel_tol² internally, i.e. the net threshold is
+    //     RTOLERANCE·nom0.  D834-3: SolverConfig.rtol follows CGSolver's
+    //     SetRelTol, so it receives `rtol` (the sqrt of MFEM's argument).
     let rtol = 1e-6;
     let cfg = SolverConfig {
-        rtol: rtol * rtol,
+        rtol,
         atol: 0.0,
         max_iter: 5000,
         verbose: false,
+        // C++ ex17.cpp:255 — PCG(A, M, B, X, 3, 5000, rtol*rtol, 0.0): print level 3.
+        print_level: PrintLevel::Iterations,
         ..Default::default()
     };
 
+    // D834-2: MFEM's FiniteElementSpace uses Ordering::byNODES — the global
+    // index of (scalar dof s, component c) is c·NS + s — and MFEM's
+    // `GSSmoother` sweeps the dofs in exactly that order.  fem-rs vectors are
+    // interleaved (s·dim + c); symmetric Gauss-Seidel is sweep-order
+    // dependent, so the solve is run on the byNODES-permuted system (same
+    // operator, MFEM's dof order) and the solution permuted back.
+    let mut perm = vec![0_usize; n_total]; // interleaved index -> byNODES index
+    for s in 0..n_scalar {
+        for c in 0..dim {
+            perm[s * dim + c] = c * n_scalar + s;
+        }
+    }
+    let a_nodes = permute_csr(&a_mat, &perm);
+    let b_nodes: Vec<f64> = {
+        let mut v = vec![0.0_f64; n_total];
+        for (i, &vi) in rhs.iter().enumerate() {
+            v[perm[i]] = vi;
+        }
+        v
+    };
+    let mut x_nodes = vec![0.0_f64; n_total];
     let mut x = vec![0.0_f64; n_total];
+
     let rhs_norm: f64 = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
     println!("  Initial ‖rhs‖ = {:.4}", rhs_norm);
     let res = if alpha == -1.0 {
         println!("  PCG (symmetric, α=-1)");
-        solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg)
+        solve_pcg_gssmoother(&a_nodes, &b_nodes, &mut x_nodes, &cfg)
     } else {
         println!("  GMRES (non-symmetric, α={})", alpha);
-        solve_gmres_gssmoother(&a_mat, &rhs, &mut x, 100, &cfg)
+        solve_gmres_gssmoother(&a_nodes, &b_nodes, &mut x_nodes, 100, &cfg)
     };
     let solve_result = res.expect("DG elasticity solve failed");
+    for (i, &ni) in perm.iter().enumerate() {
+        x[i] = x_nodes[ni];
+    }
 
     println!("  Iterations: {}", solve_result.iterations);
     println!("  Final residual: {:.3e}", solve_result.final_residual);
@@ -538,6 +574,39 @@ fn build_face_elem_map<M: MeshTopology>(mesh: &M) -> HashMap<u32, u32> {
         }
     }
     result
+}
+
+// ─── byNODES permutation helper (D834-2) ─────────────────────────────────────
+//
+// P A Pᵀ for the dof permutation `perm` (interleaved index -> byNODES index).
+// Row entry order is preserved; symmetric Gauss-Seidel then sweeps the dofs in
+// MFEM's Ordering::byNODES sequence.
+
+fn permute_csr(a: &fem_linalg::CsrMatrix<f64>, perm: &[usize]) -> fem_linalg::CsrMatrix<f64> {
+    let n = a.nrows;
+    let mut inv = vec![0_usize; n];
+    for (i, &p) in perm.iter().enumerate() {
+        inv[p] = i;
+    }
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::with_capacity(a.values.len());
+    let mut values = Vec::with_capacity(a.values.len());
+    row_ptr.push(0_usize);
+    for ni in 0..n {
+        let i = inv[ni];
+        for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+            col_idx.push(perm[a.col_idx[k] as usize] as u32);
+            values.push(a.values[k]);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    fem_linalg::CsrMatrix {
+        nrows: n,
+        ncols: n,
+        row_ptr,
+        col_idx,
+        values,
+    }
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
