@@ -195,7 +195,13 @@ fn surface_geometry<'a, M: MeshTopology>(
 ///   P1 corner map on a straight cell, the order-`g` GLL isoparametric map on
 ///   a curved one.
 /// - **Quad4** (`dim == 2`): the analytic bilinear map on `[-1,1]²` — the frame
-///   the `QuadQ1` basis in [`ref_elem_vol`] is evaluated in.
+///   the `QuadQ1` basis in [`ref_elem_vol`] is evaluated in.  D833-1: a curved
+///   quad (`geom_order > 1` with a family-sized geometry row) instead
+///   delegates to [`fem_mesh::transformation::element_jacobian_at`] — the
+///   mesh crate's D787 SQUARE-family isoparametric geometry over the order-`g`
+///   table, evaluated on the [0,1]² image of `xi` and chain-ruled back
+///   (J scales by ½, det by ¼) — the same geometry MFEM's
+///   `ComputeElementFlux`/`ComputeFluxEnergy` differentiate.
 /// - **Hex8/Hex20**: the isoparametric `HexQk` geometry, i.e. the *same*
 ///   element family the solution basis uses, so the basis and the geometry
 ///   share one reference frame.
@@ -251,15 +257,45 @@ fn geom_jacobian<M: MeshTopology>(
         let det = jac.determinant();
         (jac, det)
     } else if dim == 2 && nodes.len() >= 4 {
-        let (e, n) = (xi[0], xi[1]);
-        let c = |i: usize| mesh.node_coords(nodes[i]);
-        let j00 = 0.25 * (-(1.0 - n) * c(0)[0] + (1.0 - n) * c(1)[0] + (1.0 + n) * c(2)[0] - (1.0 + n) * c(3)[0]);
-        let j01 = 0.25 * (-(1.0 - e) * c(0)[0] - (1.0 + e) * c(1)[0] + (1.0 + e) * c(2)[0] + (1.0 - e) * c(3)[0]);
-        let j10 = 0.25 * (-(1.0 - n) * c(0)[1] + (1.0 - n) * c(1)[1] + (1.0 + n) * c(2)[1] - (1.0 + n) * c(3)[1]);
-        let j11 = 0.25 * (-(1.0 - e) * c(0)[1] - (1.0 + e) * c(1)[1] + (1.0 + e) * c(2)[1] + (1.0 - e) * c(3)[1]);
-        let det = j00 * j11 - j01 * j10;
-        let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
-        (jac, det)
+        // D833-1 (registered D821-4): a curved quad reads its own order-`g`
+        // geometry table — the arm the hex/prism arms already use — instead
+        // of straightening the cell back to the bilinear corner map.  The
+        // mesh crate's D787 quad arm (`curved_geometry`) pairs the SQUARE
+        // family element `ref_elem(g)` ([0,1]², the closed-GLL
+        // `H1_FECollection(g)` lattice) with the table, so delegate to it:
+        // the gate below (geom_order > 1 + geometry row matching the family
+        // dof count) mirrors `curved_geometry`'s acceptance exactly, and a
+        // rejected row keeps the historical corner map.
+        //
+        // `xi` arrives in the solution basis's legacy `[-1,1]²` frame (the
+        // `QuadQ1`/`QuadQ2` arms of `ref_elem_vol`): map it onto [0,1]²
+        // (ξ' = (ξ+1)/2) and chain-rule back — dξ'/dξ = ½ per axis, so
+        // J_[-1,1] = ½·J_[0,1] and det picks up the ¼ (MFEM's
+        // `Trans.Weight()` quartered).  The flux itself is frame-invariant
+        // (∇_ξu_h = ½·∇_ξ'u_h' cancels the ½ in J⁻ᵀ·∇_ξu_h); the energy
+        // integral needs the ¼·(2·ξ̄ range)² = the same measure, matching
+        // MFEM bit for bit on the d833 probe cell.
+        let g = mesh.geom_order();
+        let curved = g > 1
+            && mesh.geometry_nodes(element).len() == elem_type.ref_elem(g).n_dofs();
+        if curved {
+            let xi01 = [0.5 * (xi[0] + 1.0), 0.5 * (xi[1] + 1.0)];
+            let (j01, _xp) =
+                fem_mesh::transformation::element_jacobian_at(mesh, element, &xi01, dim);
+            let j = j01 * 0.5;
+            let det = j.determinant();
+            (j, det)
+        } else {
+            let (e, n) = (xi[0], xi[1]);
+            let c = |i: usize| mesh.node_coords(nodes[i]);
+            let j00 = 0.25 * (-(1.0 - n) * c(0)[0] + (1.0 - n) * c(1)[0] + (1.0 + n) * c(2)[0] - (1.0 + n) * c(3)[0]);
+            let j01 = 0.25 * (-(1.0 - e) * c(0)[0] - (1.0 + e) * c(1)[0] + (1.0 + e) * c(2)[0] + (1.0 - e) * c(3)[0]);
+            let j10 = 0.25 * (-(1.0 - n) * c(0)[1] + (1.0 - n) * c(1)[1] + (1.0 + n) * c(2)[1] - (1.0 + n) * c(3)[1]);
+            let j11 = 0.25 * (-(1.0 - e) * c(0)[1] - (1.0 + e) * c(1)[1] + (1.0 + e) * c(2)[1] + (1.0 - e) * c(3)[1]);
+            let det = j00 * j11 - j01 * j10;
+            let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
+            (jac, det)
+        }
     } else if matches!(elem_type, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
         // A curved hex reads its own geometry table; a straight one the
         // vertex connectivity.  `HexQk` is the element `ref_elem_vol(Hex8, o)`

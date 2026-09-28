@@ -328,22 +328,51 @@ fn write_vtk_vector_3d(
 // GLVis native high-order binary protocol
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// GLVis element type codes (from MFEM's Element::Type).
+/// GLVis/MFEM element type codes.
+///
+/// D821-3: MFEM 4.10 keeps `Element::Type` (`fem/element.hpp:41-43`) and
+/// `Geometry::Type` (`fem/geom.hpp`) **numerically identical** for every
+/// family a fem-rs mesh can hold — POINT=0, SEGMENT=1, TRIANGLE=2,
+/// SQUARE/QUADRILATERAL=3, TETRAHEDRON=4, CUBE/HEXAHEDRON=5, PRISM/WEDGE=6,
+/// PYRAMID=7 — and those are the codes MFEM itself writes on the stream it
+/// pipes to a GLVis socket (`Mesh::Print`: quad element rows `1 3 ...`, hex
+/// rows `1 5 ...`, curved quads included; probe
+/// `tmp/d88c/probe_glvis_codes.cpp` -> `probe_glvis_codes.out`, WSL mfem410).
+/// GLVis's socket reader builds an MFEM `Mesh(std::istream&)` from that
+/// stream (glvis `lib/stream_reader.cpp`, `Command::Solution`), so quads are
+/// never folded to triangles anywhere in the protocol.
 #[repr(u32)]
 enum GlvisElemType {
+    Point       = 0,
+    Segment     = 1,
     Triangle    = 2,
+    Square      = 3,
     Tetrahedron = 4,
-    Hexahedron  = 7,
+    Hexahedron  = 5,
+    Wedge       = 6,
+    Pyramid     = 7,
 }
 
-/// Convert fem-rs ElementType to GLVis base type code.
+/// Convert fem-rs ElementType to the MFEM element type code.
+///
+/// (Pre-D821-3 the quad families folded to `Triangle` and `Hexahedron` was
+/// `7` = MFEM `PYRAMID`; both contradicted the MFEM codes this table cites —
+/// see [`GlvisElemType`].)
 fn elem_to_glvis(et: fem_mesh::ElementType) -> GlvisElemType {
+    use fem_mesh::ElementType as Et;
     match et {
-        fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => GlvisElemType::Triangle,
-        fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10 => GlvisElemType::Tetrahedron,
-        fem_mesh::ElementType::Hex8 | fem_mesh::ElementType::Hex20 | fem_mesh::ElementType::Hex27 => GlvisElemType::Hexahedron,
-        fem_mesh::ElementType::Quad4 | fem_mesh::ElementType::Quad9 => GlvisElemType::Triangle, // GLVis uses tri for quad
-        _ => GlvisElemType::Triangle,
+        Et::Point1 => GlvisElemType::Point,
+        Et::Line2 | Et::Line3 => GlvisElemType::Segment,
+        Et::Tri3 | Et::Tri6 => GlvisElemType::Triangle,
+        Et::Quad4 | Et::Quad8 | Et::Quad9 => GlvisElemType::Square,
+        Et::Tet4 | Et::Tet10 => GlvisElemType::Tetrahedron,
+        Et::Hex8 | Et::Hex20 | Et::Hex27 => GlvisElemType::Hexahedron,
+        Et::Prism6 | Et::Prism15 | Et::Prism18 => GlvisElemType::Wedge,
+        Et::Pyramid5 | Et::Pyramid13 => GlvisElemType::Pyramid,
+        Et::Polygon => panic!(
+            "elem_to_glvis: fem-rs Polygon (VEM) cells have no MFEM element \
+             type code — there is nothing to send a GLVis native stream for"
+        ),
     }
 }
 
@@ -629,5 +658,47 @@ mod tests {
         let refines = u32::from_le_bytes(buf[37..41].try_into().unwrap());
         assert_eq!(order, 2);
         assert_eq!(refines, 2);
+    }
+
+    /// D821-3: the native-protocol geometry code of every mesh family is the
+    /// MFEM `Element::Type` / `Geometry::Type` value — numerically identical
+    /// enums in MFEM 4.10 — that MFEM itself writes on the stream it pipes to
+    /// GLVis (`Mesh::Print`: quad rows `1 3 ...`, hex rows `1 5 ...`; probe
+    /// `tmp/d88c/probe_glvis_codes.cpp` -> `probe_glvis_codes.out`:
+    /// `Element::QUADRILATERAL = 3`, `Element::HEXAHEDRON = 5`).  Before this
+    /// pin the quad families folded to `Triangle = 2` ("GLVis uses tri for
+    /// quad" — no upstream basis: GLVis's socket reader builds an MFEM
+    /// `Mesh(std::istream&)`, where quads stay SQUARE) and hexes carried
+    /// `7` = MFEM `PYRAMID`.
+    #[test]
+    fn glvis_native_codes_match_mfem_element_types() {
+        use fem_mesh::Mesh;
+        let mut buf = Vec::new();
+
+        let tri = Mesh::<2>::unit_square_tri(1);
+        write_native_solution_bin(&mut buf, &tri, &vec![0.0; tri.n_nodes()], 1, 1).unwrap();
+        let mut buf2 = Vec::new();
+        let quad = Mesh::<2>::unit_square_quad(1);
+        write_native_solution_bin(&mut buf2, &quad, &vec![0.0; quad.n_nodes()], 1, 1).unwrap();
+        let mut buf3 = Vec::new();
+        let tet = Mesh::<3>::unit_cube_tet(1);
+        write_native_solution_bin(&mut buf3, &tet, &vec![0.0; tet.n_nodes()], 1, 1).unwrap();
+        let mut buf4 = Vec::new();
+        let hex = Mesh::<3>::unit_cube_hex(1);
+        write_native_solution_bin(&mut buf4, &hex, &vec![0.0; hex.n_nodes()], 1, 1).unwrap();
+
+        for (buf, want, name) in [
+            (&buf, 2u32, "Tri3"),
+            (&buf2, 3, "Quad4"),
+            (&buf3, 4, "Tet4"),
+            (&buf4, 5, "Hex8"),
+        ] {
+            let fet = u32::from_le_bytes(buf[25..29].try_into().unwrap());
+            assert_eq!(
+                fet, want,
+                "{name}: native GLVis geometry code must be the MFEM \
+                 Element::Type value {want} (probe tmp/d88c), got {fet}"
+            );
+        }
     }
 }
