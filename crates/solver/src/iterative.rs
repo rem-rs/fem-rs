@@ -2313,6 +2313,210 @@ pub fn solve_minres_jacobi(
     }
 }
 
+/// MINRES with MFEM `DSmoother(1)` (Jacobi, `y = D⁻¹ x`) left preconditioning —
+/// bit-for-bit port of `MINRESSolver::Mult` (`linalg/solvers.cpp`) for the
+/// `prec != NULL` branch, as used by MFEM ex10's Jacobian solve
+/// (`J_prec = new DSmoother(1); J_minres->SetPreconditioner(*J_prec)`).
+///
+/// Arithmetic pins that differ from a textbook preconditioned MINRES:
+/// - `v1 /= beta` / `u1 /= beta` go through MFEM `Vector::operator/=(real_t)`
+///   which computes `m = 1.0/c` once and *multiplies* (`y[i] *= m`).
+/// - `DSmoother::Mult_` with `type == JACOBI, iterations == 1,
+///   iterative_mode == false` is `SparseMatrix::DiagScale`:
+///   `y[i] = 1.0 * x[i] / diag[i]`.
+/// - `eta = beta = sqrt((u1, v1))` is the *preconditioned* B-norm of the
+///   initial residual, and `norm_goal = max(rel_tol·eta, abs_tol)` scales with
+///   it (not with `‖b‖₂`).
+/// - The stopping check is `|eta| <= norm_goal` *after* the `x` update; the
+///   three `Swap` calls are skipped on that exit.
+/// - Correction directions are built from `u1` (the dual vector), not `v1`.
+pub fn solve_minres_dsmoother(
+    a: &FemCsr<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let n = a.nrows;
+    if b.len() != n || x.len() != n {
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
+    }
+
+    // DSmoother diagonal (MFEM reads A(i,i) off the finalized CSR; DiagScale
+    // aborts on a zero diagonal — here a zero diagonal would poison the solve
+    // the same way, so no guard is added).
+    let diag = a.diagonal();
+
+    // iterative_mode == false: v1 = b, x = 0, u1 = D⁻¹ v1 (DiagScale).
+    let mut v1 = b.to_vec();
+    for xi in x.iter_mut() {
+        *xi = 0.0;
+    }
+    let mut u1: Vec<f64> = Vec::with_capacity(n);
+    for i in 0..n {
+        u1.push(1.0 * v1[i] / diag[i]);
+    }
+
+    let mut eta = dot(&u1, &v1).sqrt();
+    let mut beta = eta;
+    let mut gamma0 = 1.0_f64;
+    let mut gamma1 = 1.0_f64;
+    let mut sigma0 = 0.0_f64;
+    let mut sigma1 = 0.0_f64;
+
+    // MFEM: norm_goal = std::max(rel_tol*eta, abs_tol) — fixed at setup.
+    let norm_goal = (cfg.rtol * eta).max(cfg.atol);
+
+    let mut it = 0usize;
+    let mut converged = true;
+    let gates = CgTrailerGates::from_config(cfg);
+
+    // q = A·u1 workspace; v0 = next Lanczos vector; w0/w1 correction dirs.
+    let mut q = vec![0.0_f64; n];
+    let mut v0 = vec![0.0_f64; n];
+    let mut w0 = vec![0.0_f64; n];
+    let mut w1 = vec![0.0_f64; n];
+
+    if eta > norm_goal {
+        // MFEM prints the iteration-0 line after the early-stop check
+        // (`print_options.iterations || print_options.first_and_last`).
+        if gates.first_line() {
+            println!(
+                "MINRES: iteration {:3}: ||r||_B = {}{}",
+                0,
+                fmt_g(eta),
+                gates.first_line_suffix()
+            );
+        }
+        for it_i in 1..=cfg.max_iter {
+            it = it_i;
+            // v1 /= beta; u1 /= beta — MFEM Vector::operator/=(real_t):
+            // m = 1.0/c; y[i] *= m.
+            let m = 1.0 / beta;
+            for i in 0..n {
+                v1[i] *= m;
+                u1[i] *= m;
+            }
+
+            // q = A·u1  (oper->Mult(*z, q), z = &u1 when prec).
+            a.spmv(&u1, &mut q);
+            let alpha = dot(&u1, &q);
+
+            if it_i > 1 {
+                // q.Add(-beta, v0)
+                let neg_beta = -beta;
+                for i in 0..n {
+                    q[i] += neg_beta * v0[i];
+                }
+            }
+            // v0 = q - alpha·v1  (add(q, -alpha, v1, v0))
+            let neg_alpha = -alpha;
+            for i in 0..n {
+                v0[i] = q[i] + neg_alpha * v1[i];
+            }
+
+            let delta = gamma1 * alpha - gamma0 * sigma1 * beta;
+            let rho3 = sigma0 * beta;
+            let rho2 = sigma1 * alpha + gamma0 * gamma1 * beta;
+
+            // q = D⁻¹·v0 (prec->Mult(v0, q)); beta = ‖v0‖_B.
+            for i in 0..n {
+                q[i] = 1.0 * v0[i] / diag[i];
+            }
+            beta = dot(&v0, &q).sqrt();
+
+            let rho1 = delta.hypot(beta);
+
+            if it_i == 1 {
+                // w0.Set(1./rho1, *z)
+                let c0 = 1.0 / rho1;
+                for i in 0..n {
+                    w0[i] = c0 * u1[i];
+                }
+            } else if it_i == 2 {
+                // w0 = (1/rho1)·u1 + (−rho2/rho1)·w1
+                let c0 = 1.0 / rho1;
+                let c1 = -rho2 / rho1;
+                for i in 0..n {
+                    w0[i] = c0 * u1[i] + c1 * w1[i];
+                }
+            } else {
+                // add(-rho3/rho1, w0, -rho2/rho1, w1, w0); w0.Add(1/rho1, u1)
+                let c0 = -rho3 / rho1;
+                let c1 = -rho2 / rho1;
+                for i in 0..n {
+                    w0[i] = c0 * w0[i] + c1 * w1[i];
+                }
+                let c2 = 1.0 / rho1;
+                for i in 0..n {
+                    w0[i] += c2 * u1[i];
+                }
+            }
+
+            gamma0 = gamma1;
+            gamma1 = delta / rho1;
+
+            // x.Add(gamma1*eta, w0)
+            let xcoef = gamma1 * eta;
+            for i in 0..n {
+                x[i] += xcoef * w0[i];
+            }
+
+            sigma0 = sigma1;
+            sigma1 = beta / rho1;
+
+            // eta = -sigma1*eta
+            eta = -sigma1 * eta;
+
+            if eta.abs() <= norm_goal {
+                // goto loop_end — the trailing Swaps are skipped.
+                break;
+            }
+
+            // MFEM: per-iteration line (iterations gate), printed after the
+            // stopping test so the converging pass prints only at loop_end.
+            if gates.iterations {
+                println!("MINRES: iteration {:3}: ||r||_B = {}", it_i, fmt_g(eta.abs()));
+            }
+
+            // Swap(u1, q); Swap(v0, v1); Swap(w0, w1)
+            std::mem::swap(&mut u1, &mut q);
+            std::mem::swap(&mut v0, &mut v1);
+            std::mem::swap(&mut w0, &mut w1);
+        }
+        if it == cfg.max_iter && eta.abs() > norm_goal {
+            // MFEM: for-loop exhausted → converged = false (its trailing
+            // `it--` maps the C loop counter to max_iter, which `it` already
+            // holds here).
+            converged = false;
+        }
+    }
+
+    let final_norm = eta.abs();
+    // MFEM loop_end: final iteration line, iteration count, no-convergence
+    // warning (`summary || (!converged && warnings)` /
+    // `!converged && warnings` gates).
+    if gates.first_line() {
+        println!("MINRES: iteration {:3}: ||r||_B = {}", it, fmt_g(final_norm));
+    }
+    if gates.summary || (!converged && gates.warnings) {
+        println!("MINRES: Number of iterations: {:3}", it);
+    }
+    if !converged && gates.warnings {
+        println!("MINRES: No convergence!");
+    }
+    if !converged {
+        return Err(SolverError::ConvergenceFailed {
+            max_iter: cfg.max_iter,
+            residual: final_norm,
+        });
+    }
+    Ok(SolveResult { converged, iterations: it, final_residual: final_norm })
+}
+
 // ─── GCR (generalised conjugate residual, restart) ─────────────────────────
 
 /// GCR(m) — for general (possibly non-symmetric) linear systems.

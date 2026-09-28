@@ -97,7 +97,10 @@ where
     println!("   --order-refinements {}", args.order_refs);
     println!("   --device cpu");
     if !args.visualization { println!("   --no-visualization"); }
-    println!("Device configuration: cpu (host-std)");
+    // MFEM `Device::Print` (`Device::Configure` via the `Device` ctor) prints
+    // the device and memory backend on separate lines.
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
 
     // 4. Uniform refinement onto coarse mesh.
     let coarse_mesh = {
@@ -223,6 +226,58 @@ where
     prolong.reverse();
     let hierarchy = GeometricMgHierarchy::new(levels, prolong);
     println!("Size of linear system: {}", hierarchy.finest_matrix().nrows);
+
+    // Full-precision fine-operator trace (d91b probe, stderr only; mirrors
+    // tmp/d91b/patch_ex26_probe.py: A·v for a deterministic probe vector, and
+    // the raw (pre-BC) diagonal checksum of the finest level).
+    if std::env::var_os("FEM_EX26_PROBE").is_some() {
+        let a = hierarchy.finest_matrix();
+        let n = a.nrows;
+        let v: Vec<f64> = (0..n)
+            .map(|i| {
+                2.0 * (((13007i64 * (i as i64 + 1) + 5431) % 65536) as f64) / 65536.0 - 1.0
+            })
+            .collect();
+        let mut av = vec![0.0_f64; n];
+        a.spmv(&v, &mut av);
+        let (vsum, mut avsum, mut avn2) = (v.iter().sum::<f64>(), 0.0_f64, 0.0_f64);
+        for &avi in av.iter() {
+            avsum += avi;
+            avn2 += avi * avi;
+        }
+        let d = &hierarchy.levels[0].raw_diag;
+        let (mut dsum, mut dn2) = (0.0_f64, 0.0_f64);
+        for &di in d.iter() {
+            dsum += di;
+            dn2 += di * di;
+        }
+        eprintln!(
+            "FINE vsum={vsum:.17e} avnorm={:.17e} avsum={avsum:.17e} av0={:.17e} av1={:.17e}",
+            avn2.sqrt(),
+            av[0],
+            av[1]
+        );
+        eprintln!(
+            "DIAG dsum={dsum:.17e} dnorm={:.17e} d0={:.17e} d1={:.17e}",
+            dn2.sqrt(),
+            d[0],
+            d[1]
+        );
+        if let Ok(path) = std::env::var("FEM_EX26_AV_DUMP") {
+            let mut txt = String::with_capacity(n * 40);
+            for i in 0..n {
+                txt.push_str(&format!("{:.17e} {:.17e}\n", v[i], av[i]));
+            }
+            let _ = std::fs::write(path, txt);
+        }
+        if let Ok(path) = std::env::var("FEM_EX26_DIAG_DUMP") {
+            let mut txt = String::with_capacity(n * 26);
+            for &di in d.iter() {
+                txt.push_str(&format!("{di:.17e}\n"));
+            }
+            let _ = std::fs::write(path, txt);
+        }
+    }
 
     // 9. Solve with PCG + MG V(1,1)-cycle (matching C++: V-cycle, 1 pre + 1
     //    post sweep, Chebyshev(2) smoothers, coarse CG rtol sqrt(1e-4)).

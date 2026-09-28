@@ -42,15 +42,94 @@ use fem_assembly::{
 };
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, Mesh};
-use fem_solver::{solve_pcg_gssmoother, PrintLevel, SolverConfig};
+use fem_solver::{solve_pcg_gssmoother, fmt_g, PrintLevel, SolverConfig};
 use fem_space::{
     constraints::{boundary_dofs, form_linear_system},
     fe_space::FESpace,
     H1Space,
 };
-use fem_examples::rational_approximation::compute_partial_fraction_approximation;
 #[cfg(test)]
-use fem_examples::rational_approximation::{rational_approximation_aaa, weighted_poly_product};
+use fem_examples::rational_approximation::{
+    compute_partial_fraction_approximation, rational_approximation_aaa, weighted_poly_product,
+};
+
+/// MFEM ex33.hpp `ComputePartialFractionApproximation`, no-LAPACK branch
+/// (this is the configuration of the pinned C++ reference build): prints the
+/// banner and returns the hard-coded partial-fraction tables for
+/// `alpha ∈ {0.33, 0.5, 0.99}`; any other exponent silently becomes 0.5
+/// *inside the function* (ex33.cpp restores its own exponent copy
+/// afterwards, so only the "=> Using precomputed values" line sees it).
+fn precomputed_partial_fraction_approximation(alpha: f64) -> (Vec<f64>, Vec<f64>) {
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("MFEM is compiled without LAPACK.");
+    println!("Using precomputed values for PartialFractionApproximation.");
+    println!("Only alpha = 0.33, 0.5, and 0.99 are available.");
+    println!("The default is alpha = 0.5.");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    const EPS: f64 = f64::EPSILON;
+    let (coeffs, poles) = if (alpha - 0.33).abs() < EPS {
+        (
+            vec![
+                1.821898e+03, 9.101221e+01, 2.650611e+01,
+                1.174937e+01, 6.140444e+00, 3.441713e+00,
+                1.985735e+00, 1.162634e+00, 6.891560e-01,
+                4.111574e-01, 2.298736e-01,
+            ],
+            vec![
+                -4.155583e+04, -2.956285e+03, -8.331715e+02,
+                -3.139332e+02, -1.303448e+02, -5.563385e+01,
+                -2.356255e+01, -9.595516e+00, -3.552160e+00,
+                -1.032136e+00, -1.241480e-01,
+            ],
+        )
+    } else if (alpha - 0.99).abs() < EPS {
+        (
+            vec![
+                2.919591e-02, 1.419750e-02, 1.065798e-02,
+                9.395094e-03, 8.915329e-03, 8.822991e-03,
+                9.058247e-03, 9.814521e-03, 1.180396e-02,
+                1.834554e-02, 9.840482e-01,
+            ],
+            vec![
+                -1.069683e+04, -1.769370e+03, -5.718374e+02,
+                -2.242095e+02, -9.419132e+01, -4.031012e+01,
+                -1.701525e+01, -6.810088e+00, -2.382810e+00,
+                -5.700059e-01, -1.384324e-03,
+            ],
+        )
+    } else {
+        // Default branch: the exponent is redefined to 0.5 within the
+        // function for the banner line below.
+        (
+            vec![
+                2.290262e+02, 2.641819e+01, 1.005566e+01,
+                5.390411e+00, 3.340725e+00, 2.211205e+00,
+                1.508883e+00, 1.049474e+00, 7.462709e-01,
+                5.482686e-01, 4.232510e-01, 3.578967e-01,
+            ],
+            vec![
+                -3.168211e+04, -3.236077e+03, -9.868287e+02,
+                -3.945597e+02, -1.738889e+02, -7.925178e+01,
+                -3.624992e+01, -1.629196e+01, -6.982956e+00,
+                -2.679984e+00, -7.782607e-01, -7.649166e-02,
+            ],
+        )
+    };
+
+    println!(
+        "=> Using precomputed values for alpha = {}",
+        fmt_g(if (alpha - 0.33).abs() < EPS || (alpha - 0.99).abs() < EPS {
+            alpha
+        } else {
+            0.5
+        })
+    );
+    println!();
+    (coeffs, poles)
+}
 fn main() {
     let args = parse_args();
     // C++ ex33 echoes the parsed options (`args.PrintOptions(cout)`,
@@ -74,9 +153,13 @@ fn main() {
     let (coeffs, poles) = if !integer_order {
         println!(
             "Approximating the fractional exponent {}",
-            exponent_to_approximate
+            fmt_g(exponent_to_approximate)
         );
-        compute_partial_fraction_approximation(exponent_to_approximate)
+        // MFEM 4.10 serial builds carry no LAPACK: ex33.hpp's
+        // ComputePartialFractionApproximation then prints the no-LAPACK banner
+        // and falls back to the hard-coded tables for alpha ∈ {0.33, 0.5,
+        // 0.99} (anything else silently becomes 0.5 inside the function).
+        precomputed_partial_fraction_approximation(exponent_to_approximate)
     } else {
         println!("Treating integer order PDE.");
         (Vec::new(), Vec::new())
@@ -127,11 +210,15 @@ fn main() {
     let mut b = Assembler::assemble_linear(&space, &[&source], q_int);
 
     let cfg = SolverConfig {
-        rtol: 1e-12,
+        // MFEM's free `PCG(op, prec, b, x, print, maxit, RTOL, ATOL)` wraps a
+        // CGSolver with SetRelTol(sqrt(RTOL)) / SetAbsTol(sqrt(ATOL)); the CG
+        // stopping rule is `nom <= max(nom0·rel_tol², abs_tol²)`.  ex33 calls
+        // PCG(..., 1e-12, 0.0) → rel_tol = sqrt(1e-12) here.
+        rtol: 1e-6,
         atol: 0.0,
         max_iter: 300,
         verbose: true,
-        print_level: PrintLevel::Iterations,
+        print_level: PrintLevel::FirstAndLast,
     };
 
     let mut u = vec![0.0_f64; n_dofs];
@@ -151,7 +238,7 @@ fn main() {
         let mut B = b.clone();
         form_linear_system(&mut mat, &mut B, &mut x, &ess_bdr, &ess_vals);
 
-        println!("\nComputing (-Δ) ^ -{} ( f )", power_of_laplace);
+        println!("\nComputing (-Δ) ^ -{} ( f ) ", power_of_laplace);
         for i in 0..power_of_laplace {
             // 10.4 Solve Op X = B (N times).
             solve_pcg_gssmoother(&mat, &B, &mut x, &cfg).expect("PCG failed");
@@ -184,7 +271,11 @@ fn main() {
     // ── 11. Fractional part: Σ_i c_i (A + d_i M)^{-1} g ─────────────────────
     if !integer_order {
         for i in 0..coeffs.len() {
-            println!("\nSolving PDE -Δ u + {} u = {} g ", -poles[i], coeffs[i]);
+            println!(
+                "\nSolving PDE -Δ u + {} u = {} g ",
+                fmt_g(-poles[i]),
+                fmt_g(coeffs[i])
+            );
 
             // 11.2 a(.,.) = Diffusion + d_i·Mass with d_i = -poles[i].
             let diff = DiffusionIntegrator { kappa: 1.0 };
@@ -232,7 +323,7 @@ fn main() {
         println!("Manufactured solution : {}", manufactured_solution);
         println!("Expected mesh         : {}", expected_mesh);
         println!("Your mesh             : {}", args.mesh);
-        println!("L2 error              : {}", l2_error);
+        println!("L2 error              : {}", fmt_g(l2_error));
         println!("\n{}", "=".repeat(80));
     }
 }

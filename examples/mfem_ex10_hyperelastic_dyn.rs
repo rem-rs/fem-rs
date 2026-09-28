@@ -39,7 +39,6 @@ use std::f64::consts::FRAC_1_SQRT_2;
 
 use fem_assembly::{
     Assembler, ElimPolicy, eliminate_ess_tdofs,
-    postproc::vector_l2_norm,
     standard::{VectorDiffusionIntegrator, VectorH1MassIntegrator},
     HyperelasticModel, HyperelasticityForm,
 };
@@ -53,7 +52,7 @@ use fem_mesh::{
 };
 use fem_space::fe_space::FESpace;
 use fem_space::L2Space;
-use fem_solver::{solve_minres_jacobi, solve_pcg_jacobi, SolverConfig};
+use fem_solver::{fmt_g, solve_minres_dsmoother, solve_pcg_dsmoother, SolverConfig};
 
 // ─── CLI arguments (matching MFEM ex10) ────────────────────────────────────
 
@@ -197,6 +196,28 @@ impl ReducedSystemOperator<'_> {
         for &d in self.ess_dofs {
             if d < n { y[d] = k[d]; }
         }
+
+        // Full-precision trace of the first calls (d91b probe, stderr only;
+        // mirrors tmp/d91b/patch_ex10_probe.py on the C++ side).
+        if std::env::var_os("FEM_EX10_PROBE").is_some() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static CALL: AtomicUsize = AtomicUsize::new(0);
+            let call = CALL.fetch_add(1, Ordering::Relaxed);
+            if call < 8 {
+                let (mut s, mut n2) = (0.0_f64, 0.0_f64);
+                for &yi in y.iter() { s += yi; n2 += yi * yi; }
+                let ks: f64 = k.iter().sum();
+                eprintln!(
+                    "MULT{} norm={:.17e} sum={:.17e} y0={:.17e} y1={:.17e} ksum={:.17e}",
+                    call,
+                    n2.sqrt(),
+                    s,
+                    y[0],
+                    y[1],
+                    ks
+                );
+            }
+        }
     }
 
     /// Compute the Jacobian `J = dR/dk = M + dt·S + dt²·grad_H(z)`.
@@ -245,6 +266,15 @@ fn norm2(a: &[f64]) -> f64 {
 
 /// Solve `R(k) = 0` for `k` using Newton's method with MINRES inner solver.
 ///
+/// Bit-for-bit port of MFEM `NewtonSolver::Mult` (print level 1) as configured
+/// by ex10 (`iterative_mode = false`, `rel_tol = 1e-8`, `abs_tol = 0.0`,
+/// `max_iter = 10`, `SetPrintLevel(1)`): the residual norm is printed *before*
+/// the convergence test, `norm_goal = max(rel_tol·‖r₀‖, abs_tol)` is fixed at
+/// setup, and `ComputeScalingFactor()` is the default 1.0.  The inner
+/// Jacobian solve is MFEM's `MINRESSolver` + `DSmoother(1)` (rel_tol 1e-8,
+/// abs_tol 0, max_iter 300, print level −1) via
+/// [`fem_solver::solve_minres_dsmoother`].
+///
 /// The reduced operator is evaluated at current `v`, `x`, `dt`.
 fn newton_solve_reduced(
     op: &ReducedSystemOperator,
@@ -256,68 +286,107 @@ fn newton_solve_reduced(
 ) {
     let n = op.size();
     // MFEM double-precision: rel_tol = 1e-8, abs_tol = 0.0, max_iter = 10
-    let rtol = 1e-8;
-    let atol = 1e-7;   // Inner MINRES atol=1e-8 limits Newton accuracy to ~5e-8;
-                       // atol=1e-7 catches this as converged. MFEM with UMFPack
-                       // (or tighter inner tolerances) can reach 1e-9.
+    let rel_tol = 1e-8_f64;
+    let abs_tol = 0.0_f64;
     let max_iter = 10;
-    // Initial residual
+
+    // Initial residual (iterative_mode = false: k starts at 0, enforced by
+    // the call sites which pass freshly zeroed k vectors).
     let mut r = vec![0.0; n];
     op.mult(k, v, x, dt, &mut r);
     let norm0 = norm2(&r);
-    if verbose {
-        println!("Newton iteration  0 : ||r|| = {:.6}", norm0);
-    }
-    if norm0 <= atol {
-        return;
-    }
+    let mut norm = norm0;
+    // MFEM: norm_goal = std::max(rel_tol*norm, abs_tol), fixed at setup.
+    let norm_goal = (rel_tol * norm).max(abs_tol);
 
-    // Exact Newton: inner solve with MINRES + Jacobi preconditioning.
-    // C++ MFEM ex10 uses rtol=1e-8, atol=0.0, max_iter=300 with UMFPack
-    // when SuiteSparse is available, or MINRES with DSmoother otherwise.
-    // rtol=1e-8 is too tight for Jacobi-preconditioned MINRES on the
-    // ill-conditioned tangent matrix; rtol=1e-6 gives ~5e-6 relative
-    // accuracy in the final solution — consistent with C++ MINRES.
+    // Inner MINRES + DSmoother(1): J_minres SetRelTol(1e-8), SetAbsTol(0.0),
+    // SetMaxIter(300), SetPrintLevel(-1); prec = DSmoother(1).
     let inner_cfg = SolverConfig {
-        rtol: 1e-6,
-        atol: 1e-8,
-        max_iter: 500,
+        rtol: rel_tol,
+        atol: abs_tol,
+        max_iter: 300,
         verbose: false,
+        print_level: fem_solver::PrintLevel::Silent,
         ..SolverConfig::default()
     };
 
     let mut converged = false;
-    for iter in 1..=max_iter {
-        // Build exact Jacobian J = M + dt*S + dt²*grad_H(z)
-        let jac = op.gradient(k, v, x, dt);
-        let mut rhs_work = vec![0.0; n];
-        for i in 0..n { rhs_work[i] = -r[i]; }
-        // RHS at BC DOFs must be 0 (consistent with the BC elimination)
-        for &d in op.ess_dofs { if d < n { rhs_work[d] = 0.0; } }
-
-        // Solve J * dk = -r with MINRES (matching C++ MFEM)
-        let mut dk = vec![0.0; n];
-        solve_minres_jacobi(&jac, &rhs_work, &mut dk, &inner_cfg).ok();
-
-        // Newton update: k += dk
-        for j in 0..n { k[j] += dk[j]; }
-        op.mult(k, v, x, dt, &mut r);
-        let norm = norm2(&r);
+    for it in 0..=max_iter {
+        // MFEM prints BEFORE the convergence test (print level 1).
         if verbose {
-            println!(
-                "Newton iteration {iter:2} : ||r|| = {norm:.6e}, ||r||/||r_0|| = {:.6e}",
-                norm / norm0
-            );
+            print!("Newton iteration {it:2} : ||r|| = {}", fmt_g(norm));
+            if it > 0 {
+                print!(", ||r||/||r_0|| = {}", fmt_g(norm / norm0));
+            }
+            println!();
         }
-        // MFEM convergence: ||r|| <= ATOL || ||r|| <= RTOL * ||r_0||
-        if norm <= atol || norm <= rtol * norm0 {
+        if norm <= norm_goal {
             converged = true;
             break;
         }
+        if it >= max_iter {
+            converged = false;
+            break;
+        }
+
+        // Build the Jacobian J = M + dt*S + dt²*grad_H(z) (eliminated).
+        let jac = op.gradient(k, v, x, dt);
+
+        // Full-precision Jacobian trace (d91b probe, stderr only; mirrors
+        // patch_ex10_probe2.py: J·(D⁻¹w) with w = v + dt·k).
+        if std::env::var_os("FEM_EX10_PROBE").is_some() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static GCALL: AtomicUsize = AtomicUsize::new(0);
+            if GCALL.fetch_add(1, Ordering::Relaxed) == 0 {
+                let n2 = op.size();
+                let mut wv = vec![0.0_f64; n2];
+                for i in 0..n2 { wv[i] = v[i] + dt * k[i]; }
+                let diag = jac.diagonal();
+                let dsum: f64 = diag.iter().sum();
+                let mut t = vec![0.0_f64; n2];
+                for i in 0..n2 { t[i] = 1.0 * wv[i] / diag[i]; }
+                let mut yj = vec![0.0_f64; n2];
+                jac.spmv(&t, &mut yj);
+                let (mut ysum, mut yn2) = (0.0_f64, 0.0_f64);
+                for &yi in yj.iter() { ysum += yi; yn2 += yi * yi; }
+                let mut n_ess_like = 0usize;
+                let mut dfree = 0.0_f64;
+                for &d in diag.iter() {
+                    if (d - 1.0).abs() < 2.5 { n_ess_like += 1; } else { dfree += d; }
+                }
+                eprintln!(
+                    "JAC0 dsum={:.17e} n_ess_like={} dfree={:.17e} ynorm={:.17e} ysum={:.17e} y0={:.17e} y1={:.17e}",
+                    dsum,
+                    n_ess_like,
+                    dfree,
+                    yn2.sqrt(),
+                    ysum,
+                    yj[0],
+                    yj[1]
+                );
+            }
+        }
+
+        // c = [DF(x_i)]^{-1} [F(x_i) - b] with b = 0 (empty Vector): the
+        // MINRES right-hand side is the residual r itself.
+        let mut c = vec![0.0; n];
+        solve_minres_dsmoother(&jac, &r, &mut c, &inner_cfg).ok();
+
+        // Newton update: x -= c (ComputeScalingFactor() == 1.0).
+        for j in 0..n {
+            k[j] -= c[j];
+        }
+        op.mult(k, v, x, dt, &mut r);
+        norm = norm2(&r);
     }
+    // MFEM: ImplicitSolve does MFEM_VERIFY(newton_solver.GetConverged(), ...)
     if !converged {
-        eprintln!("WARNING: Newton solver did not converge (final ||r||/||r_0|| = {:.6e})",
-                  norm2(&r) / norm0);
+        eprintln!(
+            "Newton solver did not converge (||r|| = {}, ||r||/||r_0|| = {})",
+            fmt_g(norm),
+            fmt_g(norm / norm0)
+        );
+        std::process::abort();
     }
 }
 
@@ -346,8 +415,16 @@ fn forward_euler_step(
     for &d in ess_dofs_v { rhs[d] = 0.0; }
 
     let mut dv = vec![0.0; sc];
-    let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 30, verbose: false, ..SolverConfig::default() };
-    match solve_pcg_jacobi(&m, &rhs, &mut dv, &cfg) {
+    // MFEM M_solver: CGSolver + DSmoother, iterative_mode=false, rel_tol 1e-8,
+    // abs_tol 0, max_iter 30, print level 0.
+    let cfg = SolverConfig {
+        rtol: 1e-8,
+        atol: 0.0,
+        max_iter: 30,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    match solve_pcg_dsmoother(&m, &rhs, &mut dv, &cfg) {
         Ok(_) => {}
         Err(e) => eprintln!("  Explicit: M solve failed: {e}"),
     }
@@ -501,19 +578,23 @@ fn main() {
     let args = Args::parse();
     let t0 = std::time::Instant::now();
 
-    // ─── 1. Print options ────────────────────────────────────────────────────
-    eprintln!("Options used:");
-    eprintln!("   --mesh {}", args.mesh);
-    eprintln!("   --refine {}", args.ref_levels);
-    eprintln!("   --order {}", args.order);
-    eprintln!("   --ode-solver {}", args.ode_solver_type);
-    eprintln!("   --t-final {}", args.t_final);
-    eprintln!("   --time-step {}", args.dt);
-    eprintln!("   --viscosity {}", args.viscosity);
-    eprintln!("   --shear-modulus {}", args.mu);
-    eprintln!("   --bulk-modulus {}", args.K);
-    eprintln!("   --no-visualization");
-    eprintln!("   --visualization-steps {}", args.vis_steps);
+    // ─── 1. Print options (args.PrintOptions(cout)) ──────────────────────────
+    println!("Options used:");
+    println!("   --mesh {}", args.mesh);
+    println!("   --refine {}", args.ref_levels);
+    println!("   --order {}", args.order);
+    println!("   --ode-solver {}", args.ode_solver_type);
+    println!("   --t-final {}", fmt_g(args.t_final));
+    println!("   --time-step {}", fmt_g(args.dt));
+    println!("   --viscosity {}", fmt_g(args.viscosity));
+    println!("   --shear-modulus {}", fmt_g(args.mu));
+    println!("   --bulk-modulus {}", fmt_g(args.K));
+    if !args.visualization {
+        println!("   --no-visualization");
+    } else {
+        println!("   --visualization");
+    }
+    println!("   --visualization-steps {}", args.vis_steps);
 
     // ─── 2. Read mesh ───────────────────────────────────────────────────────
     let mut mesh: Mesh<2> = read_mfem_file(&args.mesh)
@@ -614,6 +695,13 @@ fn main() {
         }
     }
 
+    // Full-precision IC trace (d91b probe, stderr only).
+    if std::env::var_os("FEM_EX10_PROBE").is_some() {
+        let sv: f64 = v_block.iter().sum();
+        let sx: f64 = x_block.iter().sum();
+        eprintln!("IC vsum={sv:.17e} xsum={sx:.17e}");
+    }
+
     // ─── 10. Create ReducedSystemOperator ───────────────────────────────────
     let reduced_op = ReducedSystemOperator {
         m: &m,
@@ -628,17 +716,9 @@ fn main() {
     let mut mv_tmp = vec![0.0; n_total];
     m.spmv(v_block, &mut mv_tmp);
     let ke0 = 0.5 * dot(v_block, &mv_tmp);
-    println!("initial elastic energy (EE) = {ee0:.6}");
-    println!("initial kinetic energy (KE) = {ke0:.6}");
-    println!("initial   total energy (TE) = {:.6}", ee0 + ke0);
-
-    // L² norm of displacement and velocity (‖u‖_{L²} = sqrt(u^T M u))
-    {
-        let l2_x = vector_l2_norm(&m, x_block);
-        let l2_v = vector_l2_norm(&m, v_block);
-        println!("initial L2 norm of deformation: {l2_x:.12e}");
-        println!("initial L2 norm of velocity:    {l2_v:.12e}");
-    }
+    println!("initial elastic energy (EE) = {}", fmt_g(ee0));
+    println!("initial kinetic energy (KE) = {}", fmt_g(ke0));
+    println!("initial   total energy (TE) = {}", fmt_g(ee0 + ke0));
 
     // ─── 12. Time integration loop ──────────────────────────────────────────
     let mut t = 0.0;
@@ -682,15 +762,13 @@ fn main() {
             let ee = hyper.elastic_energy(x);
             m.spmv(v, &mut mv_tmp);
             let ke = 0.5 * dot(v, &mv_tmp);
-            // L² norms
-            let l2_x = vector_l2_norm(&m, x);
-            let l2_v = vector_l2_norm(&m, v);
             println!(
-                "step {step}, t = {t}, EE = {ee:.6}, KE = {ke:.6}, ΔTE = {:.6}",
-                (ee + ke) - (ee0 + ke0)
-            );
-            println!(
-                "  L2(||x||)={l2_x:.12e}  L2(||v||)={l2_v:.12e}"
+                "step {}, t = {}, EE = {}, KE = {}, ΔTE = {}",
+                step,
+                fmt_g(t),
+                fmt_g(ee),
+                fmt_g(ke),
+                fmt_g((ee + ke) - (ee0 + ke0))
             );
         }
     }
