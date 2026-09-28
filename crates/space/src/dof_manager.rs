@@ -3999,13 +3999,23 @@ impl DofManager {
             .iter()
             .flat_map(|ms| ms.iter().flat_map(|o| o.dofs.iter().copied()))
             .collect();
-        // D820-3: with compacted vertex views the entity dofs can live below
-        // `n_uf_nodes` (the old `n_uf_nodes..uf.n_dofs` window assumed
-        // node-addressed vertices) — enumerate every still-unlabelled,
-        // unclassified dof instead.
-        let singletons: Vec<DofId> = (0..uf.n_dofs as DofId)
+        // D820-3: singletons are the still-unlabelled, unclassified dofs of
+        // the COVERING build.  Enumerate them from `dofs_flat` — the id
+        // universe is strictly larger than the dof set whenever the builders
+        // compact a corner view (order-1 Quad9 rows: entity dofs live below
+        // `n_uf_nodes`, which the old `n_uf_nodes..uf.n_dofs` window missed)
+        // *or* the mesh carries a high-order geometry snapshot whose
+        // non-corner nodes were never dofs at all (ex27: Quad4 + order-3
+        // rows — the full-range enumeration collected 1447 geometry ids as
+        // dofs and exploded the space).
+        let mut singletons: Vec<DofId> = uf
+            .dofs_flat
+            .iter()
+            .copied()
             .filter(|&d| relabel[d as usize] == u32::MAX && !classified.contains(&d))
             .collect();
+        singletons.sort_unstable();
+        singletons.dedup();
         for &d in &singletons {
             order_key.push((d, usize::MAX));
         }
