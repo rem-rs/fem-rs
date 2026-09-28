@@ -64,6 +64,7 @@ use fem_core::{ElemId, NodeId};
 
 use crate::element_type::ElementType;
 use crate::simplex::{GeometryData, Mesh};
+use crate::topology::MeshTopology;
 
 /// Reference coordinates ([0,1]³) of the 8 vertices of a Hex8 in **MFEM
 /// `Geometry::Constants<CUBE>` order**: `0=(0,0,0) 1=(1,0,0) 2=(1,1,0)
@@ -286,6 +287,76 @@ impl<'a> HexQkGeometry<'a> {
 /// dof point).
 pub(crate) const IDENTITY: u8 = 8;
 
+/// Whether the mesh is a *periodically merged* mesh in the sense of the
+/// space-side D808-3 predicate (`DofManager::is_periodic_merged`): some
+/// element's folded corner node is not in the element's own geometry row,
+/// i.e. the row still addresses the pre-merge node table.  On such a mesh
+/// the shared-dof refinement below would inherit the **folded (wrapped)
+/// vertex frame** for the row's corner values, and the wrapped frame is not
+/// a coherent isoparametric cell — the 3-D twin of
+/// [`super::curved_quad::is_periodic_merged_2d`] (D832-2, porting D832-1).
+pub(crate) fn is_periodic_merged_3d(mesh: &Mesh<3>) -> bool {
+    for e in 0..mesh.n_elems() as u32 {
+        let gn = mesh.geometry_nodes(e);
+        for &v in mesh.elem_nodes(e) {
+            if !gn.contains(&v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Build the refined mesh's [`GeometryData`] for a *periodically merged*
+/// parent: fully per-element own-side rows, each one the prolongation of that
+/// element's **own** order-`p` row — MFEM's `MakePeriodic` semantics, whose
+/// nodal space on a periodic mesh is converted to discontinuous `L2_T1` so
+/// every element keeps the coordinates of its own side of a seam (MFEM 4.10
+/// probe `tmp/d89b`: refined periodic hex torus nodes = `L2_T1_3D_P2`,
+/// `NDofs = 216·27 = 5832`).  No dof is shared — across a periodic seam even
+/// a *vertex* has two legitimate own-side images, so the shared-dof table
+/// (which keys vertex dofs by fine mesh node and edge/face dofs by fine node
+/// sets) cannot represent both sides.
+fn build_periodic_own_side_hex_geometry(
+    pq: &HexQkGeometry,
+    fine_parent: &[(ElemId, u8)],
+) -> GeometryData {
+    let p = pq.order;
+    let dpe = pq.dpe;
+    let n_fine = fine_parent.len();
+    let mut conn = Vec::with_capacity(n_fine * dpe);
+    let mut coords = Vec::with_capacity(n_fine * dpe * 3);
+    for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
+        // Fine-ref → parent-ref affine map (see `build_refined_hex_geometry`):
+        // `child` is the MFEM hex corner index of the child's own corner, so
+        // the octant origin is `0.5 · MFEM_HEX_VERTS[child]`.
+        let (origin, scale) = if child == IDENTITY {
+            ([0.0_f64; 3], 1.0_f64)
+        } else {
+            let v = MFEM_HEX_VERTS[child as usize];
+            ([0.5 * v[0], 0.5 * v[1], 0.5 * v[2]], 0.5)
+        };
+        for o in 0..dpe {
+            let r = pq.ref01[o];
+            let xi = [
+                origin[0] + scale * r[0],
+                origin[1] + scale * r[1],
+                origin[2] + scale * r[2],
+            ];
+            let x = pq.eval_at(pe, xi);
+            conn.push((fe * dpe + o) as NodeId);
+            coords.extend_from_slice(&x);
+        }
+    }
+    GeometryData {
+        order: p as u8,
+        conn,
+        nodes_per_elem: dpe,
+        n_nodes: n_fine * dpe,
+        coords,
+    }
+}
+
 /// Key of a shared fine edge dof: the fine edge (its sorted node pair) plus
 /// the dof's index within the edge, measured from its lower-id node.
 type EdgeKey = (NodeId, NodeId, usize);
@@ -312,6 +383,11 @@ type FaceKey = ([NodeId; 4], usize, usize);
 /// exactly 0/1; in particular every dof of an identity element) and the
 /// standard order-`p` interpolation otherwise, i.e. MFEM's
 /// `GetLocalInterpolation` with its first-touch `mark` rule.
+///
+/// A [periodically merged](is_periodic_merged_3d) parent takes the own-side
+/// per-element path ([`build_periodic_own_side_hex_geometry`]) instead — the
+/// shared table's vertex block is the fine *folded* vertex table, whose values
+/// put every seam-adjacent child row into the wrapped frame.
 pub(crate) fn build_refined_hex_geometry(
     parent: &Mesh<3>,
     fine: &Mesh<3>,
@@ -321,6 +397,10 @@ pub(crate) fn build_refined_hex_geometry(
     let p = pq.order;
     let dpe = pq.dpe;
     debug_assert_eq!(fine.n_elems(), fine_parent.len());
+
+    if is_periodic_merged_3d(parent) {
+        return Some(build_periodic_own_side_hex_geometry(&pq, fine_parent));
+    }
 
     // Index-space corner of each local vertex, used to classify a dof.
     let vix: Vec<[usize; 3]> = (0..8).map(|v| vert_index(v, p)).collect();
@@ -471,6 +551,42 @@ pub(crate) fn l2_p1_hex_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
                 return None; // shared dof: not the discontinuous layout
             }
         }
+    }
+    Some(geo)
+}
+
+/// The **periodic snapshot layout** of a straight (order-1) hex mesh:
+/// `Mesh::make_periodic`'s per-element own-side geometry snapshot
+/// (`simplex.rs::periodic_geometry_snapshot` — rows addressing the *pre-merge*
+/// node table, with dof ids shared between same-side neighbours).  MFEM's
+/// `MakePeriodic` materializes exactly this information as discontinuous
+/// `L2_T1_3D_P1` nodes (`SetCurvature(order, /*discont=*/true)` before the
+/// `v2v` renumbering), and refining it keeps the fully discontinuous
+/// own-side layout (D832-2, MFEM probe `tmp/d89b`: folded 3×3×3 torus
+/// 216 dofs → refined 1728) — so the snapshot rides the same
+/// [`build_refined_l2_p1_hex_geometry`] transport, which reads the parent's
+/// own rows through its `conn` and is layout-agnostic on the parent side.
+///
+/// Recognized **only** on a [periodically merged](is_periodic_merged_3d)
+/// mesh: a continuous order-1 table (rows = the element corners themselves)
+/// has every corner in its row, so the predicate excludes it, and the plain
+/// vertex averaging those meshes use stays bit-for-bit untouched.
+pub(crate) fn periodic_p1_hex_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
+    if !is_periodic_merged_3d(mesh) {
+        return None;
+    }
+    let geo = mesh.geometry.as_ref()?;
+    if geo.order != 1 || geo.nodes_per_elem != 8 {
+        return None;
+    }
+    if geo.conn.len() != mesh.n_elems() * 8 {
+        return None;
+    }
+    if geo.coords.len() < geo.n_nodes * 3 {
+        return None;
+    }
+    if geo.conn.iter().any(|&d| d as usize >= geo.n_nodes) {
+        return None;
     }
     Some(geo)
 }

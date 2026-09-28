@@ -5632,6 +5632,18 @@ pub fn refine_nonconforming_hex(
     // its transport and its `SetVerticesFromNodes` vertex rebuild are its own
     // (see `curved_hex::build_refined_l2_p1_hex_geometry`).
     let l2_geo = super::curved_hex::l2_p1_hex_geometry(mesh);
+    // D832-2: a periodically merged *straight* parent keeps `make_periodic`'s
+    // per-element own-side snapshot (rows addressing the pre-merge node table
+    // — not the fresh element-major layout `l2_p1_hex_geometry` matches).
+    // MFEM's `MakePeriodic` materializes `L2_T1_3D_P1` nodes
+    // (`SetCurvature(order, /*discont=*/true)` before the `v2v` renumbering)
+    // whose refinement stays fully discontinuous own-side, so the snapshot
+    // rides the same transport.
+    let p1_snapshot = if l2_geo.is_none() {
+        super::curved_hex::periodic_p1_hex_geometry(mesh)
+    } else {
+        None
+    };
     // MFEM's canonical new-vertex numbering (`oedge + E` / `oface + F` /
     // `oelem + C`, see `MfemHexRefineIds`).  Reproduced where a written file
     // pins it down — a *curved* mesh under *uniform* refinement keeps its
@@ -5639,7 +5651,9 @@ pub fn refine_nonconforming_hex(
     // Straight-sided meshes keep the historical first-touch numbering (the
     // straight-refinement regression outputs pin it), and partial refinement
     // would leave holes in the dense id space, so neither switches.
-    let mfem_ids = if (geo.is_some() || l2_geo.is_some()) && marked_set.len() == n_elems {
+    let mfem_ids = if (geo.is_some() || l2_geo.is_some() || p1_snapshot.is_some())
+        && marked_set.len() == n_elems
+    {
         Some(MfemHexRefineIds::build(mesh))
     } else {
         None
@@ -5996,13 +6010,14 @@ pub fn refine_nonconforming_hex(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
-    if let Some(l2) = l2_geo {
-        // D814-2: transport the folded per-element table (every fine element
-        // keeps its own 8 corner dofs — no averaging, no deduplication), then
-        // MFEM's closing `UpdateNodes` → `SetVerticesFromNodes`: the fine
-        // `vertices` are the mean over the element references of the refined
-        // folded values (the `vertices` block is a compatibility table, the
-        // geometry lives in the `nodes` grid function).
+    if let Some(l2) = l2_geo.or(p1_snapshot) {
+        // D814-2 / D832-2: transport the per-element own-side table (every
+        // fine element keeps its own 8 corner dofs — no averaging, no
+        // deduplication), then MFEM's closing `UpdateNodes` →
+        // `SetVerticesFromNodes`: the fine `vertices` are the mean over the
+        // element references of the refined folded values (the `vertices`
+        // block is a compatibility table, the geometry lives in the `nodes`
+        // grid function).
         let table = super::curved_hex::build_refined_l2_p1_hex_geometry(l2, &fine_parent);
         new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
         new_mesh.geometry = Some(table);
