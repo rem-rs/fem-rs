@@ -7312,6 +7312,55 @@ pub fn refine_nonconforming_hex_aniso(
 
     let n_elems = mesh.n_elems();
 
+    // ── D835-2: own-side geometry transport for periodically merged parents ──
+    // `refine_nonconforming_hex` carries the D832-2 recipe; the aniso path
+    // used to drop every geometry table, which on a periodic parent loses the
+    // seam's own-side rows entirely (the merged/wrapped vertex frame turns
+    // every seam child inside-out and puts seam-crossing midpoints on the
+    // wrong side of the torus).  Two own-side parents are recognized: a
+    // *discontinuous* order-1 table (`L2_T1_3D_P1`, or D832-2's straight
+    // periodic snapshot) and a *curved* (order-p ≥ 2) table on a periodically
+    // merged mesh.
+    let l2_geo = super::curved_hex::l2_p1_hex_geometry(mesh);
+    let p1_snapshot = if l2_geo.is_none() {
+        super::curved_hex::periodic_p1_hex_geometry(mesh)
+    } else {
+        None
+    };
+    let own_side_p1 = l2_geo.or(p1_snapshot);
+    let curved_geo = if own_side_p1.is_none() && super::curved_hex::is_periodic_merged_3d(mesh) {
+        super::curved_hex::HexQkGeometry::new(mesh)
+    } else {
+        None
+    };
+    // Own-side coordinate of element `e`'s local corner `k` (order-1 tables).
+    let own_p1_corner = |g: &crate::simplex::GeometryData, e: ElemId, k: usize| -> [f64; 3] {
+        let dof = g.conn[e as usize * g.nodes_per_elem + k] as usize;
+        [g.coords[dof * 3], g.coords[dof * 3 + 1], g.coords[dof * 3 + 2]]
+    };
+    // Own-side coordinate of the new midpoint on element `e`'s local edge
+    // `li` (local corners `ka`,`kb`): order-1 rows give the corner pair mean,
+    // a curved row the parent field at the edge midpoint — never the merged
+    // (wrapped) vertex frame.
+    let own_mid = |e: ElemId, li: usize, ka: usize, kb: usize| -> Option<[f64; 3]> {
+        if let Some(g) = own_side_p1 {
+            let (pa, pb) = (own_p1_corner(g, e, ka), own_p1_corner(g, e, kb));
+            return Some([
+                0.5 * (pa[0] + pb[0]),
+                0.5 * (pa[1] + pb[1]),
+                0.5 * (pa[2] + pb[2]),
+            ]);
+        }
+        curved_geo.as_ref().map(|g| g.edge_pick(e, li))
+    };
+    // Own-side coordinate of the cross-cut face centre of element `e` at the
+    // reference point `ref` (2-axis cuts, curved rows only — the order-1
+    // centre is the mean of the four own-side edge midpoints the closure
+    // below already appended).
+    let own_face_center = |e: ElemId, rf: [f64; 3]| -> Option<[f64; 3]> {
+        curved_geo.as_ref().map(|g| g.eval_at(e, rf))
+    };
+
     // ── Determine per-element cut flags ─────────────────────────────────────
     #[derive(Default, Clone, Copy)]
     struct CutFlags { cut_x: bool, cut_y: bool, cut_z: bool }
@@ -7372,23 +7421,25 @@ pub fn refine_nonconforming_hex_aniso(
     let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
 
-    let mut ensure_mp = |key: (NodeId, NodeId), new_coords: &mut Vec<f64>, next: &mut NodeId| -> NodeId {
+    let mut ensure_mp = |key: (NodeId, NodeId), own: Option<[f64; 3]>, new_coords: &mut Vec<f64>, next: &mut NodeId| -> NodeId {
         let k = edge_key(key.0, key.1);
         *midpoint_map.entry(k).or_insert_with(|| {
-            // Copy values first to avoid simultaneous mutable/immutable borrow.
-            let xa = [
-                new_coords[3 * k.0 as usize],
-                new_coords[3 * k.0 as usize + 1],
-                new_coords[3 * k.0 as usize + 2],
-            ];
-            let xb = [
-                new_coords[3 * k.1 as usize],
-                new_coords[3 * k.1 as usize + 1],
-                new_coords[3 * k.1 as usize + 2],
-            ];
-            new_coords.push(0.5 * (xa[0] + xb[0]));
-            new_coords.push(0.5 * (xa[1] + xb[1]));
-            new_coords.push(0.5 * (xa[2] + xb[2]));
+            // Own-side midpoint when the parent carries own-side rows
+            // (D835-2); otherwise the merged-frame average.
+            let xyz = own.unwrap_or_else(|| {
+                let xa = [
+                    new_coords[3 * k.0 as usize],
+                    new_coords[3 * k.0 as usize + 1],
+                    new_coords[3 * k.0 as usize + 2],
+                ];
+                let xb = [
+                    new_coords[3 * k.1 as usize],
+                    new_coords[3 * k.1 as usize + 1],
+                    new_coords[3 * k.1 as usize + 2],
+                ];
+                [0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1]), 0.5 * (xa[2] + xb[2])]
+            });
+            new_coords.extend_from_slice(&xyz);
             let id = *next; *next += 1; id
         })
     };
@@ -7397,22 +7448,26 @@ pub fn refine_nonconforming_hex_aniso(
     for (&e, &cf) in &cut_map {
         let ns = mesh.elem_nodes(e);
         if cf.cut_x {
-            ensure_mp((ns[0], ns[1]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[3], ns[2]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[4], ns[5]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[7], ns[6]), &mut new_coords, &mut next_node);
+            // D835-2: cut-edge local indices in `local_edges_hex` order —
+            // (0,1)=0, (3,2)=2, (4,5)=4, (7,6)=6.
+            ensure_mp((ns[0], ns[1]), own_mid(e, 0, 0, 1), &mut new_coords, &mut next_node);
+            ensure_mp((ns[3], ns[2]), own_mid(e, 2, 3, 2), &mut new_coords, &mut next_node);
+            ensure_mp((ns[4], ns[5]), own_mid(e, 4, 4, 5), &mut new_coords, &mut next_node);
+            ensure_mp((ns[7], ns[6]), own_mid(e, 6, 7, 6), &mut new_coords, &mut next_node);
         }
         if cf.cut_y {
-            ensure_mp((ns[0], ns[3]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[1], ns[2]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[4], ns[7]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[5], ns[6]), &mut new_coords, &mut next_node);
+            // (0,3)=3, (1,2)=1, (4,7)=7, (5,6)=5.
+            ensure_mp((ns[0], ns[3]), own_mid(e, 3, 0, 3), &mut new_coords, &mut next_node);
+            ensure_mp((ns[1], ns[2]), own_mid(e, 1, 1, 2), &mut new_coords, &mut next_node);
+            ensure_mp((ns[4], ns[7]), own_mid(e, 7, 4, 7), &mut new_coords, &mut next_node);
+            ensure_mp((ns[5], ns[6]), own_mid(e, 5, 5, 6), &mut new_coords, &mut next_node);
         }
         if cf.cut_z {
-            ensure_mp((ns[0], ns[4]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[1], ns[5]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[2], ns[6]), &mut new_coords, &mut next_node);
-            ensure_mp((ns[3], ns[7]), &mut new_coords, &mut next_node);
+            // (0,4)=8, (1,5)=9, (2,6)=10, (3,7)=11.
+            ensure_mp((ns[0], ns[4]), own_mid(e, 8, 0, 4), &mut new_coords, &mut next_node);
+            ensure_mp((ns[1], ns[5]), own_mid(e, 9, 1, 5), &mut new_coords, &mut next_node);
+            ensure_mp((ns[2], ns[6]), own_mid(e, 10, 2, 6), &mut new_coords, &mut next_node);
+            ensure_mp((ns[3], ns[7]), own_mid(e, 11, 3, 7), &mut new_coords, &mut next_node);
         }
     }
 
@@ -7423,16 +7478,23 @@ pub fn refine_nonconforming_hex_aniso(
     // an additional face-center node on the cross-cutting face.
     let mut face_center_map: HashMap<[NodeId; 4], NodeId> = HashMap::new();
 
-    let mut ensure_fc = |ns4: [NodeId; 4], new_coords: &mut Vec<f64>, next: &mut NodeId| -> NodeId {
+    let mut ensure_fc = |ns4: [NodeId; 4], own: Option<[f64; 3]>, new_coords: &mut Vec<f64>, next: &mut NodeId| -> NodeId {
         let key = hex_face_key(ns4);
         *face_center_map.entry(key).or_insert_with(|| {
-            let mut x = 0.0_f64; let mut y = 0.0_f64; let mut z = 0.0_f64;
-            for n in ns4 {
-                x += new_coords[3 * n as usize];
-                y += new_coords[3 * n as usize + 1];
-                z += new_coords[3 * n as usize + 2];
-            }
-            new_coords.push(x / 4.0); new_coords.push(y / 4.0); new_coords.push(z / 4.0);
+            // Curved own-side parents take the parent field at the cross-face
+            // centre (D835-2); order-1 own-side parents need no override —
+            // the four edge midpoints were already appended with own-side
+            // coordinates, so their mean is the own-side centre.
+            let xyz = own.unwrap_or_else(|| {
+                let mut x = 0.0_f64; let mut y = 0.0_f64; let mut z = 0.0_f64;
+                for n in ns4 {
+                    x += new_coords[3 * n as usize];
+                    y += new_coords[3 * n as usize + 1];
+                    z += new_coords[3 * n as usize + 2];
+                }
+                [x / 4.0, y / 4.0, z / 4.0]
+            });
+            new_coords.extend_from_slice(&xyz);
             let id = *next; *next += 1; id
         })
     };
@@ -7464,13 +7526,13 @@ pub fn refine_nonconforming_hex_aniso(
                 let m12 = *midpoint_map.get(&edge_key(ns[1], ns[2])).unwrap();
                 let m32 = *midpoint_map.get(&edge_key(ns[3], ns[2])).unwrap();
                 let m03 = *midpoint_map.get(&edge_key(ns[0], ns[3])).unwrap();
-                ensure_fc([m01, m12, m32, m03], &mut new_coords, &mut next_node);
+                ensure_fc([m01, m12, m32, m03], own_face_center(e, [0.5, 0.5, 0.0]), &mut new_coords, &mut next_node);
 
                 let m45 = *midpoint_map.get(&edge_key(ns[4], ns[5])).unwrap();
                 let m56 = *midpoint_map.get(&edge_key(ns[5], ns[6])).unwrap();
                 let m76 = *midpoint_map.get(&edge_key(ns[7], ns[6])).unwrap();
                 let m47 = *midpoint_map.get(&edge_key(ns[4], ns[7])).unwrap();
-                ensure_fc([m45, m56, m76, m47], &mut new_coords, &mut next_node);
+                ensure_fc([m45, m56, m76, m47], own_face_center(e, [0.5, 0.5, 1.0]), &mut new_coords, &mut next_node);
             }
             if cf.cut_x && cf.cut_z {
                 let m01 = *midpoint_map.get(&edge_key(ns[0], ns[1])).unwrap();
@@ -7482,9 +7544,9 @@ pub fn refine_nonconforming_hex_aniso(
                 let m26 = *midpoint_map.get(&edge_key(ns[2], ns[6])).unwrap();
                 let m37 = *midpoint_map.get(&edge_key(ns[3], ns[7])).unwrap();
                 // Front face (─y) cross: [m01, m15, m45, m04]
-                ensure_fc([m01, m15, m45, m04], &mut new_coords, &mut next_node);
+                ensure_fc([m01, m15, m45, m04], own_face_center(e, [0.5, 0.0, 0.5]), &mut new_coords, &mut next_node);
                 // Back face (+y) cross: [m32, m26, m76, m37]
-                ensure_fc([m32, m26, m76, m37], &mut new_coords, &mut next_node);
+                ensure_fc([m32, m26, m76, m37], own_face_center(e, [0.5, 1.0, 0.5]), &mut new_coords, &mut next_node);
             }
             if cf.cut_y && cf.cut_z {
                 let m03 = *midpoint_map.get(&edge_key(ns[0], ns[3])).unwrap();
@@ -7496,9 +7558,9 @@ pub fn refine_nonconforming_hex_aniso(
                 let m26 = *midpoint_map.get(&edge_key(ns[2], ns[6])).unwrap();
                 let m37 = *midpoint_map.get(&edge_key(ns[3], ns[7])).unwrap();
                 // Left face (─x) cross: [m03, m37, m47, m04]
-                ensure_fc([m03, m37, m47, m04], &mut new_coords, &mut next_node);
+                ensure_fc([m03, m37, m47, m04], own_face_center(e, [0.0, 0.5, 0.5]), &mut new_coords, &mut next_node);
                 // Right face (+x) cross: [m12, m26, m56, m15]
-                ensure_fc([m12, m26, m56, m15], &mut new_coords, &mut next_node);
+                ensure_fc([m12, m26, m56, m15], own_face_center(e, [1.0, 0.5, 0.5]), &mut new_coords, &mut next_node);
             }
         }
     }
@@ -7506,6 +7568,10 @@ pub fn refine_nonconforming_hex_aniso(
     // ── Build new element connectivity ───────────────────────────────────────
     let mut new_conn: Vec<NodeId> = Vec::new();
     let mut new_tags: Vec<i32>    = Vec::new();
+    // Fine element → (parent, origin, scale) frames for the own-side transport
+    // (D835-2): `parent_ref = origin + scale ∘ child_ref`.  A carried
+    // (unrefined) element is its own parent at unit frame.
+    let mut fine_frames: Vec<super::curved_hex::HexFrame> = Vec::new();
 
     let get_mp = |a: NodeId, b: NodeId| -> NodeId {
         *midpoint_map.get(&edge_key(a, b)).expect("midpoint missing in hex aniso")
@@ -7531,6 +7597,10 @@ pub fn refine_nonconforming_hex_aniso(
                     new_conn.extend_from_slice(&[ns[0], m01, m32, ns[3], ns[4], m45, m76, ns[7]]); new_tags.push(tag);
                     // Right (+x): [m01, n1, n2, m32, m45, n5, n6, m76]
                     new_conn.extend_from_slice(&[m01, ns[1], ns[2], m32, m45, ns[5], ns[6], m76]); new_tags.push(tag);
+                    fine_frames.extend([
+                        (e, [0.0, 0.0, 0.0], [0.5, 1.0, 1.0]),
+                        (e, [0.5, 0.0, 0.0], [0.5, 1.0, 1.0]),
+                    ]);
                 }
                 // ── Y only: 2 children ────────────────────────────────────
                 (false, true, false) => {
@@ -7540,6 +7610,10 @@ pub fn refine_nonconforming_hex_aniso(
                     new_conn.extend_from_slice(&[ns[0], ns[1], m12, m03, ns[4], ns[5], m56, m47]); new_tags.push(tag);
                     // Back  (+y): [m03, m12, n2, n3, m47, m56, n6, n7]
                     new_conn.extend_from_slice(&[m03, m12, ns[2], ns[3], m47, m56, ns[6], ns[7]]); new_tags.push(tag);
+                    fine_frames.extend([
+                        (e, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0]),
+                        (e, [0.0, 0.5, 0.0], [1.0, 0.5, 1.0]),
+                    ]);
                 }
                 // ── Z only: 2 children ────────────────────────────────────
                 (false, false, true) => {
@@ -7549,6 +7623,10 @@ pub fn refine_nonconforming_hex_aniso(
                     new_conn.extend_from_slice(&[ns[0], ns[1], ns[2], ns[3], m04, m15, m26, m37]); new_tags.push(tag);
                     // Top:    [m04, m15, m26, m37, n4, n5, n6, n7]
                     new_conn.extend_from_slice(&[m04, m15, m26, m37, ns[4], ns[5], ns[6], ns[7]]); new_tags.push(tag);
+                    fine_frames.extend([
+                        (e, [0.0, 0.0, 0.0], [1.0, 1.0, 0.5]),
+                        (e, [0.0, 0.0, 0.5], [1.0, 1.0, 0.5]),
+                    ]);
                 }
                 // ── XY: 4 children ───────────────────────────────────────
                 (true, true, false) => {
@@ -7563,6 +7641,12 @@ pub fn refine_nonconforming_hex_aniso(
                     new_conn.extend_from_slice(&[m01, ns[1], m12, fc_bot, m45, ns[5], m56, fc_top]); new_tags.push(tag);
                     new_conn.extend_from_slice(&[fc_bot, m12, ns[2], m32, fc_top, m56, ns[6], m76]); new_tags.push(tag);
                     new_conn.extend_from_slice(&[m03, fc_bot, m32, ns[3], m47, fc_top, m76, ns[7]]); new_tags.push(tag);
+                    fine_frames.extend([
+                        (e, [0.0, 0.0, 0.0], [0.5, 0.5, 1.0]),
+                        (e, [0.5, 0.0, 0.0], [0.5, 0.5, 1.0]),
+                        (e, [0.5, 0.5, 0.0], [0.5, 0.5, 1.0]),
+                        (e, [0.0, 0.5, 0.0], [0.5, 0.5, 1.0]),
+                    ]);
                 }
                 // ── XZ: 4 children ───────────────────────────────────────
                 (true, false, true) => {
@@ -7577,6 +7661,12 @@ pub fn refine_nonconforming_hex_aniso(
                     new_conn.extend_from_slice(&[m01, ns[1], ns[2], m32, fc_frt, m15, m26, fc_bck]); new_tags.push(tag);
                     new_conn.extend_from_slice(&[m04, fc_frt, fc_bck, m37, ns[4], m45, m76, ns[7]]); new_tags.push(tag);
                     new_conn.extend_from_slice(&[fc_frt, m15, m26, fc_bck, m45, ns[5], ns[6], m76]); new_tags.push(tag);
+                    fine_frames.extend([
+                        (e, [0.0, 0.0, 0.0], [0.5, 1.0, 0.5]),
+                        (e, [0.5, 0.0, 0.0], [0.5, 1.0, 0.5]),
+                        (e, [0.0, 0.0, 0.5], [0.5, 1.0, 0.5]),
+                        (e, [0.5, 0.0, 0.5], [0.5, 1.0, 0.5]),
+                    ]);
                 }
                 // ── YZ: 4 children ───────────────────────────────────────
                 (false, true, true) => {
@@ -7591,18 +7681,26 @@ pub fn refine_nonconforming_hex_aniso(
                     new_conn.extend_from_slice(&[m03, m12, ns[2], ns[3], fc_lft, fc_rgt, m26, m37]); new_tags.push(tag);
                     new_conn.extend_from_slice(&[m04, m15, fc_rgt, fc_lft, ns[4], ns[5], m56, m47]); new_tags.push(tag);
                     new_conn.extend_from_slice(&[fc_lft, fc_rgt, m26, m37, m47, m56, ns[6], ns[7]]); new_tags.push(tag);
+                    fine_frames.extend([
+                        (e, [0.0, 0.0, 0.0], [1.0, 0.5, 0.5]),
+                        (e, [0.0, 0.5, 0.0], [1.0, 0.5, 0.5]),
+                        (e, [0.0, 0.0, 0.5], [1.0, 0.5, 0.5]),
+                        (e, [0.0, 0.5, 0.5], [1.0, 0.5, 0.5]),
+                    ]);
                 }
                 // ── All three axes: delegate to isotropic (shouldn't reach here) ─
                 _ => {
                     // Fallback: emit original element unchanged (isotropic handled separately).
                     for k in 0..8 { new_conn.push(ns[k]); }
                     new_tags.push(tag);
+                    fine_frames.push((e, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
                 }
             }
         } else {
             // Unrefined element: keep as-is.
             for k in 0..8 { new_conn.push(ns[k]); }
             new_tags.push(tag);
+            fine_frames.push((e, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
         }
     }
 
@@ -7673,6 +7771,20 @@ pub fn refine_nonconforming_hex_aniso(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
+    // D835-2: transport the parent's own-side geometry through the aniso
+    // children's frames, mirroring `refine_nonconforming_hex`'s D832-2/D814-2
+    // tail: order-1 own-side parents also get the `SetVerticesFromNodes`
+    // vertex rebuild (the merged-frame midpoint values above are
+    // placeholders the rebuild overwrites); a curved periodic parent keeps
+    // its own-side order-p rows (the vertex table keeps the computed
+    // own-side picks, like the isotropic curved path).
+    if let Some(p1) = own_side_p1 {
+        let table = super::curved_hex::build_own_side_p1_hex_frames(p1, &fine_frames);
+        new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
+        new_mesh.geometry = Some(table);
+    } else if let Some(pq) = curved_geo {
+        new_mesh.geometry = Some(super::curved_hex::build_own_side_hex_frames(&pq, &fine_frames));
+    }
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 3);
     }
@@ -8879,6 +8991,16 @@ pub fn refine_hex8_uniform(
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
     let geo = super::curved_hex::HexQkGeometry::new(mesh);
+    // D814-2 / D835-2: a *discontinuous* order-1 (`L2_T1_3D_P1`) table — the
+    // folded per-element geometry of a periodic mesh — and D832-2's
+    // periodically-merged *straight* parent's own-side snapshot ride the same
+    // refinement with their own transport (mirrors `refine_nonconforming_hex`).
+    let l2_geo = super::curved_hex::l2_p1_hex_geometry(mesh);
+    let p1_snapshot = if l2_geo.is_none() {
+        super::curved_hex::periodic_p1_hex_geometry(mesh)
+    } else {
+        None
+    };
     let mut nc = mesh.coords.clone(); let mut nn = mesh.n_nodes() as NodeId;
     // Iterate in element order, not over `marked_set`: the new node ids are
     // handed out in creation order, so a `HashSet` walk made the refined node
@@ -8964,7 +9086,16 @@ pub fn refine_hex8_uniform(
         } else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
     }
     let mut nm=Mesh::uniform(nc,ncn,nt,ElementType::Hex8,nfc,nft,ElementType::Quad4);
-    if geo.is_some() {
+    if let Some(l2) = l2_geo.or(p1_snapshot) {
+        // D814-2 / D832-2 / D835-2: transport the per-element own-side table
+        // (every fine element keeps its own 8 corner dofs — no averaging, no
+        // deduplication), then MFEM's closing `UpdateNodes` →
+        // `SetVerticesFromNodes` vertex rebuild.  The merged-frame midpoint
+        // values above are placeholders the rebuild overwrites.
+        let table = super::curved_hex::build_refined_l2_p1_hex_geometry(l2, &fine_parent);
+        nm.coords = super::curved_hex::set_vertices_from_nodes(&nm, &table);
+        nm.geometry = Some(table);
+    } else if geo.is_some() {
         nm.geometry = super::curved_hex::build_refined_hex_geometry(mesh, &nm, &fine_parent);
     }
     (nm,c,mm)

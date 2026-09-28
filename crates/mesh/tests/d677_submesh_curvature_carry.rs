@@ -125,9 +125,9 @@ fn curved_parent_geometry_is_carried() {
             shared_checked += 1;
         }
     }
-    // A P2 hex pair shares its common face's vertices and edge nodes
-    // (4 + 4 = 8): `set_curvature_hex8` shares vertex/edge dofs but
-    // duplicates face/interior dofs per element (coincident positions).
+    // A P2 hex pair shares its common face's vertices, edge nodes and face
+    // centre (4 + 4 + 1 = 9): `set_curvature_hex8` shares vertex/edge/face
+    // dofs MFEM-H1-style (D835-1); only interior dofs are per element.
     assert!(shared_checked >= 8, "expected the shared face nodes, got {shared_checked}");
     // The bent node (element 0's own edge) stays distinct from element 1's
     // copy — but its coordinates transfer verbatim.

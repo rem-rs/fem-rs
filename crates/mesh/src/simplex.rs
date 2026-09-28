@@ -722,9 +722,12 @@ impl<const D: usize> Mesh<D> {
     ///
     /// Vertex DOFs reuse the mesh vertices; edge DOFs are shared between the
     /// elements meeting at that mesh edge (keyed by the vertex pair), so the
-    /// geometry stays C0-continuous.  Face/interior nodes are created per
-    /// element — for a straight-sided hex the duplicates coincide, so the
-    /// geometry map is still single-valued.
+    /// geometry stays C0-continuous.  Face DOFs are shared the same way —
+    /// keyed by the mesh face (sorted corner quad + the dof's canonical
+    /// in-face indices, the rule `amr::curved_hex::build_refined_hex_geometry`
+    /// uses), i.e. one dof per mesh face exactly like MFEM's continuous `H1`
+    /// entity dof (D835-1).  Interior nodes are private to the element —
+    /// MFEM `H1` semantics: V/E/F shared, interior private.
     fn set_curvature_hex8(&mut self, p: usize) {
         use fem_element::lagrange::factory::HexQk;
         use fem_element::ReferenceElement;
@@ -744,10 +747,24 @@ impl<const D: usize> Mesh<D> {
         let mut gll: Vec<f64> = dof_ref.iter().map(|c| c[0]).collect();
         gll.sort_by(|a, b| a.partial_cmp(b).unwrap());
         gll.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+        let gll_rank = |x: f64| -> usize {
+            gll.iter()
+                .position(|&g| (g - x).abs() < 1e-12)
+                .expect("dof coordinate sits on the GLL axis")
+        };
 
         // Shared edge nodes: edge key = (min vertex, max vertex) → ids ordered
         // from the min vertex towards the max vertex.
         let mut edge_map: std::collections::HashMap<(NodeId, NodeId), Vec<NodeId>> =
+            std::collections::HashMap::new();
+        // D835-1: shared face nodes — key = (sorted face-corner quad, the dof's
+        // two in-face indices in the face's canonical frame), so both elements
+        // meeting at a face name the same geometry node and the face trace is
+        // single-valued.  Round 89's "bitwise identical on affine meshes"
+        // harmlessness claim was wrong: even the unit 3×3×3 grid has 1-ulp
+        // differences between the two sides' trilinear evaluations (6/54 face
+        // dofs at p=2, 48/216 at p=3 — tmp/d90b/d835_probe_prefix.txt).
+        let mut face_map: std::collections::HashMap<([NodeId; 4], usize, usize), NodeId> =
             std::collections::HashMap::new();
 
         // Local vertex index whose reference corner lies at `pos`.
@@ -782,10 +799,7 @@ impl<const D: usize> Mesh<D> {
                     // Edge DOF: exactly one free axis, `rc[free]` is an interior
                     // Lobatto node of that axis.
                     let fa = free_axis.expect("hex edge DOF has one free axis");
-                    let rank = gll
-                        .iter()
-                        .position(|&g| (g - rc[fa]).abs() < 1e-12)
-                        .expect("hex edge DOF at a Lobatto node");
+                    let rank = gll_rank(rc[fa]);
                     debug_assert!(rank >= 1 && rank < p);
                     // The two end vertices of the edge: free axis at 0 and 1.
                     let end = |sign: f64| -> usize {
@@ -818,8 +832,66 @@ impl<const D: usize> Mesh<D> {
                     // Rank of this node counted from the min vertex.
                     let idx = if va < vb { rank - 1 } else { p - 1 - rank };
                     geom_conn[base + d] = ids[idx];
+                } else if n_pinned == 1 {
+                    // D835-1: Face DOF — one per mesh face, shared by the two
+                    // elements meeting there (MFEM's continuous `H1` entity
+                    // dof).  The local face is the one pinned along `ax`; the
+                    // in-face canonical frame is the min-id corner plus its
+                    // smaller-id in-face neighbour — the same rule
+                    // `amr::curved_hex::build_refined_hex_geometry` keys its
+                    // refined face dofs by.
+                    let ax = (0..3)
+                        .find(|&a| rc[a].abs() < 1e-12 || (rc[a] - 1.0).abs() < 1e-12)
+                        .expect("hex face DOF has one pinned axis");
+                    let pinned = if rc[ax].abs() < 1e-12 { 0.0 } else { 1.0 };
+                    let f = *crate::amr::local_faces_hex()
+                        .iter()
+                        .find(|f| {
+                            f.iter()
+                                .all(|&v| (HEX8_REF_CORNERS[v][ax] - pinned).abs() < 1e-12)
+                        })
+                        .expect("hex face slot");
+                    let ids = [verts[f[0]], verts[f[1]], verts[f[2]], verts[f[3]]];
+                    let k = (0..4).min_by_key(|&i| ids[i]).expect("non-empty face");
+                    let (nl, nr) = (f[(k + 3) % 4], f[(k + 1) % 4]);
+                    let (second, other) = if verts[nl] <= verts[nr] { (nl, nr) } else { (nr, nl) };
+                    // In-face axis + direction from the min-id corner towards
+                    // each neighbour (the two reference corners differ in
+                    // exactly one axis).
+                    let corner_ix = |v: usize| {
+                        [
+                            usize::from(HEX8_REF_CORNERS[v][0] > 0.5) * p,
+                            usize::from(HEX8_REF_CORNERS[v][1] > 0.5) * p,
+                            usize::from(HEX8_REF_CORNERS[v][2] > 0.5) * p,
+                        ]
+                    };
+                    let step = |from: usize, to: usize| -> (usize, bool) {
+                        let (a, b) = (corner_ix(from), corner_ix(to));
+                        let d = (0..3).find(|&d| a[d] != b[d]).expect("corners differ in one axis");
+                        (d, b[d] > a[d])
+                    };
+                    let (d1, s1) = step(f[k], second);
+                    let (d2, s2) = step(f[k], other);
+                    let (j1, j2) = (
+                        if s1 { gll_rank(rc[d1]) } else { p - gll_rank(rc[d1]) },
+                        if s2 { gll_rank(rc[d2]) } else { p - gll_rank(rc[d2]) },
+                    );
+                    let mut key = ids;
+                    key.sort_unstable();
+                    let id = *face_map.entry((key, j1, j2)).or_insert_with(|| {
+                        // Position from the creating element's linear map —
+                        // both sides' maps agree on the face up to the
+                        // 1-ulp evaluation noise that motivated the sharing.
+                        let x = Self::trilinear_interp_3d(verts, self, rc);
+                        geom_coords.extend_from_slice(&x);
+                        let id = next_geom;
+                        next_geom += 1;
+                        id
+                    });
+                    geom_conn[base + d] = id;
                 } else {
-                    // Face or interior DOF: position from the linear map.
+                    // Interior DOF: private to the element (MFEM `H1` keeps
+                    // element-interior dofs unshared too).
                     let x = Self::trilinear_interp_3d(verts, self, rc);
                     geom_coords.extend_from_slice(&x);
                     geom_conn[base + d] = next_geom;

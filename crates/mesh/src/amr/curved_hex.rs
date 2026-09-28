@@ -206,7 +206,7 @@ impl<'a> HexQkGeometry<'a> {
     /// Evaluate the parent element's order-`p` geometry field at the `[0,1]³`
     /// reference point `xi` — the tensor Lagrange interpolation of the
     /// element's `(p+1)³` geometry dofs, accumulated in local dof order.
-    fn eval_at(&self, e: ElemId, xi: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn eval_at(&self, e: ElemId, xi: [f64; 3]) -> [f64; 3] {
         let p = self.order;
         let bx: Vec<f64> = (0..=p).map(|i| lagrange(&self.nodes, i, xi[0])).collect();
         let by: Vec<f64> = (0..=p).map(|i| lagrange(&self.nodes, i, xi[1])).collect();
@@ -307,6 +307,25 @@ pub(crate) fn is_periodic_merged_3d(mesh: &Mesh<3>) -> bool {
     false
 }
 
+/// Fine-ref → parent-ref affine frame of one refined child: `parent_ref =
+/// origin + scale ∘ child_ref` (componentwise, no mirroring).  An isotropic
+/// octant child has `origin = 0.5·MFEM_HEX_VERTS[child]`, `scale = (0.5,0.5,
+/// 0.5)`; an anisotropic child (D835-2) halves only its cut axes; a carried
+/// element ([`IDENTITY`]) takes the unit frame.
+pub(crate) type HexFrame = (ElemId, [f64; 3], [f64; 3]);
+
+/// The [`HexFrame`] of the isotropic child octant `child` (see the child
+/// table in `refine_nonconforming_hex`): `child` is the MFEM hex corner index
+/// of the child's own corner.
+fn octant_frame(child: u8) -> ([f64; 3], [f64; 3]) {
+    if child == IDENTITY {
+        ([0.0_f64; 3], [1.0_f64; 3])
+    } else {
+        let v = MFEM_HEX_VERTS[child as usize];
+        ([0.5 * v[0], 0.5 * v[1], 0.5 * v[2]], [0.5; 3])
+    }
+}
+
 /// Build the refined mesh's [`GeometryData`] for a *periodically merged*
 /// parent: fully per-element own-side rows, each one the prolongation of that
 /// element's **own** order-`p` row — MFEM's `MakePeriodic` semantics, whose
@@ -321,27 +340,33 @@ fn build_periodic_own_side_hex_geometry(
     pq: &HexQkGeometry,
     fine_parent: &[(ElemId, u8)],
 ) -> GeometryData {
+    let frames: Vec<HexFrame> = fine_parent
+        .iter()
+        .map(|&(pe, child)| {
+            let (origin, scale) = octant_frame(child);
+            (pe, origin, scale)
+        })
+        .collect();
+    build_own_side_hex_frames(pq, &frames)
+}
+
+/// The anisotropic-children generalization of
+/// [`build_periodic_own_side_hex_geometry`] (D835-2): one own-side order-`p`
+/// row per `frames` entry, the parent element's field evaluated at the
+/// child's dof reference points mapped through the child's frame.
+pub(crate) fn build_own_side_hex_frames(pq: &HexQkGeometry, frames: &[HexFrame]) -> GeometryData {
     let p = pq.order;
     let dpe = pq.dpe;
-    let n_fine = fine_parent.len();
+    let n_fine = frames.len();
     let mut conn = Vec::with_capacity(n_fine * dpe);
     let mut coords = Vec::with_capacity(n_fine * dpe * 3);
-    for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
-        // Fine-ref → parent-ref affine map (see `build_refined_hex_geometry`):
-        // `child` is the MFEM hex corner index of the child's own corner, so
-        // the octant origin is `0.5 · MFEM_HEX_VERTS[child]`.
-        let (origin, scale) = if child == IDENTITY {
-            ([0.0_f64; 3], 1.0_f64)
-        } else {
-            let v = MFEM_HEX_VERTS[child as usize];
-            ([0.5 * v[0], 0.5 * v[1], 0.5 * v[2]], 0.5)
-        };
+    for (fe, &(pe, origin, scale)) in frames.iter().enumerate() {
         for o in 0..dpe {
             let r = pq.ref01[o];
             let xi = [
-                origin[0] + scale * r[0],
-                origin[1] + scale * r[1],
-                origin[2] + scale * r[2],
+                origin[0] + scale[0] * r[0],
+                origin[1] + scale[1] * r[1],
+                origin[2] + scale[2] * r[2],
             ];
             let x = pq.eval_at(pe, xi);
             conn.push((fe * dpe + o) as NodeId);
@@ -625,30 +650,40 @@ pub(crate) fn build_refined_l2_p1_hex_geometry(
     parent_geo: &GeometryData,
     fine_parent: &[(ElemId, u8)],
 ) -> GeometryData {
+    let frames: Vec<HexFrame> = fine_parent
+        .iter()
+        .map(|&(pe, child)| {
+            let (origin, scale) = octant_frame(child);
+            (pe, origin, scale)
+        })
+        .collect();
+    build_own_side_p1_hex_frames(parent_geo, &frames)
+}
+
+/// The anisotropic-children generalization of
+/// [`build_refined_l2_p1_hex_geometry`] (D835-2): one own-side 8-dof row per
+/// `frames` entry, the trilinear interpolation of the parent element's own 8
+/// corner dofs at the child's corner reference points mapped through the
+/// child's frame.
+pub(crate) fn build_own_side_p1_hex_frames(
+    parent_geo: &GeometryData,
+    frames: &[HexFrame],
+) -> GeometryData {
     const DPE: usize = 8;
     let refs = hex_p1_slot_refs();
-    let n_fine = fine_parent.len();
+    let n_fine = frames.len();
     let mut conn = Vec::with_capacity(n_fine * DPE);
     let mut coords = Vec::with_capacity(n_fine * DPE * 3);
-    for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
-        // Fine-ref → parent-ref affine map (see `build_refined_hex_geometry`):
-        // `child` is the MFEM hex corner index of the child's own corner, so
-        // the octant origin is `0.5 · MFEM_HEX_VERTS[child]`.
-        let (origin, scale) = if child == IDENTITY {
-            ([0.0_f64; 3], 1.0_f64)
-        } else {
-            let v = MFEM_HEX_VERTS[child as usize];
-            ([0.5 * v[0], 0.5 * v[1], 0.5 * v[2]], 0.5)
-        };
+    for (fe, &(pe, origin, scale)) in frames.iter().enumerate() {
         for (o, r) in refs.iter().enumerate() {
             // Parent-frame reference point of this fine dof, then the
             // trilinear interpolation of the parent element's 8 corner dofs
             // (accumulated in parent slot order, like MFEM's interpolation
             // matrix applied to the coarse element vector).
             let xi = [
-                origin[0] + scale * r[0],
-                origin[1] + scale * r[1],
-                origin[2] + scale * r[2],
+                origin[0] + scale[0] * r[0],
+                origin[1] + scale[1] * r[1],
+                origin[2] + scale[2] * r[2],
             ];
             let mut xyz = [0.0_f64; 3];
             for (j, cj) in refs.iter().enumerate() {

@@ -208,17 +208,18 @@ fn d708_curved_hex_rt0_nodal_points_isoparametric() {
 /// the face-centre geometry node, so RT0 nodal points move exactly with the
 /// face-centre nodes (edge/interior bends are invisible there — probed in
 /// `tmp/d715`).  `set_curvature` places face nodes on the trilinear map and
-/// does NOT deduplicate them across elements (one copy per element row), so a
-/// shared-face bend must move every copy at once to keep the two maps
-/// identical — which is exactly the post-fix expectation for `dof_nodal_coords`.
+/// shares them across the elements meeting at the face (D835-1: one MFEM-H1
+/// entity dof per mesh face), so a shared-face bend moves both maps at once
+/// by construction — which is exactly the post-fix expectation for
+/// `dof_nodal_coords`.
 #[test]
 fn curved_two_hex_shared_face_rt0_points_agree() {
     let mut mesh = Mesh::make_cartesian_3d(2, 1, 1, ElementType::Hex8, 2.0, 1.0, 1.0, false);
     mesh.set_curvature(2);
 
     // Bend every geometry node sitting at `target` (any element's copy):
-    // elem 0's bottom face centre and the shared face x=1 centre — off the
-    // trilinear map, i.e. genuinely curved faces.
+    // elem 0's private bottom face centre and the shared face x=1 centre —
+    // off the trilinear map, i.e. genuinely curved faces.
     let bend_all = |mesh: &mut Mesh<3>, target: [f64; 3], d: [f64; 3]| {
         let g = mesh.geometry.as_mut().unwrap();
         let mut hits = 0;
@@ -240,8 +241,8 @@ fn curved_two_hex_shared_face_rt0_points_agree() {
     );
     assert_eq!(
         bend_all(&mut mesh, [1.0, 0.5, 0.5], [-0.04, 0.02, 0.03]),
-        2,
-        "the shared face centre: one geometry-node copy per element"
+        1,
+        "the shared face centre is ONE geometry dof shared by both rows (D835-1)"
     );
 
     let space = HDivSpace::new(mesh.clone(), 0);
