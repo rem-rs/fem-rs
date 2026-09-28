@@ -4,17 +4,20 @@
 //! Fixture: 3×3 straight quad9 torus [0,3]² (`Gmsh` type-10 rows, `Line3`
 //! boundary, tags 1=left 2=right 3=bottom 4=top).
 //!
-//! # MFEM 4.10 ground truth (`tmp/d87main/d820_periodic_quad9_probe.cpp`)
+//! # MFEM 4.10 cross-check (round-88 correction — the round-87 "gap" was a
+//! fixture artifact)
 //!
-//! MFEM cannot serve as the numeric oracle here: `Mesh::MakePeriodic` folds
-//! **corner vertices only** (`CreatePeriodicVertexMapping` collects
-//! `GetBdrElementVertices` of the boundary elements — the row midsides never
-//! merge), and its two-translation composition misses the all-corner group
-//! (the (3,3) image stays unmerged: 12 of 13 boundary vertices fold).  Its
-//! H1(2) therefore counts 45 on this mesh where the torus complex has 36.
-//! Same limitation family as D61 ("MFEM cannot build <3-cell directions at
-//! all") — **upstream-report candidate**, the pins below are the
-//! topological ground truth of the quotient complex:
+//! The round-87 probe reported MFEM H1(2)=45 with one corner unmerged; Lane
+//! A's round-88 instrumentation traced that to the round-87 *fixture*: its
+//! type-8 boundary segments listed nodes (corner, mid, corner), violating
+//! the Gmsh spec order (corner, corner, mid) — MFEM then read (3,3) as a
+//! segment midside, which `CreatePeriodicVertexMapping` (bdr corners only,
+//! mesh.cpp:6249-6266) never collects.  On the regenerated spec-order
+//! fixture (this file) MFEM 4.10 is bit-correct: **NV=9, H1(1)=9,
+//! H1(2)=36** — equal to the discrete torus complex V=9/E=18/F=9, i.e. the
+//! pins below ARE the MFEM oracle (probe: `tmp/d87main/`, corrected
+//! fixture; 3-D hex27 cross-check H1(2)=216=6³ in `tmp/d88a/h27_out.txt`).
+//! No upstream report is filed for MakePeriodic.
 //!
 //! ```text
 //! 3×3 quad torus: V = 9, E = 18, C = 9   (V − E + F = 0)

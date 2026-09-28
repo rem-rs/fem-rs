@@ -53,3 +53,32 @@ D804  未用：同上（L4）；tmp/d804 同理
 D806  已闭：D806-1"只接 2-D 单纯形嵌 3-D，Quad4 曲面与 1-D 曲线响亮拒绝" = D800-2 的交付语义（r75）
 D820  段位预留：r83 Lane C 号段；仅子号 D820-1/2（r84 关闭）、D820-3（维持）使用，基号无实体债
 # 结论：§4-4 逐号定性完成。矩阵 §4 第 4 项可关闭；新号段从 D829 起（D827-1..4 在案，D828 由并行路动态占用须先 grep）。
+
+# ── 维持项清点（round 88 主会话）──
+# 对象 = 历轮"维持"债的现状复核：登记是否仍成立、数值路径是否仍存在、处置建议。
+D824-B  维持（设计选择）：hp 顶点 dof = node-id 恒等，二次行网格 id 空洞使 n_dofs > MFEM NDofs；
+        口径已钉（net-of-gaps 对拍，d824_hp_pyr13_p311_net_of_gaps）。紧化视图重构会波及
+        hanging_2d 等 identity 消费者——除非未来需要 MFEM 全局 id 逐位平价，否则不做。
+D827-2  维持（记录）：fem-rs hex hp 行边枚举 2/6 与 MFEM CUBE::Edges 反向——计数/权重对拍无影响，
+        仅 slot 级对拍存在已知方向差。若未来做 hex 行 slot-for-slot 对拍需先处理。
+D818-1  维持（上游联动）：移植的 MFEM 金字塔细化 embedding 缺陷语义（r1 tet 子元平面退化等）——
+        修复须 MFEM 上游先动、两侧同步开关。已并入 round-88 上游知会线的观察清单。
+D818-2  维持（防御性）：fused 表寻址结构判据边界（与 L2_T1 直线 tet 4-dof 臂的互斥性未穷尽）。
+        无已知数值路径经过；保持 assert 响亮拒绝现状即可。
+D822-1  拆分处置：ex17 漂移已定性"非回归"（旧值系错误罚项产物）且 C++ 对拍完成（dofs 逐字同、
+        同配置 767 vs 1269 it）；余项 = (a) 停机语义 HYPOTHESIS（‖r‖/‖r0‖ vs (B r,r) 比值，
+        D634/D753 同族——并入停机语义族线）；(b) sol.gf 表示差 + 示例内
+        "matching MFEM ex17 format" 失实注记（examples 清理线，P3）。
+D822-2  维持（P3 化妆品）：Options 回声族（ex14 缺 C++ 全部 12 行前缀、ex20 缺 2 行、D687 收尾）。
+        1:1 条款下有效，但无数值影响；排在 examples 清理线。
+# 结论：六项均无需本轮动码；D822-1 拆分后的两个余项分别并入停机语义族与 examples 清理线。
+
+# ── round 88 更正（Lane A 上游知会线自查）──
+# r87 登记的 "MFEM MakePeriodic 角点 only + 传递漏合并（上游候选）" **撤案**：
+# 根因 = r87 探针夹具的 type-8 边界段写成 (角,中,角) 违反 Gmsh 规范 (角,角,中)，
+# MFEM 按规范把 (3,3) 读成 midside ⇒ bdr 角点收集不到 ⇒ 未折。
+# 修正夹具后 MFEM 4.10 逐位正确：quad9 周期方 NV=9/H1(1)=9/H1(2)=36（=torus 真值，
+# = fem-rs d820 钉），3D hex27 H1(2)=216=6³ 交叉验证（tmp/d88a/corrected_quad9_out.txt、
+# h27_out.txt）。d820 夹具已按规范重生成，钉全部保持绿。
+# Gmsh type-14 金字塔读侧缺陷的 upstream 候选 **成立维持**（成稿 tmp/d88a/report2_gmsh_pyramid_issue.md，
+# repro 已实编译逐字核实）。
