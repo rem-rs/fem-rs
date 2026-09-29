@@ -202,6 +202,8 @@ pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, Pressure
 pub use interior_faces::InteriorFaceList;
 pub use physics::nonlinear::{LinearSolver, NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
 pub use physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
+pub use physics::mfem_nonlininteg::{MfemHyperelasticAssembler, MfemHyperelasticQuad,
+    MfemBilinearQuad, MfemLilMatrix, mfem_add, mfem_add_in_place, blocked_from_interleaved};
 pub use partial::{MatFreeOperator, PAMassOperator, PADiffusionOperator, LumpedMassOperator,
                   HcurlMatrixFreeOperator, solve_hcurl_matrix_free,
                   solve_hcurl_eigen_preconditioned_amg};
