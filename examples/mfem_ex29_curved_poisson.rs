@@ -48,7 +48,8 @@ fn main() {
     println!("   --mesh-order {}", args.mesh_order);
     println!("   --refine {}", args.ref_levels);
     println!("   --order {}", args.order);
-    if !args.static_cond { println!("   --no-static-condensation"); }
+    // MFEM `args.PrintOptions(cout)`: exactly one of the two sc flags prints.
+    println!("   {}", if args.static_cond { "--static-condensation" } else { "--no-static-condensation" });
     if !args.visualization { println!("   --no-visualization"); }
 
     // 2. Mesh: 4-panel Quad4 tube in 3D
@@ -61,10 +62,6 @@ fn main() {
     let mut mesh = mesh;
     mesh.set_curvature(mesh_order);
     mesh.transform(|p| trans_cylinder(p));
-
-    println!("  Geometry order = {}", mesh_order);
-    println!("  Mesh nodes     = {} (vertices) + {} (geom)",
-             mesh.n_nodes(), mesh.n_geom_nodes().saturating_sub(mesh.n_nodes()));
 
     // 5. H1 space
     let order = args.order;

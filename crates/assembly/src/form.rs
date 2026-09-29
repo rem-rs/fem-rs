@@ -20,8 +20,9 @@ use fem_core::types::DofId;
 use fem_linalg::CsrMatrix;
 use fem_space::fe_space::FESpace;
 
-use crate::assembler::Assembler;
+use crate::assembler::{Assembler, CondensedLinearSystem};
 use crate::integrator::{BilinearIntegrator, LinearIntegrator};
+use crate::static_cond::condense_rhs;
 use crate::vector_assembler::VectorAssembler;
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator};
 
@@ -104,11 +105,28 @@ pub struct BilinearForm<S: FESpace> {
     space: S,
     integrators: Vec<Box<dyn BilinearIntegrator>>,
     cached: Option<CsrMatrix<f64>>,
+    /// MFEM `BilinearForm::static_cond` — set by
+    /// [`BilinearForm::enable_static_condensation`].
+    static_cond: bool,
+    /// Quadrature order of the last `assemble()` — the SC path re-enters the
+    /// D839-2 condensed core, which takes it explicitly.
+    assembled_quad: Option<u8>,
+    /// Condensed-system record of the last SC `form_linear_system` (MFEM's
+    /// `static_cond` object state: reduced operator plus the per-element Schur
+    /// factors consumed by [`BilinearForm::recover_fem_solution`]).
+    cond_sys: Option<CondensedLinearSystem>,
 }
 
 impl<S: FESpace> BilinearForm<S> {
     pub fn new(space: S) -> Self {
-        BilinearForm { space, integrators: Vec::new(), cached: None }
+        BilinearForm {
+            space,
+            integrators: Vec::new(),
+            cached: None,
+            static_cond: false,
+            assembled_quad: None,
+            cond_sys: None,
+        }
     }
     pub fn add_integrator(mut self, integ: impl BilinearIntegrator + 'static) -> Self {
         self.integrators.push(Box::new(integ));
@@ -118,8 +136,33 @@ impl<S: FESpace> BilinearForm<S> {
         let refs: Vec<&dyn BilinearIntegrator> = self.integrators.iter().map(|b| b.as_ref()).collect();
         let mat = Assembler::assemble_bilinear(&self.space, &refs, quad_order);
         self.cached = Some(mat);
+        self.assembled_quad = Some(quad_order);
         self.cached.as_ref().unwrap()
     }
+
+    /// **MFEM `BilinearForm::EnableStaticCondensation()`**
+    /// (fem/bilinearform.cpp:144, LEGACY full-matrix assembly): after this,
+    /// [`BilinearForm::form_linear_system`] reduces the system to the trace
+    /// dofs — MFEM `static_cond->ReduceSystem(x, b, X, B, copy_interior)`
+    /// (bilinearform.cpp:885-889) — and
+    /// [`BilinearForm::recover_fem_solution`] back-substitutes the eliminated
+    /// private dofs (`static_cond->ComputeSolution`,
+    /// bilinearform.cpp:1000-1004).  The whole MFEM transparency contract:
+    /// `-sc` becomes a caller-side switch on the same `FormLinearSystem` /
+    /// `RecoverFEMSolution` pair instead of a specialized entry.
+    ///
+    /// Like MFEM's `ReducesTrueVSize()` guard the switch is a no-op when the
+    /// space has no interior ("bubble") dofs: the reduced system then equals
+    /// the full system element-for-element.
+    pub fn enable_static_condensation(&mut self) {
+        self.static_cond = true;
+    }
+
+    /// MFEM `BilinearForm::StaticCondensationEnabled()`.
+    pub fn static_condensation_enabled(&self) -> bool {
+        self.static_cond
+    }
+
     pub fn mat(&self) -> Option<&CsrMatrix<f64>> { self.cached.as_ref() }
     pub fn space(&self) -> &S { &self.space }
 
@@ -141,6 +184,26 @@ impl<S: FESpace> BilinearForm<S> {
     /// (returned) is the bitwise copy of the projected `x` — see
     /// [`eliminate_ess_tdofs`] for the full contract.
     ///
+    /// # Static condensation (D839-2)
+    ///
+    /// With [`BilinearForm::enable_static_condensation`] set, the entry takes
+    /// MFEM's SC branch instead (bilinearform.cpp:885-889): the element-private
+    /// dofs are Schur-eliminated through the round-91 condensed core
+    /// ([`Assembler::form_linear_system_condensed`]), the caller-supplied `b`
+    /// is reduced via [`condense_rhs`] (`ReduceRHS`), `X` becomes the kept-dof
+    /// copy of `x` (`ReduceSolution`, staticcond.cpp:389) and the essential
+    /// dofs — which stay in the reduced system exactly as in
+    /// `SetEssentialTrueDofs` + `EliminateReducedTrueDofs(policy)`
+    /// (bilinearform.cpp:959-962) — are eliminated there under `policy`.
+    /// On return
+    ///   - `mat()` holds the reduced, ess-eliminated operator (MFEM hands the
+    ///     caller the reduced `A` through the `OperatorHandle`),
+    ///   - `b[..X.len()]` holds the reduced, ess-eliminated RHS `B` (MFEM's
+    ///     out-vector `B`; the trailing entries of `b` are stale),
+    ///   - the returned vector is `X`, of length `mat().nrows()`.
+    /// Solve the reduced system, then call
+    /// [`BilinearForm::recover_fem_solution`].
+    ///
     /// # Panics
     /// Panics if `assemble()` has not been called first.
     pub fn form_linear_system(
@@ -150,8 +213,71 @@ impl<S: FESpace> BilinearForm<S> {
         b: &mut [f64],
         policy: ElimPolicy,
     ) -> Vec<f64> {
+        if self.static_cond {
+            let quad = self.assembled_quad.expect("assemble() must be called first");
+            let refs: Vec<&dyn BilinearIntegrator> =
+                self.integrators.iter().map(|bx| bx.as_ref()).collect();
+            // A-side through the round-91 condensed core: per-element Schur
+            // elimination of the element-private dofs (ex29 -sc anchor).  The
+            // core is entered with an empty linear list — the caller's `b` is
+            // reduced separately below, from the same factors.
+            let a_full = self.cached.take().expect("assemble() must be called first");
+            let mut sys =
+                Assembler::form_linear_system_condensed(&self.space, &refs, &[], quad, ess_tdof_list);
+            // MFEM `ReduceRHS` (staticcond.cpp:309) on the caller's `b`; also
+            // installs the caller's interior loads into the recovery records
+            // so `recover_fem_solution` back-substitutes with the same RHS.
+            let mut g = condense_rhs(&mut sys, &a_full, b);
+            // MFEM `ReduceSolution` (staticcond.cpp:389): X = x at the kept
+            // dofs, ascending compaction (conforming space, copy_interior = 1).
+            let n_red = sys.reduced.nrows;
+            let mut x_red = vec![0.0_f64; n_red];
+            for (d, &rid) in sys.reduced_id.iter().enumerate() {
+                if rid != u32::MAX {
+                    x_red[rid as usize] = x[d];
+                }
+            }
+            // Essential dofs stay in the reduced system and are eliminated
+            // there under the caller's policy — MFEM
+            // `SetEssentialTrueDofs` + `EliminateReducedTrueDofs(diag_policy)`
+            // (bilinearform.cpp:959-962, staticcond.cpp:286).
+            let ess_red: Vec<DofId> = ess_tdof_list
+                .iter()
+                .map(|&d| sys.reduced_id[d as usize])
+                .collect();
+            let xr = eliminate_ess_tdofs(&mut sys.reduced, &ess_red, &x_red, &mut g, policy);
+            b[..n_red].copy_from_slice(&g);
+            self.cached = Some(sys.reduced.clone());
+            self.cond_sys = Some(sys);
+            return xr;
+        }
         let a = self.cached.as_mut().expect("assemble() must be called first");
         eliminate_ess_tdofs(a, ess_tdof_list, x, b, policy)
+    }
+
+    /// **MFEM `BilinearForm::RecoverFEMSolution(X, b, x)`**
+    /// (fem/bilinearform.cpp:995).  With static condensation on, back-substitutes
+    /// the eliminated element-private dofs — `static_cond->ComputeSolution`
+    /// (bilinearform.cpp:1000-1004), via the D839-2
+    /// [`crate::assembler::recover_condensed_interior`].  Without, `X` is `x`
+    /// (`x.SyncMemory(X)`): the bitwise copy.
+    ///
+    /// The argument is the solved system vector (reduced when SC is on); the
+    /// return value is the full finite-element grid-function vector.
+    pub fn recover_fem_solution(&self, x: &[f64]) -> Vec<f64> {
+        match self.cond_sys.as_ref() {
+            Some(sys) => crate::assembler::recover_condensed_interior(sys, x),
+            None => x.to_vec(),
+        }
+    }
+
+    /// The condensed-system record of the last SC
+    /// [`BilinearForm::form_linear_system`] — full-dof → reduced-row
+    /// compaction (`reduced_id`) plus the per-element recovery factors;
+    /// `None` when the switch is off or has not run yet.  Read side of
+    /// MFEM's `BilinearForm::static_cond` state.
+    pub fn condensed_system(&self) -> Option<&CondensedLinearSystem> {
+        self.cond_sys.as_ref()
     }
 
     /// Eliminate essential (Dirichlet) BCs symmetrically.

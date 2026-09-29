@@ -47,6 +47,8 @@
 use nalgebra::{DMatrix, DVector};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
+use crate::assembler::CondensedLinearSystem;
+
 /// Element-level static condensation.
 ///
 /// Given an element stiffness matrix `K_e` (size `n × n`) and load vector
@@ -505,6 +507,72 @@ fn cg_jacobi_solve(
         rz = rz_new;
     }
     x
+}
+
+/// Reduce a caller-supplied full RHS to the condensed system of `sys` — the
+/// form-level half of MFEM `StaticCondensation::ReduceRHS` (fem/staticcond.cpp:309):
+/// `g(t) = b(t) − Σ_e A_ti^e · A_ii⁻¹^e · b_i^e`, elements in order — and
+/// install the caller's interior loads into the per-element recovery records
+/// (`rec.b_i`), so [`crate::assembler::recover_condensed_interior`] back-substitutes
+/// with the same RHS the reduction used.
+///
+/// [`crate::assembler::Assembler::form_linear_system_condensed`] folds this
+/// reduction in only when it assembles the RHS itself from linear
+/// integrators; form-level callers whose RHS arrives pre-assembled (MFEM's
+/// `FormLinearSystem` shape — `b` is an input) enter the core with an empty
+/// linear list and call this with their own `b`.  The `(trace, interior)`
+/// coupling blocks `A_ti^e` are read from `a_full` — the **same** full
+/// operator the core eliminated (same space / integrators / quadrature, so
+/// bitwise-identical by deterministic assembly); [`sys`]'s recovery records
+/// hold the stored `A_ii⁻¹` factors and the per-element dof grouping.
+///
+/// Bitwise note: per trace dof the subtractions run in element order and the
+/// inner product is `a_ti · a_ii_inv[l][m] · b_i[m]` with `m` innermost — the
+/// exact order of the in-core reduction — so core-with-integrators and
+/// core-empty + this function produce identical bits (and, after the `b_i`
+/// install, identical bubble recovery).
+pub fn condense_rhs(
+    sys: &mut CondensedLinearSystem,
+    a_full: &CsrMatrix<f64>,
+    b_full: &[f64],
+) -> Vec<f64> {
+    assert_eq!(
+        a_full.nrows,
+        sys.n_full,
+        "a_full must be the full (uncondensed) operator"
+    );
+    assert_eq!(
+        b_full.len(),
+        sys.n_full,
+        "b_full must have full-dof length"
+    );
+    let n_red = sys.reduced.nrows;
+    let mut g = vec![0.0_f64; n_red];
+    // Kept-dof compaction (ascending full-dof order), same as the core's.
+    for (d, &rid) in sys.reduced_id.iter().enumerate() {
+        if rid != u32::MAX {
+            g[rid as usize] = b_full[d];
+        }
+    }
+    for rec in &mut sys.recoveries {
+        let k = rec.interior_dofs.len();
+        // Install the caller's interior loads into the recovery record (the
+        // core was entered with an empty linear list, so its own b_i = 0).
+        for (i, bi) in rec.b_i.iter_mut().enumerate() {
+            *bi = b_full[rec.interior_dofs[i] as usize];
+        }
+        for &td in &rec.trace_dofs {
+            let mut db = 0.0_f64;
+            for (l, &id) in rec.interior_dofs.iter().enumerate() {
+                let a_ti = a_full.get(td as usize, id as usize);
+                for (m, &idm) in rec.interior_dofs.iter().enumerate() {
+                    db += a_ti * rec.a_ii_inv[l * k + m] * b_full[idm as usize];
+                }
+            }
+            g[sys.reduced_id[td as usize] as usize] -= db;
+        }
+    }
+    g
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

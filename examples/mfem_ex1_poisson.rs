@@ -20,7 +20,7 @@ use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
-    Assembler,
+    Assembler, BilinearForm, ElimPolicy,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_io::mfem::{read_mfem_file, write_mfem};
@@ -111,18 +111,46 @@ fn main() {
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
 
-    // 10. Form the linear system (MFEM FormLinearSystem — in-place, full N×N).
-    let bnd_vals = vec![0.0_f64; bnd.len()];
-    let mut x = vec![0.0_f64; n_full];
-    form_linear_system(&mut mat, &mut rhs, &mut x, &bnd, &bnd_vals);
-    println!("Size of linear system: {}", n_full);
+    // 10-11. Form the linear system and solve (MFEM FormLinearSystem + PCG).
+    //     D839-2: `-sc` mirrors MFEM ex1.cpp:219 `a.EnableStaticCondensation()`
+    //     — the form-layer switch Schur-reduces the system to the trace dofs
+    //     (one Q2 bubble per quad), the reduced system is solved, and
+    //     `RecoverFEMSolution` back-substitutes the bubbles.  Without bubbles
+    //     (order 1) the switch is a transparent no-op — same as MFEM.  The
+    //     whole flow is the caller-side switch the other way round: no
+    //     condensed-specific entry, just `form_linear_system` +
+    //     `recover_fem_solution` on the same form.
+    let x = if args.static_cond {
+        let mut bf = BilinearForm::new(space.clone())
+            .add_integrator(DiffusionIntegrator { kappa: 1.0 });
+        bf.assemble(args.order * 2 + 1);
+        bf.enable_static_condensation();
+        let mut b_sc = rhs.clone();
+        let x0 = vec![0.0_f64; n_full];
+        let x_red = bf.form_linear_system(&bnd, &x0, &mut b_sc, ElimPolicy::DiagOne);
+        println!("Size of linear system: {}", x_red.len());
+        let a_red = bf.mat().expect("condensed matrix").clone();
+        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&a_red);
+        let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
+        let mut xs = vec![0.0_f64; x_red.len()];
+        let _result = solve_pcg(&a_red, &b_sc[..x_red.len()], &mut xs, &precond, 1e-12, 200, true)
+            .expect("solver failed");
+        bf.recover_fem_solution(&xs)
+    } else {
+        // 10. Dirichlet BCs — in-place full N×N (MFEM FormLinearSystem).
+        let bnd_vals = vec![0.0_f64; bnd.len()];
+        let mut x = vec![0.0_f64; n_full];
+        form_linear_system(&mut mat, &mut rhs, &mut x, &bnd, &bnd_vals);
+        println!("Size of linear system: {}", n_full);
 
-    // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner (ω = 1 = GS).
-    //     MFEM ex1: GSSmoother M(A); PCG(A, M, B, X, 1, 200, 1e-12, 0.0)
-    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
-    let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
-    let _result = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 200, true)
-        .expect("solver failed");
+        // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner (ω = 1 = GS).
+        //     MFEM ex1: GSSmoother M(A); PCG(A, M, B, X, 1, 200, 1e-12, 0.0)
+        let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
+        let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
+        let _result = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 200, true)
+            .expect("solver failed");
+        x
+    };
 
     // 13. Save the refined mesh and solution (MFEM ex1 step 13).
     {
@@ -152,7 +180,7 @@ struct Args {
     mesh:          Option<String>,
     n:             usize,
     order:         u8,
-    /// Static condensation (not yet implemented).
+    /// Static condensation (MFEM `EnableStaticCondensation`, D839-2).
     static_cond:  bool,
     visualization: bool,
 }
