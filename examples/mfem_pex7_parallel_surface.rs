@@ -223,7 +223,7 @@ fn build_octahedron_mesh() -> Mesh<3> {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 

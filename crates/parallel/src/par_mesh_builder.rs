@@ -130,7 +130,7 @@ impl<const D: usize> ParMeshBuilder<D> {
             edge_conn: vec![],
             edge_to_elem: vec![],
             geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         };
 
         let elem_owner = vec![local_rank; n_owned_elems];

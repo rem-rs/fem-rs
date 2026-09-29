@@ -291,7 +291,7 @@ pub fn read_mesh_and_fields<const D: usize>(
         elem_offsets,
         face_types,
         face_offsets,
-    vertex_parents: vec![],
+    vertex_parents: vec![], nc_leaf_states: None,
     };
 
     // fields
@@ -474,7 +474,7 @@ mod tests {
             elem_offsets: None,
             face_types: None,
             face_offsets: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         }
     }
 
@@ -531,7 +531,7 @@ mod tests {
             elem_offsets: None,
             face_types: None,
             face_offsets: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         };
 
         let dir = TempDir::new().unwrap();

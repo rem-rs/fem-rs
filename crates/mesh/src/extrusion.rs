@@ -158,7 +158,7 @@ pub fn extrude_tri3_to_prisms(
         edge_conn: vec![],
         edge_to_elem: vec![],
         geometry: None, nc_vertex_view: None,
-    vertex_parents: vec![],
+    vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 
@@ -270,7 +270,7 @@ pub fn extrude_quad4_to_hex8(
         edge_conn: vec![],
         edge_to_elem: vec![],
         geometry: None, nc_vertex_view: None,
-    vertex_parents: vec![],
+    vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 

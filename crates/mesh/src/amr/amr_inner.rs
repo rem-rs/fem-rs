@@ -1123,7 +1123,7 @@ fn refine_uniform_2d_mixed(mesh: &Mesh<2>) -> Mesh<2> {
         edge_to_elem: vec![],
         geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 };
     // D624: a curved (order-p ≥ 2) mixed parent propagates its geometry —
     // MFEM's `UniformRefinement` + `nodes` update restricts the parent's
@@ -1760,7 +1760,7 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         edge_to_elem: vec![],
         nc_vertex_view: None,
         geometry: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     if qg.is_some() {
         new_mesh.geometry = super::curved_quad::build_refined_quad_geometry(mesh, &new_mesh);
@@ -1980,7 +1980,7 @@ fn linear_view<const D: usize>(mesh: &Mesh<D>) -> Option<Mesh<D>> {
         edge_to_elem: vec![],
         geometry: mesh.geometry.clone(),
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     })
 }
 
@@ -2787,7 +2787,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 };
     // D817-3: transport the fused pyramid `L2_T1_3D_P1` table — children
     // inherit the parent P1 field through MFEM's refinement operator (the
@@ -2878,7 +2878,7 @@ pub fn refine_uniform_surface_tri3(mesh: &Mesh<3>) -> Mesh<3> {
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 }
 }
 
@@ -2938,7 +2938,7 @@ pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 }
 }
 
@@ -3015,7 +3015,7 @@ pub fn refine_at_vertex_surface(mesh: &Mesh<3>, target: &[f64; 3]) -> Mesh<3> {
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 }
 }
 
@@ -3689,61 +3689,95 @@ fn reorder_quad_refinement_mfem(
     coords: &mut Vec<f64>,
     face_conn: &mut [NodeId],
     dir_of: &dyn Fn(ElemId) -> Option<QuadRefineDir>,
-) {
+    fresh_ancestry: &[(NodeId, NodeId, NodeId)],
+) -> (Vec<(NodeId, NodeId, NodeId)>, Vec<u8>) {
     let n_old = mesh.n_elems();
     if n_old == 0 {
-        return;
+        return (Vec::new(), Vec::new());
     }
-    let n_old_nodes = mesh.n_nodes() as NodeId;
-    let states = init_root_states_quad(mesh);
+    // D843-1: the per-leaf Hilbert state rides on the mesh and evolves through
+    // refinement exactly as MFEM's NCMesh does; the greedy
+    // `init_root_states_quad` recomputation is only the never-refined
+    // fallback (it diverges from the incremental evolution on deep batches —
+    // ex6 batch 4 reordered one leaf triplet and swapped two center ids).
+    let states = mesh
+        .nc_leaf_states
+        .clone()
+        .unwrap_or_else(|| init_root_states_quad(mesh));
 
     // 1. Leaf sequence = permutation of the new rows + per-new-leaf states.
     let mut row_order: Vec<usize> = Vec::with_capacity(conn.len() / 4);
+    let mut new_states: Vec<u8> = Vec::with_capacity(conn.len() / 4);
     let mut off = 0usize;
     for e in 0..n_old as ElemId {
         let st = states[e as usize] as usize;
         match dir_of(e) {
             None => {
                 row_order.push(off);
+                new_states.push(states[e as usize]);
                 off += 1;
             }
             Some(QuadRefineDir::Both) => {
-                // CollectLeafElements: SQUARE + XY -> Hilbert child order.
-                for &ch in &QUAD_HILBERT_CHILD_ORDER[st] {
+                // CollectLeafElements: SQUARE + XY -> Hilbert child order;
+                // children take quad_hilbert_child_state[parent][h].
+                for (h, &ch) in QUAD_HILBERT_CHILD_ORDER[st].iter().enumerate() {
                     row_order.push(off + ch as usize);
+                    new_states.push(QUAD_HILBERT_CHILD_STATE[st][h]);
                 }
                 off += 4;
             }
             Some(_) => {
-                // No SFC table for X/Y splits: natural child-slot order.
+                // No SFC table for X/Y splits: natural child-slot order;
+                // children inherit the parent's state.
                 row_order.push(off);
                 row_order.push(off + 1);
+                new_states.push(states[e as usize]);
+                new_states.push(states[e as usize]);
                 off += 2;
             }
         }
     }
     debug_assert_eq!(off, conn.len() / 4, "row grouping out of sync");
 
-    // 2. UpdateVertices numbering: input nodes keep their ids, new nodes are
-    //    numbered by first appearance over the leaf sequence × local nodes.
-    let n_new = coords.len() / 2 - n_old_nodes as usize;
-    let mut remap = vec![NodeId::MAX; n_new];
-    let mut next = n_old_nodes;
+    // 2. UpdateVertices numbering (D843-1): MFEM re-runs UpdateVertices on
+    //    EVERY GeneralRefinement batch — top-level (original mesh) vertices
+    //    keep their ids in ascending order and EVERY other vertex, including
+    //    vertices created by earlier batches, is renumbered by first
+    //    appearance over the new leaf sequence. "Top-level" is recovered from
+    //    the accumulated vertex ancestry carried on the mesh
+    //    (`vertex_parents` children = created by some earlier batch); this
+    //    batch's fresh creations are created vertices too. (The pre-D843-1
+    //    behavior treated all input nodes as top-level, which desynced the
+    //    vertex ids from MFEM from batch 2 on — ex6 iter2+ solved values were
+    //    permuted across ids.)
+    let n_total = coords.len() / 2;
+    let mut is_top = vec![true; n_total];
+    for &(c, _, _) in mesh.vertex_parents.iter() {
+        is_top[c as usize] = false;
+    }
+    for &(c, _, _) in fresh_ancestry {
+        is_top[c as usize] = false;
+    }
+    let mut new_id = vec![NodeId::MAX; n_total];
+    let mut next = 0u32;
+    for n in 0..n_total {
+        if is_top[n] {
+            new_id[n] = next;
+            next += 1;
+        }
+    }
     for &r in &row_order {
         for k in 0..4 {
-            let n = conn[r * 4 + k];
-            if n >= n_old_nodes {
-                let slot = (n - n_old_nodes) as usize;
-                if remap[slot] == NodeId::MAX {
-                    remap[slot] = next;
-                    next += 1;
-                }
+            let n = conn[r * 4 + k] as usize;
+            if new_id[n] == NodeId::MAX {
+                new_id[n] = next;
+                next += 1;
             }
         }
     }
-    debug_assert_eq!(next as usize, coords.len() / 2, "unmapped new nodes");
+    debug_assert_eq!(next as usize, n_total, "unmapped nodes");
 
-    // 3. Permute rows/tags, apply the node remap.
+    // 3. Permute rows/tags, apply the node renumbering.
     let old_conn = std::mem::take(conn);
     conn.reserve(old_conn.len());
     let old_tags = std::mem::take(tags);
@@ -3751,31 +3785,37 @@ fn reorder_quad_refinement_mfem(
     for &r in &row_order {
         for k in 0..4 {
             let n = old_conn[r * 4 + k];
-            conn.push(if n >= n_old_nodes { remap[(n - n_old_nodes) as usize] } else { n });
+            conn.push(new_id[n as usize]);
         }
         tags.push(old_tags[r]);
     }
 
     // 4. Coordinates follow the node ids; faces keep their order (MFEM's
     //    boundary segments follow NCMesh *face* ids — a different order, see
-    //    D843-2) but their new midpoints must be renumbered too.
+    //    D843-2) but their created nodes must be renumbered too.
     let old_coords = std::mem::take(coords);
     coords.resize(old_coords.len(), 0.0);
-    let n0d = n_old_nodes as usize * 2;
-    coords[..n0d].copy_from_slice(&old_coords[..n0d]);
-    for (slot, &mapped) in remap.iter().enumerate() {
-        if mapped != NodeId::MAX {
-            let src = n0d + slot * 2;
-            let dst = mapped as usize * 2;
-            coords[dst] = old_coords[src];
-            coords[dst + 1] = old_coords[src + 1];
-        }
+    for (n, &id) in new_id.iter().enumerate() {
+        let dst = id as usize * 2;
+        coords[dst] = old_coords[n * 2];
+        coords[dst + 1] = old_coords[n * 2 + 1];
     }
     for n in face_conn.iter_mut() {
-        if *n >= n_old_nodes {
-            *n = remap[(*n - n_old_nodes) as usize];
-        }
+        *n = new_id[*n as usize];
     }
+
+    // 5. Accumulated ancestry for the next batch (ids remapped to final;
+    //    NodeId::MAX parents stay MAX).
+    let map = |n: NodeId| if n == NodeId::MAX { NodeId::MAX } else { new_id[n as usize] };
+    let mut ancestry: Vec<(NodeId, NodeId, NodeId)> = mesh
+        .vertex_parents
+        .iter()
+        .map(|&(c, a, b)| (map(c), map(a), map(b)))
+        .collect();
+    for &(c, a, b) in fresh_ancestry {
+        ancestry.push((map(c), map(a), map(b)));
+    }
+    (ancestry, new_states)
 }
 
 /// Non-conforming (hanging-node) refinement for a 2-D Quad4 mesh.
@@ -3937,20 +3977,39 @@ pub fn refine_nonconforming_quad(
         }
     }
 
-    // ── 6. MFEM leaf order + vertex numbering (D837-1) ────────────────────────
-    reorder_quad_refinement_mfem(
+    // ── 6. MFEM leaf order + vertex numbering (D837-1 / D843-1) ──────────────
+    // This batch's created vertices (midpoints / centers fresh at ids ≥ the
+    // input node count) with their input-id parents — the accumulated
+    // ancestry comes back remapped and rides on the new mesh.
+    let n_old_nodes = mesh.n_nodes() as NodeId;
+    let mut fresh: Vec<(NodeId, NodeId, NodeId)> = midpoint_map
+        .iter()
+        .filter(|(_, &m)| m >= n_old_nodes)
+        .map(|(&(a, b), &m)| (m, a, b))
+        .collect();
+    for (&e, &c) in &center_map {
+        let ns = mesh.elem_nodes(e);
+        let m01 = midpoint_map.get(&quad_edge_key(ns[0], ns[1])).copied();
+        let m23 = midpoint_map.get(&quad_edge_key(ns[2], ns[3])).copied();
+        fresh.push((c, m01.unwrap_or(NodeId::MAX), m23.unwrap_or(NodeId::MAX)));
+    }
+    fresh.sort_by_key(|&(c, _, _)| c);
+    let (ancestry, leaf_states) = reorder_quad_refinement_mfem(
         mesh,
         &mut new_conn,
         &mut new_tags,
         &mut new_coords,
         &mut new_face_conn,
         &|e| marked_set.contains(&e).then_some(QuadRefineDir::Both),
+        &fresh,
     );
 
     let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Quad4,
         new_face_conn, new_face_tags, ElementType::Line2,
     );
+    new_mesh.vertex_parents = ancestry;
+    new_mesh.nc_leaf_states = Some(leaf_states);
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
     }
@@ -7337,14 +7396,28 @@ pub fn refine_nonconforming_quad_aniso(
         }
     }
 
-    // ── MFEM leaf order + vertex numbering (D837-1) ──────────────────────────
-    reorder_quad_refinement_mfem(
+    // ── MFEM leaf order + vertex numbering (D837-1 / D843-1) ─────────────────
+    let n_old_nodes = mesh.n_nodes() as NodeId;
+    let mut fresh: Vec<(NodeId, NodeId, NodeId)> = midpoint_map
+        .iter()
+        .filter(|(_, &m)| m >= n_old_nodes)
+        .map(|(&(a, b), &m)| (m, a, b))
+        .collect();
+    for (&e, &c) in &center_map {
+        let ns = mesh.elem_nodes(e);
+        let m01 = midpoint_map.get(&quad_edge_key(ns[0], ns[1])).copied();
+        let m23 = midpoint_map.get(&quad_edge_key(ns[2], ns[3])).copied();
+        fresh.push((c, m01.unwrap_or(NodeId::MAX), m23.unwrap_or(NodeId::MAX)));
+    }
+    fresh.sort_by_key(|&(c, _, _)| c);
+    let (ancestry, leaf_states) = reorder_quad_refinement_mfem(
         mesh,
         &mut new_conn,
         &mut new_elem_tags,
         &mut new_coords,
         &mut new_face_conn,
         &|e| marked_map.get(&e).copied(),
+        &fresh,
     );
 
     let mut new_mesh = Mesh::<2>::uniform(
@@ -7356,6 +7429,8 @@ pub fn refine_nonconforming_quad_aniso(
         new_face_tags,
         ElementType::Line2,
     );
+    new_mesh.vertex_parents = ancestry;
+    new_mesh.nc_leaf_states = Some(leaf_states);
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
     }
@@ -9297,7 +9372,7 @@ fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> 
     let n_elems = mesh.n_elems();
     let mut hex8_conn = Vec::with_capacity(n_elems * 8);
     for e in 0..n_elems { let off = e * npe; hex8_conn.extend_from_slice(&mesh.conn[off..off+8]); }
-    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None, vertex_parents: vec![] };
+    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None, vertex_parents: vec![], nc_leaf_states: None };
     refine_hex8_uniform(&hex8_mesh, marked)
 }
 
@@ -10027,7 +10102,7 @@ mod tests {
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 };
 
         let vol_orig = prism6_vol(&mesh, 0);
@@ -10074,7 +10149,7 @@ vertex_parents: vec![],
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 };
 
         let fine = refine_uniform_3d(&mesh);
@@ -10104,7 +10179,7 @@ vertex_parents: vec![],
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 }
     }
 
@@ -10179,7 +10254,7 @@ vertex_parents: vec![],
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 };
 
         // Refine only prism 0
@@ -10221,7 +10296,7 @@ vertex_parents: vec![],
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![],
+vertex_parents: vec![], nc_leaf_states: None,
 };
 
         let vol_orig = prism6_vol(&mesh, 0) + prism6_vol(&mesh, 1);
@@ -10276,7 +10351,7 @@ vertex_parents: vec![],
         let mesh = Mesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex20_uniform(&mesh, &all);
@@ -10298,7 +10373,7 @@ vertex_parents: vec![],
         let mesh = Mesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex27_uniform(&mesh, &all);
@@ -10324,7 +10399,7 @@ vertex_parents: vec![],
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let v0 = pyramid5_vol(&mesh, 0); assert!((v0-1.0/3.0).abs() < 1e-14);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
@@ -10348,7 +10423,7 @@ vertex_parents: vec![],
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None };
         let fine = refine_uniform_3d(&mesh);
         // D472: MFEM PYRAMID branch — 6 Pyramid5 + 4 Tet4 children per parent.
@@ -10362,7 +10437,7 @@ vertex_parents: vec![],
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None }
     }
 
@@ -10392,7 +10467,7 @@ vertex_parents: vec![],
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0], None);
         assert_eq!(nc.n_elems(), 17); assert!(ec.len()>=3); assert!(!tc.is_empty()); assert!(qc.is_empty());
@@ -10411,7 +10486,7 @@ vertex_parents: vec![],
         Mesh { coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None }
     }
 
@@ -10609,6 +10684,6 @@ pub(crate) fn fichera_mixed_mesh() -> Mesh<3> {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-    vertex_parents: vec![],
+    vertex_parents: vec![], nc_leaf_states: None,
     }
 }

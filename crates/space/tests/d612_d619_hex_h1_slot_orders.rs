@@ -254,7 +254,7 @@ fn d613_h1_numbering_on_quadratic_prism_and_pyramid_connectivity() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     let dm18 = DofManager::new(&mesh18, 2);
     assert_eq!(dm18.element_dofs(0).len(), 18, "H1(2) wedge = 18 dofs (MFEM)");
@@ -291,7 +291,7 @@ fn d613_h1_numbering_on_quadratic_prism_and_pyramid_connectivity() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     let dm13 = DofManager::new(&mesh13, 2);
     assert_eq!(
@@ -323,7 +323,7 @@ fn d613_h1_numbering_on_quadratic_prism_and_pyramid_connectivity() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     let dm_t10 = DofManager::new(&tet10, 2);
     assert_eq!(dm_t10.element_dofs(0).len(), 10, "H1(2) tet = 10 dofs");

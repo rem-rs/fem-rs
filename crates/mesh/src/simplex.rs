@@ -249,6 +249,16 @@ pub struct Mesh<const D: usize> {
     /// Temporary storage for `AddVertexParents` calls: (child, parent1, parent2).
     #[cfg_attr(feature = "serialize", serde(default))]
     pub vertex_parents: Vec<(NodeId, NodeId, NodeId)>,
+
+    /// Per-leaf Hilbert SFC state for NC quad meshes (D843-1): `states[e]` is
+    /// leaf `e`'s `quad_hilbert` state, evolved through refinement exactly as
+    /// MFEM's NCMesh does (iso children take `quad_hilbert_child_state[parent]`
+    /// in child order; X/Y children inherit the parent's state).  `None` for
+    /// meshes never NC-refined — states then derive via
+    /// `init_root_states_quad` (the exact `NCMesh::InitRootState` port).
+    #[cfg_attr(feature = "serialize", serde(default))]
+    #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
+    pub nc_leaf_states: Option<Vec<u8>>,
 }
 
 impl<const D: usize> Mesh<D> {
@@ -2277,7 +2287,7 @@ impl<const D: usize> Mesh<D> {
             edge_conn: vec![], edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
         }
     }
 
@@ -4515,7 +4525,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
         };
         let (j_lin, det_lin, xp_lin) = m.element_jacobian(0, &[0.25, 0.25, 0.5]);
         let (j_lin2, det_lin2, xp_lin2) = m.element_jacobian(0, &[0.125, 0.25, 0.375]);
@@ -4627,7 +4637,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
         }
     }
 
@@ -5198,7 +5208,7 @@ mod tet_geometry_family_tests {
         let mut cw = Mesh::<2> {
             coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             conn: vec![3, 0, 2, 3, 0, 1], // element 0 is CW
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
             elem_tags: vec![1, 1],
             elem_type: ElementType::Tri3,
             face_conn: vec![0, 1, 1, 3, 3, 2, 2, 0],

@@ -112,7 +112,7 @@ pub fn build_supermesh(
         edge_conn: vec![],
         edge_to_elem: vec![],
         geometry: None, nc_vertex_view: None,
-    vertex_parents: vec![],
+    vertex_parents: vec![], nc_leaf_states: None,
     };
 
     (mesh, sup_elems)
@@ -235,7 +235,7 @@ mod tests {
             face_type: ElementType::Line2, elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None, face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         };
 
         let (super_mesh, elems) = build_supermesh(&mesh_a, &mesh_b);

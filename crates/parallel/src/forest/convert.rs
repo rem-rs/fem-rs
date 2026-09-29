@@ -262,7 +262,7 @@ where
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
         geometry: None, nc_vertex_view: None,
-    vertex_parents: vec![],
+    vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 

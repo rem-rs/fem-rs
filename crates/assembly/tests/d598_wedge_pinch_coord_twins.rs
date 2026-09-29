@@ -70,7 +70,7 @@ fn pinched_two_hex_wedge_mesh() -> Mesh<3> {
             7, 4, 5, 8, 9, 10, // B0
             7, 5, 6, 8, 10, 11, // B1 — leaves anti-diagonal edge 5–7 on z=1
         ],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1, 1, 1, 1],
         elem_type: ElementType::Prism6,
         face_conn: vec![],

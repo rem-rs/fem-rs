@@ -178,7 +178,7 @@ fn round_trip_prism_mixed_boundary() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
 
     assert_round_trip(&mesh, "unit wedge (mixed boundary)");
@@ -251,7 +251,7 @@ fn round_trip_manual_hex_face_offsets_none() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     assert_round_trip(&mesh, "hand-built 2-hex brick");
 

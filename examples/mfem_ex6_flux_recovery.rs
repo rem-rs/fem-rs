@@ -66,8 +66,8 @@ fn main() {
     let is_quad = matches!(elem_type, ElementType::Quad4);
 
     // ── 2. Define H1 FE space ────────────────────────────────────────────────
+    // (rebuilt at the top of every AMR iteration below)
     let order = args.order;
-    let mut space = H1Space::new(mesh.clone(), order);
 
     // ── 3. Set up bilinear form a(u,v) = ∫ ∇u·∇v dx ──────────────────────────
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
@@ -125,7 +125,7 @@ fn main() {
         }
 
         // Build space on current mesh.
-        space = H1Space::new(mesh.clone(), order);
+        let mut space = H1Space::new(mesh.clone(), order);
         let cdofs = space.n_dofs();
         if u.len() != cdofs {
             u.resize(cdofs, 0.0);
@@ -263,7 +263,6 @@ fn prolongate_quad_p1(old: &Mesh<2>, u: &[f64], new: &Mesh<2>) -> Vec<f64> {
     use fem_core::NodeId;
     use std::collections::HashMap;
 
-    let old_n = old.n_nodes();
     // position bit-key → (dof, weight) pairs in element corner order
     let mut table: HashMap<[u64; 2], Vec<(NodeId, f64)>> = HashMap::new();
     for e in 0..old.n_elems() as NodeId {
@@ -286,13 +285,22 @@ fn prolongate_quad_p1(old: &Mesh<2>, u: &[f64], new: &Mesh<2>) -> Vec<f64> {
             .entry(key(mid(m01, m23)))
             .or_insert_with(|| center_row(ns));
     }
-    let mut u_new = vec![0.0; new.n_nodes()];
-    for (i, v) in u.iter().enumerate().take(old_n) {
-        u_new[i] = *v;
+    // Surviving vertices carry their value by POSITION (D843-1: batch ≥ 2
+    // renumbers every non-top-level vertex id, so the identity rows of MFEM's
+    // RefinementMatrix no longer align with input ids — but a surviving
+    // vertex's row is e at its own coordinate, exact under a bit-key match).
+    let mut old_val: HashMap<[u64; 2], f64> = HashMap::with_capacity(old.n_nodes());
+    for n in 0..old.n_nodes() as NodeId {
+        let p = old.coords_of(n);
+        old_val.insert([p[0].to_bits(), p[1].to_bits()], u[n as usize]);
     }
-    for nid in old_n as NodeId..new.n_nodes() as NodeId {
+    let mut u_new = vec![0.0; new.n_nodes()];
+    for nid in 0..new.n_nodes() as NodeId {
         let p = new.coords_of(nid);
-        if let Some(row) = table.get(&[p[0].to_bits(), p[1].to_bits()]) {
+        let k = [p[0].to_bits(), p[1].to_bits()];
+        if let Some(&v) = old_val.get(&k) {
+            u_new[nid as usize] = v;
+        } else if let Some(row) = table.get(&k) {
             let mut acc = 0.0;
             for (c, w) in row {
                 acc += w * u[*c as usize];

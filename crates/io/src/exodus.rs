@@ -346,7 +346,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
         }
     }
 
@@ -397,7 +397,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![],
+            vertex_parents: vec![], nc_leaf_states: None,
         };
         let bytes = serialize_exodus(&mesh).expect("write failed");
         let nc = crate::netcdf::NetCdfFile::from_bytes(bytes).expect("netcdf parse failed");

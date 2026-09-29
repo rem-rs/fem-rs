@@ -55,7 +55,7 @@ fn mfem_tri_mesh() -> Mesh<2> {
     Mesh::<2> {
         coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
         conn: vec![0, 3, 2, 3, 0, 1],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1, 1],
         elem_type: ElementType::Tri3,
         face_conn: vec![0, 1, 1, 3, 3, 2, 2, 0],

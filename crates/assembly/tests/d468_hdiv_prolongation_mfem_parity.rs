@@ -423,7 +423,7 @@ fn mfem_tri_mesh() -> Mesh<2> {
     Mesh::<2> {
         coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
         conn: vec![0, 3, 2, 3, 0, 1],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1, 1],
         elem_type: ElementType::Tri3,
         face_conn: vec![0, 1, 1, 3, 3, 2, 2, 0],
@@ -453,7 +453,7 @@ fn mfem_tet_mesh() -> Mesh<3> {
         conn: vec![
             7, 0, 3, 1, 7, 0, 1, 5, 7, 0, 5, 4, 7, 0, 2, 3, 7, 0, 6, 2, 7, 0, 4, 6,
         ],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1, 1, 1, 1, 1, 1],
         elem_type: ElementType::Tet4,
         face_conn: vec![
@@ -764,7 +764,7 @@ fn mfem_tet_refine(coarse: &Mesh<3>) -> Mesh<3> {
     Mesh::<3> {
         coords: coords.iter().flat_map(|c| c.to_vec()).collect(),
         conn,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags,
         elem_type: ElementType::Tet4,
         face_conn,
@@ -901,7 +901,7 @@ fn mfem_prism_mesh() -> Mesh<3> {
             1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ],
         conn: vec![0, 1, 3, 4, 5, 7, 0, 3, 2, 4, 7, 6],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1, 1],
         elem_type: ElementType::Prism6,
         face_conn: vec![],

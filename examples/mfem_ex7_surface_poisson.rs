@@ -252,7 +252,7 @@ fn build_octahedron_mesh() -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 
@@ -275,7 +275,7 @@ fn build_cube_mesh() -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 
@@ -352,7 +352,7 @@ fn elevate_to_tri6(mesh: &Mesh<3>) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 
@@ -412,7 +412,7 @@ fn refine_uniform_tri6(mesh: &Mesh<3>) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     }
 }
 

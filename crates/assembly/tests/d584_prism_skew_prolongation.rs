@@ -58,7 +58,7 @@ fn skewed_prism_mesh() -> Mesh<3> {
             0.3, 1.2, 1.0, //
         ],
         conn: vec![0, 1, 2, 3, 4, 5],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1],
         elem_type: ElementType::Prism6,
         face_conn: vec![],
@@ -97,7 +97,7 @@ fn skewed_two_wedge_mesh() -> Mesh<3> {
             1.3, 1.2, 1.0, //
         ],
         conn: vec![0, 1, 3, 4, 5, 7, 0, 3, 2, 4, 7, 6],
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
         elem_tags: vec![1, 1],
         elem_type: ElementType::Prism6,
         face_conn: vec![],

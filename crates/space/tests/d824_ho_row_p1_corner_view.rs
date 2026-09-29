@@ -218,7 +218,7 @@ fn d824_hex20_prism15_corner_view_counts() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     let space = H1Space::new(hex20, 1);
     assert_eq!(space.n_dofs(), 8, "Hex20 row of 20: P1 = 8 corners");
@@ -249,7 +249,7 @@ fn d824_hex20_prism15_corner_view_counts() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     let space = H1Space::new(prism15, 1);
     assert_eq!(space.n_dofs(), 6, "Prism15 row of 15: P1 = 6 corners");
@@ -297,7 +297,7 @@ fn d824_mixed_linear_quadratic_rows_corner_view() {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![],
+        vertex_parents: vec![], nc_leaf_states: None,
     };
     let space = H1Space::new(mesh, 1);
     assert_eq!(space.n_dofs(), 5, "corner set of both rows");
