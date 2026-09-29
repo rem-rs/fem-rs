@@ -4470,6 +4470,35 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第九十三轮（round 93）：D843-1 批≥2 节点 id 状态化（主会话，ex6 全档 BIT）+ D844-1 fem-py 弹性分派（Lane A）+ D839-2 SC 通用 form 路径（Lane B）——三路并行全交付
+
+**开局 HEAD = round-92 终稿 `dab6a789`；三路主树文件互斥（㉛）；并发限 2。**
+
+### 主会话（D843-1 关闭，ex6 全档 BIT 达成）
+- **两层根因**：① MFEM `UpdateVertices` 每批重跑——top-level 保 id、其余（含历史批次创建的）按新叶序首见重编；pre-fix 把输入节点全当 top-level。状态载体 = `Mesh.vertex_parents` 改累积祖先表（refine 后全量重映射随网格携带）。② 每叶 `quad_hilbert` 态——贪心 `InitRootState` 重推在批 4 与 MFEM 增量演化差一处（三叶顺序反转、两 center id 互换）。状态载体 = 新增 `Mesh.nc_leaf_states: Option<Vec<u8>>`（iso 子代取 `QUAD_HILBERT_CHILD_STATE[parent][h]`，X/Y 子承父态；None=未 NC 加密退回贪心）。
+- **配套**：ex6 暖启动改位置键保号（批≥2 id 变位后 `RefinementMatrix` 恒等行按坐标位键对齐）。全仓 41 处 `Mesh{..}` 字面量补字段（examples/miniapps 的 ex7/pex7/trimmer 6 处由 examples 门抓到）。
+- **验收：ex6 star 12 轮全档 stdout = C++ 0 diff（131 行）**。钉 `d845_batch2_vertex_mfem_pin`（重放四批真实标记含 X/Y 各向异性；V4 316 顶点逐位；**牙** = 态载体退贪心 → batch-4 红）。探针 `probe_d92c.cpp` 重写为 ex6 逐字循环后 it3 X/B 逐位确认。证据 `tmp/d93c/`。
+
+### Lane A（D844-1 关闭，登记前提细化）
+- python 绑定层分派错误——`VectorH1Space` 被喂标量 `DiffusionIntegrator`；MFEM 依据 bilininteg.cpp:934/559：标量内核按标量 FE 出 nd×nd、BilinearForm 无标量→vdim 展开 ⇒ 向量空间的正规路径是 `VectorDiffusionIntegrator`/`VectorMassIntegrator`。修 = `crates/python/src/assembly.rs` 按空族分派；`standard/vector_diffusion.rs` 内核对齐 `AddMult_a_AAt` 位模式（旧差 1 ulp）。钉 `d844_vector_h1_dispatch_contract` 3 用例（逐位对角块+交叉块精确 0）。**pytest 28/28**（elasticity 红转绿）；fem-assembly 1322/0；fem-space 649/0。证据 `tmp/d93a/`。
+- **新债 D844-2（P3）**：fem-py 测试面 8 处 AttributeError（`test_mesh_element_type`/`node_coords`/`3d_refine`/`3d_boundary`/`hcurl_mass_matrix`/`complex_*` 等——1dd3109 迁移的测试引用从未实现的绑定 API）；预存，非本轮引入。
+
+### Lane B（D839-2 收尾关闭：SC 接入通用 form 路径，落地非登记）
+- `form.rs::enable_static_condensation()`（MFEM 同名语义）：翻转后**同一个** `form_linear_system`/`recover_fem_solution` 透明切换；`static_cond::condense_rhs`（= `ReduceRHS`，staticcond.cpp:309），ess 留缩减系按原 policy 消元。**新消费方 ex1 `-o 2 -sc` console = C++ 0 diff**（82561→62081，Δ=20480=NE，145 行 PCG 逐行相等）；ex29 `-sc -o 3` 锚 0 diff 复验、ex29 default 0 diff、ex1 默认回归 0 diff。
+- **红→绿抓到真 bug**：空线性表进核心时 recovery 的 b_i=0 ⇒ 回代 bubble 偏 3.4e-2 → `condense_rhs` 安装 b_i 修复。钉 `d839_form_static_condensation` 6 用例全绿（关=D706 逐位不变；开=与直入逐位相等；D697 经 SC 成立）。fem-assembly 1322/0。登记小债：assembler 专用入口应委托 static_cond 核心复用缓存（≤30 行，下轮）。证据 `tmp/d93b/`。
+
+### 大门（主树 ㉗，round-93 合并口径）
+- lib(debug) 18/3015/0；tests(release) **ten-crate 374/4458/0**；doc ten-crate 10/11/0；examples build 0 错误（ex6 的 `space` 未用赋值同步清零）；pro rc=0；fem-py **28/28 + 8 预存漂移（D844-2）**。
+- `--workspace --tests` 全口径另有 **vendor linger 自带测试 11 红——vendor 预存**（canonical 十 crate 门历来不含 vendor；含 test_amg 5、test_direct_s14_s15 1 等），登记备查非本轮引入。
+- 锚点：ex6 全档 **0**（新 BIT）、ex26 hex/star **0/0**、ex33 A/B **0/0**、ex10 **0**、ex14 323 行 **0**、ex29 -sc/default **0/0**、ex1 -sc **0**。
+- 回归：五套 276 靶 3076 passed 0 failed；fem-mesh 534+2、fem-space 649+2、fem-assembly 1322+6+3、fem-solver 451/0、fem-examples 108/0。
+
+### 新债
+- **D844-2（P3）**：fem-py 绑定 API 与迁移测试面漂移（8 用例 AttributeError），预存。
+- **vendor linger 自带测试 11 红**（预存，canonical 门不含）：下轮裁定——修 vendor 或正式排除出 --workspace 口径。
+- D843-2（P3，NC 边界段顺序）维持开放；ex6 全档 BIT 不受其影响（stdout 无边界段输出）。
+
+
 ## 第九十二轮（round 92）：D843-3 悬挂 dof true-dof 压缩（主会话）+ D842-3 hex-P4（Lane A）+ D842-2 ex10 切线（Lane B）——三路并行全交付；ex6 iter0/1 升 BIT
 
 **开局 HEAD = round-91 终稿 `bb4cc8e4`；三路主树文件互斥（㉛）；并发限 2（两代理 + 主会话）。**
