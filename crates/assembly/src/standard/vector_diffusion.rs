@@ -15,6 +15,16 @@ scalar_bilinear_integrator!(VectorDiffusionIntegrator, kappa,
 Unlike [`ElasticityIntegrator`], this treats each component independently
 (no cross-coupling between u_x and u_y).
 
+MFEM twin: `VectorDiffusionIntegrator::AssembleElementMatrix`
+(`fem/bilininteg.cpp:3049`) computes the `nd × nd` scalar matrix
+`pelmat = w·dshapedxt·dshapedxtᵀ` **once** per quadrature point (the
+`AddMult_a_AAt` bit pattern, identical to [`DiffusionIntegrator`]) and adds
+that same matrix to each of the `vdim` diagonal blocks
+(`elmat.AddMatrix(pelmat, dof·k, dof·k)`).  This kernel reproduces that
+shape: one accumulation per node pair, scattered to every same-component
+block — so the diagonal blocks are bit-identical to the scalar
+`DiffusionIntegrator` on the same space.
+
 # Example
 ```rust,ignore
 use fem_assembly::standard::VectorDiffusionIntegrator;
@@ -22,18 +32,31 @@ let integ = VectorDiffusionIntegrator { kappa: 1.0 };
 ```", |qp, k_elem, n, w| {
     let dim     = qp.dim;
     let n_nodes = n / dim;
-    // Outer product over spatial dimensions: same-component coupling.
-    for d in 0..dim {
-        for k in 0..n_nodes {
-            let g_kd = qp.grad_phys[k * dim + d];
-            for l in 0..n_nodes {
-                let contrib = w * g_kd * qp.grad_phys[l * dim + d];
-                for a in 0..dim {
-                    let row = k * dim + a;
-                    let col = l * dim + a;
-                    k_elem[row * n + col] += contrib;
-                }
+    // MFEM `AddMult_a_AAt` pair accumulation (see `diffusion.rs`), computed
+    // once per node pair and then added to each diagonal (same-component)
+    // block — local dof (node k, component a) = `k·dim + a`, the layout of
+    // `VectorH1Space`'s interleaved element DOF list.
+    for k in 0..n_nodes {
+        for l in 0..k {
+            let mut d = 0.0_f64;
+            for c in 0..dim {
+                d += qp.grad_phys[k * dim + c] * qp.grad_phys[l * dim + c];
             }
+            let ad = w * d;
+            for a in 0..dim {
+                let row = k * dim + a;
+                let col = l * dim + a;
+                k_elem[row * n + col] += ad;
+                k_elem[col * n + row] += ad;
+            }
+        }
+        let mut d = 0.0_f64;
+        for c in 0..dim {
+            d += qp.grad_phys[k * dim + c] * qp.grad_phys[k * dim + c];
+        }
+        for a in 0..dim {
+            let row = k * dim + a;
+            k_elem[row * n + row] += w * d;
         }
     }
 });
