@@ -3853,15 +3853,20 @@ pub fn refine_nonconforming_quad(
                 id
             });
         }
-        // Element centroid
+        // NC iso split center — MFEM `NCMesh::RefineElement` SQUARE XY arm
+        // (ncmesh.cpp:1855): `nodes.GetId(mid01, mid23)`, the midpoint of the
+        // (0,1)/(2,3) edge-midpoint pair. (`Mesh::UniformRefinement2D_base`
+        // uses `AverageVertices` — Σ/4 — but that is a different MFEM path;
+        // on the NC path the two compositions can differ by 1 ulp.)
         center_map.entry(e).or_insert_with(|| {
-            let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
-            for k in 0..4 {
-                let c = mesh.coords_of(ns[k]);
-                cx += c[0]; cy += c[1];
-            }
-            new_coords.push(cx / 4.0);
-            new_coords.push(cy / 4.0);
+            let a = mesh.coords_of(ns[0]);
+            let b = mesh.coords_of(ns[1]);
+            let c = mesh.coords_of(ns[2]);
+            let d = mesh.coords_of(ns[3]);
+            let m01 = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+            let m23 = [0.5 * (c[0] + d[0]), 0.5 * (c[1] + d[1])];
+            new_coords.push(0.5 * (m01[0] + m23[0]));
+            new_coords.push(0.5 * (m01[1] + m23[1]));
             let id = next_node;
             next_node += 1;
             id
@@ -5790,12 +5795,19 @@ pub fn refine_nonconforming_hex(
     // `oelem + C`, see `MfemHexRefineIds`).  Reproduced where a written file
     // pins it down — a *curved* mesh under *uniform* refinement keeps its
     // `nodes` table, so the refined file carries these ids in every section.
-    // Straight-sided meshes keep the historical first-touch numbering (the
-    // straight-refinement regression outputs pin it), and partial refinement
-    // would leave holes in the dense id space, so neither switches.
-    let mfem_ids = if (geo.is_some() || l2_geo.is_some() || p1_snapshot.is_some())
-        && marked_set.len() == n_elems
-    {
+    // D842-3 (round 92): *straight* meshes under **uniform** (full)
+    // refinement switch to the canonical ids too — MFEM has no
+    // straight/curved fork here (`AverageVertices(…, oedge + e)` runs for
+    // every `Mesh::UniformRefinement`), and ex26's inline-hex hierarchy is
+    // exactly this case: the twice-refined 16³ fine mesh feeds the P4 H¹
+    // numbering, and the per-parent first-touch numbering permuted every
+    // level after the first (pre-fix evidence: `tmp/d92a/`
+    // `refined2_mesh_diff_prefix.txt`, 16862 diff lines vs MFEM's print;
+    // 0 after the switch).  Partial
+    // refinement (true NC) still keeps the on-demand numbering: holes in the
+    // dense id space would be wrong (and MFEM ncmesh numbers differently
+    // anyway).
+    let mfem_ids = if marked_set.len() == n_elems {
         Some(MfemHexRefineIds::build(mesh))
     } else {
         None
@@ -7218,10 +7230,22 @@ pub fn refine_nonconforming_quad_aniso(
                     ensure_midpoint!(quad_edge_key(ns[a], ns[b]));
                 }
                 center_map.entry(e).or_insert_with(|| {
-                    let (mut cx, mut cy) = (0.0_f64, 0.0_f64);
-                    for k in 0..4 { let c = mesh.coords_of(ns[k]); cx += c[0]; cy += c[1]; }
-                    new_coords.push(cx / 4.0);
-                    new_coords.push(cy / 4.0);
+                    // MFEM quad iso split (ncmesh.cpp:1855): the center is
+                    // `nodes.GetId(mid01, mid23)` — the midpoint of the
+                    // (0,1)/(2,3) edge-midpoint pair (CalcVertexPos halves
+                    // each coordinate). A running Σcorners/4 differs from
+                    // that composition by 1 ulp on some coordinate values,
+                    // which desyncs every downstream dof value (ex6 iter1:
+                    // 6 of 15 centers off by 1 ulp => assembled A/b off by
+                    // ulps => PCG trajectory diverges).
+                    let a = mesh.coords_of(ns[0]);
+                    let b = mesh.coords_of(ns[1]);
+                    let c = mesh.coords_of(ns[2]);
+                    let d = mesh.coords_of(ns[3]);
+                    let m01 = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+                    let m23 = [0.5 * (c[0] + d[0]), 0.5 * (c[1] + d[1])];
+                    new_coords.push(0.5 * (m01[0] + m23[0]));
+                    new_coords.push(0.5 * (m01[1] + m23[1]));
                     let id = next_node; next_node += 1; id
                 });
             }

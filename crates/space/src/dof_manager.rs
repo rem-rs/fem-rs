@@ -2272,11 +2272,18 @@ impl DofManager {
         };
 
         // Phase 1: create edge DOFs (first touch, MFEM block order:
-        // all edges before any face/volume DOF).
+        // all edges before any face/volume DOF).  D842-3: the ids *inside*
+        // one edge block are assigned along MFEM's canonical mesh-edge
+        // direction, which is the SORTED vertex pair (`Mesh::GetEdgeVertices`
+        // stores vert[0] < vert[1], "consistent with the global edge
+        // orientation") — NOT the first-touch element's local CUBE::Edges
+        // direction (edges (3,2) and (7,6) are stored descending).  The
+        // element-local slots re-map below through the SegDofOrd reversal.
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             for &(la, lb, _) in &edge_runs {
-                get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+                let (a, b) = (ns[la].min(ns[lb]), ns[la].max(ns[lb]));
+                get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);
             }
         }
 
@@ -2317,11 +2324,23 @@ impl DofManager {
             let base = e as usize * dofs_per_elem;
             dofs_flat[base..base + 8].copy_from_slice(&ns[..8]);
             let mut off = 8;
-            // Edges: get_edge_dofs_pk orients the Vec along the call order
-            // (ns[la]→ns[lb]), which is exactly the slot-run direction.
+            // Edges: D842-3 — the block ids are canonical (ascending from the
+            // smaller vertex, see Phase 1); the element-local slots run along
+            // the element's CUBE::Edges direction (la → lb), so they map
+            // identity onto the block when the local direction ascends and
+            // reversed when it descends (MFEM
+            // `H1_FECollection::DofOrderForOrientation(SEGMENT, ori)`:
+            // `SegDofOrd[1][i] = p − i`).
             for &(la, lb, _) in &edge_runs {
-                let ed = get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
-                for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                let (a, b) = (ns[la].min(ns[lb]), ns[la].max(ns[lb]));
+                let ed = get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+                if ns[la] <= ns[lb] {
+                    for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                } else {
+                    for k in 0..edge_dofs_per {
+                        dofs_flat[base + off + k] = ed[edge_dofs_per - 1 - k];
+                    }
+                }
                 off += edge_dofs_per;
             }
             // Faces: match this element's slot GLL positions onto the
