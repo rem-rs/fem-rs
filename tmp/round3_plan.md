@@ -4470,6 +4470,32 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第九十二轮（round 92）：D843-3 悬挂 dof true-dof 压缩（主会话）+ D842-3 hex-P4（Lane A）+ D842-2 ex10 切线（Lane B）——三路并行全交付；ex6 iter0/1 升 BIT
+
+**开局 HEAD = round-91 终稿 `bb4cc8e4`；三路主树文件互斥（㉛）；并发限 2（两代理 + 主会话）。**
+
+### Lane A（D842-3，ex26 hex 冲 BIT）· **关闭（登记前提部分被驳，⑥）**
+- **build_pk_hex 的 hex-P4 dof 序本来就是 MFEM 的**（探针 4 网格 × order 1..4 全表 + `GetEdgeVertices` 方向 + `DofOrderForOrientation` 源码证明；钉测试 stash 后仍绿=诚实阴性）。**真根因在网格层**：`refine_uniform_3d` 直边 hex 新顶点编号按父单元逐块，MFEM 按全局实体相位（全部边中点→面心→体心）——`MfemHexRefineIds` 门控从 `(curved||l2||p1)&&全量` 放宽为 `全量`（真 NC 部分加密不变）。修后 ref1/ref2 与 MFEM Print 逐字节 0 diff。
+- **验收：ex26 hex 档 stdout 与 C++ 现跑 0 diff**（修前 14 diff 行复现存档）；ex26 star 反回归锚 0 diff。钉 `crates/space/tests/d842_hex_p4_dof_order_mfem_pin.rs` 3 用例双牙。证据 `tmp/d92a/`。
+
+### Lane B（D842-2，ex10 切线公式）· **关闭（前任代理环境墙终止后按 ⑦ 收编续作）**
+- 元素内核位级移植 `crates/assembly/src/physics/mfem_nonlininteg.rs`（GL 点牛顿迭代、重心基、闭式 2×2 det、`EvalW` 把 elfun 当**位置场**——解释 EE0 = −7.9e-19）；**7 层根因链**：CalcInverse<2>=伴随、ESS 语义（DIAG_KEEP/H->Mult 尾部置零/grad_H DIAG_ONE）、Newton-MFEM GL 表（`gauss_legendre_01` n=3 差 1 ulp）、MFEM LIL 稀疏管线（prepend+Finalize 逆序）、glibc_hypot、MFEM 序 Mult/Dot 核、DSmoother(1)=l1-Jacobi。
+- **验收：ex10 默认档 stdout 与 C++ 现跑逐字节 0 diff**（1349 行，run-to-run 确定）。fem-assembly 1313/0、fem-solver 451/0（D842-1 pin 未动）。钉 `d842_hyperelastic_tangent_mfem_pin.rs` 5/5 + `d842_libm_bitwise_pin.rs`（内嵌 600 位三元组）。证据 `tmp/d92b/`。
+
+### 主会话（D843-3，悬挂 dof true-dof 压缩）· **关闭**
+- **`crates/space/src/constraints/conforming.rs`（新）**：MFEM `BuildConformingInterpolation`（fespace.cpp:1144）1:1——deps 行 LIFO 合并 + `Finalize` 发射序 + 多趟闭包解析链式约束；cR = 升序 vdof 选择；`compress` = `ConformingAssemble`（bilinearform.cpp:762）的 `(R·A)·P` 两级 **first-touch `Mult`** 稀疏积（R = Pᵀ，列含悬挂系数——非行选择！）；`EliminateRowCol(DIAG_KEEP)`（sparsemat.cpp:2281，Ae 前插序）+ `EliminateVDofsInRHS`（`AddMult(-1)` LIFO + `PartMult` 赋值）逐位移植。ex6 全迭代切 `FormLinearSystem(copy_interior=1)` 语义（conforming 分支 + 压缩分支 + `RefinementMatrix` 等价的 Q1 暖启动）。
+- **顺藤挖出两个跨 crate 真缺陷**：① `crates/solver gs_sweep` backward 臂行内**正序**累加——MFEM `Gauss_Seidel_back`（sparsemat.cpp:2571）`j--` **逆序**，行内 ≥3 项即 1 ulp（ex14 的 323 行 BIT 掩盖至今）；② `crates/mesh` NC quad iso 中心合成 `Σcorners/4`——MFEM `GetId(mid01,mid23)`（ncmesh.cpp:1855）边中点中点，iter1 的 15 中心里 6 个差 1 ulp ⇒ 装配崩。**注意 `Mesh::UniformRefinement2D_base` 的 `AverageVertices`（Σ/4）是另一条 MFEM 路径，均匀路径保留 Σ/4。**
+- **验收：ex6 star iter0+iter1 stdout 逐字节 = C++**（iter1 首残差 0.0297211 = C++；前 25 行 0 diff）。iter2+ 差 = **D843-1 实证**（批≥2 顶点 id 置换——值集合相同、id 错位，非数值偏差）；ex6 全档 BIT 待 D843-1。钉 `d843_conforming_mfem_pin.rs` 2 用例 + fixture `d843_star_iter1_mfem.txt`，**三牙**（compress 退选择式 / GS 去 rev / 中心退 Σ4 各自红）。探针与真值 `tmp/d92c/`。
+
+### 大门（主树 ㉗）
+- lib(debug) **18/3015/0/0**（全 workspace，含 fem-py）；tests(release) **426/5323/0/0**（`--no-fail-fast`）；doc **17/14/0/0**；examples build **0 错误、0 非 vendor 警告**（④ 按 `-->` 归属全 vendor）；pro rc=0；fem-py maturin ok + pytest **27 passed + 1 预存红**（见新债 D844-1）。
+- BIT 锚点复跑（GS 序波及面全查）：ex26 star/hex **0/0**、ex33 A/B **0/0**、ex10 **0**、ex14 323 行 **0**；fem-examples **108/0**。
+
+### 新债
+- **D844-1（P2，crates/python + assembly 契约）**：fem-py `test_elasticity_assemble` panic（diffusion.rs:39 index 6/len 6——标量 Diffusion 内核收到向量空间 QpData：`n_dofs`=6 而 `grad_phys` 按标量参考元 3×2 分配）。**bb4cc8e4 预存**（本轮 assembly/diffusion 零 diff 佐证；round-91 的"fem-py rc=0"口径未含此 pytest 用例）。修法 = 向量积分器分派或 QpData 尺寸契约（vector_assembler.rs），随 py 绑定轮次处理。
+- **D843-1 维持开放并强化证据**：iter2 X/B 的 35 处"差"全部为 id 置换（值集合逐位相同）——落地后 ex6 全档 BIT 即达成。
+
+
 ## 第九十一轮（round 91）：D837-1 假设否证 + NC 叶子序真修（Lane A）+ D839-2 SC 实现（主会话+调试代理，两数学 bug）+ RUN→BIT 第三波（Lane B：ex33/ex26 star 升 BIT）——三路并行全交付
 
 **开局 HEAD = round-90 终稿 `13b21d09`；三路主树文件互斥（㉛）；并发限 2（Lane C 首派败后由主会话接手 D839-2 并派调试代理）。**
