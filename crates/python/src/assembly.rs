@@ -5,6 +5,7 @@ use numpy::{PyArray1, PyArrayMethods};
 use fem_assembly::Assembler;
 use fem_assembly::standard::{
     DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator,
+    VectorDiffusionIntegrator, VectorH1MassIntegrator,
 };
 use fem_assembly::BilinearIntegrator;
 use fem_assembly::LinearIntegrator;
@@ -64,6 +65,16 @@ impl PyConstantLoad {
 ///     integrators: list[StiffnessIntegrator | MassIntegrator]
 ///     quad_order: (optional) quadrature order, default 4
 ///
+/// On a `VectorH1Space` the scalar integrators are routed to their
+/// vector-space analogues (`StiffnessIntegrator` → `VectorDiffusionIntegrator`,
+/// `MassIntegrator` → `VectorH1MassIntegrator`), mirroring MFEM where the
+/// scalar `DiffusionIntegrator`/`MassIntegrator` kernels are written against
+/// the *scalar* reference element (`nd = el.GetDof()`) and a vector (vdim > 1)
+/// space assembles through the vector-aware integrators whose element matrix
+/// is `vdim·dof` square (`bilininteg.cpp` `VectorDiffusionIntegrator::`
+/// `AssembleElementMatrix` / `VectorMassIntegrator::AssembleElementMatrix`);
+/// `BilinearForm::Assemble` has no scalar-to-vdim expansion.
+///
 /// Returns:
 ///     CsrMatrix
 #[pyfunction]
@@ -78,23 +89,10 @@ pub fn py_assemble_bilinear(
         return Err(PyValueError::new_err("at least one integrator required"));
     }
 
-    let mut bilinear_integrators: Vec<Box<dyn BilinearIntegrator>> = Vec::new();
-    for item in integrators.iter() {
-        let obj = item;
-        if let Ok(s) = obj.extract::<PyRef<'_, PyStiffnessIntegrator>>() {
-            bilinear_integrators.push(Box::new(DiffusionIntegrator { kappa: s.kappa }));
-        } else if let Ok(m) = obj.extract::<PyRef<'_, PyMassIntegrator>>() {
-            bilinear_integrators.push(Box::new(MassIntegrator { rho: m.alpha }));
-        } else {
-            return Err(PyValueError::new_err(
-                "unsupported integrator; expected StiffnessIntegrator or MassIntegrator"
-            ));
-        }
-    }
-    let refs: Vec<&dyn BilinearIntegrator> = bilinear_integrators.iter().map(|b| b.as_ref()).collect();
-
     // Dispatch by space type
     if let Ok(h1) = space.extract::<PyRef<'_, PyH1Space>>() {
+        let bilinear_integrators = scalar_bilinear_integrators(integrators)?;
+        let refs: Vec<&dyn BilinearIntegrator> = bilinear_integrators.iter().map(|b| b.as_ref()).collect();
         match h1.dim {
             2 => Ok(PyCsrMatrix { inner: Assembler::assemble_bilinear(
                 h1.inner_2d.as_ref().unwrap(), &refs, qo) }),
@@ -103,6 +101,8 @@ pub fn py_assemble_bilinear(
             _ => Err(PyValueError::new_err("unsupported dim")),
         }
     } else if let Ok(hcurl) = space.extract::<PyRef<'_, PyHCurlSpace>>() {
+        let bilinear_integrators = scalar_bilinear_integrators(integrators)?;
+        let refs: Vec<&dyn BilinearIntegrator> = bilinear_integrators.iter().map(|b| b.as_ref()).collect();
         match hcurl.dim {
             2 => Ok(PyCsrMatrix { inner: Assembler::assemble_bilinear(
                 hcurl.inner_2d.as_ref().unwrap(), &refs, qo) }),
@@ -111,6 +111,8 @@ pub fn py_assemble_bilinear(
             _ => Err(PyValueError::new_err("unsupported dim")),
         }
     } else if let Ok(hdiv) = space.extract::<PyRef<'_, PyHDivSpace>>() {
+        let bilinear_integrators = scalar_bilinear_integrators(integrators)?;
+        let refs: Vec<&dyn BilinearIntegrator> = bilinear_integrators.iter().map(|b| b.as_ref()).collect();
         match hdiv.dim {
             2 => Ok(PyCsrMatrix { inner: Assembler::assemble_bilinear(
                 hdiv.inner_2d.as_ref().unwrap(), &refs, qo) }),
@@ -119,6 +121,8 @@ pub fn py_assemble_bilinear(
             _ => Err(PyValueError::new_err("unsupported dim")),
         }
     } else if let Ok(l2) = space.extract::<PyRef<'_, PyL2Space>>() {
+        let bilinear_integrators = scalar_bilinear_integrators(integrators)?;
+        let refs: Vec<&dyn BilinearIntegrator> = bilinear_integrators.iter().map(|b| b.as_ref()).collect();
         match l2.dim {
             2 => Ok(PyCsrMatrix { inner: Assembler::assemble_bilinear(
                 l2.inner_2d.as_ref().unwrap(), &refs, qo) }),
@@ -127,6 +131,13 @@ pub fn py_assemble_bilinear(
             _ => Err(PyValueError::new_err("unsupported dim")),
         }
     } else if let Ok(vh1) = space.extract::<PyRef<'_, PyVectorH1Space>>() {
+        // VectorH1Space dofs are interleaved (n_dofs = vdim × scalar dofs), so
+        // the scalar kernels — which interpret `QpData::n_dofs` as the scalar
+        // per-node dof count — must not see its QpData (a vdim·n_nodes entry
+        // list).  Route to the vector analogues, exactly MFEM's supported path
+        // for vdim > 1 spaces.  D844-1.
+        let bilinear_integrators = vector_h1_bilinear_integrators(integrators)?;
+        let refs: Vec<&dyn BilinearIntegrator> = bilinear_integrators.iter().map(|b| b.as_ref()).collect();
         match vh1.dim {
             2 => Ok(PyCsrMatrix { inner: Assembler::assemble_bilinear(
                 vh1.inner_2d.as_ref().unwrap(), &refs, qo) }),
@@ -139,6 +150,50 @@ pub fn py_assemble_bilinear(
             "unsupported space type; expected H1Space|HCurlSpace|HDivSpace|L2Space|VectorH1Space"
         ))
     }
+}
+
+/// Map the Python bilinear integrators to scalar-family kernels (H1, HCurl,
+/// HDiv, L2 spaces — one entry per reference-element dof).
+fn scalar_bilinear_integrators(
+    integrators: &Bound<'_, PyList>,
+) -> PyResult<Vec<Box<dyn BilinearIntegrator>>> {
+    let mut out: Vec<Box<dyn BilinearIntegrator>> = Vec::new();
+    for item in integrators.iter() {
+        let obj = item;
+        if let Ok(s) = obj.extract::<PyRef<'_, PyStiffnessIntegrator>>() {
+            out.push(Box::new(DiffusionIntegrator { kappa: s.kappa }));
+        } else if let Ok(m) = obj.extract::<PyRef<'_, PyMassIntegrator>>() {
+            out.push(Box::new(MassIntegrator { rho: m.alpha }));
+        } else {
+            return Err(PyValueError::new_err(
+                "unsupported integrator; expected StiffnessIntegrator or MassIntegrator"
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Map the Python bilinear integrators to their `VectorH1Space` analogues
+/// (interleaved dofs, `n_dofs = vdim × scalar dofs`): stiffness → vector
+/// Laplacian, mass → vector mass.  Same-component block-diagonal operators,
+/// as MFEM's `VectorDiffusionIntegrator` / `VectorMassIntegrator`.
+fn vector_h1_bilinear_integrators(
+    integrators: &Bound<'_, PyList>,
+) -> PyResult<Vec<Box<dyn BilinearIntegrator>>> {
+    let mut out: Vec<Box<dyn BilinearIntegrator>> = Vec::new();
+    for item in integrators.iter() {
+        let obj = item;
+        if let Ok(s) = obj.extract::<PyRef<'_, PyStiffnessIntegrator>>() {
+            out.push(Box::new(VectorDiffusionIntegrator { kappa: s.kappa }));
+        } else if let Ok(m) = obj.extract::<PyRef<'_, PyMassIntegrator>>() {
+            out.push(Box::new(VectorH1MassIntegrator { kappa: m.alpha }));
+        } else {
+            return Err(PyValueError::new_err(
+                "unsupported integrator; expected StiffnessIntegrator or MassIntegrator"
+            ));
+        }
+    }
+    Ok(out)
 }
 
 /// Assemble a linear form (RHS vector). Supports H1Space and L2Space.
