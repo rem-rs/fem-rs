@@ -30,7 +30,10 @@ use fem_linalg::PrintLevel;
 use fem_solver::{SolverConfig, solve_pcg_gssmoother};
 use fem_space::{
     H1Space,
-    constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
+    constraints::{
+        boundary_dofs, conforming::ConformingInterpolation, eliminate_rowcol_keep_diag,
+        eliminate_vdofs_in_rhs,
+    },
     fe_space::FESpace,
 };
 
@@ -75,7 +78,7 @@ fn main() {
     let quad_rhs = (order as u8) * 2 + 1;
 
     // ── 5. Initialize solution vector u (persistent across AMR iterations) ────
-    let mut u = vec![0.0; space.n_dofs()];
+    let mut u: Vec<f64> = Vec::new();
     let mut prev_mesh: Option<Mesh<2>> = None;
 
     // ── 6. BCs on all boundaries ─────────────────────────────────────────────
@@ -85,10 +88,48 @@ fn main() {
     let mut mesh = mesh;
     let mut hanging_constraints: Vec<HangingNodeConstraint> = Vec::new();
 
+    // Solve: PCG + GSSmoother (MFEM: PCG(*A, M, B, X, 3, 200, 1e-12, 0.0)).
+    // The MFEM legacy helper applies `SetRelTol(sqrt(1e-12))` = 1e-6;
+    // `solve_pcg_gssmoother` takes that rel_tol directly (its criterion is
+    // `(B r, r) <= rtol²·nom0`, i.e. `1e-12·nom0` — the raw 1e-12 here
+    // meant `1e-24·nom0` and over-converged 12 orders past C++, D634).
+    // print_iter = 3 → legacy `FirstAndLast` (`(B r, r) = … ...` first line
+    // + final line + ARF, no per-iteration history).
+    let cfg = SolverConfig {
+        rtol: 1e-6,
+        atol: 0.0,
+        max_iter: 200,
+        print_level: PrintLevel::FirstAndLast,
+        ..SolverConfig::default()
+    };
+
     for it in 0.. {
+        // Warm start (ex6 step 21 `x.Update()`): MFEM interpolates the previous
+        // solution onto the refined mesh through the refinement matrix before
+        // the next solve. Tri3 uses the edge-midpoint map (conforming
+        // refinement); Quad4 NC refinement keeps top-level vertex ids and
+        // appends new vertices (MFEM UpdateVertices order, round-91), so the
+        // old dofs carry over by id and the new ones are the edge midpoints /
+        // cell centers of their parent quads — exactly the rows of MFEM's
+        // `RefinementMatrix` for Q1 (bilinear interpolation at dyadic
+        // reference points, `RefinementMatrix_main` first-touch rows).
+        if let Some(ref pmesh) = prev_mesh {
+            if is_quad {
+                if order == 1 {
+                    u = prolongate_quad_p1(pmesh, &u, &mesh);
+                }
+            } else {
+                let mid_map = build_edge_midpoint_map(pmesh, &mesh);
+                u = fem_mesh::amr::prolongate_p1(&u, mesh.n_nodes(), &mid_map);
+            }
+        }
+
         // Build space on current mesh.
         space = H1Space::new(mesh.clone(), order);
         let cdofs = space.n_dofs();
+        if u.len() != cdofs {
+            u.resize(cdofs, 0.0);
+        }
 
         // MFEM ex6.cpp:193 prints `fespace.GetTrueVSize()`: constrained
         // hanging-node dofs are interpolated, not unknowns (D837-1 round-91
@@ -100,68 +141,52 @@ fn main() {
         println!("Number of unknowns: {}", n_true);
 
         // Assemble RHS: b(v) = ∫ 1·v dx.
-        let mut rhs = Assembler::assemble_linear(&space, &[&source], quad_rhs);
+        let rhs = Assembler::assemble_linear(&space, &[&source], quad_rhs);
 
-        // Get boundary DOFs.
+        // Get boundary DOFs. ex6 step 14 `x.ProjectBdrCoefficient(zero,
+        // ess_bdr)` rewrites the (homogeneous) essential values into x before
+        // every FormLinearSystem — the warm start enters the restriction with
+        // the boundary zeroed.
         let dm = space.dof_manager();
         let bnd = boundary_dofs(&mesh, dm, &mesh.unique_boundary_tags());
-        let bnd_vals = vec![0.0; bnd.len()];
+        for &d in &bnd {
+            u[d as usize] = 0.0;
+        }
 
         // Assemble stiffness matrix.
         let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], quad_stiff);
 
-        // Apply hanging-node constraints (Quad4 NC path).
-        if !hanging_constraints.is_empty() {
-            use fem_space::constraints::apply_hanging_constraints;
-            apply_hanging_constraints(&mut mat, &mut rhs, &hanging_constraints);
-        }
-
-        // Eliminate Dirichlet DOFs → reduced system (MFEM FormLinearSystem).
-        let (red_mat, red_rhs, free_map, constrained_map) =
-            eliminate_dirichlet(&mat, &rhs, &bnd, &bnd_vals);
-
-        // Warm-start: prolongate previous solution if available (Tri3).
-        let mut u_red = vec![0.0; red_mat.nrows];
-        if let Some(ref pmesh) = prev_mesh {
-            if !is_quad {
-                let mid_map = build_edge_midpoint_map(pmesh, &mesh);
-                let prol = fem_mesh::amr::prolongate_p1(&u, mesh.n_nodes(), &mid_map);
-                for (ri, &dof) in free_map.iter().enumerate() {
-                    u_red[ri] = prol[dof as usize];
-                }
-            }
-        }
-
-        // Solve: PCG + GSSmoother (MFEM: PCG(*A, M, B, X, 3, 200, 1e-12, 0.0)).
-        // The MFEM legacy helper applies `SetRelTol(sqrt(1e-12))` = 1e-6;
-        // `solve_pcg_gssmoother` takes that rel_tol directly (its criterion is
-        // `(B r, r) <= rtol²·nom0`, i.e. `1e-12·nom0` — the raw 1e-12 here
-        // meant `1e-24·nom0` and over-converged 12 orders past C++, D634).
-        // print_iter = 3 → legacy `FirstAndLast` (`(B r, r) = … ...` first line
-        // + final line + ARF, no per-iteration history).
-        let cfg = SolverConfig {
-            rtol: 1e-6,
-            atol: 0.0,
-            max_iter: 200,
-            print_level: PrintLevel::FirstAndLast,
-            ..SolverConfig::default()
-        };
-        let res = solve_pcg_gssmoother(&red_mat, &red_rhs, &mut u_red, &cfg);
-        let (converged, _iters) = match res {
-            Ok(r) => (r.converged, r.iterations),
-            Err(_) => (false, 200),
-        };
-        if !converged {
-            // MFEM: prints "No convergence!" and continues with the current X.
-        }
-
-        // RecoverFEMSolution: expand to full DOF vector.
-        u = expand_from_reduced(&u_red, &free_map, &constrained_map, &bnd_vals, cdofs);
-
-        // Recover hanging-node DOF values (Quad4 NC path).
-        if !hanging_constraints.is_empty() {
-            use fem_space::constraints::recover_hanging_values;
-            recover_hanging_values(&mut u, &hanging_constraints);
+        // MFEM FormLinearSystem (ex6 passes copy_interior = 1). Conforming
+        // spaces solve the square system with the essential rows/columns
+        // eliminated in place (DIAG_KEEP); non-conforming spaces compress to
+        // the true dofs first (D843-3): A_t = (R·A)·P, X = R·x (warm start),
+        // B = Pᵀb − A_e·X with B[ess] = (A_t·X)[ess].
+        let mut xs = u.clone();
+        if hanging_constraints.is_empty() {
+            let ae = eliminate_rowcol_keep_diag(&mut mat, &bnd);
+            let mut bsys = rhs;
+            eliminate_vdofs_in_rhs(&ae, &mat, &bnd, &xs, &mut bsys);
+            let _ = solve_pcg_gssmoother(&mat, &bsys, &mut xs, &cfg);
+            // RecoverFEMSolution (conforming): X *is* x.
+            u = xs;
+        } else {
+            let conf =
+                ConformingInterpolation::from_hanging_constraints(cdofs, &hanging_constraints);
+            // GetEssentialTrueDofs maps essential vdofs through cR: the
+            // elimination list holds true-dof indices, not vdof ids.
+            let ess_true: Vec<u32> = bnd
+                .iter()
+                .filter_map(|&d| conf.true_index_of(d).map(|t| t as u32))
+                .collect();
+            let mut a_true = conf.compress(&mat);
+            let ae = eliminate_rowcol_keep_diag(&mut a_true, &ess_true);
+            let mut bsys = conf.mult_transpose(&rhs);
+            xs = conf.restrict(&xs);
+            eliminate_vdofs_in_rhs(&ae, &a_true, &ess_true, &xs, &mut bsys);
+            let _ = solve_pcg_gssmoother(&a_true, &bsys, &mut xs, &cfg);
+            // RecoverFEMSolution (non-conforming): x = P·X (hanging dofs are
+            // interpolated from the true dofs).
+            u = conf.prolongate(&xs);
         }
 
         // Print ZZ estimator diagnostics.
@@ -205,18 +230,77 @@ fn main() {
             }).collect();
             let (new_mesh, new_constraints) =
                 refine_nonconforming_quad_aniso(&mesh, &marked_aniso, None);
+            prev_mesh = Some(mesh.clone());
             mesh = new_mesh;
             hanging_constraints = new_constraints;
         } else {
             prev_mesh = Some(mesh.clone());
             mesh = closure_refine_default(&mesh, &marked.iter().map(|&i| i as u32).collect::<Vec<_>>(), None);
         }
-        // Resize solution vector for new mesh.
-        u.resize(space.n_dofs(), 0.0);
     }
 
     eprintln!("\n  Total time: {:.3}s", t0.elapsed().as_secs_f64());
     eprintln!("  Done.");
+}
+
+/// Corner-order quarter-weight row MFEM stores for a center dof.
+fn center_row(ns: &[fem_core::NodeId]) -> Vec<(fem_core::NodeId, f64)> {
+    vec![(ns[0], 0.25), (ns[1], 0.25), (ns[2], 0.25), (ns[3], 0.25)]
+}
+
+/// Q1 warm-start interpolation across a Quad4 NC refinement (the Rust
+/// equivalent of MFEM's `RefinementMatrix` rows for H1 order 1 on squares).
+///
+/// New vertices are the edge midpoints (weights ½/½ on the edge endpoints)
+/// and — for isotropic splits — the cell center (weights ¼×4 on the corners
+/// in element corner order, the same order MFEM's `SetRow` stores and its
+/// `Mult` accumulates). All reference coordinates are dyadic, so the weight
+/// products are exact and the values match MFEM bit-for-bit. Old dofs carry
+/// over by id (MFEM `UpdateVertices` keeps top-level vertices first,
+/// round-91); the explicit zero weights MFEM stores for the off-edge corners
+/// only ever add ±0.0 terms, which cannot change any value or comparison.
+fn prolongate_quad_p1(old: &Mesh<2>, u: &[f64], new: &Mesh<2>) -> Vec<f64> {
+    use fem_core::NodeId;
+    use std::collections::HashMap;
+
+    let old_n = old.n_nodes();
+    // position bit-key → (dof, weight) pairs in element corner order
+    let mut table: HashMap<[u64; 2], Vec<(NodeId, f64)>> = HashMap::new();
+    for e in 0..old.n_elems() as NodeId {
+        let ns = old.elem_nodes(e);
+        let p: Vec<[f64; 2]> = ns.iter().map(|&n| old.coords_of(n)).collect();
+        let mid = |a: [f64; 2], b: [f64; 2]| [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+        let key = |q: [f64; 2]| [q[0].to_bits(), q[1].to_bits()];
+        for (a, b) in [(0usize, 1usize), (1, 2), (2, 3), (3, 0)] {
+            table
+                .entry(key(mid(p[a], p[b])))
+                .or_insert_with(|| vec![(ns[a], 0.5), (ns[b], 0.5)]);
+        }
+        let m01 = mid(p[0], p[1]);
+        let m23 = mid(p[2], p[3]);
+        // The mesh's center vertex (NC iso split) is stored as the midpoint of
+        // the (0,1)/(2,3) edge-midpoint pair — MFEM `GetId(mid01, mid23)` —
+        // and interpolates with the corner-order quarter weights, which is
+        // MFEM's P row for the center dof.
+        table
+            .entry(key(mid(m01, m23)))
+            .or_insert_with(|| center_row(ns));
+    }
+    let mut u_new = vec![0.0; new.n_nodes()];
+    for (i, v) in u.iter().enumerate().take(old_n) {
+        u_new[i] = *v;
+    }
+    for nid in old_n as NodeId..new.n_nodes() as NodeId {
+        let p = new.coords_of(nid);
+        if let Some(row) = table.get(&[p[0].to_bits(), p[1].to_bits()]) {
+            let mut acc = 0.0;
+            for (c, w) in row {
+                acc += w * u[*c as usize];
+            }
+            u_new[nid as usize] = acc;
+        }
+    }
+    u_new
 }
 
 fn build_edge_midpoint_map(old: &Mesh<2>, new: &Mesh<2>) -> std::collections::HashMap<(u32, u32), u32> {

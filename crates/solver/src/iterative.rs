@@ -512,11 +512,14 @@ fn gs_sweep(row_ptr: &[usize], col: &[u32], val: &[f64], r: &[f64], z: &mut [f64
         }
         z[i] = (r[i] - sum) / diag(row_ptr, col, val, i);
     }
-    // backward
+    // backward — MFEM `Gauss_Seidel_back` (sparsemat.cpp:2571) scans each row
+    // with `j--`, i.e. accumulates the row sum in REVERSE stored order; the
+    // forward-order sweep here diverged from C++ by 1 ulp on rows with >= 3
+    // entries (ex6 iter0 probe: same A/B, 4 solution entries off by 1 ulp).
     for ii in 0..n {
         let i = n - 1 - ii;
         let mut sum = 0.0;
-        for k in row_ptr[i]..row_ptr[i + 1] {
+        for k in (row_ptr[i]..row_ptr[i + 1]).rev() {
             let j = col[k] as usize;
             if j != i {
                 sum += val[k] * z[j];

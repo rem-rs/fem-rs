@@ -12,6 +12,7 @@
 //! - [`apply_hanging_constraints_hdiv`] — RT0/RT1 face DOF flux constraints
 //! - [`recover_hanging_values_hcurl`] / [`recover_hanging_values_hdiv`]
 
+pub mod conforming;
 pub mod dirichlet;
 pub mod hanging_2d;
 pub mod hcurl;
@@ -21,6 +22,7 @@ pub mod periodic;
 pub mod prolong;
 pub mod mpc;
 
+pub use conforming::*;
 pub use dirichlet::*;
 pub use hanging_2d::*;
 pub use hcurl::*;
