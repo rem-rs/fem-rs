@@ -1003,7 +1003,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None,
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, vertex_parents: vec![], nc_leaf_states: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             geometry: None,
         }
     }
@@ -1094,7 +1094,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None,
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, vertex_parents: vec![], nc_leaf_states: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             geometry: None,
         };
         let space = H1Space::new(mesh, 1);

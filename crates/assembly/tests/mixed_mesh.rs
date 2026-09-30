@@ -149,7 +149,7 @@ fn build_mixed_mesh() -> Mesh<2> {
     Mesh::<2> {
         coords: coords_final,
         conn,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags,
         elem_type: ElementType::Tri3, // primary (ignored when elem_types is set)
         face_conn,

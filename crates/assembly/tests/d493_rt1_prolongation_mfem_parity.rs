@@ -77,7 +77,7 @@ fn mfem_quad_meshes() -> (Mesh<2>, Mesh<2>) {
     let coarse = Mesh::<2> {
         coords: flat(MFEM_QUAD_O1_CVERT),
         conn: conn(MFEM_QUAD_O1_CCONN),
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags: vec![1],
         elem_type: ElementType::Quad4,
         face_conn: vec![0, 1, 1, 3, 3, 2, 2, 0],
@@ -96,7 +96,7 @@ fn mfem_quad_meshes() -> (Mesh<2>, Mesh<2>) {
     let fine = Mesh::<2> {
         coords: flat(MFEM_QUAD_O1_FVERT),
         conn: conn(MFEM_QUAD_O1_FCONN),
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags: vec![1; 4],
         elem_type: ElementType::Quad4,
         face_conn,
@@ -158,7 +158,7 @@ fn mfem_hex_meshes() -> (Mesh<3>, Mesh<3>) {
     let coarse = Mesh::<3> {
         coords: flat(MFEM_HEX_O1_CVERT),
         conn: conn(MFEM_HEX_O1_CCONN),
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags: vec![1],
         elem_type: ElementType::Hex8,
         face_conn: vec![
@@ -179,7 +179,7 @@ fn mfem_hex_meshes() -> (Mesh<3>, Mesh<3>) {
     let fine = Mesh::<3> {
         coords: flat(MFEM_HEX_O1_FVERT),
         conn: conn(MFEM_HEX_O1_FCONN),
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags: vec![1; 8],
         elem_type: ElementType::Hex8,
         face_conn,
@@ -435,7 +435,7 @@ fn mfem_pyramid_mesh() -> Mesh<3> {
     Mesh::<3> {
         coords: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0],
         conn: vec![0, 1, 2, 3, 4],
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags: vec![1],
         elem_type: ElementType::Pyramid5,
         face_conn: vec![0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 0, 3, 2, 1],
@@ -884,7 +884,7 @@ fn d493_pyramid_refinement_matches_mfem_construction() {
     let coarse = Mesh::<3> {
         coords: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0],
         conn: vec![0, 1, 2, 3, 4],
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_tags: vec![1],
         elem_type: ElementType::Pyramid5,
         face_conn: vec![0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 0, 3, 2, 1],

@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::{GeometryData, Mesh}, rebuild_boundary::{rebuild_3d_boundary, BoundaryRebuildMaps}};
+use crate::{element_type::ElementType, simplex::{GeometryData, Mesh, NcFaceIdState}, rebuild_boundary::{rebuild_3d_boundary, BoundaryRebuildMaps}};
+use crate::boundary::BoundaryTag;
 use crate::cad::{ProjectionConfig, project_boundary_to_cad};
 
 use super::bisect::{edge_key, local_edges_tri, refine_marked};
@@ -1123,7 +1124,7 @@ fn refine_uniform_2d_mixed(mesh: &Mesh<2>) -> Mesh<2> {
         edge_to_elem: vec![],
         geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 };
     // D624: a curved (order-p ≥ 2) mixed parent propagates its geometry —
     // MFEM's `UniformRefinement` + `nodes` update restricts the parent's
@@ -1760,7 +1761,7 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         edge_to_elem: vec![],
         nc_vertex_view: None,
         geometry: None,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     };
     if qg.is_some() {
         new_mesh.geometry = super::curved_quad::build_refined_quad_geometry(mesh, &new_mesh);
@@ -1980,7 +1981,7 @@ fn linear_view<const D: usize>(mesh: &Mesh<D>) -> Option<Mesh<D>> {
         edge_to_elem: vec![],
         geometry: mesh.geometry.clone(),
         nc_vertex_view: None,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     })
 }
 
@@ -2787,7 +2788,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         face_types: None, face_offsets: None,
         face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 };
     // D817-3: transport the fused pyramid `L2_T1_3D_P1` table — children
     // inherit the parent P1 field through MFEM's refinement operator (the
@@ -2878,7 +2879,7 @@ pub fn refine_uniform_surface_tri3(mesh: &Mesh<3>) -> Mesh<3> {
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 }
 }
 
@@ -2938,7 +2939,7 @@ pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 }
 }
 
@@ -3015,7 +3016,7 @@ pub fn refine_at_vertex_surface(mesh: &Mesh<3>, target: &[f64; 3]) -> Mesh<3> {
         face_to_elem: None,
         edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 }
 }
 
@@ -3690,6 +3691,7 @@ fn reorder_quad_refinement_mfem(
     face_conn: &mut [NodeId],
     dir_of: &dyn Fn(ElemId) -> Option<QuadRefineDir>,
     fresh_ancestry: &[(NodeId, NodeId, NodeId)],
+    face_state: &mut NcFaceIdState,
 ) -> (Vec<(NodeId, NodeId, NodeId)>, Vec<u8>) {
     let n_old = mesh.n_elems();
     if n_old == 0 {
@@ -3805,7 +3807,10 @@ fn reorder_quad_refinement_mfem(
     }
 
     // 5. Accumulated ancestry for the next batch (ids remapped to final;
-    //    NodeId::MAX parents stay MAX).
+    //    NodeId::MAX parents stay MAX).  The face-id state rides along the
+    //    same renumbering (D843-2): its keys are canonical pairs in the
+    //    batch-input node-id space and must move to the MFEM vertex-id space
+    //    the new mesh uses, or the next batch's lookups would miss.
     let map = |n: NodeId| if n == NodeId::MAX { NodeId::MAX } else { new_id[n as usize] };
     let mut ancestry: Vec<(NodeId, NodeId, NodeId)> = mesh
         .vertex_parents
@@ -3815,7 +3820,191 @@ fn reorder_quad_refinement_mfem(
     for &(c, a, b) in fresh_ancestry {
         ancestry.push((map(c), map(a), map(b)));
     }
+    face_state.ids = face_state
+        .ids
+        .drain()
+        .map(|((a, b), id)| {
+            // The renumbering does not preserve order — re-canonicalize the
+            // pair or every later (min, max) lookup would miss it.
+            let (x, y) = (map(a), map(b));
+            (if x <= y { (x, y) } else { (y, x) }, id)
+        })
+        .collect();
     (ancestry, new_states)
+}
+
+// ─── NCMesh face-id lifecycle (D843-2) ───────────────────────────────────────
+
+/// Canonical (min, max) key of a 2-D edge.
+#[inline]
+fn nc_edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Initialize the NCMesh face-id hash from a never-NC-refined mesh: faces
+/// are `Get`-ed by the NCMesh constructor while enumerating the elements in
+/// order, each element's faces in local face order
+/// (0-1, 1-2, 2-3, 3-0) — first-touch allocation.  Verified against ex6
+/// star.mesh: the batch-1 boundary output lists the ten UNSPLIT boundary
+/// segments in exactly this id order (C++ probe, round 95).
+pub fn init_nc_face_ids_quad(mesh: &Mesh<2>) -> NcFaceIdState {
+    let mut st =
+        NcFaceIdState { ids: std::collections::HashMap::new(), free: Vec::new(), next: 0 };
+    for e in 0..mesh.n_elems() as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for f in 0..4 {
+            let k = nc_edge_key(ns[f], ns[(f + 1) % 4]);
+            st.ids.entry(k).or_insert_with(|| { let id = st.next; st.next += 1; id });
+        }
+    }
+    st
+}
+
+/// Evolve the NCMesh face-id hash through one refinement batch — 1:1 with
+/// MFEM `NCMesh::Refine`/`RefineElement` (ncmesh.cpp:1947, 1700-1920):
+/// marked elements are processed in array order (the refiner collects marks
+/// in ascending element order and `Refine` pops its LIFO stack in that same
+/// order; forced refinements only exist under `nc_limit > 0`, which ex6 and
+/// this port do not use).  Per element, in `RefineElement`'s order:
+/// the children are created first — each child's four faces `faces.Get` in
+/// local face order, allocating from the freelist (LIFO, hash.hpp:627) or
+/// appending — then the parent's **split** faces lose this element's
+/// reference and the ones that drop to zero users are freed in parent
+/// local-face order (`DeleteUnusedFaces`, ncmesh.cpp:455).  Edges the
+/// refinement keeps whole (X keeps 3-0/1-2, Y keeps 0-1/2-3) survive as a
+/// child edge: the parent's reference is replaced by the child's
+/// (`RegisterFaces`), so their ids and live status are untouched.
+pub fn advance_nc_face_ids_quad(
+    state: &NcFaceIdState,
+    mesh: &Mesh<2>,
+    marked: &[(ElemId, QuadRefineDir)],
+    midpoint_of: &dyn Fn(NodeId, NodeId) -> Option<NodeId>,
+    center_of: &dyn Fn(ElemId) -> Option<NodeId>,
+) -> NcFaceIdState {
+    let mut st = NcFaceIdState {
+        ids: state.ids.clone(),
+        free: state.free.clone(),
+        next: state.next,
+    };
+    // Reference counts of every edge over the current (old) mesh.
+    let mut refs: std::collections::HashMap<(NodeId, NodeId), u32> =
+        std::collections::HashMap::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for f in 0..4 {
+            *refs.entry(nc_edge_key(ns[f], ns[(f + 1) % 4])).or_insert(0) += 1;
+        }
+    }
+
+    let get = |st: &mut NcFaceIdState, k: (NodeId, NodeId)| -> u32 {
+        if let Some(&id) = st.ids.get(&k) {
+            return id;
+        }
+        let id = match st.free.pop() {
+            Some(id) => id,
+            None => { let id = st.next; st.next += 1; id }
+        };
+        st.ids.insert(k, id);
+        id
+    };
+
+    for &(e, dir) in marked {
+        let ns = mesh.elem_nodes(e);
+        let mid = |a: NodeId, b: NodeId| {
+            midpoint_of(a, b).expect("advance_nc_face_ids_quad: missing midpoint")
+        };
+        // Children in MFEM's `NewQuadrilateral` creation order
+        // (ncmesh.cpp:1841-1868).
+        let children: Vec<[NodeId; 4]> = match dir {
+            QuadRefineDir::X => {
+                let m01 = mid(ns[0], ns[1]);
+                let m23 = mid(ns[2], ns[3]);
+                vec![[ns[0], m01, m23, ns[3]], [m01, ns[1], ns[2], m23]]
+            }
+            QuadRefineDir::Y => {
+                let m12 = mid(ns[1], ns[2]);
+                let m30 = mid(ns[3], ns[0]);
+                vec![[ns[0], ns[1], m12, m30], [m30, m12, ns[2], ns[3]]]
+            }
+            QuadRefineDir::Both => {
+                let m01 = mid(ns[0], ns[1]);
+                let m12 = mid(ns[1], ns[2]);
+                let m23 = mid(ns[2], ns[3]);
+                let m30 = mid(ns[3], ns[0]);
+                let c = center_of(e).expect("advance_nc_face_ids_quad: missing center");
+                vec![
+                    [ns[0], m01, c, m30],
+                    [m01, ns[1], m12, c],
+                    [c, m12, ns[2], m23],
+                    [m30, c, m23, ns[3]],
+                ]
+            }
+        };
+        for ch in &children {
+            for f in 0..4 {
+                let k = nc_edge_key(ch[f], ch[(f + 1) % 4]);
+                get(&mut st, k);
+            }
+        }
+        // The split parent faces lose this element's reference; a face that
+        // drops to zero users is freed (its id goes to the freelist and its
+        // key is unlinked — MFEM `HashTable::Delete`).  X keeps edges (3,0)
+        // and (1,2) whole (they survive as child edges) so only the two
+        // split edges are released; Y keeps (0,1)/(2,3).
+        let to_release: Vec<(NodeId, NodeId)> = match dir {
+            QuadRefineDir::X => vec![nc_edge_key(ns[0], ns[1]), nc_edge_key(ns[2], ns[3])],
+            QuadRefineDir::Y => vec![nc_edge_key(ns[1], ns[2]), nc_edge_key(ns[3], ns[0])],
+            QuadRefineDir::Both => vec![
+                nc_edge_key(ns[0], ns[1]),
+                nc_edge_key(ns[1], ns[2]),
+                nc_edge_key(ns[2], ns[3]),
+                nc_edge_key(ns[3], ns[0]),
+            ],
+        };
+        for k in to_release {
+            let r = refs.get_mut(&k).expect("advance_nc_face_ids_quad: unknown edge");
+            *r -= 1;
+            if *r == 0 {
+                if let Some(&id) = st.ids.get(&k) {
+                    st.free.push(id);
+                    st.ids.remove(&k);
+                }
+            }
+        }
+    }
+    st
+}
+
+/// Reorder boundary segments into MFEM's `Mesh::boundary` order: ascending
+/// NCMesh face id (`GetMeshComponents` collects boundary faces into a
+/// `std::map<face id, verts>` and appends in map order — ncmesh.cpp:2790,
+/// 2866).  Segments are permuted together with their tags; a segment whose
+/// key is missing from `state` means the boundary was not covered by the
+/// batch simulation (caller error) and is kept in place after a warning-
+/// free fallback (stable index sort on the found ids only).
+pub fn order_boundary_by_face_id(
+    state: &NcFaceIdState,
+    face_conn: &mut [NodeId],
+    face_tags: &mut [BoundaryTag],
+) {
+    let n = face_tags.len();
+    debug_assert_eq!(face_conn.len(), n * 2);
+    let mut order: Vec<usize> = (0..n).collect();
+    let key = |i: usize| {
+        state
+            .ids
+            .get(&nc_edge_key(face_conn[2 * i], face_conn[2 * i + 1]))
+            .copied()
+            .unwrap_or(u32::MAX)
+    };
+    order.sort_by_key(|&i| (key(i), i));
+    let old_conn: Vec<NodeId> = face_conn.to_vec();
+    let old_tags: Vec<BoundaryTag> = face_tags.to_vec();
+    for (dst, &src) in order.iter().enumerate() {
+        face_conn[2 * dst] = old_conn[2 * src];
+        face_conn[2 * dst + 1] = old_conn[2 * src + 1];
+        face_tags[dst] = old_tags[src];
+    }
 }
 
 /// Non-conforming (hanging-node) refinement for a 2-D Quad4 mesh.
@@ -3981,6 +4170,23 @@ pub fn refine_nonconforming_quad(
     // This batch's created vertices (midpoints / centers fresh at ids ≥ the
     // input node count) with their input-id parents — the accumulated
     // ancestry comes back remapped and rides on the new mesh.
+    //
+    // D843-2: evolve the NCMesh face-id hash through this batch (MFEM
+    // `RefineElement` order — the caller's `marked` array order) and reorder
+    // the boundary segments into MFEM's boundary-array order (ascending face
+    // id) before the leaf reorder.
+    let base_state = mesh
+        .nc_face_ids
+        .clone()
+        .unwrap_or_else(|| init_nc_face_ids_quad(mesh));
+    let mut face_state = advance_nc_face_ids_quad(
+        &base_state,
+        mesh,
+        &marked.iter().map(|&e| (e, QuadRefineDir::Both)).collect::<Vec<_>>(),
+        &|a, b| midpoint_map.get(&quad_edge_key(a, b)).copied(),
+        &|e| center_map.get(&e).copied(),
+    );
+    order_boundary_by_face_id(&face_state, &mut new_face_conn, &mut new_face_tags);
     let n_old_nodes = mesh.n_nodes() as NodeId;
     let mut fresh: Vec<(NodeId, NodeId, NodeId)> = midpoint_map
         .iter()
@@ -4002,6 +4208,7 @@ pub fn refine_nonconforming_quad(
         &mut new_face_conn,
         &|e| marked_set.contains(&e).then_some(QuadRefineDir::Both),
         &fresh,
+        &mut face_state,
     );
 
     let mut new_mesh = Mesh::uniform(
@@ -4010,6 +4217,7 @@ pub fn refine_nonconforming_quad(
     );
     new_mesh.vertex_parents = ancestry;
     new_mesh.nc_leaf_states = Some(leaf_states);
+    new_mesh.nc_face_ids = Some(face_state);
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
     }
@@ -7397,6 +7605,23 @@ pub fn refine_nonconforming_quad_aniso(
     }
 
     // ── MFEM leaf order + vertex numbering (D837-1 / D843-1) ─────────────────
+    // D843-2: evolve the NCMesh face-id hash through this batch (MFEM
+    // `RefineElement` order) and reorder the boundary segments into MFEM's
+    // boundary-array order (ascending face id) before the leaf reorder.
+    let base_state = mesh
+        .nc_face_ids
+        .clone()
+        .unwrap_or_else(|| init_nc_face_ids_quad(mesh));
+    let mut face_state = advance_nc_face_ids_quad(
+        &base_state,
+        mesh,
+        marked,
+        &|a, b| midpoint_map.get(&quad_edge_key(a, b)).copied(),
+        &|e| center_map.get(&e).copied(),
+    );
+    order_boundary_by_face_id(&face_state, &mut new_face_conn, &mut new_face_tags);
+
+    // ── MFEM leaf order + vertex numbering (D837-1 / D843-1) ─────────────────
     let n_old_nodes = mesh.n_nodes() as NodeId;
     let mut fresh: Vec<(NodeId, NodeId, NodeId)> = midpoint_map
         .iter()
@@ -7418,6 +7643,7 @@ pub fn refine_nonconforming_quad_aniso(
         &mut new_face_conn,
         &|e| marked_map.get(&e).copied(),
         &fresh,
+        &mut face_state,
     );
 
     let mut new_mesh = Mesh::<2>::uniform(
@@ -7431,6 +7657,7 @@ pub fn refine_nonconforming_quad_aniso(
     );
     new_mesh.vertex_parents = ancestry;
     new_mesh.nc_leaf_states = Some(leaf_states);
+    new_mesh.nc_face_ids = Some(face_state);
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
     }
@@ -9372,7 +9599,7 @@ fn refine_hex27_uniform_inner(mesh: &Mesh<3>, marked: &[ElemId], npe: usize) -> 
     let n_elems = mesh.n_elems();
     let mut hex8_conn = Vec::with_capacity(n_elems * 8);
     for e in 0..n_elems { let off = e * npe; hex8_conn.extend_from_slice(&mesh.conn[off..off+8]); }
-    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None, vertex_parents: vec![], nc_leaf_states: None };
+    let hex8_mesh = Mesh { coords: mesh.coords.clone(), conn: hex8_conn, elem_tags: mesh.elem_tags.clone(), elem_type: ElementType::Hex8, face_conn: mesh.face_conn.clone(), face_tags: mesh.face_tags.clone(), face_type: mesh.face_type, elem_types: None, elem_offsets: None, face_types: None, face_offsets: None, face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None, vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None };
     refine_hex8_uniform(&hex8_mesh, marked)
 }
 
@@ -10102,7 +10329,7 @@ mod tests {
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 };
 
         let vol_orig = prism6_vol(&mesh, 0);
@@ -10149,7 +10376,7 @@ vertex_parents: vec![], nc_leaf_states: None,
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 };
 
         let fine = refine_uniform_3d(&mesh);
@@ -10179,7 +10406,7 @@ vertex_parents: vec![], nc_leaf_states: None,
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 }
     }
 
@@ -10254,7 +10481,7 @@ vertex_parents: vec![], nc_leaf_states: None,
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 };
 
         // Refine only prism 0
@@ -10296,7 +10523,7 @@ vertex_parents: vec![], nc_leaf_states: None,
             face_offsets: Some(face_offsets),
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None,
             nc_vertex_view: None,
-vertex_parents: vec![], nc_leaf_states: None,
+vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 };
 
         let vol_orig = prism6_vol(&mesh, 0) + prism6_vol(&mesh, 1);
@@ -10351,7 +10578,7 @@ vertex_parents: vec![], nc_leaf_states: None,
         let mesh = Mesh { coords:c, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex20,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex20_uniform(&mesh, &all);
@@ -10373,7 +10600,7 @@ vertex_parents: vec![], nc_leaf_states: None,
         let mesh = Mesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Hex27,
             face_conn: fc, face_tags: ft, face_type: ElementType::Quad4,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c, _) = refine_hex27_uniform(&mesh, &all);
@@ -10399,7 +10626,7 @@ vertex_parents: vec![], nc_leaf_states: None,
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let v0 = pyramid5_vol(&mesh, 0); assert!((v0-1.0/3.0).abs() < 1e-14);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
@@ -10423,7 +10650,7 @@ vertex_parents: vec![], nc_leaf_states: None,
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None };
         let fine = refine_uniform_3d(&mesh);
         // D472: MFEM PYRAMID branch — 6 Pyramid5 + 4 Tet4 children per parent.
@@ -10437,7 +10664,7 @@ vertex_parents: vec![], nc_leaf_states: None,
             face_type: ElementType::Tri3, elem_types: None, elem_offsets: None,
             face_types: Some(vec![ElementType::Quad4,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3,ElementType::Tri3]),
             face_offsets: Some(vec![0,4,7,10,13,16]),
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None }
     }
 
@@ -10467,7 +10694,7 @@ vertex_parents: vec![], nc_leaf_states: None,
         let mesh = Mesh { coords, conn, elem_tags, elem_type:ElementType::Pyramid5,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None };
         let (nc, ec, tc, qc, _) = refine_nonconforming_pyramid(&mesh, &[0], None);
         assert_eq!(nc.n_elems(), 17); assert!(ec.len()>=3); assert!(!tc.is_empty()); assert!(qc.is_empty());
@@ -10486,7 +10713,7 @@ vertex_parents: vec![], nc_leaf_states: None,
         Mesh { coords, conn, elem_tags, elem_type: ElementType::Prism6,
             face_conn:fc, face_tags:ft, face_type:ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:Some(fty), face_offsets:Some(fo),
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view:None, geometry:None }
     }
 
@@ -10684,6 +10911,6 @@ pub(crate) fn fichera_mixed_mesh() -> Mesh<3> {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-    vertex_parents: vec![], nc_leaf_states: None,
+    vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     }
 }

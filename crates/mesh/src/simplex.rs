@@ -259,6 +259,34 @@ pub struct Mesh<const D: usize> {
     #[cfg_attr(feature = "serialize", serde(default))]
     #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
     pub nc_leaf_states: Option<Vec<u8>>,
+
+    /// NCMesh `faces`-hash state for NC quad meshes (D843-2): canonical
+    /// (min, max) node pair → face id, plus the id freelist and allocator,
+    /// evolved through refinement exactly as MFEM's NCMesh does.  The
+    /// boundary-segment order MFEM prints (`GetMeshComponents` fills
+    /// `Mesh::boundary` in ascending face id — std::map iteration,
+    /// ncmesh.cpp:2790/2866) is derived from this.  `None` for meshes never
+    /// NC-refined; the state is then initialized lazily by first-touch over
+    /// the elements in order × local face order (the NCMesh constructor's
+    /// enumeration).
+    #[cfg_attr(feature = "serialize", serde(default))]
+    #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
+    pub nc_face_ids: Option<NcFaceIdState>,
+}
+
+/// NCMesh `faces` hash state (D843-2).  Face ids are hash-table ids keyed by
+/// the face's corner-node tuple; in 2-D a face is an edge, keyed by its
+/// canonical (min, max) node pair.  Freed ids are reused LIFO (MFEM
+/// `HashTable::GetId` pops `unused.Last()`, hash.hpp:627).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct NcFaceIdState {
+    /// Canonical edge key → face id.
+    pub ids: std::collections::HashMap<(NodeId, NodeId), u32>,
+    /// LIFO freelist of face ids whose face lost all references.
+    pub free: Vec<u32>,
+    /// Next id to allocate once the freelist is empty.
+    pub next: u32,
 }
 
 impl<const D: usize> Mesh<D> {
@@ -2287,7 +2315,7 @@ impl<const D: usize> Mesh<D> {
             edge_conn: vec![], edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         }
     }
 
@@ -4525,7 +4553,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         };
         let (j_lin, det_lin, xp_lin) = m.element_jacobian(0, &[0.25, 0.25, 0.5]);
         let (j_lin2, det_lin2, xp_lin2) = m.element_jacobian(0, &[0.125, 0.25, 0.375]);
@@ -4637,7 +4665,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         }
     }
 
@@ -5208,7 +5236,7 @@ mod tet_geometry_family_tests {
         let mut cw = Mesh::<2> {
             coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             conn: vec![3, 0, 2, 3, 0, 1], // element 0 is CW
-            vertex_parents: vec![], nc_leaf_states: None,
+            vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
             elem_tags: vec![1, 1],
             elem_type: ElementType::Tri3,
             face_conn: vec![0, 1, 1, 3, 3, 2, 2, 0],

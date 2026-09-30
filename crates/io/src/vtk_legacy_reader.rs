@@ -1357,7 +1357,7 @@ fn build_mesh_2d(cells: VtkCells, refine: bool, fix_orientation: bool) -> FemRes
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     };
     // MFEM orients a *loaded VTK* mesh in two places:
     //   * `CreateVTKMesh` (mesh_readers.cpp:488): `CheckElementOrientation(true)`
@@ -1460,7 +1460,7 @@ fn build_mesh_3d(cells: VtkCells, refine: bool, fix_orientation: bool) -> FemRes
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     };
     // MFEM orients a *loaded VTK* mesh in two places (same split as the 2-D
     // path): `CreateVTKMesh`'s unconditional `CheckElementOrientation(true)`

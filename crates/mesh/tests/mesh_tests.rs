@@ -200,7 +200,7 @@ fn mixed_mesh_elem_type_accessor() {
         edge_to_elem: vec![],
         nc_vertex_view: None,
         geometry: None,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     };
 
     assert!(mesh.is_mixed());

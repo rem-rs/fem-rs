@@ -79,7 +79,7 @@ fn mixed_mesh(hex_first: bool) -> Mesh<3> {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     }
 }
 

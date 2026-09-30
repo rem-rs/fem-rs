@@ -340,7 +340,7 @@ fn main() {
         edge_to_elem: mesh.edge_to_elem,
         geometry: mesh.geometry,
         nc_vertex_view: mesh.nc_vertex_view,
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     };
 
     // Remove unused vertices (C++: FinalizeTopology/Finalize/RemoveUnusedVertices)

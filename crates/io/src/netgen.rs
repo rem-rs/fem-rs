@@ -287,7 +287,7 @@ impl VolParser {
             face_offsets: Some(face_offsets),
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
-            geometry: None, nc_vertex_view: None, vertex_parents: vec![], nc_leaf_states: None,
+            geometry: None, nc_vertex_view: None, vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         })
     }
 }

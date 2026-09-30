@@ -117,7 +117,7 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
         face_tags: Vec::new(),
         face_type: n_face_type,
         elem_types: if uniform_type.is_some() { None } else { Some(elem_types) },
-        vertex_parents: vec![], nc_leaf_states: None,
+        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
         elem_offsets: None,
         face_types: None,
         face_offsets: None,
