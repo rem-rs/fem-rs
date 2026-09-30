@@ -67,7 +67,6 @@ fn main() {
     println!("   --mesh {}", args.mesh);
     println!("   --order {}", args.order);
     println!("   --no-visualization");
-    println!();
 
     // ── 1. Read mesh ──────────────────────────────────────────────────────────
     let mfem = read_mfem_file(&args.mesh).expect("read mesh");
@@ -249,15 +248,13 @@ fn main() {
         ..Default::default()
     };
     let result = fem_solver::solve_pcg_operator_precond(n_tot, op.as_closure(), &rhs, &mut x, precond, &cfg);
-    if let Ok(ref r) = result {
-        println!("PCG: iterations={}, final residual={:.3e}", r.iterations, r.final_residual);
-    } else {
+    if result.is_err() {
         eprintln!("PCG: solver warning, using partial solution");
     }
 
     // ── 14. DPG residual ||Bx - F||_{S^{-1}} ──────────────────────────────────
     let dres = op.compute_residual(&f_test, &x);
-    println!("\n|| B0*x0 + Bhat*xhat - F ||_{{S^{{-1}}}} = {dres:.7}");
+    println!("\n|| B0*x0 + Bhat*xhat - F ||_{{S^-1}} = {dres:.7}");
 
     // ── 15. Output ────────────────────────────────────────────────────────────
     {

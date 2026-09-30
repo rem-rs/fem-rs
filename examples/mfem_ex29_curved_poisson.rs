@@ -50,7 +50,7 @@ fn main() {
     println!("   --order {}", args.order);
     // MFEM `args.PrintOptions(cout)`: exactly one of the two sc flags prints.
     println!("   {}", if args.static_cond { "--static-condensation" } else { "--no-static-condensation" });
-    if !args.visualization { println!("   --no-visualization"); }
+    println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
 
     // 2. Mesh: 4-panel Quad4 tube in 3D
     let mesh = get_mesh_quad4();
@@ -419,7 +419,7 @@ struct Args { order: u8, mesh_type: i32, mesh_order: u8, ref_levels: usize,
 
 fn parse_args() -> Args {
     let mut a = Args { order: 3, mesh_type: 4, mesh_order: 3, ref_levels: 0,
-                       static_cond: false, visualization: false };
+                       static_cond: false, visualization: true };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {

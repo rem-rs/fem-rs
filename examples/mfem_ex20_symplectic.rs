@@ -92,7 +92,7 @@ fn main() {
     let mut dt = 0.1f64;
     let mut m = 1.0f64;
     let mut k = 1.0f64;
-    let mut visualization = false;
+    let mut visualization = true;
     let mut gnuplot = false;
 
     let mut i = std::env::args().skip(1);
@@ -232,7 +232,6 @@ fn main() {
             }
             write_mfem_gf_file("ex20_energy.gf", 2, &energy_vals, "H1", 1, 1, 8)
                 .expect("cannot write ex20_energy.gf");
-            println!("  Wrote ex20_phase.mesh, ex20_energy.gf — load with: glvis -m ex20_phase.mesh -g ex20_energy.gf");
         }
     }
 

@@ -17,7 +17,7 @@
 
 | 分类 | 串行 | 并行 | self-test | 合计 |
 |---|---|---|---|---|
-| BIT | 8（ex1/ex2/ex3/ex9/ex14/ex24/ex27/ex31） | 0 | 0 | **8** |
+| BIT | 11（ex1/ex2/ex3/ex9/ex14/ex24/ex27/ex31 + **r98: ex29/ex20/ex5**） | 0 | 0 | **11**（注：ex17[r89]/ex33 两档[r91]/ex10[r92]/ex6[r93] 的升 BIT 记录在 coverage_matrix §5 各轮行，本表行未逐一回写——历史欠账，r98 起 **BIT 计数以 coverage_matrix 为准**） |
 | RUN（含 RUN-LONG 2：pex15 替代档/pex30 单列） | 36 | 38 | 0 | **74** |
 | RUN\*（数值失配，已立债） | 0 | 0 | 0 | **0** |
 | CRASH | 0 | 0 | 0 | **0** |
@@ -38,10 +38,10 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
 | mfem_ex3_maxwell_cavity | ex3 | 默认 beam-tet -o1 | **BIT**（r65 D664 双档） | logs/… + ref/ex3.out | 终值 3.91630923150637e-1 = C++ 0.391631（6 位）；PCG 历史口径不同（Rust 打归一化残差、119 迭代 vs C++ 137/ARF 0.903118）→ D634。**round-84:** 现档 BIT（r64 D651/D653 + r65 D664，PCG 轨迹 137 行逐字节）；重验默认档 vs ref/ex3.out = 仅 mesh 路径回声行（built-in vs 文件） |
 | mfem_ex4_darcy | ex4 | `-m data/star.mesh -no-vis` | RUN（r62 D634） | logs/… + ref/ex4.out | **失配**：‖F−F_h‖=0.432497 vs C++ 0.0161443（27×）；Rust 287 迭代即"收敛" vs C++ 646 → D634。**round-84:** 失配已闭（r62 停机规则 + r63 D639 评估器，646 it = C++）；重验：终误差行 0.0161443 逐字同、iter0-588 逐字节，589+ 为 1e-17 噪声级分叉（r62 已记载口径），ARF 第 6 位差 |
 | mfem_ex4_darcy_simple | —（无对应） | — | NOREF | — | 未注册死文件、无 exe（round 30 D133 在案）；自述 SIMPLIFIED |
-| mfem_ex5_mixed_darcy | ex5 | `-m data/star.mesh -no-vis` | RUN（r62 D634） | logs/… + ref/ex5.out | **失配**：dim(R/W) 全同（41280/20480），Rust MINRES 423 it ‖r‖/‖b‖=9.24e-7 判收敛但 u_err **1.211582e0** vs C++ 396 it / 1.43587e-4 → D634（块预条件/minres 判据族）。**round-84:** 失配已闭（r63 D639：397 行逐字节、u_err 0.000143587 = C++）；重验：数值行逐字同，豁免 = C++ Options 块 8 行 Rust 不打、Rust 多 `Wrote` 行、wall-clock |
+| mfem_ex5_mixed_darcy | ex5 | `-m data/star.mesh -no-vis` | **BIT**（r98，具名豁免 1 行） | logs/… + ref/ex5.out + `tmp/d98runbit/` | **失配**：dim(R/W) 全同（41280/20480），Rust MINRES 423 it ‖r‖/‖b‖=9.24e-7 判收敛但 u_err **1.211582e0** vs C++ 396 it / 1.43587e-4 → D634（块预条件/minres 判据族）。**round-84:** 失配已闭（r63 D639：397 行逐字节、u_err 0.000143587 = C++）；重验：数值行逐字同，豁免 = C++ Options 块 8 行 Rust 不打、Rust 多 `Wrote` 行、wall-clock。**round-98:** 升 **BIT**——414 行 stdout 与 C++ 现编现跑（`$HOME/work/d98runbit/ex5_cpp`，两侧同 `-m data/star.mesh` 路径形式）**逐字节**（396 it 收敛行逐字同），唯一 diff = `MINRES solver took …s.` wall-clock 行（MFEM 自打 RealTime，**具名豁免**）；r84 三类豁免中前两类已不存在 |
 | mfem_ex6_flux_recovery | ex6 | 默认 star -o1 -no-vis | RUN | logs/… + ref/ex6.out | 前 4 迭代逐字节（0.441629/0.00864066/2.48721e-06/1.90288e-09）；首个求解 C++@5 停、Rust 拖到 4.6e-40 → D634；AMR 环两端 rc=0（C++ 打 `Reached the maximum number of dofs.`，Rust 打 `Done.`，终态行未逐字节比对）。**round-84:** 重验 rc=0；D634 后首解与 C++ 逐字节 ✓；AMR 标记路径自第 2 环分叉（C++ 76 vs Rust 86 unknowns，r61 已有性质非新漂移；疑与参考命令带 `--no-ls-zz/--max-dofs` 旗标不对齐有关），终态行差维持 |
 | mfem_ex7_surface_poisson | ex7 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，HEAD c5a06dd6） |
-| mfem_ex8_dpg_2x2 | ex8 | `-m data/star.mesh -no-vis` | RUN（数值级 = C++） | logs/… + ref/ex8.out | 前 13 迭代逐字节；DPG 范数 0.0181446 vs C++ 0.0183277（~1%）；ARF 0.829413 vs 0.608926 → D634。**round-84:** 数值失配已闭（r63 D640 sinv 四边形分支修复：DPG 0.0183277 与 C++ 逐字同）；重验 ✓，残 = Rust 29 it vs C++ 28 it（停机阈值 1 it 差）、`S^-1` vs `S^{-1}` 打印、Rust 多诊断行 |
+| mfem_ex8_dpg_2x2 | ex8 | `-m data/star.mesh -no-vis` | RUN（数值级 = C++） | logs/… + ref/ex8.out + `tmp/d98runbit/` | 前 13 迭代逐字节；DPG 范数 0.0181446 vs C++ 0.0183277（~1%）；ARF 0.829413 vs 0.608926 → D634。**round-84:** 数值失配已闭（r63 D640 sinv 四边形分支修复：DPG 0.0183277 与 C++ 逐字同）；重验 ✓，残 = Rust 29 it vs C++ 28 it（停机阈值 1 it 差）、`S^-1` vs `S^{-1}` 打印、Rust 多诊断行。**round-98:** 打印失真**清零**（删多余空行 + `S^{{-1}}`→`S^-1` + 删 Rust 独有 `PCG: iterations=` 摘要行）后 stdout 前 15 行逐字同；**唯一残差 = PCG 轨迹自 iter5 起 1.3e-5 相对分叉**（29 vs 28 it、ARF 0.619477 vs 0.608926）＝核心求解器路径债（D634 族），维持 RUN；真值现编现跑 `$HOME/work/d98runbit/ex8_cpp` |
 | mfem_ex9_dg_advection | ex9 | 默认 periodic-hexagon | **BIT**（r77 D812-2，具名豁免） | logs/… + `$HOME/work/d76main/ex9_rerun/` | 默认档 panic（D633 资产缺失）；`-m data/periodic-square.mesh` rc=0；文件头自述 L2 基 ≠ MFEM GLL ⇒ 有意分歧（DEV 性质）双注记。**round-84:** 现档 BIT——r62 资产回填后 rc=0；r77 D812-2 stdout 与 C++ oracle **逐字节**（豁免 = `--mesh` 路径回声 + stderr wall-clock 两处具名）+ r78 D813-3 `ex9-init.gf` 逐字节/final max\|Δ\|=1.0e-08；r82/r83 锚点重验 ✓（旧"L2 基有意分歧"注记作废） |
 | mfem_ex10_hyperelastic_dyn | ex10 | 默认 beam-quad | RUN | logs/… + ref/ex10_quad.out | step1..100 的 EE/KE/ΔTE 与 C++ 全部 6 位吻合（0.011958/0.000784/-0.019639）；Newton ‖r‖ 自 iter1 起第 4 位漂移（0.0099624 vs 0.0099476）；打印多诊断行 |
 | mfem_ex14_dg_poisson | ex14 | `-m data/star.mesh -no-vis` | **BIT**（r73 D795-1，剥 Options 前缀逐字节） | logs/… + ref/ex14.out | **前 309 行逐字节**；C++@308 收敛（ARF 0.956044），Rust 500 maxiter 不收敛（ARF 0.950077）→ D634。**round-84:** 现档 BIT——r73 D795-1（DG 面规则改等参几何）后迭代史 **311 行逐字节 = C++**（ARF 0.956044 同；豁免 = C++ 12 行 Options 前缀 Rust 不打 = D822-2）；r79/r82/r83 锚点重验 ✓，本轮重验 ✓ |
@@ -56,7 +56,7 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
 | mfem_ex17_dg_elasticity | ex17 | 默认 beam-tri | RUN（round-84 漂移注记） | logs/… + `tmp/d84c/`（r84 对拍） | rc=0。**round-84:** 数值漂移 = r76 D805-1（DG 弹性罚项改 MFEM 原式）传导：1063→1269 it、‖u_h‖_L2 227.189938→226.758078、checksum −0.15%（旧值系错误罚项产物，非回归）；**新对拍 C++（NOREF-NEW 登记，ref/ex17_cpp_default.out）**：dofs 24576 逐字同、同 PCG+GS+rtol² 配置下 C++ 767 it vs Rust 1269 it → **D822-1**；另 sol.gf 输出表示差（H1 平均位移 vs C++ DG 节点空间）→ 同债 |
 | mfem_ex18_euler | ex18 | 默认 periodic-square | **RUN**（round-85 起 C++ 对拍 8 位全对齐 → D822-4） | logs/… + `tmp/d84c/`（二分证据）+ `tmp/d85main/`（D822-4 验收） | rc=0。**round-85（D822-4）**：示例默认 order 对齐 C++（ex18.cpp 默认 3，原 Rust 默认 1）+ `dg_hyperbolic.rs` Quad4 臂放开任意阶（原 `assert_eq!(order,1)`）+ 2-D 面规则改 MFEM 公式（`HyperbolicFormIntegrator` 2p+1 阶 ⇒ p+1 个 GL 点，hyperbolic.cpp:224 + intrules.cpp `SegmentIntegrationRule`；原 `(2p+1).min(4)` 在 p=1 给 3 点/MFEM 2 点）。**默认档（= C++ 默认，order 3）：435 步 = C++，`Solution error: 3.930926246114457e-3` = C++ `0.0039309262` 全部 8 位打印数字逐位一致**；`-o 1` 档：184 步 = C++（原 185），`6.168658610565338e-2` = C++ `0.061686586` 8 位全对齐（原 6.168620814596272e-2 仅 6 位——**旧残差真根因 = 面规则点数差，"fp 排序"归因证伪**）。C++ 真值现编现跑 `$HOME/work/d85main/ex18/`（mfem410_ser 源码），快照 `tmp/d85main/cpp_{default,o1}.out`。历史（round-84 D822-3 回归）：默认档曾 step 27 起 NaN，二分钉 `24e00a8d`，修复后 o1 档终值 6.168620814596272e-2（该值含面规则偏差，已被上值取代） |
 | mfem_ex19_hyperelastic_incomp | ex19 | 默认 beam-quad | RUN | logs/… | rc=0（Newton+块 GMRES 收敛）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Newton 3 it 收敛行逐字同） |
-| mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | RUN（r62 D635b） | logs/… + ref/ex20.out | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635。**round-84:** 失配已闭（r62 D635b 六配置逐字节 = C++）；重验 `-o 1 -t 100 -no-vis`：数值行逐字同，豁免 = C++ Options 回声多 2 行（`--no-visualization/--no-gnuplot`，→ D822-2） |
+| mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | **BIT**（r98 双档） | logs/… + ref/ex20.out + `tmp/d98runbit/` | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635。**round-84:** 失配已闭（r62 D635b 六配置逐字节 = C++）；重验 `-o 1 -t 100 -no-vis`：数值行逐字同，豁免 = C++ Options 回声多 2 行（`--no-visualization/--no-gnuplot`，→ D822-2）。**round-98:** 升 **BIT**——`-no-vis` 档 12 行 stdout 逐字节 = C++（回声块早已补齐，r84 豁免过期）；无参默认档两处 1:1 保真修复后（`visualization` 默认 false→true = C++ ex20.cpp:98；删 Rust 独有 `Wrote ex20_phase…` 行——C++ 走 socketstream 无打印）亦逐字节；vis 副产物文件改为落 rundir |
 | mfem_ex21_amr_elasticity | ex21 | 默认 beam-tri | RUN | logs/… | rc=0；历史有机器本地 golden 注记（非 C++ 逐字节）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff） |
 | mfem_ex22_complex_helmholtz | ex22 | 默认 inline-quad | RUN（r67 D693-695 收口） | logs/… | rc=0（复数系统求解完成）。**round-84:** r67 -p0/-p1 双双逐位收官 + r69 D738 评估器求积阶修复 + r71 D748 评估器族配对化（余项 D704/D748/D765/D767）；重验默认档：误差行 1.422826e-1/1.422741e-1 与 r61 后状态逐字同，GMRES 打印已换 MFEM Pass/Iteration 族 |
 | mfem_ex23_wave_equation | ex23 | 默认 star | RUN | logs/… | rc=0；历史 golden 本地注记。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，checksum 1.889982e4 / du/dt 2.955466e4 逐字同） |
@@ -65,7 +65,7 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
 | mfem_ex26_geom_mg | ex26 | 默认 star；hex 档 `-m inline-hex -gr 0 -or 2` | RUN | logs/mfem_ex26_geom_mg.log、logs/mfem_ex26_hex.log + ref/ex26_hex.out | 默认档 rc=0。hex 档本轮**实况对拍**：274625 未知数同、6 迭代轨迹机器精度级吻合（ARF 0.0435272 vs 0.0435273、iter1 1.55112e-6 vs 1.55209e-6），**非逐字节**（Chebyshev smoother 特征值估计 ulp 级分叉）。round 60 存档对 tmp/d31/ex26_{rs,cpp}.log 数值逐字节，但其原命令不可复原 ⇒ 存档对不作为本轮逐字节证据引用。**round-84:** 重验 OK（默认档 stdout 与 r61 记录 **0 diff**；r72 D754 并行装配逐位化后 5 连跑 sha256 全同口径维持） |
 | mfem_ex27_robin_bc | ex27 | 默认 `-no-vis` | **BIT\***（round 72 D771） | logs/… + `tmp/d771/`（gold/diff/probe） | **canonical stdout 对齐**：Options 块 12 行 + 去前导空行 + 删非 C++ 的 `Solved in N iterations.` + 平均值行 `", \t"` 与 `%g6`（`fem_solver::fmt_g`）⇒ **default 51 行中 49 行逐字节、`-dbc 2.5` 52 行中 50 行逐字节**（残 2 行/档 = 半面求积 + 网格表示差 **D778**，非格式）；迭代历史 29/30 行零差异保持；**`-dg` 迭代历史逐字节不回退**（其 C++ 差距 = **D779**）。**round-84:** 现档全逐字节——r73 D778（半面求积修为 [0,1] 恒等语义）后 **default 51/51 + `-dbc 2.5` 52/52 逐字节**；r76 D805-3 refined.mesh TOPOLOGY-IDENTICAL 10/10；r82/r83 锚点重验 IDENTICAL ✓ |
 | mfem_ex28_sliding_elasticity | ex28 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Pass 15 707 it 轨迹逐字同） |
-| mfem_ex29_curved_poisson | ex29 | 默认（-mt 4 -mo 3） | RUN（数值行 = C++ 逐字节） | logs/… + ref/ex29.out | 迭代 0–7 逐字节；C++@7 停（ARF 0.0969461）Rust@11（ARF 0.0719572）；终误差 ‖u−u_h‖ 0.00138643 / ‖f−f_h‖ 0.00797749 **逐字节同**；Rust 多 2 行头注 → D634。**round-84:** 重验 = 与 C++ **全部数值行逐字节**（含 ARF/停机点，D634/D758b 停机同步达成）；豁免仅 Rust 多 2 行头注（Geometry order/Mesh nodes 诊断行） |
+| mfem_ex29_curved_poisson | ex29 | 默认（-mt 4 -mo 3） | **BIT**（r98 双档） | logs/… + ref/ex29.out + `tmp/d98runbit/` | 迭代 0–7 逐字节；C++@7 停（ARF 0.0969461）Rust@11（ARF 0.0719572）；终误差 ‖u−u_h‖ 0.00138643 / ‖f−f_h‖ 0.00797749 **逐字节同**；Rust 多 2 行头注 → D634。**round-84:** 重验 = 与 C++ **全部数值行逐字节**（含 ARF/停机点，D634/D758b 停机同步达成）；豁免仅 Rust 多 2 行头注（Geometry order/Mesh nodes 诊断行）。**round-98:** 升 **BIT**——`-no-vis` 档 20 行 stdout **逐字节**（r84 记载的「2 行头注豁免」已不存在）；无参默认档两处 1:1 保真修复后（`visualization` 默认 false→true = C++ ex29.cpp:72；bool 对回声补 true 分支 `--visualization`）亦**逐字节**；真值现编现跑 `$HOME/work/d98runbit/ex29_cpp` |
 | mfem_ex30_aniso_amr | ex30 | 默认 star | RUN | logs/… | rc=0（三系数预处理完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，12572 元/Osc error 0.000619） |
 | mfem_ex31_anisotropic_maxwell | ex31 | `-m data/inline-quad.mesh -r 2 -o 1 -no-vis` | **BIT** | logs/… + ref/ex31.out | **本轮现对拍**：除 Options 里 mesh 路径串外**全 stdout 逐字节**（含 0.181455 / ARF 0.829075）；无参默认档会 exit(3)（-vis 未移植，文档化）。**round-84:** 重验 = 仅 mesh 路径行差 ✓；r69 后 `-m data/inline-segment.mesh` 档按声明缺口 exit(3)（1-D ND_R1D 未移植 = D733，C++ 金标已留档） |
 | mfem_ex31_dump | —（tools/ex31_cpp_helper 配套） | `-m data/inline-quad.mesh -r 2 -o 1` | RUN | logs/… | debug dump harness；rc=0，落盘 rust_*.txt 供 harness 比对（D375 管线） |
@@ -455,3 +455,34 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
   所为，命令清单已交主会话）；本路 `tmp/d84c/run/data/` 内有开局完整副本（124 项）可复原。
   本路 example 重跑均在该副本尚在/原 data/ 完好时完成，证据有效性不受影响，但**在 data/
   恢复前任何复跑都会 panic**。
+
+## round 98 增量（主会话：RUN→BIT 第四波，HEAD 42a8b17e 基线）
+
+> 单路主会话，采样原则 = 「距 BIT 最近的豁免收尾」+ 候选实跑现 diff（不照抄台账豁免清单——
+> r84 多条豁免注记已过期：ex29「2 行头注」、ex5「Options 块 8 行 + Wrote 行」、
+> ex20「C++ 回声多 2 行」均已不存在，系 r62-r83 各轮修复后未回写）。
+> C++ 真值一律现编现跑：`$HOME/work/d98runbit/`（mfem410 源码 + mfem410_ser 库，
+> `g++ -std=c++17 -O2 -I$HOME/mfem410 -L$HOME/mfem410_ser`）；Rust 侧 `cargo run --release`，
+> 对拍副本与 diff 证据 `tmp/d98runbit/`。
+
+- **ex29 升 BIT（双档）**：`-no-vis` 档 20 行 + 无参默认档 20 行均逐字节 = C++（ex29_cpp）。
+  代码改动 2 处（示例侧 1:1 保真）：`visualization` 默认 false→true（C++ ex29.cpp:72
+  `bool visualization = true`）；bool 对回声补 true 分支（MFEM `PrintOptions` 恰打其一：
+  `--visualization`/`--no-visualization`）。修后 `-no-vis` 档不受影响（原已逐字节）。
+- **ex20 升 BIT（双档）**：`-no-vis` 档 12 行 + 无参默认档 11 行均逐字节 = C++（ex20_cpp）。
+  代码改动 2 处：`visualization` 默认 false→true（C++ ex20.cpp:98）；删 Rust 独有
+  `Wrote ex20_phase.mesh, ex20_energy.gf` 行（C++ 走 socketstream 无 stdout）。vis=true 时
+  副产物文件落 rundir（C++ 同档仅发 socket，无文件——stdout 不受影响）。
+- **ex5 升 BIT（标准档，具名豁免 1 行）**：`-m data/star.mesh -no-vis` 414 行 stdout 与
+  C++ 逐字节（396 it 收敛、u_err/p_err 行逐字同）；唯一 diff = `MINRES solver took …s.`
+  （MFEM 自打 `chrono.RealTime()`，逐次不同，具名豁免类 = ex9 stderr wall-clock 同族）。
+  **零代码改动**——r84 的 Options 块/Wrote 豁免已不存在。⚠️ 网格路径串进 Options 回声，
+  两侧必须同形式 `-m data/star.mesh`（WSL 侧 `ln -s $HOME/mfem410/data data`）。
+- **ex8 打印失真清零（维持 RUN）**：删 `println!()` 多余空行 + `S^{{-1}}`→`S^-1`
+  （C++ ex8.cpp:244 无花括号）+ 删 Rust 独有 `PCG: iterations=` 摘要行后，stdout 前 15 行
+  逐字同；**唯一残差 = PCG 轨迹自 iter5 起 1.3e-5 相对分叉**（7.50974e-07 vs 7.50964e-07，
+  放大至 29 vs 28 it、ARF 0.619477 vs 0.608926）——非打印、非 ulp 求和噪声量级，
+  = B^T·S^{-1}·B / S^{-1}·F 路径上某处真数值差，核心求解器债（D634 族），
+  升 BIT 挡在此，建议下波专项（探针入口：iter0-4 逐字节、iter5 首叉）。
+- **计数**：BIT 串行 8 → **11**（本波 +ex29/ex20/ex5；ex17/ex33/ex10/ex6 的历史升级见
+  coverage_matrix §5，本表未回写）。本轮未动并行档。
