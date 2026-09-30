@@ -4743,9 +4743,26 @@ pub fn form_linear_system_condensed<S: FESpace>(
     quad_order: u8,
     ess_dofs: &[DofId],
 ) -> CondensedLinearSystem {
-    let n_full = space.n_dofs();
     let mut a = Assembler::assemble_bilinear(space, bilinear, quad_order);
     let mut b = Assembler::assemble_linear(space, linear, quad_order);
+    Assembler::condense_assembled(space, &mut a, &mut b, ess_dofs)
+}
+
+/// Condensation core on an **already assembled** system — the entry
+/// [`Assembler::form_linear_system_condensed`] delegates to, and the path
+/// form-level callers use to reuse their cached operator (SC small debt,
+/// round 94: `BilinearForm`'s SC branch no longer pays a duplicate
+/// assembly).  The caller's `a` is Schur-eliminated in place (trace-trace
+/// entries only) and its interior RHS loads are consumed; trace-interior
+/// blocks stay untouched, so a subsequent [`crate::static_cond::condense_rhs`]
+/// on the same matrix reads identical bits.
+pub fn condense_assembled<S: FESpace>(
+    space: &S,
+    a: &mut CsrMatrix<f64>,
+    b: &mut [f64],
+    ess_dofs: &[DofId],
+) -> CondensedLinearSystem {
+    let n_full = space.n_dofs();
 
     // Interior classification: element-private dofs (multiplicity 1) that
     // are not essential.

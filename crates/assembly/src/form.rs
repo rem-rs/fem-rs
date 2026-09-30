@@ -108,9 +108,6 @@ pub struct BilinearForm<S: FESpace> {
     /// MFEM `BilinearForm::static_cond` — set by
     /// [`BilinearForm::enable_static_condensation`].
     static_cond: bool,
-    /// Quadrature order of the last `assemble()` — the SC path re-enters the
-    /// D839-2 condensed core, which takes it explicitly.
-    assembled_quad: Option<u8>,
     /// Condensed-system record of the last SC `form_linear_system` (MFEM's
     /// `static_cond` object state: reduced operator plus the per-element Schur
     /// factors consumed by [`BilinearForm::recover_fem_solution`]).
@@ -124,7 +121,6 @@ impl<S: FESpace> BilinearForm<S> {
             integrators: Vec::new(),
             cached: None,
             static_cond: false,
-            assembled_quad: None,
             cond_sys: None,
         }
     }
@@ -136,7 +132,6 @@ impl<S: FESpace> BilinearForm<S> {
         let refs: Vec<&dyn BilinearIntegrator> = self.integrators.iter().map(|b| b.as_ref()).collect();
         let mat = Assembler::assemble_bilinear(&self.space, &refs, quad_order);
         self.cached = Some(mat);
-        self.assembled_quad = Some(quad_order);
         self.cached.as_ref().unwrap()
     }
 
@@ -189,7 +184,8 @@ impl<S: FESpace> BilinearForm<S> {
     /// With [`BilinearForm::enable_static_condensation`] set, the entry takes
     /// MFEM's SC branch instead (bilinearform.cpp:885-889): the element-private
     /// dofs are Schur-eliminated through the round-91 condensed core
-    /// ([`Assembler::form_linear_system_condensed`]), the caller-supplied `b`
+    /// ([`Assembler::condense_assembled`]) operating on the cached operator —
+    /// no re-assembly —, the caller-supplied `b`
     /// is reduced via [`condense_rhs`] (`ReduceRHS`), `X` becomes the kept-dof
     /// copy of `x` (`ReduceSolution`, staticcond.cpp:389) and the essential
     /// dofs — which stay in the reduced system exactly as in
@@ -214,16 +210,16 @@ impl<S: FESpace> BilinearForm<S> {
         policy: ElimPolicy,
     ) -> Vec<f64> {
         if self.static_cond {
-            let quad = self.assembled_quad.expect("assemble() must be called first");
-            let refs: Vec<&dyn BilinearIntegrator> =
-                self.integrators.iter().map(|bx| bx.as_ref()).collect();
-            // A-side through the round-91 condensed core: per-element Schur
-            // elimination of the element-private dofs (ex29 -sc anchor).  The
-            // core is entered with an empty linear list — the caller's `b` is
+            // A-side through the round-91 condensed core, **reusing the cached
+            // operator** (SC small debt, round 94 — the core's own assembly of
+            // the same space/integrators/quadrature is deterministic, so
+            // handing it the cache is bitwise-identical and skips the duplicate
+            // assembly).  Entered with an empty RHS — the caller's `b` is
             // reduced separately below, from the same factors.
-            let a_full = self.cached.take().expect("assemble() must be called first");
+            let mut a_full = self.cached.take().expect("assemble() must be called first");
+            let mut b_zero = vec![0.0_f64; self.space.n_dofs()];
             let mut sys =
-                Assembler::form_linear_system_condensed(&self.space, &refs, &[], quad, ess_tdof_list);
+                Assembler::condense_assembled(&self.space, &mut a_full, &mut b_zero, ess_tdof_list);
             // MFEM `ReduceRHS` (staticcond.cpp:309) on the caller's `b`; also
             // installs the caller's interior loads into the recovery records
             // so `recover_fem_solution` back-substitutes with the same RHS.
