@@ -1372,7 +1372,11 @@ mod lor_vector_tests {
         // approximation on the LOR system — the same effect the hex ND leg
         // documents (25 → 34, tolerance +10) and the hex RT leg documents for
         // ADS (46 → 65, tolerance +25).
-        assert!(nd_iters[1] <= nd_iters[0] + 10, "grew: {nd_iters:?}");
+        // Recalibrated (round 94, D94-lu): 20 → 31.  linger's SparseLu coarse
+        // solve inside the AMS inner AMG dropped a fill-reducing column
+        // permutation on the RHS (linger 40dd871); the correction now actually
+        // correct, the pencil shifted one step (+11), past the old +10 slack.
+        assert!(nd_iters[1] <= nd_iters[0] + 12, "grew: {nd_iters:?}");
     }
 
     /// 2-D quad RT1 LOR: scaling 4×4 vs 8×8 quads.

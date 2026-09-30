@@ -125,7 +125,7 @@ fn main() {
         }
 
         // Build space on current mesh.
-        let mut space = H1Space::new(mesh.clone(), order);
+        let space = H1Space::new(mesh.clone(), order);
         let cdofs = space.n_dofs();
         if u.len() != cdofs {
             u.resize(cdofs, 0.0);

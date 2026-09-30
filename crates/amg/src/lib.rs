@@ -11,11 +11,14 @@
 //! [`CorrectedAmgPrecond`], not through `linlvo`'s `AmgPrecond` directly.  The
 //! two implement the same V/W/F-cycle; they differ only in the coarsest-level
 //! solve, which `linlvo` performs with the *default* (`Rcm`) fill-reducing
-//! ordering of `SparseLu`.  That path returns a permuted solution, so the
-//! coarse-grid correction is garbage and the cycle operator becomes
-//! non-symmetric — enough to make CG/MINRES stall.  [`CorrectedAmgPrecond`] uses
-//! `OrderingMethod::Natural`, for which `SparseLu` is exact; see its docs for the
-//! reproducer and the measured numbers.
+//! ordering of `SparseLu`.  Up to round 93 that path returned a permuted
+//! solution (missing column permutation on the RHS — fixed upstream in
+//! linger `40dd871`), which made the coarse-grid correction garbage and the
+//! cycle operator non-symmetric — enough to make CG/MINRES stall.
+//! [`CorrectedAmgPrecond`] keeps `OrderingMethod::Natural` — exact under the
+//! fixed solver too, and it pins the bitwise behaviour the iteration-count
+//! anchors were calibrated against; see its docs for the reproducer and the
+//! measured numbers.
 //!
 //! ## Usage
 //! ```ignore
