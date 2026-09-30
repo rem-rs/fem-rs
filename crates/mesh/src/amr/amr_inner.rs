@@ -3886,18 +3886,28 @@ pub fn advance_nc_face_ids_quad(
         free: state.free.clone(),
         next: state.next,
     };
-    // Reference counts of every edge over the current (old) mesh.
-    let mut refs: std::collections::HashMap<(NodeId, NodeId), u32> =
+    // Registration counts (MFEM `Face::elem[0]/elem[1]`) over the input mesh:
+    // each face holds one registration per adjacent leaf.  Split edges of
+    // hanging meshes are covered by the re-registration in `get` below — the
+    // refined neighbour's child re-registers the half-face, which a plain
+    // old-mesh multiplicity walk would miss.
+    let mut live: std::collections::HashMap<(NodeId, NodeId), u32> =
         std::collections::HashMap::new();
     for e in 0..mesh.n_elems() as ElemId {
         let ns = mesh.elem_nodes(e);
         for f in 0..4 {
-            *refs.entry(nc_edge_key(ns[f], ns[(f + 1) % 4])).or_insert(0) += 1;
+            *live.entry(nc_edge_key(ns[f], ns[(f + 1) % 4])).or_insert(0) += 1;
         }
     }
 
-    let get = |st: &mut NcFaceIdState, k: (NodeId, NodeId)| -> u32 {
+    // Registration counts (MFEM `Face::elem[0]/elem[1]`): at batch start each
+    // face holds one registration per adjacent input-mesh element.
+    let get = |st: &mut NcFaceIdState, live: &mut std::collections::HashMap<(NodeId, NodeId), u32>, k: (NodeId, NodeId)| -> u32 {
         if let Some(&id) = st.ids.get(&k) {
+            // The child (re-)registers an existing face — including the
+            // half-face of a hanging edge, where the refined neighbour's
+            // child replaces the neighbour's own registration.
+            *live.entry(k).or_insert(1) += 1;
             return id;
         }
         let id = match st.free.pop() {
@@ -3905,6 +3915,7 @@ pub fn advance_nc_face_ids_quad(
             None => { let id = st.next; st.next += 1; id }
         };
         st.ids.insert(k, id);
+        live.insert(k, 1);
         id
     };
 
@@ -3943,31 +3954,26 @@ pub fn advance_nc_face_ids_quad(
         for ch in &children {
             for f in 0..4 {
                 let k = nc_edge_key(ch[f], ch[(f + 1) % 4]);
-                get(&mut st, k);
+                get(&mut st, &mut live, k);
             }
         }
-        // The split parent faces lose this element's reference; a face that
-        // drops to zero users is freed (its id goes to the freelist and its
-        // key is unlinked — MFEM `HashTable::Delete`).  X keeps edges (3,0)
-        // and (1,2) whole (they survive as child edges) so only the two
-        // split edges are released; Y keeps (0,1)/(2,3).
-        let to_release: Vec<(NodeId, NodeId)> = match dir {
-            QuadRefineDir::X => vec![nc_edge_key(ns[0], ns[1]), nc_edge_key(ns[2], ns[3])],
-            QuadRefineDir::Y => vec![nc_edge_key(ns[1], ns[2]), nc_edge_key(ns[3], ns[0])],
-            QuadRefineDir::Both => vec![
-                nc_edge_key(ns[0], ns[1]),
-                nc_edge_key(ns[1], ns[2]),
-                nc_edge_key(ns[2], ns[3]),
-                nc_edge_key(ns[3], ns[0]),
-            ],
-        };
-        for k in to_release {
-            let r = refs.get_mut(&k).expect("advance_nc_face_ids_quad: unknown edge");
-            *r -= 1;
-            if *r == 0 {
-                if let Some(&id) = st.ids.get(&k) {
-                    st.free.push(id);
-                    st.ids.remove(&k);
+        // `UnreferenceElement`: the parent forgets ALL four of its faces
+        // (ncmesh.cpp:407-414); then `RegisterFaces` re-registers the
+        // children (already counted as the +1s above — MFEM orders forget →
+        // register → free, and the net per kept edge is 0).  A face whose
+        // registration count drops to zero is freed (`DeleteUnusedFaces`,
+        // ncmesh.cpp:455): its id goes to the freelist and its key is
+        // unlinked (MFEM `HashTable::Delete`).
+        for f in 0..4 {
+            let k = nc_edge_key(ns[f], ns[(f + 1) % 4]);
+            if let Some(l) = live.get_mut(&k) {
+                *l -= 1;
+                if *l == 0 {
+                    if let Some(&id) = st.ids.get(&k) {
+                        st.free.push(id);
+                        st.ids.remove(&k);
+                        live.remove(&k);
+                    }
                 }
             }
         }

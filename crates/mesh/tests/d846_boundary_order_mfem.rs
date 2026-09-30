@@ -27,8 +27,7 @@ use fem_mesh::Mesh;
 
 const MESH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/star.mesh");
 const MARKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/d846_marks.txt");
-const CPP_ORDER: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/d846_cpp_boundary_r0_12.txt");
+const CPP_ORDER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/d846_cpp_boundary_all.txt");
 const CPP_NBE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/d846_nbe_all.txt");
 
 fn star_mesh() -> Mesh<2> {
@@ -111,19 +110,17 @@ fn d8432_boundary_order_matches_mfem() {
             cpp_nbe[r + 1].1
         );
 
-        // Full boundary order vs MFEM, bit-verified scope (rounds 1..=12;
-        // R0 is the untouched input mesh, checked against the fixture too).
-        if r + 1 <= 12 {
-            let got: Vec<(u32, u32)> = (0..mesh.n_faces())
-                .map(|f| (mesh.face_conn[2 * f], mesh.face_conn[2 * f + 1]))
-                .collect();
-            assert_eq!(
-                got,
-                cpp_order[r + 1],
-                "R{}: boundary order diverged from MFEM face-id order",
-                r + 1
-            );
-        }
+        // Full boundary order vs MFEM, all 20 rounds (the face-id lifecycle
+        // is event-identical to the instrumented MFEM run — round 96).
+        let got: Vec<(u32, u32)> = (0..mesh.n_faces())
+            .map(|f| (mesh.face_conn[2 * f], mesh.face_conn[2 * f + 1]))
+            .collect();
+        assert_eq!(
+            got,
+            cpp_order[r + 1],
+            "R{}: boundary order diverged from MFEM face-id order",
+            r + 1
+        );
     }
 }
 
