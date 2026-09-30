@@ -198,6 +198,18 @@ fn main() {
     }
     let kappa = freq * PI;
     let path = mesh_arg.expect("-m mesh required");
+
+    // MFEM `args.PrintOptions()` echo block, matching the C++ helper's stdout
+    // (cf. `tmp/d90c/cpp/cpp_ex31dump_default.out`): three-space indent +
+    // `--long-name value`, boolean switches print their long name.  The
+    // `--mesh` line shows the Rust-side argument value (standing exemption —
+    // the C++ snapshot prints its own C++-side path).
+    println!("Options used:");
+    println!("   --mesh {path}");
+    println!("   --refine {ref_levels}");
+    println!("   --order {order}");
+    println!("   --frequency {freq}");
+    println!("   --no-visualization");
     let mfem = read_mfem_file(&path).expect("read MFEM mesh");
     let base_mesh = match mfem.mesh2d {
         Some(m) => m,
