@@ -198,7 +198,7 @@ fn ams_2d_hpc_improvement() {
     );
     // D73 NOTE — the "HPC is no worse than default" expectation is not met by
     // the current linger presets, for two measured, *out-of-scope* reasons
-    // (vendor/linger/src/precond/ams.rs, this round's file list excludes it):
+    // (vendor/linlvo/src/precond/ams.rs, this round's file list excludes it):
     //
     //  * `AmsConfig::hpc_default()` leaves `singularity_regularization = 0.0`
     //    while `AmsConfig::default()` uses 1e-6.  Without the shift the coarse

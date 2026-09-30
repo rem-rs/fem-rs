@@ -5,7 +5,7 @@
 //! each boundary component satisfies `A(Gφ) = 0`.  A plain LOBPCG
 //! Rayleigh–Ritz then picks up these zero Ritz values and the projected
 //! pencil becomes ill-conditioned (HYPRE AME's target problem — see
-//! `vendor/linger/src/eigen/ame.rs`).
+//! `vendor/linlvo/src/eigen/ame.rs`).
 //!
 //! [`ParGradientProjector`] applies the discrete divergence-free projection
 //!

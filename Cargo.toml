@@ -18,7 +18,7 @@ members = [
     # "crates/benches",  // moved to fem-pro
     "crates/rmetis",
     "crates/regression",
-    "vendor/linger",
+    "vendor/linlvo",
     "examples",
 ]
 
@@ -45,7 +45,7 @@ reed-cpu    = { git = "https://github.com/rem-rs/reed.git", rev = "11eaaed88aaa4
 
 # Patch linlvo to use local vendored copy (allows AMS/ADS modifications).
 [patch."https://github.com/rem-rs/linlvo.git"]
-linlvo = { path = "vendor/linger" }
+linlvo = { path = "vendor/linlvo" }
 
 [profile.release]
 opt-level   = 3

@@ -553,9 +553,9 @@
 - **D76（P2）RT1 quad 的 LOR transfer 缺陷**：quad ND 修好后 RT 腿显形——LOR-Jacobi FGMres(30) 69→200、exact-inner 10→24 vs MFEM 同 recipe 11→12。已拆为独立 `#[ignore]` 测试 `lor_rt_quad_pcg_iterations_mesh_independent`（数字全在文档注释）。RT perm 的步长已按 `RT_QuadrilateralElement` 逐块核对、与 MFEM 一致 ⇒ 嫌疑在 `assemble_lor_rt_quad` 的入口/规则（下一步照 D65 做入口级对照 `d69_full 1 n 1`）。
 - **D77（P2）PA 固定阶 hex 核仍内嵌旧布局**：`crates/assembly/src/pa/q2.rs`/`q3.rs`/`q4.rs` + `crates/linalg-gpu/src/pa_apply.rs` 的硬编码 MAP 与收敛后的 `HexQ2`/`HexQ3`/`HexQk` 不一致（当前无生产调用方，仅自测试 + GPU 镜像）。接线任何生产调用方前必须迁移，否则复活第三种序。
 - **D78（P3）`ProjectCoefficientElementL2` 未实现**（nurbs_ex3 的最后一格）：C++ 对 NURBS 空间 `ProjectCoefficient(VectorCoefficient&)` 默认走单元局部 L2 投影 + LSQ 映回 + `GetRowl2` 加权。影响面 = 粗网格 `-r 1` 的误差（0.0398 vs 默认分派 0.0509）与中间迭代数字；默认细网格档末值/误差不受影响。
-- **D79（已结案，非本轮引入）ex3 默认值 3 ulp 漂移**：内置 beam-tet `-o 1` 现为 3.91630923150637e-1，round 18 记录为 …634。与线程数无关（`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS=1000000` 同值）。**决定性二分**：`git worktree` 到 HEAD `ae4996e`（`vendor/linger` 用 `cmd //c mklink /J` junction、独立 `CARGO_TARGET_DIR`）编译 ex3 并运行 ⇒ **3.91630923150637e-1，与工作树逐位相同**（`beam-tri -o 1` 亦为 8.01477893043346e-2 逐位相同）⇒ **round 23 零影响**；round 18 记录的数字相对第 19–22 轮已陈旧（该档由迭代求解器驱动，末 2–3 位随 AMS/PCG 路径变化，物理意义为零）。**方法论沉淀**：`vendor/linger` 是 submodule，`git worktree` 不检出它且 `git submodule update --init` 被 `transport 'file' not allowed` 拒绝 ⇒ 二分须用 junction（已记入备忘 ④）。
+- **D79（已结案，非本轮引入）ex3 默认值 3 ulp 漂移**：内置 beam-tet `-o 1` 现为 3.91630923150637e-1，round 18 记录为 …634。与线程数无关（`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS=1000000` 同值）。**决定性二分**：`git worktree` 到 HEAD `ae4996e`（`vendor/linlvo` 用 `cmd //c mklink /J` junction、独立 `CARGO_TARGET_DIR`）编译 ex3 并运行 ⇒ **3.91630923150637e-1，与工作树逐位相同**（`beam-tri -o 1` 亦为 8.01477893043346e-2 逐位相同）⇒ **round 23 零影响**；round 18 记录的数字相对第 19–22 轮已陈旧（该档由迭代求解器驱动，末 2–3 位随 AMS/PCG 路径变化，物理意义为零）。**方法论沉淀**：`vendor/linlvo` 是 submodule，`git worktree` 不检出它且 `git submodule update --init` 被 `transport 'file' not allowed` 拒绝 ⇒ 二分须用 junction（已记入备忘 ④）。
 - **D80（P2）库内 quad ND 仍绑定遗留 `QuadNDk`**：LOR 兼容的 `(GaussLobatto, IntegratedGLL)` 目前只在元素层/测试局部装配器可用（`vec_ref_elem` 对 quad ND o≥3 仍返回遗留 Lagrange × hat 元素）⇒ perm 只对 MFEM 布局元素成立。收口 = 像 `HexNDk::new_integrated_gll` 一样把 `QuadND::new_integrated_gll` 接进 `HCurlSpace`/`HDivSpace`（D63 式升级）。
-- 备忘：① `stash@{0}`（ex4-ads-preconditioner）仍在，待用户决定；② linger 的 PCG 停机判据非真残差（本轮第二个独立系统上复现：quad LOR 上真残差 6.1e-5；第一个是 round 22 的 D72 假收敛 0.585）；③ `lor_factory` 的 `A_LO = PᵀA_HO P` 仍是 HO 矩阵的置换而非 MFEM `BatchedLOR_H1` 重新装配的低阶矩阵；④ **告警**：`vendor/linger` 是 git submodule（`url = C:/Users/lilu/works/linger`），`git worktree` 不会检出它、且 `git submodule update --init` 被 `transport 'file' not allowed` 拒绝 ⇒ 二分时须用 `cmd //c mklink /J` 建 junction。
+- 备忘：① `stash@{0}`（ex4-ads-preconditioner）仍在，待用户决定；② linger 的 PCG 停机判据非真残差（本轮第二个独立系统上复现：quad LOR 上真残差 6.1e-5；第一个是 round 22 的 D72 假收敛 0.585）；③ `lor_factory` 的 `A_LO = PᵀA_HO P` 仍是 HO 矩阵的置换而非 MFEM `BatchedLOR_H1` 重新装配的低阶矩阵；④ **告警**：`vendor/linlvo` 是 git submodule（`url = C:/Users/lilu/works/linger`），`git worktree` 不会检出它、且 `git submodule update --init` 被 `transport 'file' not allowed` 拒绝 ⇒ 二分时须用 `cmd //c mklink /J` 建 junction。
 
 ## 第二十四轮完成（2026-09-12，四路：D76+D80 LOR 收尾 / D77 PA 核迁移 / D78 nurbs 最后一格 / navier_cht 立项）
 
@@ -776,7 +776,7 @@
 - **D113 剩余（P3）**：`Hex20`/`Hex27`、`Tet4`/`Tet10`、`Prism6`、`Pyramid5` 的细化**仍丢弃**父几何（`Mesh::uniform` 置 `geometry: None`；Hex20/27 连建 Hex8 视图时也丢）。估计：Hex27（把 Q2 几何透传）~0.5 天、Prism6 ~1 天、Tet4 ~1.5–2 天、Pyramid5 ~1.5 天。
 - **D123（P3）`curl_3d` 错误分支里的遗留调试 `eprintln!`**（`crates/assembly/src/discrete_op.rs`，pre-existing）未清。
 - **D124（P2）rank-local `boundary_dofs` 不是分布式本质边界集**：np=2 上存在 owned 边内部 dof 而其边界边只在邻居（owner 把它留自由 ⇒ 解漂 **2.0e-3**）、np=4 上漏一个 ghost dof（⇒ 9 个 LOR 耦合未消元）。ParLOR 目前在 miniapp 内用 `ParVector::accumulate_ghosts` + `update_ghosts` 交换标志绕过；正解 = 在 `crates/parallel`/`crates/space/constraints` 补 `ParFiniteElementSpace::GetBoundaryTrueDofs` 类入口（估 1–2 天含测试）。
-- **D125（P3）并行 LOR 的 ND/RT/L² 腿**：ND/RT 需**分布式** AMS/ADS（`vendor/linger/src/precond/{ams,ads}.rs` 只有串行版、`parallel_dist` 只有 `DistCsrMatrix`）⇒ 估 1–2 周或走 hypre FFI；L²/DG 需并行面积分器 ⇒ ~1 周。`-fe n|r|l` 现显式拒绝。另一项磨光活：把 rank-local 聚合 AMG 换成跨 rank 粗化以关掉 np 增长（48→74 vs C++ 25→27），~1 周。
+- **D125（P3）并行 LOR 的 ND/RT/L² 腿**：ND/RT 需**分布式** AMS/ADS（`vendor/linlvo/src/precond/{ams,ads}.rs` 只有串行版、`parallel_dist` 只有 `DistCsrMatrix`）⇒ 估 1–2 周或走 hypre FFI；L²/DG 需并行面积分器 ⇒ ~1 周。`-fe n|r|l` 现显式拒绝。另一项磨光活：把 rank-local 聚合 AMG 换成跨 rank 粗化以关掉 np 增长（48→74 vs C++ 25→27），~1 周。
 - 备忘：① `stash@{0}`（ex4-ads-preconditioner）仍在，待用户决定；② WSL 本轮一度整体掉线（连 `wsl --shutdown` 都超时，约 20 分钟后自行恢复）——C++ 参考比对期间需留意；③ 主会话新增工具：MFEM 4.10 serial `mesh-optimizer` 参考 `$HOME/work/mo410`、D112 ground-truth 探针 `tmp/d112_ref_main.cpp`（带 `fix_orientation` 参数与 `MIN_DET_GLL6`）；④ 派单时的授权清单要写**真实存在**的路径（本轮给 ④ 写了不存在的 `crates/solver/src/lor_factory.rs`，真身在 `crates/assembly/src/lor_factory.rs`，代理正确识别并只读未改）。
 
 ## 第三十轮（round 30）：miniapps / 串并示例 **能力覆盖审计**（只读 + 2 处即时修复）
@@ -1261,7 +1261,7 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
   linalg 66 / linalg-gpu 13(+2 ign) / **mesh 301** / parallel 232 / solver 264 / space 286；
   `tests/**` 集成层：solver 4 个 suite + assembly 8 个 + mesh 3 个 + space 4 个 + io 7 个 = 全绿，
   唯一失败 = **预存的** `poisson_solve::poisson_nc_amr_convergence`（`got 7.9085e-2`，与 round 22/23/30/31/32 **逐位相同** ⇒ 非本轮引入）。
-- `cargo build --release --examples --keep-going`：**0 error**（首轮 24m39s；警告仅来自 `vendor/linger` 与
+- `cargo build --release --examples --keep-going`：**0 error**（首轮 24m39s；警告仅来自 `vendor/linlvo` 与
   10 个**未被本轮触碰**的既有示例）；pro 层 `cargo check -p pro-bench-tests -p pro-cad`：**0 error**。
 - 本会话对 T1/T2/T3/T4 的**独立复核总数**：ex1 逐字节 1 件 + gslib 2 件 + `interpolated.gf` 逐字节 1 件 +
   T4 逐字节 4 件 + T4 数值/出口码 6 件（mandel/mondrian/lissajous/nurbs_solenoidal/get-values 3-D 缺口/tmop rc）。
@@ -1761,7 +1761,7 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 ### 4. ④ 路：D202/D216/D218/D161 全关
 - **D202**：postproc 三表 + physics 两表补 tri/tet o≥4..6 臂（GLL 族，与 `ref_elem_vol_h1` 同源槽位），5/5 测试（`n_dofs`+`dof_coords` 逐点+单位分解）。**D235**：postproc 三表仍缺 Quad4 o≥3+/Hex/Prism/Tet10 臂（fail-fast，低危）。
 - **D216**：`bpcg.rs` 档位改显式 match（对照 C++ `bramble_pasciak.cpp:225-391` + `FromLegacyPrintLevel`）；改前 `Ord >=` 会让 FirstAndLast 错拿逐迭代历史。C++ 探针 8 组合真值，新测试 **16/16 逐字节**（数值尾含在内）。
-- **D218**：读完 vendor/linger API 确认 `VerboseLevel` 三档且打印硬连 `println!` ⇒ **to_linlvo 有损映射诚实化**（WarningsOnly→Silent 降级、FirstAndLast→Summary 近似，文档逐条列原因）+ 映射表测试 3/3。**D234**：linlvo 包装族打印自有格式非 MFEM trailer（字节级对齐需比照手写 trailer 改造）。
+- **D218**：读完 vendor/linlvo API 确认 `VerboseLevel` 三档且打印硬连 `println!` ⇒ **to_linlvo 有损映射诚实化**（WarningsOnly→Silent 降级、FirstAndLast→Summary 近似，文档逐条列原因）+ 映射表测试 3/3。**D234**：linlvo 包装族打印自有格式非 MFEM trailer（字节级对齐需比照手写 trailer 改造）。
 - **D161**：`compute_div_error{,_order,_filtered,_filtered_order}` + `compute_hdiv_full_error`（MFEM `ComputeDivError`/`ComputeHDivError` 1:1，默认规则 2p+3/RT 2p+5，ND abort 语义照抄）。C++ 对拍（quad RT 4×4，`tmp/d161/`）：RT0/RT1/RT2 三组 div_err **<1e-10**，div_norm 与解析 √(31/9) 一致。未动 nurbs_solenoidal。
 
 ### 第三十九轮新债务
@@ -2653,7 +2653,7 @@ P3 测试）。**本批后 fem-rs 零红测试、零因缺陷忽略。**
   `solve_gmres_complex_with` 的循环内停机判据用 ‖M⁻¹(b−Ax)‖/‖b‖——对近奇异的粗模态
   低估真残差 ~2 个量级 ⇒ 每轮重启提前退出，平台**随 tol 线性移动、与预算/重启无关**
   （tol 探针：1e-8/1e-10/1e-12 → 真残差 6.8e-7/6.4e-9/1.2e-10，排除 (a)/(c)）。
-- **修法**（fem-solver 驱动层，vendor/linger 未动）：`solve_gmres_ams_complex` 改用新
+- **修法**（fem-solver 驱动层，vendor/linlvo 未动）：`solve_gmres_ams_complex` 改用新
   `solve_gmres_complex_right_prec` —— **右预处理**重启 GMRES（Krylov 空间在 A·M⁻¹ 上、
   修正 x += M⁻¹Vy），最小化/监控/重启复核的都是**真残差**。注：MFEM 的 GMRESSolver
   本身是左预处理+预条件停机（`solvers.cpp:1134`），本修复**超出 MFEM**，与 D72 类
@@ -3381,7 +3381,7 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   （⑥路独立归因一致；src diff 无任何测试函数删除）。
 - 纪律偏差 1 处：`sbm3_dirichlet.rs` 非 UTF-8 导致 Read/Edit 拒开，2 处单行删除用
   `sed -i` 执行——主会话审计 diff：内容为测试内未用变量删除，与描述一致，接受并记录。
-- 残留列明：physics/** 6 处（禁动）、vendor/linger 20、fem-solver 8（越界）。
+- 残留列明：physics/** 6 处（禁动）、vendor/linlvo 20、fem-solver 8（越界）。
 
 ### ⑤ D143 残留全关 —— NURBS 网格读取四缺口（含批准越界件 D486）
 
@@ -3911,7 +3911,7 @@ HEAD 通过是舍入巧合。三档实测：tri1 `−6.661e-16`、tri2 `−2.220
 #### ② 路诚实清单
 - 未换 `TriRTk` 泛函集（D529）、未加定向检查（D530）、未重跑 `fem-py`（`pyo3-build-config` 失败，与本改动无关）。
 - workspace 全扫 `cargo test --workspace --exclude fem-py` = **4659 passed / 37 failed**：
-  **35 个在 `vendor/linger`**（AMG/预条件收敛断言）——主会话核实 `vendor/` **未被改动**且
+  **35 个在 `vendor/linlvo`**（AMG/预条件收敛断言）——主会话核实 `vendor/` **未被改动**且
   `linlvo` 只依赖 num-traits/num-complex/thiserror/rayon/mpi/cblas-sys、**不依赖任何 fem crate**
   ⇒ **不可能由本轮引起，属既有 vendor 状态，且在四道回归门之外**；
   **4 个 doctest 二进制**失败是 `LNK1318/LNK1201: … insufficient disk space`（**磁盘耗尽伪影**，
@@ -4987,7 +4987,7 @@ oracle 全部来自 `$HOME/mfem410_ser` 探针实跑（⑯ 对照物自审：把
 - 大门（十 crate 口径 = round 77/78 的显式 `-p` 集）：`--lib`(debug) **10 靶/2654/0/5 ign**
   （= round 78 逐项）；`--tests`(release) **338 靶/4329/0/28 ign**（= r78 的 337/4328/0/26
   + 本轮 1 靶/1 通过/2 忽略，账目吻合）；`--doc` **10 靶/9/0/95**（= r78）；examples
-  **rc=0 / 0 非 vendor 警告**（28 条全在 vendor/linger，按 `-->` 行归属 ④）；pro **rc=0**；
+  **rc=0 / 0 非 vendor 警告**（28 条全在 vendor/linlvo，按 `-->` 行归属 ④）；pro **rc=0**；
   fem-py **rc=0**（首轮 rc=101 = **C 盘满的环境性失败**（"No space left on device"），
   清 `target/debug` 后过——⑨ 的又一实例）。
 
@@ -5898,7 +5898,7 @@ D805-1+D805-2）→ `f5a7e657`（Lane B：D807-1 部分）。
 |---|---|---|
 | 1 lib（十 crate 批） | **10 targets / 2643 passed / 0 failed / 5 ignored** | 2634/0（+9：D754 五测 + linalg-gpu 两测转绿 + …） |
 | 2 `--tests`（十 crate 全靶） | **308 targets / 4174 passed / 0 failed / 123 ignored** | 286/4104/0/24（targets +22、passed +70；**ignored 差异已查清**：本轮跑集为十 crate **全靶含 doc-tests**，ignored 全部落在既有诊断/oracle 族[`fem-assembly` 71 = `*_diagnostics`/`*_matches_mfem`/`d342|d493` oracle 等]、**本轮新增仅 4**（E 的夹具导出器 1 + F 的 D122-1/2/3 各 1，均带 un-ignore 条件）；round-71 的 24 是更窄跑集口径） |
-| 3 examples（`--keep-going`） | **0 错误、非 vendor 警告 0**（28 条警告全在 `vendor/linger/**`） | 同 |
+| 3 examples（`--keep-going`） | **0 错误、非 vendor 警告 0**（28 条警告全在 `vendor/linlvo/**`） | 同 |
 | 4 pro 层（`fem-pro` 根跑 `cargo check -p pro-bench-tests -p pro-cad`） | **rc=0**（742 条警告**全部在 pro 层自身代码** `crates/pro-physics|pro-iga/**`，与 fem-rs 无关） | 同 |
 | 5 fem-py | **构建 rc=0**（`PYO3_PYTHON` 指 uv 3.11）；`pytest ../tests/test_full_pipeline.py` = **29 passed / 10 failed** —— 失败全部是**绑定面方法缺失**（`CsrMatrix.to_dense`、`Mesh.element_type` 等，`grep` 证实绑定源码里没有这些方法）⇒ **既存 D607 缺口**，绑定源码本轮零改动 | round 71 记"all green"（口径差异；本轮如实记录 10 项失败并归因） |
 

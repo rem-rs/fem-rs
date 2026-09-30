@@ -88,7 +88,7 @@ impl SolverConfig {
     /// Map the MFEM legacy print scale onto `linlvo`'s 3-level `VerboseLevel`.
     ///
     /// D218 — this mapping is **lossy** for two variants, because
-    /// `linlvo::VerboseLevel` (`vendor/linger/src/core/solver.rs`) has only
+    /// `linlvo::VerboseLevel` (`vendor/linlvo/src/core/solver.rs`) has only
     /// `Silent`/`Summary`/`Iterations`: no level-0 (warnings-only) tier, no
     /// level-3 (first-and-last) tier, no warnings channel of its own, and no
     /// output abstraction (its solvers `println!` directly behind

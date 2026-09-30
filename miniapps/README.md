@@ -1050,7 +1050,7 @@ d244、poisson_p3_debug_rates）、基准（ras_benchmark ×3、d260 热路径�
    重启循环提前退出（平台**随 tol 线性移动、与预算无关**——tol 探针 6.8e-7/6.4e-9/
    1.2e-10 证明 (a) 奇异、(c) 循环缺陷均不成立，HANDOVER 旧假设被推翻）。
    修复在 fem-solver 自己的驱动层：`solve_gmres_ams_complex` 改用新实现的
-   **右预处理**重启 GMRES（真残差最小化 + 监控 + 每轮重启复核），vendor/linger 未动。
+   **右预处理**重启 GMRES（真残差最小化 + 监控 + 每轮重启复核），vendor/linlvo 未动。
    实测 hpc 16×16：**2000 迭代/6.05e-5 平台 → 25 迭代/6.27e-7 收敛**；default 预设
    同步改善（22→18 迭代）；`ams_ads` 全部 **11 个测试通过（0 ignored）**。
 3. **D401 —— stokes_darcy_coupled MMS 取消 ignore**：根因是**两个测试侧缺陷 +
