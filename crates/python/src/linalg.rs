@@ -46,4 +46,12 @@ impl PyCsrMatrix {
             (self.inner.nrows, self.inner.ncols),
         ))
     }
+
+    /// Dense row-major copy of the matrix as a flat list of ``nrows·ncols``
+    /// entries (entry ``(i, j)`` at index ``i·ncols + j``).  Delegates to
+    /// ``fem_linalg::CsrMatrix::to_dense``.  Intended for small matrices
+    /// (tests, diagnostics).
+    pub fn to_dense(&self) -> Vec<f64> {
+        self.inner.to_dense()
+    }
 }

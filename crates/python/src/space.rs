@@ -185,6 +185,34 @@ impl PyComplexGridFunction {
 
     pub fn n_dofs(&self) -> usize { self.u_re.len() }
 
+    /// Set the real part from a list/array of ``n_dofs`` values.
+    pub fn set_real(&mut self, values: Vec<f64>) -> PyResult<()> {
+        if values.len() != self.u_re.len() {
+            return Err(PyValueError::new_err(format!(
+                "set_real: expected {} values, got {}", self.u_re.len(), values.len()
+            )));
+        }
+        self.u_re = values;
+        Ok(())
+    }
+
+    /// Set the imaginary part from a list/array of ``n_dofs`` values.
+    pub fn set_imag(&mut self, values: Vec<f64>) -> PyResult<()> {
+        if values.len() != self.u_im.len() {
+            return Err(PyValueError::new_err(format!(
+                "set_imag: expected {} values, got {}", self.u_im.len(), values.len()
+            )));
+        }
+        self.u_im = values;
+        Ok(())
+    }
+
+    /// Real part as a list of floats.
+    pub fn get_real(&self) -> Vec<f64> { self.u_re.clone() }
+
+    /// Imaginary part as a list of floats.
+    pub fn get_imag(&self) -> Vec<f64> { self.u_im.clone() }
+
     pub fn amplitude<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         let a: Vec<f64> = self.u_re.iter().zip(self.u_im.iter())
             .map(|(&r, &i)| (r*r + i*i).sqrt()).collect();
