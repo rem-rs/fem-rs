@@ -21,9 +21,9 @@ use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
-    Assembler, MixedAssembler, MixedBilinearIntegrator,
+    Assembler, MixedAssembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
-    integrator::QpData,
+    mixed::MixedScalarDiffusionIntegrator,
     dpg::{SinvBuilder, assemble_bhat, DpgNormalOperator, build_shat},
 };
 use fem_io::mfem::read_mfem_file;
@@ -35,26 +35,6 @@ use fem_space::{
     fe_space::FESpace,
     constraints::{boundary_dofs, apply_dirichlet_diag_one},
 };
-
-// ─── Mixed Diffusion Integrator (B0) ─────────────────────────────────────────
-
-struct MixedDiffusion;
-impl MixedBilinearIntegrator for MixedDiffusion {
-    fn add_to_element_matrix(&self, qp_row: &QpData<'_>, qp_col: &QpData<'_>, m: &mut [f64]) {
-        let nr = qp_row.n_dofs;
-        let nc = qp_col.n_dofs;
-        let d = qp_col.dim;
-        let w = qp_col.weight;
-        for k in 0..d {
-            for i in 0..nr {
-                let gik = qp_row.grad_phys[i * d + k];
-                for j in 0..nc {
-                    m[i * nc + j] += w * gik * qp_col.grad_phys[j * d + k];
-                }
-            }
-        }
-    }
-}
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -131,7 +111,7 @@ fn main() {
     let ess_dofs: Vec<u32> = boundary_dofs(&mesh as &dyn fem_mesh::topology::MeshTopology, dm, &ess_tags);
     let ess_usize: Vec<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
 
-    let mut b0 = MixedAssembler::assemble_bilinear(&test, &x0, &[&MixedDiffusion], qo);
+    let mut b0 = MixedAssembler::assemble_bilinear(&test, &x0, &[&MixedScalarDiffusionIntegrator], qo);
 
     // BC: zero columns of B0 for essential DOFs (homogeneous Dirichlet)
     for &d in &ess_dofs {

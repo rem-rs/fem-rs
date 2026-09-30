@@ -22,14 +22,13 @@
 
 use std::marker::PhantomData;
 
-use fem_element::{
-    ReferenceElement,
-    lagrange::{QuadL2GL, TriL2GL},
-    quadrature::{tri_rule, quad_rule_01},
-};
+use fem_linalg::CsrMatrix;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
+
+use crate::assembler::Assembler;
+use crate::standard::{DiffusionIntegrator, MassIntegrator};
 
 /// Per-element `(M + K)^{-1}` for a discontinuous L² test space.
 ///
@@ -59,92 +58,141 @@ fn quad_order(elem_type: ElementType, order: u8) -> u8 {
     }
 }
 
-// ─── Dense inversion (Gaussian elimination, no pivoting) ──────────────────────
+// ─── Dense inversion — bit-for-bit port of MFEM's Invert() ───────────────────
 
-fn solve_dense_inv(n: usize, a: &mut [f64]) {
-    let a0 = a.to_vec();
-    let mut inv = vec![0.0; n * n];
-    for col in 0..n {
-        let mut ac = a0.clone();
-        let mut b = vec![0.0; n];
-        b[col] = 1.0;
-        for c in 0..n {
-            let mut best = c;
-            let mut bv = ac[c * n + c].abs();
-            for r in (c + 1)..n {
-                let v = ac[r * n + c].abs();
-                if v > bv { bv = v; best = r; }
-            }
-            if bv < 1e-30 { continue; }
-            if best != c {
-                for k in c..n { ac.swap(c * n + k, best * n + k); }
-                b.swap(c, best);
-            }
-            let piv = ac[c * n + c];
-            for r in (c + 1)..n {
-                let f = ac[r * n + c] / piv;
-                for k in c..n { ac[r * n + k] -= f * ac[c * n + k]; }
-                b[r] -= f * b[c];
-            }
-        }
-        for r in (0..n).rev() {
-            let mut s = b[r];
-            for k in (r + 1)..n { s -= ac[r * n + k] * inv[k * n + col]; }
-            inv[r * n + col] = if ac[r * n + r].abs() > 1e-30 { s / ac[r * n + r] } else { 0.0 };
-        }
-    }
-    a.copy_from_slice(&inv);
-}
-
-// ─── Jacobian transform ─────────────────────────────────────────────────────
-
-fn transform_grads(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, d: usize) {
-    for i in 0..n {
-        for j in 0..d {
-            let mut s = 0.0;
-            for k in 0..d { s += jit[(j, k)] * gr[i * d + k]; }
-            gp[i * d + j] = s;
-        }
-    }
-}
-
-/// Bilinear quad Jacobian at (xi, eta): J = [J00 J01; J10 J11]
+/// Invert an `n × n` row-major matrix in place, bit-for-bit following MFEM
+/// 4.10 `DenseMatrix::Invert()` in the **non-LAPACK** branch
+/// (`linalg/densemat.cpp`; the reference build `$HOME/mfem410_ser` has
+/// `MFEM_USE_LAPACK = NO`).
 ///
-/// Reference domain is [0,1]² for QuadL2GL: N0 .. N3 are the standard
-/// bilinear shape functions.
-/// Returns (J, det_J) with the **signed** determinant — D652: MFEM 4.10
-/// `ElementTransformation::Weight()` is the signed determinant
-/// (`EvalWeight -> dFdx.Weight() -> DenseMatrix::Weight() -> Det()`) and its
-/// `InverseJacobian()` is the signed algebraic inverse, so inverted (det < 0)
-/// elements must not be silently repaired.
-fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64; 2]; 2], f64) {
-    // QuadL2GL (Gauss-Legendre nodal) shape derivatives on [0,1]²:
-    // N0=(1-ξ)(1-η), N1=ξ(1-η), N2=ξη, N3=(1-ξ)η
-    let dN_dxi = [
-        -(1.0 - eta),
-         (1.0 - eta),
-         eta,
-        -eta,
-    ];
-    let dN_deta = [
-        -(1.0 - xi),
-        -xi,
-         xi,
-         (1.0 - xi),
-    ];
-    let mut j = [[0.0; 2]; 2];
-    for i in 0..4 {
-        j[0][0] += dN_dxi[i] * x[i];  j[0][1] += dN_dxi[i] * y[i];
-        j[1][0] += dN_deta[i] * x[i]; j[1][1] += dN_deta[i] * y[i];
+/// Why this exact algorithm (D864): the DPG element blocks `S_e^{-1}` feed
+/// `b = Bᵀ S⁻¹ F`, `Shat = Bhatᵀ S⁻¹ Bhat` and every preconditioner
+/// application, so an ulp-level difference in the inverse scheme grows into a
+/// visible fork of the outer PCG trajectory.  The previous implementation here
+/// solved `n` separate systems (fresh elimination + back substitution per unit
+/// vector) — mathematically the same inverse, but a different floating-point
+/// algorithm with ~5e-12 relative disagreement against MFEM's Gauss–Jordan on
+/// the ex8 star-mesh blocks, which surfaced as a 1.3e-5 relative difference in
+/// the printed `(B r, r)` by iteration 5 and a 29-vs-28 iteration split.
+///
+/// The port preserves MFEM's operation order exactly: pivot scan with strict
+/// `a < b` (diagonal seeded first), full-row swap, reciprocal scaling of the
+/// pivot row, Gauss–Jordan updates of rows above *and* below the pivot (both
+/// split into the `j < c` / `j > c` column ranges), and the final column swaps
+/// driven by the recorded pivot indices.  Row-major indexing replaces MFEM's
+/// column-major `(i, j)` accessor; since every swap is whole-row or whole-column
+/// and every update is elementwise, the sequence of floating-point operations is
+/// identical.
+fn mfem_dense_invert(n: usize, a: &mut [f64]) {
+    let mut piv = vec![0usize; n];
+
+    for c in 0..n {
+        let mut amax = a[c * n + c].abs();
+        let mut imax = c;
+        for j in (c + 1)..n {
+            let b = a[j * n + c].abs();
+            if amax < b {
+                amax = b;
+                imax = j;
+            }
+        }
+        if amax == 0.0 {
+            // MFEM: `mfem_error("DenseMatrix::Invert() : singular matrix")`.
+            panic!("mfem_dense_invert: singular matrix");
+        }
+        piv[c] = imax;
+        for j in 0..n {
+            a.swap(c * n + j, imax * n + j);
+        }
+
+        let r = 1.0 / a[c * n + c];
+        a[c * n + c] = r;
+        for j in 0..c {
+            a[c * n + j] *= r;
+        }
+        for j in (c + 1)..n {
+            a[c * n + j] *= r;
+        }
+        for i in 0..c {
+            let b = -a[i * n + c];
+            a[i * n + c] = r * b;
+            for j in 0..c {
+                a[i * n + j] += b * a[c * n + j];
+            }
+            for j in (c + 1)..n {
+                a[i * n + j] += b * a[c * n + j];
+            }
+        }
+        for i in (c + 1)..n {
+            let b = -a[i * n + c];
+            a[i * n + c] = r * b;
+            for j in 0..c {
+                a[i * n + j] += b * a[c * n + j];
+            }
+            for j in (c + 1)..n {
+                a[i * n + j] += b * a[c * n + j];
+            }
+        }
     }
-    let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
-    (j, det)
+
+    for c in (0..n).rev() {
+        let j = piv[c];
+        for i in 0..n {
+            a.swap(i * n + c, i * n + j);
+        }
+    }
+}
+
+// ─── Element-matrix extraction from the global assembly ──────────────────────
+
+/// Copy the element's `dofs[i] × dofs[j]` entries of the assembled matrix `m`
+/// into the row-major dense block `blk` (`nt × nt`); unstored entries are zero.
+fn read_block(m: &CsrMatrix<f64>, dofs: &[usize], blk: &mut [f64]) {
+    blk.fill(0.0);
+    let nt = dofs.len();
+    for (i, &di) in dofs.iter().enumerate() {
+        for p in m.row_ptr[di]..m.row_ptr[di + 1] {
+            let c = m.col_idx[p] as usize;
+            if let Some(j) = dofs.iter().position(|&d| d == c) {
+                blk[i * nt + j] = m.values[p];
+            }
+        }
+    }
+}
+
+/// MFEM `SumIntegrator`: the second integrator's element matrix is added to the
+/// first's, entrywise, over the element's dof block.
+fn add_block(m: &CsrMatrix<f64>, dofs: &[usize], blk: &mut [f64]) {
+    let nt = dofs.len();
+    for (i, &di) in dofs.iter().enumerate() {
+        for p in m.row_ptr[di]..m.row_ptr[di + 1] {
+            let c = m.col_idx[p] as usize;
+            if let Some(j) = dofs.iter().position(|&d| d == c) {
+                blk[i * nt + j] += m.values[p];
+            }
+        }
+    }
 }
 
 // ─── SinvBuilder ─────────────────────────────────────────────────────────────
 
 impl<M: MeshTopology> SinvBuilder<M> {
     /// Build `S^{-1} = (M + K)^{-1}` element-by-element over the test space.
+    ///
+    /// The element matrices `S_e = M_e + K_e` come from the **generic volume
+    /// assembly path** ([`Assembler::assemble_bilinear`] on the L² space, whose
+    /// dofs are element-local so the global matrix is exactly block-diagonal).
+    /// That path reproduces MFEM's integrator kernels bit-for-bit — signed
+    /// `Weight()` in `ip.weight / Weight()`, adjugate-scaled gradients
+    /// `dshapedxt = dshape · adj(J)`, and the `AddMult_a_AAt`/`AddMult_a_VVt`
+    /// accumulation with the shared symmetric products — which the previous
+    /// hand-rolled element loop here did *not*: its `J⁻ᵀ`-scaled gradient and
+    /// `w = weight·det` grouping differ from MFEM's in the last ulps, and the
+    /// `κ ≈ 10³` conditioning of `S_e` amplifies that into ~5e-12 relative
+    /// error in `S_e^{-1}` (D864; measured by dumping both sides' `Sinv` —
+    /// `tmp/d98runbit/`).  Since `S^{-1}` feeds the RHS, `Shat` and every
+    /// preconditioner application, that error forked the ex8 outer PCG
+    /// trajectory in the 6th printed digit from iteration 5 on.
     ///
     /// # Arguments
     /// * `test_space` — the L² (discontinuous) test space
@@ -153,141 +201,40 @@ impl<M: MeshTopology> SinvBuilder<M> {
         let mesh = test_space.mesh();
         let ne = mesh.n_elements();
         let order = test_space.order();
-        let dim = mesh.dim() as usize;
         let et = mesh.element_type(0);
-        let is_tri = matches!(et, ElementType::Tri3 | ElementType::Tri6);
         let qo = if qorder > 0 { qorder } else { quad_order(et, order) };
 
-        // D269: the reference element must be the test space's *actual* basis —
-        // the `L2_FECollection` default GaussLegendre placement, i.e. open
-        // barycentric GL nodes on Tri3 (`TriL2GL`, matching the space's dof
-        // slots) and interior GL tensor nodes on Quad4 (`QuadL2GL`, round-40
-        // precedent).  Otherwise these blocks are not the inverse of the
-        // test-space Gram matrix in the space's dof basis.
-        let (ref_elem, nt) = match (et, order) {
-            (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriL2GL::new(1)) as Box<dyn ReferenceElement>, 3usize),
-            (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriL2GL::new(2)) as Box<dyn ReferenceElement>, 6),
-            (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriL2GL::new(3)) as Box<dyn ReferenceElement>, 10),
-            (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4),
-            (ElementType::Quad4, 2) => (Box::new(QuadL2GL::new(2)) as Box<dyn ReferenceElement>, 9),
-            _ => panic!("SinvBuilder: unsupported ({et:?}, order={order})"),
-        };
-        let qr = match et {
-            ElementType::Tri3 | ElementType::Tri6 => tri_rule(qo),
-            ElementType::Quad4 => quad_rule_01(qo),
-            _ => panic!("SinvBuilder: unsupported {et:?}"),
-        };
+        let stiff = Assembler::assemble_bilinear(
+            test_space, &[&DiffusionIntegrator { kappa: 1.0 }], qo,
+        );
+        let mass = Assembler::assemble_bilinear(
+            test_space, &[&MassIntegrator { rho: 1.0 }], qo,
+        );
 
         let mut elem_blocks = Vec::with_capacity(ne);
         let mut elem_dofs = Vec::with_capacity(ne);
-
-        let mut phi = vec![0.0; nt];
-        let mut dphi = vec![0.0; nt * dim];
+        let mut n_per_elem = 0usize;
 
         for e in mesh.elem_iter() {
-            let nodes = mesh.element_nodes(e);
             let dofs: Vec<usize> = test_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let nt = dofs.len();
+            n_per_elem = nt;
 
-            // Geometry
-            let xq: Vec<f64> = (0..4)
-                .map(|k| mesh.node_coords(nodes[k.min(nodes.len() - 1)])[0])
-                .collect();
-            let yq: Vec<f64> = (0..4)
-                .map(|k| mesh.node_coords(nodes[k.min(nodes.len() - 1)])[1])
-                .collect();
-            let (x4, y4): ([f64; 4], [f64; 4]) = (
-                [xq[0], xq[1], xq[2], xq[3]],
-                [yq[0], yq[1], yq[2], yq[3]],
-            );
+            // MFEM `InverseIntegrator(SumIntegrator(Diffusion, Mass))`: the
+            // first integrator's matrix is the accumulator, the second is added.
+            let mut s = vec![0.0; nt * nt];
+            read_block(&stiff, &dofs, &mut s);
+            add_block(&mass, &dofs, &mut s);
 
-            let tr = if is_tri {
-                Some(fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes))
-            } else {
-                None
-            };
-
-            let mut mass = vec![0.0; nt * nt];
-            let mut stiff = vec![0.0; nt * nt];
-
-            for (xi, &wr) in qr.points.iter().zip(qr.weights.iter()) {
-                // D652: det_j is SIGNED throughout.  MFEM 4.10 assembles with
-                // the signed `Weight()` (= det, `eltrans.cpp:EvalWeight`) and
-                // the signed algebraic `InverseJacobian()`, so a negative-det
-                // element yields exactly the negation of its mirrored
-                // positive-det block (probe: tmp/d652/probe.cpp — Weight()
-                // prints -1, DenseMatrixInverse returns -S^{-1}).  The
-                // previous `.abs()` / `max(1e-30)` clamps silently repaired
-                // inverted elements instead.
-                let (det_j, j00, j01, j10, j11) = if is_tri {
-                    let t = tr.as_ref().unwrap();
-                    (t.det_j(), 0.0, 0.0, 0.0, 0.0)
-                } else {
-                    let xi_f = xi[0];
-                    let eta_f = xi[1];
-                    let (j, det) = quad_jacobian(&x4, &y4, xi_f, eta_f);
-                    (det, j[0][0], j[0][1], j[1][0], j[1][1])
-                };
-                let w = wr * det_j;
-
-                ref_elem.eval_basis(xi, &mut phi);
-                ref_elem.eval_grad_basis(xi, &mut dphi);
-
-                let mut gp = vec![0.0; nt * dim];
-                if is_tri {
-                    let jit = tr.as_ref().unwrap().jacobian_inv_t().clone();
-                    transform_grads(&jit, &dphi, &mut gp, nt, dim);
-                } else {
-                    // ∇_x φ = J_std^{-T} · ∇_ξ φ where J_std = [[dx/dξ, dx/dη], [dy/dξ, dy/dη]]
-                    // (rows = physical dims) and det = x_ξ·y_η − y_ξ·x_η, so with the
-                    // (j00, j01, j10, j11) = (dx/dξ, dy/dξ, dx/dη, dy/dη) layout of
-                    // `quad_jacobian`:
-                    // jit = J_std^{-T} = 1/det * [[j11, -j01], [-j10, j00]].
-                    // D640: the off-diagonal entries were previously swapped
-                    // (jit01 = -j10, jit10 = -j01, i.e. J_std^{-1} instead of
-                    // J_std^{-T}); identical on axis-aligned quads (where the
-                    // unit-square tests ran) and wrong on sheared ones — the
-                    // star-mesh boundary quads of MFEM ex8.
-                    // D652: `id = 1/det_j` uses the signed determinant (MFEM
-                    // algebraic InverseJacobian()); for det > 0 this is
-                    // bitwise the old clamped value.
-                    let id = 1.0 / det_j;
-                    let jit00 = j11 * id;  //  dy/dη / det
-                    let jit01 = -j01 * id; // -dy/dξ / det
-                    let jit10 = -j10 * id; // -dx/dη / det
-                    let jit11 = j00 * id;  //  dx/dξ / det
-                    for i in 0..nt {
-                        gp[i * dim] = jit00 * dphi[i * dim] + jit01 * dphi[i * dim + 1];
-                        gp[i * dim + 1] = jit10 * dphi[i * dim] + jit11 * dphi[i * dim + 1];
-                    }
-                }
-
-                for i in 0..nt {
-                    for j in 0..nt {
-                        mass[i * nt + j] += w * phi[i] * phi[j];
-                        let mut gdot = 0.0;
-                        for d in 0..dim {
-                            gdot += gp[i * dim + d] * gp[j * dim + d];
-                        }
-                        stiff[i * nt + j] += w * gdot;
-                    }
-                }
-            }
-
-            // A = M + K
-            for i in 0..nt {
-                for j in 0..nt {
-                    mass[i * nt + j] += stiff[i * nt + j];
-                }
-            }
-            solve_dense_inv(nt, &mut mass);
-            elem_blocks.push(mass);
+            mfem_dense_invert(nt, &mut s);
+            elem_blocks.push(s);
             elem_dofs.push(dofs);
         }
 
         SinvBuilder {
             elem_blocks,
             elem_dofs,
-            n_per_elem: nt,
+            n_per_elem,
             n_dofs_total: test_space.n_dofs(),
             _phantom: PhantomData,
         }

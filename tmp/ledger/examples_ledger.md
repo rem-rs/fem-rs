@@ -41,7 +41,7 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
 | mfem_ex5_mixed_darcy | ex5 | `-m data/star.mesh -no-vis` | **BIT**（r98，具名豁免 1 行） | logs/… + ref/ex5.out + `tmp/d98runbit/` | **失配**：dim(R/W) 全同（41280/20480），Rust MINRES 423 it ‖r‖/‖b‖=9.24e-7 判收敛但 u_err **1.211582e0** vs C++ 396 it / 1.43587e-4 → D634（块预条件/minres 判据族）。**round-84:** 失配已闭（r63 D639：397 行逐字节、u_err 0.000143587 = C++）；重验：数值行逐字同，豁免 = C++ Options 块 8 行 Rust 不打、Rust 多 `Wrote` 行、wall-clock。**round-98:** 升 **BIT**——414 行 stdout 与 C++ 现编现跑（`$HOME/work/d98runbit/ex5_cpp`，两侧同 `-m data/star.mesh` 路径形式）**逐字节**（396 it 收敛行逐字同），唯一 diff = `MINRES solver took …s.` wall-clock 行（MFEM 自打 RealTime，**具名豁免**）；r84 三类豁免中前两类已不存在 |
 | mfem_ex6_flux_recovery | ex6 | 默认 star -o1 -no-vis | RUN | logs/… + ref/ex6.out | 前 4 迭代逐字节（0.441629/0.00864066/2.48721e-06/1.90288e-09）；首个求解 C++@5 停、Rust 拖到 4.6e-40 → D634；AMR 环两端 rc=0（C++ 打 `Reached the maximum number of dofs.`，Rust 打 `Done.`，终态行未逐字节比对）。**round-84:** 重验 rc=0；D634 后首解与 C++ 逐字节 ✓；AMR 标记路径自第 2 环分叉（C++ 76 vs Rust 86 unknowns，r61 已有性质非新漂移；疑与参考命令带 `--no-ls-zz/--max-dofs` 旗标不对齐有关），终态行差维持 |
 | mfem_ex7_surface_poisson | ex7 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，HEAD c5a06dd6） |
-| mfem_ex8_dpg_2x2 | ex8 | `-m data/star.mesh -no-vis` | RUN（数值级 = C++） | logs/… + ref/ex8.out + `tmp/d98runbit/` | 前 13 迭代逐字节；DPG 范数 0.0181446 vs C++ 0.0183277（~1%）；ARF 0.829413 vs 0.608926 → D634。**round-84:** 数值失配已闭（r63 D640 sinv 四边形分支修复：DPG 0.0183277 与 C++ 逐字同）；重验 ✓，残 = Rust 29 it vs C++ 28 it（停机阈值 1 it 差）、`S^-1` vs `S^{-1}` 打印、Rust 多诊断行。**round-98:** 打印失真**清零**（删多余空行 + `S^{{-1}}`→`S^-1` + 删 Rust 独有 `PCG: iterations=` 摘要行）后 stdout 前 15 行逐字同；**唯一残差 = PCG 轨迹自 iter5 起 1.3e-5 相对分叉**（29 vs 28 it、ARF 0.619477 vs 0.608926）＝核心求解器路径债（D634 族），维持 RUN；真值现编现跑 `$HOME/work/d98runbit/ex8_cpp` |
+| mfem_ex8_dpg_2x2 | ex8 | `-m data/star.mesh -no-vis` | RUN（数值级 = C++；**r99 D864 后轨迹差 1.3e-5 → 7e-8，仅末位**） | logs/… + ref/ex8.out + `tmp/d98runbit/` | 前 13 迭代逐字节；DPG 范数 0.0181446 vs C++ 0.0183277（~1%）；ARF 0.829413 vs 0.608926 → D634。**round-84:** 数值失配已闭（r63 D640 sinv 四边形分支修复：DPG 0.0183277 与 C++ 逐字同）；重验 ✓，残 = Rust 29 it vs C++ 28 it（停机阈值 1 it 差）、`S^-1` vs `S^{-1}` 打印、Rust 多诊断行。**round-98:** 打印失真**清零**（删多余空行 + `S^{{-1}}`→`S^-1` + 删 Rust 独有 `PCG: iterations=` 摘要行）后 stdout 前 15 行逐字同；**唯一残差 = PCG 轨迹自 iter5 起 1.3e-5 相对分叉**（29 vs 28 it、ARF 0.619477 vs 0.608926）＝核心求解器路径债（D634 族），维持 RUN；真值现编现跑 `$HOME/work/d98runbit/ex8_cpp`。**round-99（D864）：分叉源全部定位**——① `QuadL2GL` 节点用 `gauss_legendre_arbitrary`+映射 ⇒ 比 MFEM `Poly_1D::OpenPoints` **差 1 ulp**（GL 求积点=节点 ⇒ 基函数给 ~1e-17 伪残差而非精确零）；② GL-L2 一维基用直接 Lagrange 乘积 vs MFEM 重心式；③ `SinvBuilder` 手写几何/梯度约定 + 逐列解求逆。三处修后 **F/Bhat/Sinv/S0/Mtest/Ktest 全部逐位 = C++**（`cmp_d99.py`/`cmp_mk.py`），轨迹差降到 iter5 **7.1e-8**（放大率改善 180×），29 行中仅末位翻转；**残余 = B0 混合路径约定（中位 5 ulp、333 条 >100 ulp）+ Shat RAP 求和序（≤5 ulp）+ b（±1e-16）经内层 CG κ≈10³ 放大**——三步配方在 D864 条目 |
 | mfem_ex9_dg_advection | ex9 | 默认 periodic-hexagon | **BIT**（r77 D812-2，具名豁免） | logs/… + `$HOME/work/d76main/ex9_rerun/` | 默认档 panic（D633 资产缺失）；`-m data/periodic-square.mesh` rc=0；文件头自述 L2 基 ≠ MFEM GLL ⇒ 有意分歧（DEV 性质）双注记。**round-84:** 现档 BIT——r62 资产回填后 rc=0；r77 D812-2 stdout 与 C++ oracle **逐字节**（豁免 = `--mesh` 路径回声 + stderr wall-clock 两处具名）+ r78 D813-3 `ex9-init.gf` 逐字节/final max\|Δ\|=1.0e-08；r82/r83 锚点重验 ✓（旧"L2 基有意分歧"注记作废） |
 | mfem_ex10_hyperelastic_dyn | ex10 | 默认 beam-quad | RUN | logs/… + ref/ex10_quad.out | step1..100 的 EE/KE/ΔTE 与 C++ 全部 6 位吻合（0.011958/0.000784/-0.019639）；Newton ‖r‖ 自 iter1 起第 4 位漂移（0.0099624 vs 0.0099476）；打印多诊断行 |
 | mfem_ex14_dg_poisson | ex14 | `-m data/star.mesh -no-vis` | **BIT**（r73 D795-1，剥 Options 前缀逐字节） | logs/… + ref/ex14.out | **前 309 行逐字节**；C++@308 收敛（ARF 0.956044），Rust 500 maxiter 不收敛（ARF 0.950077）→ D634。**round-84:** 现档 BIT——r73 D795-1（DG 面规则改等参几何）后迭代史 **311 行逐字节 = C++**（ARF 0.956044 同；豁免 = C++ 12 行 Options 前缀 Rust 不打 = D822-2）；r79/r82/r83 锚点重验 ✓，本轮重验 ✓ |
@@ -486,3 +486,39 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
   升 BIT 挡在此，建议下波专项（探针入口：iter0-4 逐字节、iter5 首叉）。
 - **计数**：BIT 串行 8 → **11**（本波 +ex29/ex20/ex5；ex17/ex33/ex10/ex6 的历史升级见
   coverage_matrix §5，本表未回写）。本轮未动并行档。
+
+## round 99 增量（主会话：D864 ex8 DPG 轨迹分叉专项——三处核心缺陷关闭）
+
+> 单路主会话；真值 = 现编 MFEM 4.10（`$HOME/work/d99/`），逐位对拍机 = `tmp/d98runbit/`
+> （`cmp_d99.py`/`cmp_mk.py`/`q_dist.py` + 单元素/扭曲单元/基函数探针）。这是「示例是手段、
+> 核心库才是目的」的又一实例：ex8 停在 RUN 的价值是把三处**真核心缺陷**逼了出来。
+
+- **根因链（逐位 dump 定位，非推测）**：把 F/b/B0/Bhat/Sinv/S0/Shat 七件从两侧全精度 dump 后
+  逐条比位（`cmp_d99.py`），得三条独立缺陷：
+  1. **`QuadL2GL` 节点 1 ulp 偏差**（`crates/element/src/lagrange/factory.rs`）：原用
+     `gauss_legendre_arbitrary(n)` 在 [-1,1] 求根再 `0.5*(x+1)`，而 MFEM `Poly_1D::OpenPoints`
+     是 128 位 MPFR Newton 直接给 [0,1] 值。因 GL-L2 的求积点与节点重合（order 1 ⇒ 2×2 GL=节点），
+     1 ulp 节点差使基函数在求积点给 **~1e-17 伪残差**（MFEM 精确 0）、L2 单元刚度差 1–2 ulp；
+     经 DPG 单元块 κ≈10³ 放大成 `S⁻¹` 的 **5e-12 相对误差**。修 = 改用已与 MFEM 逐位钉死的
+     `[0,1]` 表 `gauss_legendre_01`（`HexL2GL` 本就如此）。
+  2. **GL-L2 一维基用直接 Lagrange 乘积**（同文件）：MFEM `Poly_1D::Basis` 走**重心式**，且
+     值/导数两个变体**故意不同式**（`CalcShape`：`u=l·w/(y−x)`；`CalcDShape`：`u=l·(1/(y−x))·w`）。
+     逐位移植两变体 + 新 `eval_1d_vals()`（值专用）；postproc L2 误差（`grid_function.rs`）
+     切到值专用变体（= MFEM `ComputeL2Error` 的 `CalcShape` 路径）。
+  3. **`SinvBuilder` 两处**（`crates/assembly/src/dpg/sinv.rs`）：① 单元矩阵原为手写几何/梯度
+     （`J⁻ᵀ` 缩放 + `w=weight·det`）+ k 外层累加 ⇒ 改走**通用体积装配器路径**
+     （`Assembler::assemble_bilinear`，其伴随约定已由 S0 逐位证明）；② 求逆原为逐列解单位向量 ⇒
+     换 **`mfem_dense_invert`**（MFEM `DenseMatrix::Invert()` 非 LAPACK Gauss–Jordan 分支的逐位移植，
+     本构建 `MFEM_USE_LAPACK=NO`）。
+- **顺带落地**：新核心积分器 `MixedScalarDiffusionIntegrator`（`crates/assembly/src/mixed/`，
+  MFEM `DiffusionIntegrator::AssembleElementMatrix2` 标量支），替换示例与 `dpg_operator` 测试里的
+  两份重复自写版（死代码零容忍）。
+- **验收（逐位）**：**F、Bhat、Sinv、S0（值）、Mtest、Ktest 全部与 C++ 逐位相同**；
+  S0 仅多存零；b 仅 ±1e-16 符号翻转（近零项）；B0 中位 ~5 ulp / 333 条 >100 ulp；
+  Shat ≤5 ulp（RAP 求和序）。**ex8 标准档轨迹**：分叉点 iter5 的 1.3e-5 → **7.1e-8**
+  （放大率改善 180×），29 行中仅末位数字翻转 ⇒ **维持 RUN**（未逐字节），三步配方入 D864。
+- **反回归金标（本轮亲跑）**：workspace 全口径 **5347/0/40**（= r97/r98 锚逐位不变）、doc 28/0/102-gated；
+  ex5 0 diff、ex9（hexagon）**逐字节**、ex14 仅 mesh 路径回声、ex24 star-p0-o1 0 diff、
+  ex27 default 0 diff、ex29 0 diff；**ex18 反向受益**：误差 3.930926246114457e-3 →
+  **3.930926246117042e-3**，对 C++ 17 位真值 `0.003930926246116611` 的相对差
+  **5.5e-13 → 1.1e-13（贴近 5×）**；435 步不变。

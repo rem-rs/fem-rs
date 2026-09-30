@@ -249,28 +249,12 @@ pub fn compute_dpg_residual<M: MeshTopology>(
 mod tests {
     use super::*;
     use crate::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-    use crate::{Assembler, MixedAssembler, MixedBilinearIntegrator};
-    use crate::integrator::QpData;
+    use crate::mixed::MixedScalarDiffusionIntegrator;
+    use crate::{Assembler, MixedAssembler};
     use crate::dpg::{SinvBuilder, assemble_bhat};
     use fem_mesh::{refine_uniform, Mesh};
     use fem_space::{H1Space, L2Space, DpgTraceSpace, boundary_dofs};
     use fem_space::fe_space::FESpace;
-
-    // Replicate the MixedDiffusion from the example
-    struct MixedDiffusion;
-    impl MixedBilinearIntegrator for MixedDiffusion {
-        fn add_to_element_matrix(&self, qp_row: &QpData<'_>, qp_col: &QpData<'_>, m: &mut [f64]) {
-            let nr = qp_row.n_dofs; let nc = qp_col.n_dofs; let d = qp_col.dim; let w = qp_col.weight;
-            for k in 0..d {
-                for i in 0..nr {
-                    let gik = qp_row.grad_phys[i * d + k];
-                    for j in 0..nc {
-                        m[i * nc + j] += w * gik * qp_col.grad_phys[j * d + k];
-                    }
-                }
-            }
-        }
-    }
 
     fn run_dpg_solve(n: usize) -> (usize, f64) {
         let mesh = Mesh::<2>::unit_square_tri(n);
@@ -301,7 +285,7 @@ mod tests {
         let ess_tags: Vec<i32> = mesh.unique_boundary_tags();
         let dm = x0.dof_manager();
         let ess_dofs: Vec<u32> = boundary_dofs(&mesh as &dyn MeshTopology, dm, &ess_tags);
-        let mut b0 = MixedAssembler::assemble_bilinear(&test, &x0, &[&MixedDiffusion], qo);
+        let mut b0 = MixedAssembler::assemble_bilinear(&test, &x0, &[&MixedScalarDiffusionIntegrator], qo);
         let ess_usize: Vec<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
 
         // Zero BC columns of B0

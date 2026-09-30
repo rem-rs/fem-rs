@@ -1813,8 +1813,10 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                 let w = quad.weights[q] * det_j;
                 let uh = if let Some(ref gl) = l2gl {
                     let p = order as usize;
-                    let (lx, _) = gl.eval_1d(xi[0]);
-                    let (ly, _) = gl.eval_1d(xi[1]);
+                    // MFEM `ComputeL2Error` evaluates through `CalcShape`, i.e.
+                    // the value-only variant of the 1D basis (D864).
+                    let lx = gl.eval_1d_vals(xi[0]);
+                    let ly = gl.eval_1d_vals(xi[1]);
                     let mut s = 0.0;
                     for ix in 0..=p {
                         for iy in 0..=p {

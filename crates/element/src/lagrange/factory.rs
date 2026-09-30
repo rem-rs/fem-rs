@@ -1815,76 +1815,149 @@ impl ReferenceElement for QuadQk {
 /// including the boundary), GL nodes are interior-only.
 ///
 /// The 1D basis uses the direct Lagrange formula `Π_{j≠i}(x−x_j)/(x_i−x_j)`
-/// on `[0,1]` (no reference-domain mapping), so the values match MFEM's L2
-/// element bit-for-bit.
-/// Direct 1D Lagrange values through `nodes` at `x`:
-/// `l_i(x) = Π_{j≠i} (x−x_j)/(x_i−x_j)`.
+/// on `[0,1]` (no reference-domain mapping).
 ///
-/// Shared by the Gauss-Legendre L² tensor elements ([`QuadL2GL`], [`HexL2GL`]);
-/// MFEM's L2 tensor elements evaluate the same nodal Lagrange product on
-/// `[0,1]` via `Poly_1D::Basis`, so the values match at the GL nodes.
-fn lagrange_1d_val(nodes: &[f64], x: f64) -> Vec<f64> {
-    nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &xi)| {
-            let mut v = 1.0;
-            for (j, &xj) in nodes.iter().enumerate() {
-                if j != i {
-                    v *= (x - xj) / (xi - xj);
-                }
-            }
-            v
-        })
-        .collect()
+/// Barycentric weights `w(i) = 1/Π_{j≠i}(x_i − x_j)`, accumulated exactly like
+/// MFEM `Poly_1D::Basis` (Barycentric branch, `fe_base.cpp`): start from
+/// `w = 1`, then for every pair `j < i` do `xij = x_i − x_j; w(i) *= xij;
+/// w(j) *= −xij`, and finally `w(i) = 1/w(i)`.
+fn barycentric_weights(nodes: &[f64]) -> Vec<f64> {
+    let n = nodes.len();
+    let mut w = vec![1.0; n];
+    for i in 0..n {
+        for j in 0..i {
+            let xij = nodes[i] - nodes[j];
+            w[i] *= xij;
+            w[j] *= -xij;
+        }
+    }
+    for v in w.iter_mut() {
+        *v = 1.0 / *v;
+    }
+    w
 }
 
-/// Direct 1D Lagrange derivative values through `nodes` at `x`.
-fn lagrange_1d_der(nodes: &[f64], x: f64) -> Vec<f64> {
-    nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &xi)| {
-            let mut s = 0.0;
-            for (m, &xm) in nodes.iter().enumerate() {
-                if m == i {
-                    continue;
-                }
-                let mut t = 1.0 / (xi - xm);
-                for (j, &xj) in nodes.iter().enumerate() {
-                    if j != i && j != m {
-                        t *= (x - xj) / (xi - xj);
-                    }
-                }
-                s += t;
+/// MFEM's prefix/suffix product: `lk = Π_{j≠k}(y − x_j)` accumulated exactly as
+/// `Poly_1D::Basis::Eval` does — the prefix `Π_{j<k}(y − x_j)` grows until `y`
+/// falls below the midpoint of `[x_k, x_{k+1}]`, then the suffix
+/// `Π_{j>k}(y − x_j)` is folded in.  When the midpoint test never fails,
+/// `k = p` and `lk = Π_{j<p}(y − x_j)` (MFEM's loop runs to completion).
+fn bary_product(nodes: &[f64], y: f64) -> (f64, usize) {
+    let p = nodes.len() - 1;
+    let mut lk = 1.0;
+    for k in 0..p {
+        if y >= (nodes[k] + nodes[k + 1]) / 2.0 {
+            lk *= y - nodes[k];
+        } else {
+            for i in (k + 1)..=p {
+                lk *= y - nodes[i];
             }
-            s
-        })
-        .collect()
+            return (lk, k);
+        }
+    }
+    (lk, p)
+}
+
+/// MFEM `Poly_1D::Basis::Eval(y, u)` (Barycentric branch) — basis **values**
+/// only, i.e. the exact floating-point sequence MFEM's `CalcShape` runs:
+/// `l = lk·(y − x_k)` then `u(i) = l·w(i)/(y − x_i)` (multiply **then**
+/// divide).  The derivative variant below deliberately forms
+/// `u(i) = l·(1/(y − x_i))·w(i)` instead; the two differ in the last ulp, so
+/// value-only and gradient paths must each use their own variant.
+///
+/// Shared by the Gauss-Legendre L² tensor elements ([`QuadL2GL`], [`HexL2GL`]);
+/// MFEM's L2 tensor elements evaluate the same nodal basis on `[0,1]` through
+/// this barycentric form (D864 — the previous direct
+/// `Π_{j≠i}(x−x_j)/(x_i−x_j)` grouping disagreed with MFEM by 1–2 ulp, which
+/// the `κ ≈ 10³` DPG element blocks amplified into a visible trajectory fork).
+fn lagrange_1d_val(nodes: &[f64], w: &[f64], y: f64) -> Vec<f64> {
+    let p = nodes.len() - 1;
+    let mut u = vec![0.0; p + 1];
+    if p == 0 {
+        u[0] = 1.0;
+        return u;
+    }
+    let (lk, k) = bary_product(nodes, y);
+    let l = lk * (y - nodes[k]);
+    for i in 0..k {
+        u[i] = l * w[i] / (y - nodes[i]);
+    }
+    u[k] = lk * w[k];
+    for i in (k + 1)..=p {
+        u[i] = l * w[i] / (y - nodes[i]);
+    }
+    u
+}
+
+/// MFEM `Poly_1D::Basis::Eval(y, u, d)` (Barycentric branch) — values **and**
+/// derivatives as that variant computes them.  Its `u(i) = l·si·w(i)` with
+/// `si = 1/(y − x_i)` (and `sk = Σ si`), and MFEM's `CalcDShape` consumes
+/// exactly these values for the cross terms; the derivatives are
+/// `d(i) = (lp·w(i) − u(i))/(y − x_i)` with `lp = l·sk + lk`, and
+/// `d(k) = sk·u(k)`.
+fn lagrange_1d_val_der(nodes: &[f64], w: &[f64], y: f64) -> (Vec<f64>, Vec<f64>) {
+    let p = nodes.len() - 1;
+    let mut u = vec![0.0; p + 1];
+    let mut d = vec![0.0; p + 1];
+    if p == 0 {
+        u[0] = 1.0;
+        return (u, d);
+    }
+    let (lk, k) = bary_product(nodes, y);
+    let l = lk * (y - nodes[k]);
+    let mut sk = 0.0;
+    for i in 0..k {
+        let si = 1.0 / (y - nodes[i]);
+        sk += si;
+        u[i] = l * si * w[i];
+    }
+    u[k] = lk * w[k];
+    for i in (k + 1)..=p {
+        let si = 1.0 / (y - nodes[i]);
+        sk += si;
+        u[i] = l * si * w[i];
+    }
+    let lp = l * sk + lk;
+    for i in 0..k {
+        d[i] = (lp * w[i] - u[i]) / (y - nodes[i]);
+    }
+    d[k] = sk * u[k];
+    for i in (k + 1)..=p {
+        d[i] = (lp * w[i] - u[i]) / (y - nodes[i]);
+    }
+    (u, d)
 }
 
 pub struct QuadL2GL {
     order: usize,
     nodes: Vec<f64>, // Gauss-Legendre nodes on [0,1]
+    w: Vec<f64>,     // barycentric weights (MFEM `Poly_1D::Basis`)
 }
 
 impl QuadL2GL {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        // Gauss-Legendre nodes on [-1,1] mapped to [0,1]
-        let (nodes, _w) = crate::quadrature::gauss_legendre_arbitrary(p + 1);
-        let nodes = nodes.iter().map(|x| 0.5 * (x + 1.0)).collect();
-        Self { order: p, nodes }
+        // MFEM `Poly_1D::OpenPoints` — Gauss-Legendre nodes on **[0,1]**,
+        // ascending.  Must come from the pinned `[0,1]` table: MFEM computes
+        // these nodes with a 128-bit MPFR Newton iteration and the previous
+        // route here (`gauss_legendre_arbitrary` on [-1,1] then `0.5*(x+1)`)
+        // lands 1 ulp away from it — which makes the nodal basis evaluate to
+        // ~1e-17 instead of exact 0 at the quadrature points (they coincide
+        // with the nodes for order 1) and perturbs the element stiffness by
+        // 1–2 ulp (D864).  `HexL2GL` already took this route.
+        let (nodes, _w) = crate::quadrature::gauss_legendre_01(p + 1);
+        let w = barycentric_weights(&nodes);
+        Self { order: p, nodes, w }
     }
 
-    /// Direct 1D Lagrange values at `x` (on [0,1]).
+    /// MFEM `Poly_1D::Basis::Eval(y, u)` (value-only variant) at `x` on [0,1].
     fn lag1d_val(&self, x: f64) -> Vec<f64> {
-        lagrange_1d_val(&self.nodes, x)
+        lagrange_1d_val(&self.nodes, &self.w, x)
     }
 
-    /// Direct 1D Lagrange derivative values at `x`.
-    fn lag1d_der(&self, x: f64) -> Vec<f64> {
-        lagrange_1d_der(&self.nodes, x)
+    /// MFEM `Poly_1D::Basis::Eval(y, u, d)` (derivative variant) at `x`.
+    fn lag1d_val_der(&self, x: f64) -> (Vec<f64>, Vec<f64>) {
+        lagrange_1d_val_der(&self.nodes, &self.w, x)
     }
 
     /// Tensor-product DOF ordering: dof = iy*(p+1) + ix (x varies fastest,
@@ -1907,11 +1980,20 @@ impl QuadL2GL {
         coords
     }
 
-    /// Evaluate the 1D Lagrange basis (values, derivatives) at `t ∈ [0,1]`.
-    /// Exposed so assemblers can reproduce MFEM's bit-identical `(dof·l_x)·l_y`
-    /// summation order instead of a pre-multiplied tensor basis.
+    /// Evaluate the 1D basis at `t ∈ [0,1]`: **values as MFEM's derivative
+    /// variant computes them** (`Poly_1D::Basis::Eval(y, u, d)`) plus the
+    /// derivatives — i.e. exactly the pair MFEM's `CalcDShape` uses.
+    /// Exposed so assemblers can reproduce MFEM's bit-identical
+    /// `(dof·l_x)·l_y` summation order instead of a pre-multiplied tensor basis.
     pub fn eval_1d(&self, t: f64) -> (Vec<f64>, Vec<f64>) {
-        (self.lag1d_val(t), self.lag1d_der(t))
+        self.lag1d_val_der(t)
+    }
+
+    /// Value-only variant (`Poly_1D::Basis::Eval(y, u)`) — the sequence
+    /// MFEM's `CalcShape` runs.  Differs from [`Self::eval_1d`]'s values in
+    /// the last ulp by construction, so value-only consumers must use this.
+    pub fn eval_1d_vals(&self, t: f64) -> Vec<f64> {
+        self.lag1d_val(t)
     }
 
     /// Tensor-product DOF index for the `(ix, iy)` node.
@@ -1940,8 +2022,10 @@ impl ReferenceElement for QuadL2GL {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (lx, dlx) = (self.lag1d_val(xi[0]), self.lag1d_der(xi[0]));
-        let (ly, dly) = (self.lag1d_val(xi[1]), self.lag1d_der(xi[1]));
+        // MFEM `L2_QuadrilateralElement::CalcDShape` takes BOTH the values and
+        // the derivatives from the derivative variant of `Basis::Eval`.
+        let (lx, dlx) = self.lag1d_val_der(xi[0]);
+        let (ly, dly) = self.lag1d_val_der(xi[1]);
         let p = self.order;
         for ix in 0..=p {
             for iy in 0..=p {
@@ -1975,6 +2059,7 @@ impl ReferenceElement for QuadL2GL {
 pub struct HexL2GL {
     order: usize,
     nodes: Vec<f64>, // Gauss-Legendre nodes on [0,1], ascending (MFEM order)
+    w: Vec<f64>,     // barycentric weights (MFEM `Poly_1D::Basis`)
 }
 
 impl HexL2GL {
@@ -1987,7 +2072,8 @@ impl HexL2GL {
         if nodes.len() > 1 && nodes[0] > nodes[nodes.len() - 1] {
             nodes.reverse();
         }
-        Self { order: p, nodes }
+        let w = barycentric_weights(&nodes);
+        Self { order: p, nodes, w }
     }
 
     /// Tensor-product DOF ordering: dof = `ix + iy·(p+1) + iz·(p+1)²`
@@ -2031,9 +2117,9 @@ impl ReferenceElement for HexL2GL {
     }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (lx, ly, lz) = (
-            lagrange_1d_val(&self.nodes, xi[0]),
-            lagrange_1d_val(&self.nodes, xi[1]),
-            lagrange_1d_val(&self.nodes, xi[2]),
+            lagrange_1d_val(&self.nodes, &self.w, xi[0]),
+            lagrange_1d_val(&self.nodes, &self.w, xi[1]),
+            lagrange_1d_val(&self.nodes, &self.w, xi[2]),
         );
         let p = self.order;
         for iz in 0..=p {
@@ -2045,16 +2131,11 @@ impl ReferenceElement for HexL2GL {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (lx, ly, lz) = (
-            lagrange_1d_val(&self.nodes, xi[0]),
-            lagrange_1d_val(&self.nodes, xi[1]),
-            lagrange_1d_val(&self.nodes, xi[2]),
-        );
-        let (dlx, dly, dlz) = (
-            lagrange_1d_der(&self.nodes, xi[0]),
-            lagrange_1d_der(&self.nodes, xi[1]),
-            lagrange_1d_der(&self.nodes, xi[2]),
-        );
+        // MFEM `L2_HexahedronElement::CalcDShape`: values AND derivatives from
+        // the derivative variant of `Basis::Eval`.
+        let (lx, dlx) = lagrange_1d_val_der(&self.nodes, &self.w, xi[0]);
+        let (ly, dly) = lagrange_1d_val_der(&self.nodes, &self.w, xi[1]);
+        let (lz, dlz) = lagrange_1d_val_der(&self.nodes, &self.w, xi[2]);
         let p = self.order;
         for iz in 0..=p {
             for iy in 0..=p {

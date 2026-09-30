@@ -46,11 +46,13 @@ pub mod mixed_scalar_mass;
 pub mod mixed_scalar_weak_grad;
 pub mod mixed_dot_product;
 pub mod mixed_scalar_weak_div;
+pub mod mixed_scalar_diffusion;
 
 pub use mixed_scalar_mass::MixedScalarMassIntegrator;
 pub use mixed_scalar_weak_grad::MixedScalarWeakGradientIntegrator;
 pub use mixed_dot_product::MixedDotProductIntegrator;
 pub use mixed_scalar_weak_div::MixedScalarWeakDivergenceIntegrator;
+pub use mixed_scalar_diffusion::MixedScalarDiffusionIntegrator;
 
 // ─── MixedBilinearIntegrator ──────────────────────────────────────────────────
 
