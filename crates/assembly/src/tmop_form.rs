@@ -39,11 +39,15 @@ use fem_element::reference::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix, SolveResult, SolverConfig};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::tmop::metrics::{
-    TmopMetric001, TmopMetric002, TmopMetric007, TmopMetric009, TmopMetric014, TmopMetric022,
-    TmopMetric050, TmopMetric055, TmopMetric056, TmopMetric058, TmopMetric077, TmopMetric094,
-    TmopMetric301,
-    TmopMetric302, TmopMetric303, TmopMetric304, TmopMetric315, TmopMetric316, TmopMetric318,
-    TmopMetric321, TmopMetric323, TmopMetric360, TmopQualityMetric, TmopQualityMetric3D,
+    TmopAMetric011, TmopAMetric036, TmopAMetric049, TmopAMetric051,
+    TmopAMetric107, TmopAMetric126, TmopMetric000, TmopMetric001, TmopMetric002, TmopMetric004,
+    TmopMetric007, TmopMetric009, TmopMetric014, TmopMetric022, TmopMetric050, TmopMetric055,
+    TmopMetric056, TmopMetric058, TmopMetric066, TmopMetric077, TmopMetric080, TmopMetric085,
+    TmopMetric090, TmopMetric094, TmopMetric098, TmopMetric211, TmopMetric252,
+    TmopMetric301, TmopMetric302, TmopMetric303, TmopMetric304, TmopMetric311, TmopMetric313,
+    TmopMetric315, TmopMetric316, TmopMetric318, TmopMetric321, TmopMetric322, TmopMetric323,
+    TmopMetric328, TmopMetric332, TmopMetric333, TmopMetric334, TmopMetric338, TmopMetric342,
+    TmopMetric347, TmopMetric352, TmopMetric360, TmopQualityMetric, TmopQualityMetric3D,
 };
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_cg, solve_minres, solve_minres_jacobi, solve_minres_precond};
@@ -170,40 +174,177 @@ impl TmopQualityMetric for Metric22Shared {
 
 /// Build a metric from a mesh-optimizer `-mid` id. Returns `None` for ids the
 /// metric zoo does not cover.
+///
+/// Combo/delta parameters use the mesh-optimizer / tmop-check-metric driver
+/// conventions (MFEM 4.10): gamma = 0.5 for metrics 66/80/332/333/334/347,
+/// gamma = 0.9 for the A-combos 49/126, eps = 1e-4 for 211/311, and the
+/// solver-shared `min_det` cell for the reference-bound tau0/min_detT of
+/// 22/252/313/352.
 pub fn metric_from_id_2d(id: i32, min_det: &SharedMinDet) -> Option<TmopMetric> {
     let m = match id {
+        0 => TmopMetric::D2(Box::new(TmopMetric000)),
         1 => TmopMetric::D2(Box::new(TmopMetric001)),
         2 => TmopMetric::D2(Box::new(TmopMetric002)),
+        4 => TmopMetric::D2(Box::new(TmopMetric004)),
         7 => TmopMetric::D2(Box::new(TmopMetric007)),
         9 => TmopMetric::D2(Box::new(TmopMetric009)),
+        11 => TmopMetric::D2(Box::new(TmopAMetric011::new())),
         14 => TmopMetric::D2(Box::new(TmopMetric014)),
         22 => TmopMetric::D2(Box::new(Metric22Shared { tau0: min_det.clone() })),
+        36 => TmopMetric::D2(Box::new(TmopAMetric036::new())),
+        49 => TmopMetric::D2(Box::new(TmopAMetric049::new(0.9))),
         50 => TmopMetric::D2(Box::new(TmopMetric050)),
+        51 => TmopMetric::D2(Box::new(TmopAMetric051::new())),
         55 => TmopMetric::D2(Box::new(TmopMetric055)),
         56 => TmopMetric::D2(Box::new(TmopMetric056)),
         58 => TmopMetric::D2(Box::new(TmopMetric058)),
+        66 => TmopMetric::D2(Box::new(TmopMetric066::new(0.5))),
         77 => TmopMetric::D2(Box::new(TmopMetric077)),
+        80 => TmopMetric::D2(Box::new(TmopMetric080::new(0.5))),
+        85 => TmopMetric::D2(Box::new(TmopMetric085)),
+        90 => TmopMetric::D2(Box::new(TmopMetric090::new())),
         94 => TmopMetric::D2(Box::new(TmopMetric094::new())),
+        98 => TmopMetric::D2(Box::new(TmopMetric098)),
+        107 => TmopMetric::D2(Box::new(TmopAMetric107::new())),
+        126 => TmopMetric::D2(Box::new(TmopAMetric126::new(0.9))),
+        211 => TmopMetric::D2(Box::new(TmopMetric211 { eps: 1e-4 })),
+        252 => TmopMetric::D2(Box::new(Metric252Shared { tau0: min_det.clone() })),
         _ => return None,
     };
     Some(m)
 }
 
-pub fn metric_from_id_3d(id: i32, _min_det: &SharedMinDet) -> Option<TmopMetric> {
+pub fn metric_from_id_3d(id: i32, min_det: &SharedMinDet) -> Option<TmopMetric> {
     let m = match id {
         301 => TmopMetric::D3(Box::new(TmopMetric301)),
         302 => TmopMetric::D3(Box::new(TmopMetric302)),
         303 => TmopMetric::D3(Box::new(TmopMetric303)),
         304 => TmopMetric::D3(Box::new(TmopMetric304)),
+        311 => TmopMetric::D3(Box::new(TmopMetric311 { eps: 1e-4 })),
+        313 => TmopMetric::D3(Box::new(Metric313Shared { min_det: min_det.clone() })),
         315 => TmopMetric::D3(Box::new(TmopMetric315)),
         316 => TmopMetric::D3(Box::new(TmopMetric316)),
         318 => TmopMetric::D3(Box::new(TmopMetric318)),
         321 => TmopMetric::D3(Box::new(TmopMetric321)),
+        322 => TmopMetric::D3(Box::new(TmopMetric322)),
         323 => TmopMetric::D3(Box::new(TmopMetric323)),
+        328 => TmopMetric::D3(Box::new(TmopMetric328::new())),
+        332 => TmopMetric::D3(Box::new(TmopMetric332::new(0.5))),
+        333 => TmopMetric::D3(Box::new(TmopMetric333::new(0.5))),
+        334 => TmopMetric::D3(Box::new(TmopMetric334::new(0.5))),
+        338 => TmopMetric::D3(Box::new(TmopMetric338::new())),
+        342 => TmopMetric::D3(Box::new(TmopMetric342)),
+        347 => TmopMetric::D3(Box::new(TmopMetric347::new(0.5))),
+        352 => TmopMetric::D3(Box::new(Metric352Shared { tau0: min_det.clone() })),
         360 => TmopMetric::D3(Box::new(TmopMetric360)),
         _ => return None,
     };
     Some(m)
+}
+
+/// `TMOP_Metric_252` wrapper reading tau0 from the shared min-det cell (MFEM
+/// binds `real_t &tau0`, mesh-optimizer passes its shared `min_detJ`).
+struct Metric252Shared {
+    tau0: SharedMinDet,
+}
+
+impl TmopQualityMetric for Metric252Shared {
+    fn eval_w(&self, jpt: &[[f64; 2]; 2]) -> f64 {
+        TmopMetric252 {
+            tau0: self.tau0.get(),
+        }
+        .eval_w(jpt)
+    }
+
+    fn eval_p(&self, jpt: &[[f64; 2]; 2], p: &mut [[f64; 2]; 2]) {
+        TmopMetric252 {
+            tau0: self.tau0.get(),
+        }
+        .eval_p(jpt, p);
+    }
+
+    fn assemble_h(&self, jpt: &[[f64; 2]; 2], ds: &[[f64; 2]], weight: f64, a: &mut [f64]) {
+        TmopMetric252 {
+            tau0: self.tau0.get(),
+        }
+        .assemble_h(jpt, ds, weight, a);
+    }
+
+    fn id(&self) -> i32 {
+        252
+    }
+}
+
+/// `TMOP_Metric_313` wrapper reading min_detT from the shared min-det cell
+/// (MFEM binds `real_t &min_detT`, mesh-optimizer passes its `min_detJ`).
+struct Metric313Shared {
+    min_det: SharedMinDet,
+}
+
+impl TmopQualityMetric3D for Metric313Shared {
+    fn eval_w(&self, jpt: &[[f64; 3]; 3]) -> f64 {
+        TmopMetric313 {
+            min_det_t: self.min_det.get(),
+        }
+        .eval_w(jpt)
+    }
+
+    fn eval_p(&self, jpt: &[[f64; 3]; 3], p: &mut [[f64; 3]; 3]) {
+        TmopMetric313 {
+            min_det_t: self.min_det.get(),
+        }
+        .eval_p(jpt, p);
+    }
+
+    fn assemble_h(&self, jpt: &[[f64; 3]; 3], ds: &[[f64; 3]], weight: f64, a: &mut [f64]) {
+        TmopMetric313 {
+            min_det_t: self.min_det.get(),
+        }
+        .assemble_h(jpt, ds, weight, a);
+    }
+
+    fn id(&self) -> i32 {
+        313
+    }
+}
+
+/// `TMOP_Metric_352` wrapper reading tau0 from the shared min-det cell.
+struct Metric352Shared {
+    tau0: SharedMinDet,
+}
+
+impl TmopQualityMetric3D for Metric352Shared {
+    fn eval_w(&self, jpt: &[[f64; 3]; 3]) -> f64 {
+        TmopMetric352 {
+            tau0: self.tau0.get(),
+        }
+        .eval_w(jpt)
+    }
+
+    fn eval_p(&self, jpt: &[[f64; 3]; 3], p: &mut [[f64; 3]; 3]) {
+        TmopMetric352 {
+            tau0: self.tau0.get(),
+        }
+        .eval_p(jpt, p);
+    }
+
+    fn assemble_h(&self, jpt: &[[f64; 3]; 3], ds: &[[f64; 3]], weight: f64, a: &mut [f64]) {
+        TmopMetric352 {
+            tau0: self.tau0.get(),
+        }
+        .assemble_h(jpt, ds, weight, a);
+    }
+
+    fn id(&self) -> i32 {
+        352
+    }
+}
+
+/// Convert the column-major `[f64; 4]` target Jacobian of
+/// `TmopForm::compute_element_targets` to the row-access form of
+/// `TmopQualityMetric::set_target_jacobian`.
+fn jtr_to_2x2(j: &[f64; 4]) -> [[f64; 2]; 2] {
+    [[j[0], j[2]], [j[1], j[3]]]
 }
 
 /// Surface fitting to prescribed node positions (MFEM
@@ -1753,6 +1894,10 @@ impl<'a> TmopForm<'a> {
                     // `MultAtB(PMatI, DSh, Jpr); Mult(Jpr, Jrt, Jpt)`).
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
+                            // MFEM `TMOP_Integrator::GetElementEnergy`: per-QP
+                            // `metric->SetTargetJacobian(Jtr(q))` (used by the
+                            // target-dependent A-metrics).
+                            m.set_target_jacobian(&jtr_to_2x2(&jtr2[q]));
                             let mut jpr = [[0.0f64; 2]; 2];
                             for a in 0..2 {
                                 for b in 0..2 {
@@ -2168,6 +2313,9 @@ impl<'a> TmopForm<'a> {
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
                             let jrt = invert_2x2(&jtr2[q]);
+                            // MFEM AssembleElementVectorExact: per-QP
+                            // `metric->SetTargetJacobian(Jtr(q))`.
+                            m.set_target_jacobian(&jtr_to_2x2(&jtr2[q]));
                             // DS = DSh * Jrt (dof x dim, column-major).
                             for i in 0..nd {
                                 for d in 0..2 {
@@ -2337,6 +2485,9 @@ impl<'a> TmopForm<'a> {
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
                             let jrt = invert_2x2(&jtr2[q]);
+                            // MFEM AssembleElementVectorExact: per-QP
+                            // `metric->SetTargetJacobian(Jtr(q))`.
+                            m.set_target_jacobian(&jtr_to_2x2(&jtr2[q]));
                             // DS = DSh * Jrt.
                             for i in 0..nd {
                                 for d in 0..2 {
@@ -2568,6 +2719,9 @@ impl<'a> TmopForm<'a> {
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
                             let jrt = invert_2x2(&jtr2[q]);
+                            // MFEM AssembleElementGradExact: per-QP
+                            // `metric->SetTargetJacobian(Jtr(q))`.
+                            m.set_target_jacobian(&jtr_to_2x2(&jtr2[q]));
                             for i in 0..nd {
                                 for d in 0..2 {
                                     let mut s = 0.0;

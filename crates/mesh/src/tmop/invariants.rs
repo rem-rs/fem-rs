@@ -599,6 +599,10 @@ impl InvariantsEvaluator3D {
 
     fn eval_di3(&mut self) {
         self.eval_state |= HAVE_DI3_3D;
+        // MFEM reads c1 = 2*Get_I3b() after ensuring dI3b — the getter
+        // evaluates I3b on a cold evaluator, so mirror that order here
+        // (self.i3b is stale until eval_i3b has run).
+        if !self.has(HAVE_I3B_3D) { self.eval_i3b(); }
         let c1 = 2.0 * self.i3b;
         if !self.has(HAVE_DI3B_3D) { self.eval_di3b(); }
         let di3b = self.di3b;
@@ -917,12 +921,16 @@ impl InvariantsEvaluator3D {
                     {
                         let z2_ik_01 = a_ddt_ik * b[3];
                         a[i0 + ah * k1_idx] -= z2_ik_01;
-                        a[i1_idx + ah * i0] -= z2_ik_01;
+                        // MFEM: A[i1+ah*k0] (row = dof i comp 1, col = dof k
+                        // comp 0) — the cross-dof entry, not (i1, i0).
+                        a[i1_idx + ah * k0] -= z2_ik_01;
                         a[k0 + ah * i1_idx] -= z2_ik_01;
                         a[k1_idx + ah * i0] -= z2_ik_01;
                         let z2_ik_02 = a_ddt_ik * b[4];
                         a[i0 + ah * k2_idx] -= z2_ik_02;
-                        a[i2_idx + ah * i0] -= z2_ik_02;
+                        // MFEM: A[i2+ah*k0] (row = dof i comp 2, col = dof k
+                        // comp 0) — cross-dof entry, same pattern as z2_ik_01.
+                        a[i2_idx + ah * k0] -= z2_ik_02;
                         a[k0 + ah * i2_idx] -= z2_ik_02;
                         a[k2_idx + ah * i0] -= z2_ik_02;
                         let z2_ik_12 = a_ddt_ik * b[5];
@@ -1051,6 +1059,7 @@ impl InvariantsEvaluator3D {
     }
 
     pub fn assemble_dd_i3(&mut self, w: f64, a: &mut [f64]) {
+        if !self.has(HAVE_I3B_3D) { self.eval_i3b(); }
         if !self.has(HAVE_DI3B_3D) { self.eval_di3b(); }
         let i3b = self.i3b;
         let di3b = self.get_di3b().clone();
@@ -1059,18 +1068,38 @@ impl InvariantsEvaluator3D {
     }
 
     pub fn assemble_dd_i3b(&mut self, w: f64, a: &mut [f64]) {
+        // MFEM InvariantsEvaluator3D::Assemble_ddI3b (linalg/invariants.hpp):
+        //
+        //   A(i+nd*j,k+nd*l) += (w/I3b) [ DaJ_ij DaJ_kl - DaJ_il DaJ_kj ]
+        //
+        // | DaJ_ij  DaJ_il | = determinant of rows {i,k}, columns {j,l} of DaJ
+        // | DaJ_kj  DaJ_kl |
+        //
+        // (the same antisymmetrized pattern as the 2D Assemble_ddI2b — NOT a
+        // plain rank-1 DaJ outer product).
         if !self.has(HAVE_DAJ_3D) { self.eval_daj(); }
         let daj = self.get_daj();
         let nd = self.d_height;
         let ah = 3 * nd;
-        let a2 = 2.0 * w;
-        for i in 0..ah {
-            let avi = a2 * daj[i];
-            a[i + ah * i] += avi * daj[i];
-            for j in 0..i {
-                let avv = avi * daj[j];
-                a[i + ah * j] += avv;
-                a[j + ah * i] += avv;
+        if !self.has(HAVE_I3B_3D) { self.eval_i3b(); }
+        let a_w = w / self.i3b;
+        for j in 1..3 {
+            for l in 0..j {
+                for i in 0..nd {
+                    let ij = i + nd * j;
+                    let il = i + nd * l;
+                    let a_daj_ij = a_w * daj[ij];
+                    let a_daj_il = a_w * daj[il];
+                    for k in 0..i {
+                        let kj = k + nd * j;
+                        let kl = k + nd * l;
+                        let a_ijkl = a_daj_ij * daj[kl] - a_daj_il * daj[kj];
+                        a[ij + ah * kl] += a_ijkl;
+                        a[kl + ah * ij] += a_ijkl;
+                        a[kj + ah * il] -= a_ijkl;
+                        a[il + ah * kj] -= a_ijkl;
+                    }
+                }
             }
         }
     }

@@ -33,16 +33,19 @@ pub mod tmop;
 /// Kershaw anisotropic mesh transformation (miniapps/common `mesh_extras`).
 pub mod kershaw;
 
-pub use tmop::invariants::{InvariantsEvaluator2D, InvariantsEvaluator3D};
 pub use tmop::metrics::{
     TmopQualityMetric, TmopQualityMetric3D,
-    TmopMetric001, TmopMetric002, TmopMetric007, TmopMetric009,
+    TmopMetric000, TmopMetric001, TmopMetric002, TmopMetric004, TmopMetric007, TmopMetric009,
     TmopMetric014, TmopMetric022, TmopMetric050, TmopMetric055, TmopMetric056,
-    TmopMetric058, TmopMetric077, TmopAMetric014, TmopAMetric050,
-    TmopMetric301, TmopMetric302, TmopMetric303, TmopMetric304,
-    TmopMetric315, TmopMetric316, TmopMetric318, TmopMetric321, TmopMetric323, TmopMetric360,
+    TmopMetric058, TmopMetric066, TmopMetric077, TmopMetric080, TmopMetric085, TmopMetric090,
+    TmopMetric094, TmopMetric098, TmopMetric211, TmopMetric252,
+    TmopAMetric011, TmopAMetric014, TmopAMetric036, TmopAMetric049, TmopAMetric050,
+    TmopAMetric051, TmopAMetric107, TmopAMetric126,
+    TmopMetric301, TmopMetric302, TmopMetric303, TmopMetric304, TmopMetric311, TmopMetric313,
+    TmopMetric315, TmopMetric316, TmopMetric318, TmopMetric321, TmopMetric322, TmopMetric323,
+    TmopMetric328, TmopMetric332, TmopMetric333, TmopMetric334, TmopMetric338, TmopMetric342,
+    TmopMetric347, TmopMetric352, TmopMetric360,
 };
-pub use tmop::target::{TargetConstructor, TargetType, ideal_shape_jac_2d, ideal_shape_jac_3d};
 pub use tmop::check::{check_metric_2d, check_metric_3d, run_tmop_check_metric, MetricCheckResult};
 pub use tmop::integrator::{TmopIntegrator2D, TmopIntegrator3D};
 pub use size_function::{compute_element_sizes, compute_target_sizes, size_to_markers, smooth_size_field};
