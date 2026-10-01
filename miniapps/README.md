@@ -78,24 +78,30 @@ miniapps/
 │                                跑; `-h1/-l2/-t/-w/-ea/-d` 未实现 ⇒ `panic!` 而非
 │                                `exit(3)`; HO/R(HO)/LOR 质量与 C++ 逐位一致)
 ├── electromagnetics/        ← 对应 miniapps/electromagnetics/（**round 31 D139 处置 3 件**）
-│   ├── lorentz.rs           ← ⚠️ **round 31 声明式缺口 (exit(3))**：C++ 是 VisIt
-│   │                            DataCollection 接口 (`-er/-ef/-ec/-epdc/-epdr/-br/-bf/
-│   │                            -bc/-bpdc/-bpdr/-rdf/-rdm/-o/-npt/-m/-q/-xmin/-xmax/
-│   │                            -pmin/-pmax/-dt/-nt/-vis/-vt/-vf/-d`)，本文件自造
-│   │                            `-ex/-emesh/-efield` CLI 且曾**静默忽略 C++ 选项后 rc=0**
-│   │                            （实测 `-er Volta-AMR-Parallel -br Tesla-AMR-Parallel
-│   │                            -npt 20 -nt 5` → rc=0、`E=(0,0,1), B=(0,0,0) [constant]`）
-│   │                            ⇒ 现任何输入 `exit(3)` + 缺口清单，文件头换成真实 C++
-│   │                            选项表 + 偏离说明；缺并行 VisIt DC 读取 / GF 求值 /
-│   │                            `-rdf` 重分配（`fem_io::data_collection_load` 存在但未接线）
-│   ├── tesla.rs             ← ⚠️ **round 31 声明式缺口 (exit(3))**：stub + 假参数 ——
-│   │                            mesh 恒为内置 `unit_cube_tet(2)`、`-m`/`-maxit` 被
-│   │                            `let _…` 丢弃、`|A|=|B|=0` 且 `PCG Iterations = 0` 却 rc=0。
-│   │                            证据（round 31 实测）：`-m data/beam-tet.mesh -maxit 1
-│   │                            -ubbc "0 0 1"` 与无参运行的 dof 计数**完全相同**
-│   │                            (H1 27 / H(curl) 98 / H(div) 120 / L2 48)
-│   │                            ⇒ 现 `not_ported()` 在 main 第一行、不解析任何参数、
-│   │                            `exit(3)` + 缺口清单
+│   ├── lorentz.rs           ← ✅ **round 103 补全（D139 关闭）**：C++ 是 VisIt
+│   │                            DataCollection 接口，现为真移植——PARALLEL_FORMAT
+│   │                            集合读取（root JSON `mesh.path`→`pmesh.%06d`）、
+│   │                            vector-H1 按分量标量求值、Boris::ParticleStep 逐项
+│   │                            转写、`std::mt19937`+libstdc++ 分布逐位复刻、丢失
+│   │                            粒子剔除、np=1 Redistribute no-op。**验收**：三场景
+│   │                            （E+B/仅E/仅B）逐步逐号轨迹对拍 worst |Δx| 4.4e-16…1.3e-15
+│   │                            （目标 1e-10），剔除步序一致，`Step:` 行逐字节；
+│   │                            7 钉红绿验牙。残留 exit(3)：`-d≠cpu`/pad≠6/非
+│   │                            vector-H1/无 E 无 B；GLVis 连不上警告后继续（同 C++）。
+│   │                            新债 **D946**：io `load_visit_collection` 硬编码
+│   │                            `mesh.000000`，读不了 4.10 并行集合（miniapp 侧绕行）
+│   ├── tesla.rs             ← ✅ **round 103 真移植（覆盖 stub）**：CLI/banner/Options
+│   │                            dump 逐字节对齐 C++；H1/ND/RT 空间 + curl-curl(μ⁻¹)
+│   │                            + ND mass + RT→ND mixed/weak-curl + AMS+PCG +
+│   │                            DivergenceFreeProjector + `-bm/-ha/-cr/-ms/-pwm` 源项；
+│   │                            顺带修 `crates/assembly/src/mixed/mod.rs` 四处弯曲
+│   │                            网格几何喂入（直网格逐位不变）。**验收**：ball-quad
+│   │                            `-ubbc/-ms` o1 逐位一致（DOF 79/202/180，含 MFEM
+│   │                            首轮 BC quirk 如实复现）、inline-hex `-bm` o2
+│   │                            `||M||`/`||JD||` 位级；`-cr` o1 `||B||/||H||` 0.03%；
+│   │                            弯曲 `-bm` o2 ||B|| 3.5% = D926（space 弯曲插值直地图）。
+│   │                            PCG 迭代数差 = AMS 栈差异（D927）。残留 exit(3)：
+│   │                            AMR(D928)/SurfaceCurrent(D929)/NURBS(D930)/vis 等(D931)
 │   ├── volta.rs             ← 1:1 到单次解 (`-maxit 1`)：4 空间 + Assemble + Solve +
 │   │                            Total charge。**round 31 D139**：`--ranks` 默认
 │   │                            **2 → 1**（`>1` 因并行装配 `assert(24≠48)` 原为 panic，
