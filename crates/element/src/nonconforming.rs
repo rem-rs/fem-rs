@@ -367,6 +367,69 @@ impl ReferenceElement for RotTriLinearHex {
     }
 }
 
+// ─── 3D nonconforming P1 tetrahedron (4 face-center dofs) ──────────────────
+
+/// MFEM `P1TetNonConfFiniteElement` — the TETRAHEDRON arm of
+/// `LinearNonConf3DFECollection` (`fem/fe_coll.hpp:1048`): the lowest-order
+/// nonconforming Crouzeix–Raviart-type tetrahedron element, 4 dofs = point
+/// values at the *centroids of the four faces* of the reference tet
+/// `(0,0,0),(1,0,0),(0,1,0),(0,0,1)`.
+///
+/// Space: span{1, x, y, z} composed as `φ₀ = 1 − 3L₀`, `φᵢ = 1 − 3Lᵢ` with
+/// `L₀ = 1 − x − y − z`, `L₁ = x`, `L₂ = y`, `L₃ = z` — continuous across
+/// inter-element faces only in the edge-average sense (the function value at
+/// a face is its centroid value, so the trace is not single-valued: hence
+/// "nonconforming").  Ported verbatim from MFEM 4.10
+/// `fem/fe/fe_fixed_order.cpp:2959` (`CalcShape` :2980, `CalcDShape`
+/// :2992); dof numbering = MFEM `Nodes` order (face opposite vertex 0 first,
+/// then faces x=0, y=0, z=0).  Branch-free closed form.
+///
+/// MFEM declares `NodalFiniteElement(3, TETRAHEDRON, 4, 1)` (order tag 1).
+pub struct P1TetNonConf;
+
+impl ReferenceElement for P1TetNonConf {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        4
+    }
+
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        // Verbatim MFEM operation order: L0 = 1.0 - L1 - L2 - L3.
+        let l1 = xi[0];
+        let l2 = xi[1];
+        let l3 = xi[2];
+        let l0 = 1.0 - l1 - l2 - l3;
+        values[0] = 1.0 - 3.0 * l0;
+        values[1] = 1.0 - 3.0 * l1;
+        values[2] = 1.0 - 3.0 * l2;
+        values[3] = 1.0 - 3.0 * l3;
+    }
+
+    fn eval_grad_basis(&self, _xi: &[f64], grads: &mut [f64]) {
+        // Constant dshape table, MFEM rows verbatim.
+        grads[0 * 3..0 * 3 + 3].copy_from_slice(&[3.0, 3.0, 3.0]);
+        grads[1 * 3..1 * 3 + 3].copy_from_slice(&[-3.0, 0.0, 0.0]);
+        grads[2 * 3..2 * 3 + 3].copy_from_slice(&[0.0, -3.0, 0.0]);
+        grads[3 * 3..3 * 3 + 3].copy_from_slice(&[0.0, 0.0, -3.0]);
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        crate::quadrature::tet_rule(order)
+    }
+
+    /// MFEM `Nodes.IntPoint`: centroid of the face opposite vertex 0, then
+    /// centroids of the faces x = 0, y = 0, z = 0.
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        const T: f64 = 0.33333333333333333333;
+        vec![vec![T, T, T], vec![0.0, T, T], vec![T, 0.0, T], vec![T, T, 0.0]]
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -448,6 +511,69 @@ mod tests {
             for x in &c {
                 assert!(x.is_finite());
             }
+        }
+    }
+
+    #[test]
+    fn p1tet_nonconf_partition_of_unity() {
+        let e = P1TetNonConf;
+        let mut v = vec![0.0; 4];
+        for p in &[
+            [0.0, 0.0, 0.0],
+            [0.25, 0.25, 0.25],
+            [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+            [0.5, 0.25, 0.0],
+            [0.0, 0.5, 0.5],
+        ] {
+            e.eval_basis(p, &mut v);
+            let s: f64 = v.iter().sum();
+            assert!((s - 1.0).abs() < 1e-15, "POU at {p:?}: sum={s}");
+        }
+    }
+
+    #[test]
+    fn p1tet_nonconf_face_center_delta() {
+        // Nodal dof = face-centroid value; the 1/3 coordinates are inexact
+        // binary doubles, so the delta property holds to ~1 ulp of 1.
+        let e = P1TetNonConf;
+        let nodes = e.dof_coords();
+        let n = e.n_dofs();
+        let mut v = vec![0.0; n];
+        for (j, node) in nodes.iter().enumerate() {
+            e.eval_basis(node, &mut v);
+            for (i, x) in v.iter().enumerate() {
+                let expect = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (x - expect).abs() < 1e-15,
+                    "phi_{i} at node_{j} = {x} (expect {expect})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p1tet_nonconf_gradient_sum_zero() {
+        let e = P1TetNonConf;
+        let mut g = vec![0.0; 12];
+        for p in &e.quadrature(3).points {
+            e.eval_grad_basis(p, &mut g);
+            for j in 0..3 {
+                let s: f64 = (0..4).map(|i| g[i * 3 + j]).sum();
+                assert_eq!(s, 0.0, "sum dphi dir {j} at {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn p1tet_nonconf_interior_finite() {
+        let e = P1TetNonConf;
+        let mut v = vec![0.0; 4];
+        let mut g = vec![0.0; 12];
+        for p in &e.quadrature(5).points {
+            e.eval_basis(p, &mut v);
+            e.eval_grad_basis(p, &mut g);
+            assert!(v.iter().all(|x| x.is_finite()));
+            assert!(g.iter().all(|x| x.is_finite()));
         }
     }
 }

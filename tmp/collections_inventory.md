@@ -20,8 +20,8 @@ MFEM 那种 collection 类层次（用 `SpaceType` + 元素结构体 + 分派表
 | `ND1_3DFECollection` | `HexNDk(1)`/`TetNDk(1)`/`PrismND1`/`PyraND1` | §1.2（D555 逐位、d680 位级门） |
 | `Const2D/Const3DFECollection` | `P0Tensor/P0Tri/P0Tet/P0Pyr`（`crates/space/src/ref_elem.rs:77+`，D364 单一真源）+ `L2Space` order 0 | ref_elem/assembler 单测；**无 gf 级 pin**（见二） |
 | `CrouzeixRaviartFECollection`(2-D CR) | `crates/element/src/crouzeix_raviart.rs`（`CrTri1/CrTri2/CrouzeixRaviart1/Vec`），DG 侧在用（`dg_base`/`dg_advection`） | 元素级单测；**无空间级 pin** |
-| `LinearNonConf3DFECollection` | 2-D 版：`crates/element/src/nonconforming.rs`（`Q1RotRef/QuadQ1Rot/Vec`，Rannacher-Turek 旋转双线性）；3-D hex 版：同文件 `RotTriLinearHex`（round 102/D102 落地，MFEM `RotTriLinearHexFiniteElement` 1:1，face-center dof，[0,1]³ MFEM cube 约定）。collection 其余臂：TRI/SQUARE = P0（等价物在 space 侧 `P0Tri/P0Tensor`），TET = `P1TetNonConfFiniteElement` 仍未移植（D911） | 元素级；hex 版 **MFEM 4.10 对拍位级**（D102：276 点 worst Δ=0，`crates/element/tests/d102_refined_nonconf_mfem_truth.rs`） |
-| `RefinedLinearFECollection` | 单纯形三元素 round 102/D102 落地：`crates/element/src/refined_linear.rs`（`RefinedLinear1D`(3 dof)/`RefinedLinear2D`(6)/`RefinedLinear3D`(10)，细分网格分片线性 macro-element，MFEM `fe_fixed_order.cpp` 逐行移植）。SQUARE/CUBE 臂（`RefinedBiLinear2D` 9 dof、`RefinedTriLinear3D` 27 dof）**未移植**（D912/D913） | 元素级 **MFEM 4.10 对拍位级**（D102：含全部分支边界带，worst Δ=0，`d102_refined_nonconf_mfem_truth.rs`）；无空间级消费者（见 D914） |
+| `LinearNonConf3DFECollection` | 2-D 版：`crates/element/src/nonconforming.rs`（`Q1RotRef/QuadQ1Rot/Vec`，Rannacher-Turek 旋转双线性）；3-D hex 版：同文件 `RotTriLinearHex`（round 102/D102 落地，MFEM `RotTriLinearHexFiniteElement` 1:1，face-center dof，[0,1]³ MFEM cube 约定）；TET 臂：同文件 `P1TetNonConf`（round 103/D103 落地，MFEM `P1TetNonConfFiniteElement` 1:1，4 face-centroid dof）。collection 其余臂：TRI/SQUARE = P0（等价物在 space 侧 `P0Tri/P0Tensor`） | 元素级 **MFEM 4.10 对拍位级**（D102：hex 276 点；D103：TET 50 点，含全部节点 ±1e-13 带，worst Δ=0，`d102_refined_nonconf_mfem_truth.rs` / `d103_refined_nonconf_mfem_truth.rs`） |
+| `RefinedLinearFECollection` | 全 5 臂已落地：单纯形三元素 round 102/D102（`crates/element/src/refined_linear.rs` 的 `RefinedLinear1D`(3 dof)/`RefinedLinear2D`(6)/`RefinedLinear3D`(10)）+ 张量积两臂 round 103/D103（同文件 `RefinedBiLinear2D` 9 dof SQUARE、`RefinedTriLinear3D` 27 dof CUBE，分片双线性/三线性 macro-element，MFEM `fe_fixed_order.cpp` 逐行移植，含上游 quirk 保真：RBQ T0 `dshape(7,0)` 双写、RBH T2/T3/T6/T7 交叉 `Lx`）。无空间级消费者（见 D914） | 元素级 **MFEM 4.10 对拍位级**（D102：276 点；D103：RBQ 62 点 + RBH 184 点，含全部分支面 ±1/64、±1e-13 双侧带，worst Δ=0，`d102_refined_nonconf_mfem_truth.rs` / `d103_refined_nonconf_mfem_truth.rs`） |
 | `H1Ser_FECollection` | `HexSerendipityPk`/`QuadSerendipityPk` | D743（hex p=1 位级）、D768（2-D 帧，round 72） |
 | `H1Pos_FECollection` | `crates/element/src/lagrange/factory.rs:1495` 的 H1Pos 对应物 | 元素级注释 + 单测 |
 | `RT_Trace_FECollection` | `crates/space/src/dpg_trace.rs`（ex8 的 trace 空间，逐边 `order+1` dof） | dpg 套件 |
@@ -31,10 +31,12 @@ MFEM 那种 collection 类层次（用 `SpaceType` + 元素结构体 + 分派表
 
 ## 二、真实缺口 / 需登记（本 pass 未盘出等价物或只有元素级）
 
-1. ~~**`RefinedLinearFECollection` — 全库 0 命中**~~ **已落地（round 102/D102）**：单纯形三元素
-   `RefinedLinear1D/2D/3D` 在 `crates/element/src/refined_linear.rs`，MFEM 4.10 探针对拍
-   **位级一致**（276 点，覆盖全部子域分支内部 + 边界带两侧）。剩余：SQUARE/CUBE 臂
-   （D912/D913）与 space 层消费者（D914，MFEM 中该 collection 服务 LOBPCG/LOR 宏元素场景）。
+1. ~~**`RefinedLinearFECollection` — 全库 0 命中**~~ **已全部落地（round 102/D102 + round
+   103/D103）**：单纯形三元素 `RefinedLinear1D/2D/3D` 与张量积两臂 `RefinedBiLinear2D`/
+   `RefinedTriLinear3D` 在 `crates/element/src/refined_linear.rs`，MFEM 4.10 探针对拍
+   **位级一致**（D102 276 点 + D103 296 点中的 RBQ/RBH 246 点，覆盖全部子域分支内部 +
+   边界带两侧）。剩余：space 层消费者（D914，MFEM 中该 collection 服务 LOBPCG/LOR 宏元素
+   场景）。
 2. **`ND_R2D/RT_R2D` 族（降维嵌入 collection）— 已闭合（round 102 / D102）**：
    `crates/element/src/embedded/`（NdR2dTri/Quad、RtR2dTri/Quad + ND_R1D/RT_R1D
    segment/point 元素；`RT_R2D_SegmentElement` 为上游死代码，有意不移植）+
@@ -45,11 +47,11 @@ MFEM 那种 collection 类层次（用 `SpaceType` + 元素结构体 + 分派表
    `d102_embedded_space.rs`，先红后绿验牙）。1-D 网格的空间层（ex31 dim==1
    分支）= D901；Trace 变体按映射级落地（无消费者，见 embedded/mod.rs 文档）；
    VectorAssembler embedded 臂缺位 = D900（空间层有意不实现 FESpace 防静默错装）。
-3. ~~**`LinearNonConf3DFECollection` 的 3-D 版**（hex 面中点非协调线性）~~ **hex 臂已落地
-   （round 102/D102）**：`RotTriLinearHex` 在 `crates/element/src/nonconforming.rs`，MFEM 4.10
-   探针对拍**位级一致**（125 点 hex 网格 + 全 collection dof 表）。剩余：TET 臂
-   `P1TetNonConfFiniteElement`（4 dof，D911）；TRI/SQUARE 臂 = P0 常量（等价物已在 space 侧）。
-   space 层的非协调 hex 空间接线仍无消费者需求（维持"先确认消费者"原则，未为接线而接线）。
+3. ~~**`LinearNonConf3DFECollection` 的 3-D 版**（hex 面中点非协调线性）~~ **hex + TET 臂均已
+   落地（round 102/D102 + round 103/D103）**：`RotTriLinearHex` 与 `P1TetNonConf` 在
+   `crates/element/src/nonconforming.rs`，MFEM 4.10 探针对拍**位级一致**（hex 125 点 +
+   TET 50 点 + 全 collection dof 表）。剩余：TRI/SQUARE 臂 = P0 常量（等价物已在 space 侧）。
+   space 层的非协调空间接线仍无消费者需求（维持"先确认消费者"原则，未为接线而接线）。
 4. **`P1OnQuad`/`GaussLinearDiscont` 之类"同族不同基"的 collection**：等价路径在（见上表），
    但**没有以该 collection 语义命名的 pin** ⇒ 归入下面的"pin 深度"问题，不单列缺口。
 

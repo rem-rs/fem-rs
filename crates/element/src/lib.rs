@@ -98,13 +98,15 @@ pub use nurbs_fe_collection::{
     NurbsHCurlFECollection, NurbsHDivFECollection, NurbsRefElement, NurbsScalar2D, NurbsScalar3D,
     VARIABLE_ORDER,
 };
-pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec, RotTriLinearHex};
+pub use nonconforming::{P1TetNonConf, Q1RotRef, QuadQ1Rot, QuadQ1RotVec, RotTriLinearHex};
 pub use raviart_thomas::{
     HexRT1, HexRTk, PrismRT0, PrismRTk, PyraRT0, PyraRTk, QuadRT1, QuadRTk,
     TetRT1, TetRT2, TetRTk, TriRT1, TriRT2, TriRTk,
 };
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
-pub use refined_linear::{RefinedLinear1D, RefinedLinear2D, RefinedLinear3D};
+pub use refined_linear::{
+    RefinedBiLinear2D, RefinedLinear1D, RefinedLinear2D, RefinedLinear3D, RefinedTriLinear3D,
+};
 pub use serendipity::{HexSerendipityPk, QuadSerendipityPk};
 
 /// Map type for finite element spaces (MFEM 4.10).
