@@ -311,13 +311,14 @@ miniapps/
 │   ├── extruder.rs          ← ✅ **round 31 修复**：`-m data/inline-quad.mesh` → NE=16 NBE=48
 │   │                            NV=50、边界段全为 `1 3 <4 节点>`（与 C++ 相同）、探针
 │   │                            `NE=16 NBE=48 NV=50 dim=3 sdim=3 nodes=0` **与 C++ 完全相同**、
-│   │                            `mesh-explorer` kappa 4/4 全等。`-trans`/1-D 输入/混合 2-D 输入
-│   │                            ⇒ exit(3)+缺口清单（缺曲面 nodes 写出 / `Mesh::Extrude1D`）
-│   │                            **仍存偏差（未授权改 `crates/mesh/src/extrusion.rs`，见 D144）**：
-│   │                            ① `elem_tags_3d.push(0)` 应 `mesh.elem_tags[e]` ⇒ MFEM 警告
-│   │                            `Non-positive attributes`；② 边界面属性 1/2/3 vs C++ 的
-│   │                            源属性 1..nba 与底/顶 `nba+elem attr`；③ 顶点编号层优先
-│   │                            `j*nv+i` vs C++ 点优先 `i*nvz+j`
+│   │                            `mesh-explorer` kappa 4/4 全等。**round 102：1-D 路解锁**——
+│   │                            `Mesh::Extrude1D`（`fem_mesh::extrusion::extrude_1d`，MFEM
+│   │                            `closed=false` 分支）落地，`-m data/inline-segment.mesh`
+│   │                            三档（`-ny 8 -wy 2` / 默认 ny=1 / `-nz` 连锁 1-D→2-D→3-D）
+│   │                            输出与 C++ oracle **逐字节一致**；钉
+│   │                            `d102_extrude_1d`。D144 旧偏差三笔（elem_tags/边界属性/
+│   │                            顶点层序）已由逐字节对拍证伪，条目作废。
+│   │                            `-trans`（曲面 nodes 继承）/混合 2-D 输入 ⇒ 仍 exit(3)
 │   ├── toroid.rs            ← ✅ **round 31 修复**：① `elem_type` 未随 `-e` 同步（把 6 节点
 │   │                            prism 按 Hex8 写出 ⇒ round 30 看到的"6 个 CUBE + 空 boundary"）
 │   │                            ② 本地复刻 `FinalizeTopology`/`GenerateBoundaryElements`
