@@ -388,12 +388,16 @@ miniapps/
 │   │                            ⇒ 产物带（L2）`nodes` 段，本仓无 nodes writer。**已 port**：
 │   │                            `-o 1 -no-pm` → NE=3 NBE=14 NV=16，与 C++ 同命令 **拓扑逐字节
 │   │                            相同**；顺带修了 v2v 顶层置换与 `-e 6`（prism）的 panic
-│   ├── polar-nc.rs          ← ⚠️ **round 31 降级 exit(3)**：C++ 产物是 `MFEM NC mesh v1.0`
-│   │                            + `vertex_parents`（真 NC）+ `SetCurvature(2)` 曲面 nodes +
-│   │                            `-sfc`（`GridSfcOrdering2D`，该 miniapp 的存在理由）；本仓
-│   │                            writer 只写 conforming `MFEM mesh v1.0`（旧实现写出的文件
-│   │                            MFEM 判 `Invalid mesh topology`）⇒ 缺口清单 5 条；
-│   │                            Options dump 与 C++ **逐行一致**
+│   ├── polar-nc.rs          ← ✅ **round 104 解锁（逐字节 = C++）**：新 `crates/io/src/mfem_nc.rs`
+│   │                            `MFEM NC mesh v1.0` 写者（elements `rank attr geom
+│   │                            ref_type nodes` + 条件 boundary/vertex_parents +
+│   │                            coordinates/nodes 双尾段）+ conforming 回退；miniapp
+│   │                            Make2D 1:1 + `GridSfcOrdering2D` + UpdateVertices +
+│   │                            H1 全阶曲率映射 + RestrictConforming（悬挂顶点 dof 约束）。
+│   │                            **验收：21/21 参数集输出 cmp 逐字节相同**（def/±sfc/-o 1..5/
+│   │                            -n/-a/-phi/-r）；MFEM 4.10 读回 Rust 产物 7 份全过；
+│   │                            8 钉红绿。残留 exit(3)：`-d 3`（D965）、阶>8（D966）；
+│   │                            fem-rs 尚无 NC 读者（D968，现状已钉）
 │   ├── mobius-strip.rs      ← ✅ **round 34（D171）：双双解锁，`exit 0`**。主会话亲验
 │   │ ── klein-bottle.rs        （对照入库的 C++ 4.10 参考夹具）：
 │   │                            mobius = `NE=16 NBE=16 NV=24 dim=2 sdim=3 nodes=1
@@ -827,8 +831,17 @@ miniapps/
 │   │                            双折号已修（MFEM 语义 = 存未折号块 + 取时一次；
 │   │                            修后 serial 残差 4.706293799742669 = C++ np1
 │   │                            逐字），并行侧绕过退役，三条头条复跑逐位不变
-│   └── pconvection_diffusion.rs ← ⚠️ **诚实 exit(3) + 缺口清单**（缺带系数的 DPG 积分器 +
-│                                `setup_test_norm_coeffs`）
+│   └── pconvection_diffusion.rs ← ✅ **round 104 真移植（--ranks 1 六档打印位一致 vs MFEM
+│                                4.10 MPI oracle）**：新增 3 个 DPG 积分器
+│                                （MixedScalarWeakDivergence/矩阵系数 Diffusion/标量系数
+│                                VectorFEMass 的 spatial 版）+ CLI/4 prob/系数化
+│                                test-norm/AMR 标记 1:1。`-theta 0.0` 等六档位级；
+│                                `-prob 2` it0 末位差（≤1.4e-5，CG 容差噪声如实报）；
+│                                CG it 列不逐位 = D963（Hypre AMG/AMS 栈差）。
+│                                残留 exit(3)：字面默认 theta=0.7（**D960**：fem-mesh 缺
+│                                quad 部分标记 4 分叉 NC 细化）。**顺带发现（D963 移交）**：
+│                                HEAD `--ranks 2` 并行 DPG 已坏（pdiffusion 同病，
+│                                0b3ace79 D813-1 剪薄回归，时间线钉定）
 │      ✅ **round 34（D167）：库层已修**——`from_local_matrix` 的 ghost 列数改从
 │      `local.ncols - n_owned` 推导（矩形输入合法）+ `nrows ≥ n_owned` 断言；
 │      回归钉两层（`par_csr.rs:750` 矩形用例 + `two_rank_system_matches_serial_full_mesh`，
