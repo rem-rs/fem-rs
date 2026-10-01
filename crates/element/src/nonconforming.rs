@@ -260,6 +260,113 @@ impl VectorReferenceElement for QuadQ1RotVec {
     }
 }
 
+// ─── 3D Rannacher-Turek: RotTriLinearHex (6 face-midpoint dofs) ─────────────
+
+/// MFEM `RotTriLinearHexFiniteElement` — the 3-D arm of
+/// `LinearNonConf3DFECollection` (`fem/fe_coll.hpp:1044`): rotated bilinear
+/// (Rannacher–Turek) hexahedron element, 6 dofs = face-midpoint *values* on
+/// the reference hex `[0,1]^3`.
+///
+/// Space: span{1, x, y, z, x²−y², y²−z²} in the MFEM cube coordinates
+/// rescaled to `[-1,1]³`; branching-free closed form.  Ported verbatim from
+/// MFEM 4.10 `fem/fe/fe_fixed_order.cpp:6763` (`CalcShape` :6791,
+/// `CalcDShape` :6808); dof numbering = MFEM `Nodes` order (bottom, front,
+/// right, back, left, top face centers).  Note this element's dofs are point
+/// values at face centers — unlike the 2-D `Q1RotRef` whose dofs are edge
+/// *averages* (Stokes usage).
+///
+/// Unlike fem-rs' own `HexQ1`/`HexQk` ([-1,1]³), the reference domain follows
+/// MFEM's cube convention `[0,1]³` (same as `HexRT1`/`mfem_hex_nodal_dofs`)
+/// so the probe acceptance is a 1:1 point-set comparison.
+pub struct RotTriLinearHex;
+
+impl RotTriLinearHex {
+    /// MFEM's affine rescale of the `[0,1]³` reference hex onto `[-1,1]³`.
+    #[inline]
+    fn unit2center(u: f64) -> f64 {
+        2.0 * u - 1.0
+    }
+}
+
+impl ReferenceElement for RotTriLinearHex {
+    fn dim(&self) -> u8 {
+        3
+    }
+    /// MFEM declares `NodalFiniteElement(3, CUBE, 6, 2, Qk)`.
+    fn order(&self) -> u8 {
+        2
+    }
+    fn n_dofs(&self) -> usize {
+        6
+    }
+
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let x = Self::unit2center(xi[0]);
+        let y = Self::unit2center(xi[1]);
+        let z = Self::unit2center(xi[2]);
+        let f5 = x * x - y * y;
+        let f6 = y * y - z * z;
+
+        // Verbatim MFEM expressions (operation order preserved).
+        values[0] = (1.0 / 6.0) * (1.0 - 3.0 * z - f5 - 2.0 * f6);
+        values[1] = (1.0 / 6.0) * (1.0 - 3.0 * y - f5 + f6);
+        values[2] = (1.0 / 6.0) * (1.0 + 3.0 * x + 2.0 * f5 + f6);
+        values[3] = (1.0 / 6.0) * (1.0 + 3.0 * y - f5 + f6);
+        values[4] = (1.0 / 6.0) * (1.0 - 3.0 * x + 2.0 * f5 + f6);
+        values[5] = (1.0 / 6.0) * (1.0 + 3.0 * z - f5 - 2.0 * f6);
+    }
+
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        // grads[i * 3 + j] = dphi_i/dxi_j (MFEM reference [0,1]^3 coords),
+        // MFEM dshape(i,j) with a = 2/3.
+        const A: f64 = 2.0 / 3.0;
+        let xt = A * (1.0 - 2.0 * xi[0]);
+        let yt = A * (1.0 - 2.0 * xi[1]);
+        let zt = A * (1.0 - 2.0 * xi[2]);
+
+        grads[0 * 3] = xt;
+        grads[0 * 3 + 1] = yt;
+        grads[0 * 3 + 2] = -1.0 - 2.0 * zt;
+
+        grads[1 * 3] = xt;
+        grads[1 * 3 + 1] = -1.0 - 2.0 * yt;
+        grads[1 * 3 + 2] = zt;
+
+        grads[2 * 3] = 1.0 - 2.0 * xt;
+        grads[2 * 3 + 1] = yt;
+        grads[2 * 3 + 2] = zt;
+
+        grads[3 * 3] = xt;
+        grads[3 * 3 + 1] = 1.0 - 2.0 * yt;
+        grads[3 * 3 + 2] = zt;
+
+        grads[4 * 3] = -1.0 - 2.0 * xt;
+        grads[4 * 3 + 1] = yt;
+        grads[4 * 3 + 2] = zt;
+
+        grads[5 * 3] = xt;
+        grads[5 * 3 + 1] = yt;
+        grads[5 * 3 + 2] = 1.0 - 2.0 * zt;
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        crate::quadrature::hex_rule(order)
+    }
+
+    /// MFEM `Nodes.IntPoint` face centers: bottom, front, right, back, left,
+    /// top.
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![
+            vec![0.5, 0.5, 0.0],
+            vec![0.5, 0.0, 0.5],
+            vec![1.0, 0.5, 0.5],
+            vec![0.5, 1.0, 0.5],
+            vec![0.0, 0.5, 0.5],
+            vec![0.5, 0.5, 1.0],
+        ]
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

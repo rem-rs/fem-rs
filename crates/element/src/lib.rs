@@ -39,6 +39,11 @@ pub mod bernstein;
 pub mod bezier_extraction;
 pub mod brezzi_douglas_marini;
 pub mod crouzeix_raviart;
+/// Embedded (restricted) vector families — MFEM `ND_R1D` / `ND_R2D` /
+/// `RT_R1D` / `RT_R2D` collections (`fe_nd.cpp` / `fe_rt.cpp`): in-plane
+/// ND/RT components + out-of-plane H1/L2 components on intrinsic 1-D/2-D
+/// meshes (MFEM `ex31` / `ex32p`).
+pub mod embedded;
 /// 1-D Gauss-Lobatto nodal basis + integrated-GLL (Gerritsma) open basis on
 /// `[-1,1]` — the MFEM `(GaussLobatto, IntegratedGLL)` tensor-element
 /// convention used by the hexahedral ND/RT elements.
@@ -60,6 +65,10 @@ pub mod nurbs_fe_collection;
 pub mod nurbs_vector;
 pub mod quadrature;
 pub mod raviart_thomas;
+/// RefinedLinear macro-elements (MFEM `RefinedLinearFECollection`):
+/// piecewise-linear bases on the once-refined reference segment, triangle,
+/// and tetrahedron (`RefinedLinear1D/2D/3D`).
+pub mod refined_linear;
 pub mod reference;
 pub mod serendipity;
 
@@ -89,12 +98,13 @@ pub use nurbs_fe_collection::{
     NurbsHCurlFECollection, NurbsHDivFECollection, NurbsRefElement, NurbsScalar2D, NurbsScalar3D,
     VARIABLE_ORDER,
 };
-pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec};
+pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec, RotTriLinearHex};
 pub use raviart_thomas::{
     HexRT1, HexRTk, PrismRT0, PrismRTk, PyraRT0, PyraRTk, QuadRT1, QuadRTk,
     TetRT1, TetRT2, TetRTk, TriRT1, TriRT2, TriRTk,
 };
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
+pub use refined_linear::{RefinedLinear1D, RefinedLinear2D, RefinedLinear3D};
 pub use serendipity::{HexSerendipityPk, QuadSerendipityPk};
 
 /// Map type for finite element spaces (MFEM 4.10).
