@@ -21,10 +21,9 @@ use std::fs::File;
 use std::io::Write;
 
 use fem_assembly::{
-    Assembler, MixedAssembler,
+    Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
-    mixed::MixedScalarDiffusionIntegrator,
-    dpg::{SinvBuilder, assemble_bhat, DpgNormalOperator, build_shat},
+    dpg::{SinvBuilder, assemble_b0_mfem, assemble_bhat, DpgNormalOperator, build_shat},
 };
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, Mesh};
@@ -111,7 +110,11 @@ fn main() {
     let ess_dofs: Vec<u32> = boundary_dofs(&mesh as &dyn fem_mesh::topology::MeshTopology, dm, &ess_tags);
     let ess_usize: Vec<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
 
-    let mut b0 = MixedAssembler::assemble_bilinear(&test, &x0, &[&MixedScalarDiffusionIntegrator], qo);
+    // MFEM `MixedBilinearForm B0` with `DiffusionIntegrator` — assembled with
+    // the MFEM-bitwise dedicated path (D864): the generic mixed assembler's
+    // J⁻ᵀ/physical-measure convention is algebraically equal but ~5 ulp off,
+    // which the outer PCG trajectory sees.
+    let mut b0 = assemble_b0_mfem(&x0, &test, qo);
 
     // BC: zero columns of B0 for essential DOFs (homogeneous Dirichlet)
     for &d in &ess_dofs {

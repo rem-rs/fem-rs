@@ -189,15 +189,24 @@ impl<M: MeshTopology> DpgNormalOperator<M> {
 /// Build `Shat = Bhat^T * S^{-1} * Bhat` as an explicit sparse matrix.
 ///
 /// Used as the (1,1) block of the block-diagonal DPG preconditioner.
-/// Uses the sparse triple product `RAP(Bhat, Sinv, Bhat)` via
-/// `CsrMatrix::rap_product`, matching MFEM's `RAP(matBhat, matSinv, matBhat)`.
+/// Bit-for-bit port of MFEM's `RAP(matBhat, matSinv, matBhat)` (the
+/// `(Rt, A, P)` overload): `R = Transpose(Bhat)`, `RA = Mult(R, Sinv)`,
+/// `RAP_ = Mult(RA, Bhat)` — i.e. the **(Bᵀ·S)·B** association order, with
+/// every product in MFEM's first-touch row order
+/// ([`CsrMatrix::multiply_first_touch`]).  `CsrMatrix::rap_product` computes
+/// `Bᵀ·(S·B)` with sorted rows instead — algebraically the same matrix, but
+/// the ≤5 ulp differences in the intermediate products' row order feed both
+/// the later accumulation sequence and the inner CG's spmv sums, which was
+/// the last visible residual of D864 on the Shat block.
 pub fn build_shat<M: MeshTopology>(
     bhat: &CsrMatrix<f64>,
     sinv: &SinvBuilder<M>,
     _n_trace: usize,
 ) -> CsrMatrix<f64> {
     let mat_sinv = assemble_sinv_sparse(sinv);
-    bhat.rap_product(&mat_sinv, bhat)
+    let bhat_t = bhat.transpose();
+    let bhat_t_sinv = bhat_t.multiply_first_touch(&mat_sinv);
+    bhat_t_sinv.multiply_first_touch(bhat)
 }
 
 // ─── DPG residual (error estimator) ─────────────────────────────────────────

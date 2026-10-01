@@ -715,6 +715,50 @@ impl<T: Scalar> CsrMatrix<T> {
         let rt = self.transpose();
         rt.multiply(&t)
     }
+
+    /// `C = A * B` with the accumulation order of MFEM's `SparseMatrix::Mult`
+    /// (`linalg/sparsemat.cpp`): per output row the contributions are added in
+    /// **first-touch order** — scanning `A`'s row entries in stored (column)
+    /// order, each `B`-row in stored order, first product assigned, later ones
+    /// `+=` — and the output rows are LEFT in that first-touch order instead
+    /// of being sorted.
+    ///
+    /// Row order is invisible to this product's own values but NOT to its
+    /// consumers: feeding an unsorted row into a subsequent product changes
+    /// the accumulation sequence there, and spmv sums over the stored order.
+    /// Both matter for the bit-for-bit MFEM RAP port used by the DPG
+    /// preconditioner (`build_shat` = `(Bᵀ·S)·B`, MFEM `RAP(Rt, A, P)`), where
+    /// the ≤5 ulp residual against MFEM traced to exactly this
+    /// sorted-vs-first-touch divergence in the intermediate matrix.  For
+    /// everything that only needs sorted CSR, use [`Self::multiply`].
+    pub fn multiply_first_touch(&self, b: &CsrMatrix<T>) -> CsrMatrix<T>
+    where T: Scalar {
+        assert_eq!(self.ncols, b.nrows, "multiply: dim mismatch {}×{} * {}×{}",
+                   self.nrows, self.ncols, b.nrows, b.ncols);
+        let m = self.nrows;
+        let n = b.ncols;
+        let mut crp = vec![0usize; m + 1];
+        let mut cci: Vec<u32> = Vec::new();
+        let mut cv: Vec<T> = Vec::new();
+        let mut acc = vec![T::zero(); n];
+        let mut mark = vec![false; n];
+        for i in 0..m {
+            for pk in self.row_ptr[i]..self.row_ptr[i + 1] {
+                let k = self.col_idx[pk] as usize;
+                let aik = self.values[pk];
+                for qj in b.row_ptr[k]..b.row_ptr[k + 1] {
+                    let j = b.col_idx[qj] as usize;
+                    let v = aik * b.values[qj];
+                    if !mark[j] { mark[j] = true; acc[j] = v; cci.push(j as u32); }
+                    else { acc[j] = acc[j] + v; }
+                }
+            }
+            let off = cv.len();
+            for &j in &cci[off..] { cv.push(acc[j as usize]); acc[j as usize] = T::zero(); mark[j as usize] = false; }
+            crp[i + 1] = cv.len();
+        }
+        CsrMatrix { nrows: m, ncols: n, row_ptr: crp, col_idx: cci, values: cv }
+    }
 }
 
 // ─── Free functions ──────────────────────────────────────────────────────────

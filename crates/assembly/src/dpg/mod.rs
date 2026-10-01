@@ -8,8 +8,8 @@ pub mod dpg_elasticity;
 pub mod sinv;
 pub mod trace_jump;
 pub mod dpg_operator;
-pub mod dpg_basis;
-pub mod dpg_integrators;
+pub mod b0_mfem;
+pub mod dpg_basis;pub mod dpg_integrators;
 
 pub use dpg::*;
 pub use dpg_2d::*;
@@ -21,3 +21,4 @@ pub use dpg_elasticity::*;
 pub use sinv::SinvBuilder;
 pub use trace_jump::assemble_bhat;
 pub use dpg_operator::{DpgNormalOperator, build_shat, compute_dpg_residual};
+pub use b0_mfem::assemble_b0_mfem;
