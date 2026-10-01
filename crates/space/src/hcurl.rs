@@ -538,12 +538,50 @@ fn hex_face_slots(
         let xi = &coords[off + n];
         let (x, jac) = hex_trilinear_map(verts, xi);
         let tau = tangents[off + n];
-        let mut t = [0.0_f64; 3];
-        for d in 0..3 {
-            t[d] = jac[d][0] * tau[0] + jac[d][1] * tau[1] + jac[d][2] * tau[2];
-        }
+        let t = j_mul(&jac, &tau);
         xs.push(x);
         ts.push(t);
+    }
+    (xs, ts)
+}
+
+/// [`hex_face_slots`] on a possibly CURVED cell: when the mesh's geometric
+/// order exceeds 1, MFEM builds the face anchors and every element's local
+/// face slots through the *isoparametric* transformation, not the trilinear
+/// corner map — the anchor IS the canonical global functional
+/// (`σ(Φ) = Φ(x_m)·t_m`), so a straightened anchor mis-places the shared face
+/// dofs (D926).  The per-slot `(x, J·t)` goes through
+/// [`fem_mesh::element_jacobian_at`], the mesh crate's MFEM closed-form curved
+/// dispatch over `mesh.geometry_nodes(e)` (the vector_assembler
+/// `geometry_nodes(e)` contract).  `geom_order() == 1` keeps the straight
+/// path byte-for-byte.
+fn hex_face_slots_iso<M: MeshTopology>(
+    mesh: &M,
+    e: u32,
+    verts: &[[f64; 3]; 8],
+    k: usize,
+    lf: usize,
+    coords: &[Vec<f64>],
+    tangents: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    if mesh.geom_order() <= 1 {
+        return hex_face_slots(verts, k, lf, coords, tangents);
+    }
+    let ndf = 2 * k * (k - 1);
+    let off = 12 * k + ndf * HEX_QUAD_FACE_TO_ND_BLOCK[lf];
+    let mut xs = Vec::with_capacity(ndf);
+    let mut ts = Vec::with_capacity(ndf);
+    for n in 0..ndf {
+        let xi = &coords[off + n];
+        let tau = tangents[off + n];
+        let (jac, x) = fem_mesh::element_jacobian_at(mesh, e, xi, 3);
+        let j = [
+            [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+            [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+            [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+        ];
+        xs.push([x[0], x[1], x[2]]);
+        ts.push(j_mul(&j, &tau));
     }
     (xs, ts)
 }
@@ -1239,7 +1277,8 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             quad_face_to_dof.insert(key, next_dof);
                             next_dof += ndf_quad as DofId;
                             face_creators.insert((e, lf));
-                            let (xs, ts) = hex_face_slots(&verts8, k, lf, &hex_coords, &hex_tks);
+                            let (xs, ts) =
+                                hex_face_slots_iso(&mesh, e, &verts8, k, lf, &hex_coords, &hex_tks);
                             quad_face_anchor.insert(
                                 key,
                                 QuadFaceAnchor { nodes: xs, tangents: ts },
@@ -1478,7 +1517,8 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             let (la, lb, lc, ld) = HEX_QUAD_FACES[lf];
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
                             let first_dof = quad_face_to_dof[&key];
-                            let (xs, ts) = hex_face_slots(&verts8, k, lf, &hex_coords, &hex_tks);
+                            let (xs, ts) =
+                                hex_face_slots_iso(&mesh, e, &verts8, k, lf, &hex_coords, &hex_tks);
                             if face_creators.contains(&(e, lf)) {
                                 for m in 0..ndf_quad {
                                     dofs_flat.push(first_dof + m as DofId);
@@ -2434,6 +2474,53 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         val += w * (fv[0] * j_t[0] + fv[1] * j_t[1]);
                     }
                     r[dofs[i] as usize] = signs[i] * val;
+                }
+            }
+            return result;
+        }
+
+        // D926: on a CURVED hex MFEM evaluates every ND dof functional through
+        // the element's isoparametric transformation — `Project_ND`
+        // (fe_base.cpp:1404): `dofs(k) = Φ(x_k)·(J(x_k)·t_k)` at the
+        // `FE::Nodes` reference slot, scattered per element last-write-wins in
+        // mesh order (`GridFunction::ProjectCoefficient`, the `vdofs`
+        // orientation table = this space's `element_dofs`/`element_signs`).
+        // The straight engine below samples the canonical functionals through
+        // vertex chords / the trilinear corner map, which bends away from the
+        // curved map at the face and interior slots.  The curved branch
+        // evaluates `(x, J·t)` per slot through `fem_mesh::element_jacobian_at`
+        // — the mesh crate's MFEM closed-form curved dispatch over
+        // `mesh.geometry_nodes(e)` (the vector_assembler `geometry_nodes(e)`
+        // contract) — and scatters through the orientation table exactly like
+        // MFEM.  `geom_order() == 1` keeps the straight engine byte-for-byte.
+        if self.dim == 3
+            && self.mesh.geom_order() > 1
+            && matches!(self.cell_type, ElementType::Hex8 | ElementType::Hex20)
+        {
+            let hnd = HexNDk::new(k);
+            let coords = hnd.dof_coords();
+            let tks = hnd.dof_tangents();
+            let r = result.as_slice_mut();
+            for e in 0..self.mesh.n_elements() as u32 {
+                let dofs = self.element_dofs(e);
+                debug_assert_eq!(
+                    dofs.len(),
+                    coords.len(),
+                    "HCurlSpace::interpolate_vector: hex slot/layout count mismatch"
+                );
+                let signs = self.element_signs(e);
+                for (m, xi) in coords.iter().enumerate() {
+                    let (jac, x) = fem_mesh::element_jacobian_at(&self.mesh, e, xi, 3);
+                    let j = [
+                        [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+                        [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+                        [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+                    ];
+                    let tau = tks[m];
+                    let t = j_mul(&j, &tau);
+                    let fv = f(&x);
+                    r[dofs[m] as usize] =
+                        signs[m] * (fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2]);
                 }
             }
             return result;

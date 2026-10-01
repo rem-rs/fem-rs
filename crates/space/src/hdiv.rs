@@ -1998,9 +1998,34 @@ impl<M: MeshTopology> HDivSpace<M> {
             debug_assert_eq!(dofs.len(), n);
             let signs = self.element_signs(e);
             let mut d = vec![0.0_f64; n];
+            // D926: on a curved cell MFEM `Project_RT` evaluates every dof
+            // functional through the element's *isoparametric* transformation
+            // (`Trans.AdjugateJacobian()` at `FE::Nodes`, fe_base.cpp:1179) —
+            // not the affine corner map.  The curved branch below routes the
+            // per-sample `(J, x)` through `fem_mesh::element_jacobian_at`, the
+            // mesh crate's MFEM closed-form curved dispatch over
+            // `mesh.geometry_nodes(e)` (the same `geometry_nodes(e)` contract
+            // the vector assembler consumes).  `geom_order() == 1` keeps the
+            // historical straight paths byte-for-byte.
+            let curved = self.mesh.geom_order() > 1;
 
             match et {
                 ElementType::Tri3 | ElementType::Tri6 => {
+                    if curved {
+                        for (row, di) in rows.iter().zip(d.iter_mut()) {
+                            let (jac, x) =
+                                fem_mesh::element_jacobian_at(&self.mesh, e, &row.xi[..2], 2);
+                            let j = [
+                                [jac[(0, 0)], jac[(0, 1)]],
+                                [jac[(1, 0)], jac[(1, 1)]],
+                            ];
+                            let fv = f(&x);
+                            // physical normal = cof(J) nk, cof = [[j11, -j10], [-j01, j00]]
+                            let nx = j[1][1] * row.nk[0] - j[1][0] * row.nk[1];
+                            let ny = -j[0][1] * row.nk[0] + j[0][0] * row.nk[1];
+                            *di = fv[0] * nx + fv[1] * ny;
+                        }
+                    } else {
                     let p0 = self.mesh.node_coords(nodes[0]);
                     let c0 = self.mesh.node_coords(nodes[1]);
                     let c1 = self.mesh.node_coords(nodes[2]);
@@ -2019,8 +2044,23 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let ny = -j[0][1] * row.nk[0] + j[0][0] * row.nk[1];
                         *di = fv[0] * nx + fv[1] * ny;
                     }
+                    }
                 }
                 ElementType::Quad4 => {
+                    if curved {
+                        for (row, di) in rows.iter().zip(d.iter_mut()) {
+                            let (jac, x) =
+                                fem_mesh::element_jacobian_at(&self.mesh, e, &row.xi[..2], 2);
+                            let j = [
+                                [jac[(0, 0)], jac[(0, 1)]],
+                                [jac[(1, 0)], jac[(1, 1)]],
+                            ];
+                            let fv = f(&x);
+                            let nx = j[1][1] * row.nk[0] - j[1][0] * row.nk[1];
+                            let ny = -j[0][1] * row.nk[0] + j[0][0] * row.nk[1];
+                            *di = fv[0] * nx + fv[1] * ny;
+                        }
+                    } else {
                     let c: Vec<[f64; 2]> = nodes
                         .iter()
                         .map(|&nd| {
@@ -2035,8 +2075,29 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let ny = -jac[0][1] * row.nk[0] + jac[0][0] * row.nk[1];
                         *di = fv[0] * nx + fv[1] * ny;
                     }
+                    }
                 }
                 ElementType::Tet4 | ElementType::Tet10 => {
+                    if curved {
+                        for (row, di) in rows.iter().zip(d.iter_mut()) {
+                            let (jac, x) =
+                                fem_mesh::element_jacobian_at(&self.mesh, e, &row.xi, 3);
+                            let j = [
+                                [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+                                [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+                                [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+                            ];
+                            let cof = cof3(&j);
+                            let fv = f(&x);
+                            let mut val = 0.0;
+                            for r in 0..3 {
+                                val += fv[r] * (cof[r][0] * row.nk[0]
+                                    + cof[r][1] * row.nk[1]
+                                    + cof[r][2] * row.nk[2]);
+                            }
+                            *di = val;
+                        }
+                    } else {
                     let p0 = self.mesh.node_coords(nodes[0]);
                     let c0 = self.mesh.node_coords(nodes[1]);
                     let c1 = self.mesh.node_coords(nodes[2]);
@@ -2062,8 +2123,29 @@ impl<M: MeshTopology> HDivSpace<M> {
                         }
                         *di = val;
                     }
+                    }
                 }
                 ElementType::Hex8 => {
+                    if curved {
+                        for (row, di) in rows.iter().zip(d.iter_mut()) {
+                            let (jac, x) =
+                                fem_mesh::element_jacobian_at(&self.mesh, e, &row.xi, 3);
+                            let j = [
+                                [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+                                [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+                                [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+                            ];
+                            let cof = cof3(&j);
+                            let fv = f(&x);
+                            let mut val = 0.0;
+                            for r in 0..3 {
+                                val += fv[r] * (cof[r][0] * row.nk[0]
+                                    + cof[r][1] * row.nk[1]
+                                    + cof[r][2] * row.nk[2]);
+                            }
+                            *di = val;
+                        }
+                    } else {
                     let c: Vec<[f64; 3]> = nodes
                         .iter()
                         .map(|&nd| {
@@ -2082,6 +2164,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                                 + cof[r][2] * row.nk[2]);
                         }
                         *di = val;
+                    }
                     }
                     // D289: the dual matrix must be built from the SAME basis
                     // the assembly/get-values stack pairs these dofs with —
@@ -2103,6 +2186,26 @@ impl<M: MeshTopology> HDivSpace<M> {
                     // explicitly and never consume these values.
                 }
                 ElementType::Prism6 => {
+                    if curved {
+                        for (row, di) in rows.iter().zip(d.iter_mut()) {
+                            let (jac, x) =
+                                fem_mesh::element_jacobian_at(&self.mesh, e, &row.xi, 3);
+                            let j = [
+                                [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+                                [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+                                [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+                            ];
+                            let cof = cof3(&j);
+                            let fv = f(&x);
+                            let mut val = 0.0;
+                            for r in 0..3 {
+                                val += fv[r] * (cof[r][0] * row.nk[0]
+                                    + cof[r][1] * row.nk[1]
+                                    + cof[r][2] * row.nk[2]);
+                            }
+                            *di = val;
+                        }
+                    } else {
                     let p0 = self.mesh.node_coords(nodes[0]);
                     let c0 = self.mesh.node_coords(nodes[3]); // xi column
                     let c1 = self.mesh.node_coords(nodes[1]); // eta column
@@ -2127,6 +2230,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                                 + cof[r][2] * row.nk[2]);
                         }
                         *di = val;
+                    }
                     }
                 }
                 ElementType::Pyramid5 => {

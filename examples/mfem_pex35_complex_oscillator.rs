@@ -896,6 +896,7 @@ fn solve_hcurl(
             edge_smoother: linlvo::precond::AmsEdgeSmoother::SymmetricGaussSeidel,
             cycle: linlvo::precond::AmsCycle::MultiplicativeV11,
             face_space: false,
+            singular_problem: false,
             node_solver: linlvo::precond::AuxSpaceSolver::Amg(linlvo::amg::AmgConfig {
                 coarse_threshold: 9,
                 max_levels: 25,
