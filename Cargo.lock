@@ -709,6 +709,7 @@ dependencies = [
  "fem-linalg",
  "fem-linalg-gpu",
  "fem-mesh",
+ "fem-parallel",
  "fem-regression",
  "fem-solver",
  "fem-space",

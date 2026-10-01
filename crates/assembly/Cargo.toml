@@ -35,4 +35,9 @@ optional  = true
 fem-linalg = { path = "../linalg" }
 fem-regression = { path = "../regression" }
 fem-io = { path = "../io" }
+# d104_pconv pins: the ultraweak DPG convection-diffusion table needs the
+# parallel DPG driver + mesh refinement + the PCG solver.
+fem-mesh = { path = "../mesh" }
+fem-parallel = { path = "../parallel" }
+fem-solver = { path = "../solver" }
 proptest = "1"

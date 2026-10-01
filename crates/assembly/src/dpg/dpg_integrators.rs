@@ -534,6 +534,12 @@ pub type DpgSpatialScalar = Box<dyn Fn(&VolCtx) -> f64 + Send + Sync>;
 /// `MatrixCoefficient::Eval(DenseMatrix&, ElementTransformation&, …)`).
 pub type DpgSpatialMatrix = Box<dyn Fn(&VolCtx, &mut [f64]) + Send + Sync>;
 
+/// Object-safe spatially varying vector coefficient: writes the `dim`
+/// components into the output slice at every quadrature point (MFEM
+/// `VectorCoefficient::Eval(Vector&, ElementTransformation&, const
+/// IntegrationPoint&)`).
+pub type DpgSpatialVector = Box<dyn Fn(&VolCtx, &mut [f64]) + Send + Sync>;
+
 /// `(q(x) u, v)` — MFEM `MassIntegrator(q)` / `MixedScalarMassIntegrator(q)`
 /// with a spatially varying scalar `Coefficient` (PML: `MassIntegrator`
 /// `μ²ω²·|detJ|²(x)` on (F,F), `MixedScalarMassIntegrator` `ωμ·detJᵣ` etc. on
@@ -783,6 +789,128 @@ impl DpgBilinear2 for DpgMixedVectorWeakCurlSpatialIntegrator {
                     }
                 }
                 m[i * nc + j] += ctx.w * s;
+            }
+        }
+    }
+}
+
+/// `-(β(x) u, ∇v)` — MFEM `MixedScalarWeakDivergenceIntegrator(VectorCoefficient&)`
+/// (a `MixedScalarVectorIntegrator` with `transpose = false`): scalar trial
+/// `u`, scalar-with-gradient test `v`.  The kernel (`fem/bilininteg.cpp`)
+/// negates the *physical* test gradient (`CalcVShape` does `CalcPhysDShape`
+/// then `shape *= -1`), scales the vector coefficient by
+/// `w = Trans.Weight()·ip.weight` (`V *= w`), contracts
+/// `vshape_tmp = vshape·V` and finally does `AddMultVWt(vshape_tmp, shape,
+/// elmat)`:
+///
+/// ```text
+///     B[v_i, u_j] -= ( Σ_c ∇v_i[c]·(β_c(x)·w) ) · u_j
+/// ```
+///
+/// (`w` is exactly fem-rs's [`VolCtx::w`]; IEEE negation is exact, so folding
+/// the basis minus sign into the elmat minus is bit-identical to MFEM.)
+/// `pconvection-diffusion` uses it for the `-(βu, ∇v)` trial block
+/// (`u ∈ L²(p−1)`, `v ∈ H¹(p+δ)`).
+pub struct DpgMixedScalarWeakDivergenceSpatialIntegrator {
+    /// Spatial coefficient `β(x)`.
+    pub beta: DpgSpatialVector,
+}
+
+impl DpgBilinear2 for DpgMixedScalarWeakDivergenceSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let mut beta = [0.0_f64; 3];
+        (self.beta)(ctx, &mut beta[..d]);
+        let nt = test.n_expanded;
+        let nc = trial.n_expanded;
+        for i in 0..nt {
+            // MFEM scales the coefficient by the integration weight first
+            // (`V *= w`), then contracts with the (negated) test gradient.
+            let mut s = 0.0;
+            for c in 0..d {
+                s += test.grad[i * d + c] * (beta[c] * ctx.w);
+            }
+            for j in 0..nc {
+                m[i * nc + j] -= s * trial.phi[j];
+            }
+        }
+    }
+}
+
+/// `(∇v, Q(x) ∇δv)` — MFEM `DiffusionIntegrator(MatrixCoefficient&)` (the `MQ`
+/// kernel): per quadrature point MFEM scales the matrix by
+/// `w = ip.weight/|det J|` (`M *= w`), forms the physical gradients
+/// `dshapedxt = dshape·adj(J) = |det J|·∇`, then
+/// `Mult(dshapedxt, M, tmp); AddMultABt(tmp, dshapedxt, elmat)`.  With fem-rs's
+/// `grad = ∇` and `ctx.w = ip.weight·|det J|` the `|det J|` factors cancel
+/// term-by-term, leaving
+///
+/// ```text
+///     B[v_i, v_j] += ctx.w · Σ_c ( Σ_d ∇v_i[d]·Q(x)(d,c) ) · ∇v_j[c]
+/// ```
+///
+/// (`Mult` accumulates the row `tmp(i,c) = Σ_d A(i,d)·M(d,c)` before
+/// `AddMultABt` pairs it with `A(j,c)`.)  `pconvection-diffusion` uses it for
+/// the `(β·∇v, β·∇δv)` test-norm block with `Q(x) = β(x)β(x)ᵀ` (MFEM
+/// `OuterProductCoefficient`).
+pub struct DpgDiffusionSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgDiffusionSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..d * d]);
+        let nt = test.n_expanded;
+        let nc = trial.n_expanded;
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..d {
+                    let mut t = 0.0;
+                    for dq in 0..d {
+                        t += test.grad[i * d + dq] * qm[dq * d + c];
+                    }
+                    s += t * trial.grad[j * d + c];
+                }
+                m[i * nc + j] += ctx.w * s;
+            }
+        }
+    }
+}
+
+/// `(q(x) u, v)` on genuine vector-DOF sides — scalar-Coefficient twin of
+/// [`DpgVectorFEMassSpatialIntegrator`]: MFEM
+/// `VectorFEMassIntegrator(Coefficient&)` takes the `AddMult_a_AAt` kernel
+/// (`w = ip.weight·|det J|; w *= q;` — as opposed to the matrix-Coefficient
+/// `Mult`/`AddMultABt` kernel of the matrix twin):
+///
+/// ```text
+///     B[v_i, u_j] += ctx.w·q(x)·Σ_c (v_i)_c (u_j)_c
+/// ```
+///
+/// `pconvection-diffusion` uses it for the `c₂(x)(τ, δτ)` test-norm block with
+/// the L²(P0) field `c₂` (indexed through [`VolCtx::elem`]).
+pub struct DpgVectorFEMassScalarSpatialIntegrator {
+    /// Spatial coefficient `q(x)`.
+    pub q: DpgSpatialScalar,
+}
+
+impl DpgBilinear2 for DpgVectorFEMassScalarSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let qv = (self.q)(ctx);
+        let nt = test.n_scalar;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..d {
+                    s += test.phi[i * d + c] * trial.phi[j * d + c];
+                }
+                m[i * nc + j] += ctx.w * qv * s;
             }
         }
     }
@@ -1092,6 +1220,101 @@ mod tests {
         let mut m3 = vec![0.0; 6];
         DpgMassSpatialIntegrator { q: Box::new(gated) }.assemble2(&ctx, &r, &t, &mut m3);
         assert!(m3.iter().all(|&v| v == 0.0));
+    }
+
+    /// The pconvection-diffusion spatial integrators: constant-coefficient
+    /// reduction against their constant twins plus hand-computed entries with
+    /// a genuinely varying coefficient.
+    #[test]
+    fn spatial_weak_divergence_diffusion_vectorfemass() {
+        // -(β·∇v, u) with constant β == -β_c ∇v_c u (hand entry).
+        let ctx = VolCtx { w: 0.7, x: vec![0.2, 0.9], dim: 2, elem: 3 };
+        let mut t = vals(4, 1, 0.0);
+        t.grad = vec![0.3, -0.5, 1.1, 0.2, -0.7, 0.9, 0.4, 2.0];
+        let mut r = vals(2, 1, 0.0);
+        r.phi = vec![1.5, -2.0];
+        let beta = |_c: &VolCtx, out: &mut [f64]| {
+            out[..2].copy_from_slice(&[1.0, 0.0]);
+        };
+        let mut m = vec![0.0; 8];
+        DpgMixedScalarWeakDivergenceSpatialIntegrator { beta: Box::new(beta) }
+            .assemble2(&ctx, &r, &t, &mut m);
+        for i in 0..4 {
+            // -( (β·∇v_i)·w ) · u_j with β = (1,0): only the x-derivative enters.
+            let want = -(ctx.w * t.grad[i * 2]) * r.phi[0] - 0.0 * (ctx.w * t.grad[i * 2 + 1]) * r.phi[1];
+            assert!((m[i * 2] - want).abs() < 1e-15, "row {i}: {} vs {want}", m[i * 2]);
+        }
+        // Non-unit β flips both components.
+        let beta2 = |_c: &VolCtx, out: &mut [f64]| {
+            out[..2].copy_from_slice(&[2.0, -1.0]);
+        };
+        let mut m2 = vec![0.0; 8];
+        DpgMixedScalarWeakDivergenceSpatialIntegrator { beta: Box::new(beta2) }
+            .assemble2(&ctx, &r, &t, &mut m2);
+        for i in 0..4 {
+            let dot = 2.0 * t.grad[i * 2] - t.grad[i * 2 + 1];
+            assert!((m2[i * 2] - (-ctx.w * dot * r.phi[0])).abs() < 1e-15);
+            assert!((m2[i * 2 + 1] - (-ctx.w * dot * r.phi[1])).abs() < 1e-15);
+        }
+
+        // (∇v, Q(x) ∇δv) with Q = k·I == constant DpgDiffusionIntegrator.
+        let k = 1.7_f64;
+        let diag = move |_c: &VolCtx, out: &mut [f64]| {
+            out[..4].copy_from_slice(&[k, 0.0, 0.0, k]);
+        };
+        let mut t2 = vals(3, 1, 0.0);
+        t2.grad = vec![0.2, -0.3, 0.5, 0.1, -1.0, 0.4];
+        let mut r2 = vals(3, 1, 0.0);
+        r2.grad = vec![0.7, 0.3, -0.2, 0.6, 1.0, -0.5];
+        let mut m1 = vec![0.0; 9];
+        let mut m2 = vec![0.0; 9];
+        DpgDiffusionIntegrator { q: k }.assemble2(&ctx, &r2, &t2, &mut m1);
+        DpgDiffusionSpatialIntegrator { q: Box::new(diag) }.assemble2(&ctx, &r2, &t2, &mut m2);
+        for (a, b) in m1.iter().zip(&m2) {
+            assert!((a - b).abs() < 1e-14, "{a} vs {b}");
+        }
+        // Full matrix Q, hand-checked (0,0) entry: Σ_c (Σ_d g0d Q_dc) g0c.
+        let qm = vec![vec![0.4, -0.2], vec![1.1, 0.7]];
+        let qmc = qm.clone();
+        let full = move |_c: &VolCtx, out: &mut [f64]| {
+            out[..4].copy_from_slice(&[qmc[0][0], qmc[0][1], qmc[1][0], qmc[1][1]]);
+        };
+        let mut m3 = vec![0.0; 9];
+        DpgDiffusionSpatialIntegrator { q: Box::new(full) }.assemble2(&ctx, &r2, &t2, &mut m3);
+        let want00: f64 = (0..2)
+            .map(|c| (0..2).map(|d| t2.grad[d] * qm[d][c]).sum::<f64>() * r2.grad[c])
+            .sum::<f64>();
+        assert!((m3[0] - ctx.w * want00).abs() < 1e-15, "{} vs {}", m3[0], ctx.w * want00);
+
+        // q(x)(τ, δτ) with constant q == constant DpgVectorFEMassIntegrator.
+        let mut tv = vals(8, 2, 0.0);
+        tv.n_scalar = 4;
+        tv.n_expanded = 8;
+        tv.phi = vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8, 0.9, 1.0, -1.1, 1.2];
+        tv.n_scalar = 6;
+        let mut rv = vals(6, 2, 0.0);
+        rv.n_scalar = 3;
+        rv.n_expanded = 6;
+        rv.phi = vec![0.3, -0.1, 0.7, 0.2, 0.9, -0.4];
+        let qsp = move |_c: &VolCtx| 1.3;
+        let mut m4 = vec![0.0; 6 * 3];
+        let mut m5 = vec![0.0; 6 * 3];
+        DpgVectorFEMassIntegrator { q: 1.3 }.assemble2(&ctx, &rv, &tv, &mut m4);
+        DpgVectorFEMassScalarSpatialIntegrator { q: Box::new(qsp) }
+            .assemble2(&ctx, &rv, &tv, &mut m5);
+        for (a, b) in m4.iter().zip(&m5) {
+            assert!((a - b).abs() < 1e-14, "{a} vs {b}");
+        }
+        // Element-index gating picks the P0 field value of THIS element.
+        let c2 = [0.5_f64, 2.0, 4.0, 8.0, 16.0];
+        let p0 = move |c: &VolCtx| c2[c.elem as usize];
+        let mut m6 = vec![0.0; 6 * 3];
+        DpgVectorFEMassScalarSpatialIntegrator { q: Box::new(p0) }
+            .assemble2(&ctx, &rv, &tv, &mut m6);
+        let scale = c2[ctx.elem as usize] / 1.3;
+        for (a, b) in m4.iter().zip(&m6) {
+            assert!((a * scale - b).abs() < 1e-13, "{a}·{scale} vs {b}");
+        }
     }
 
     /// `TransposeIntegrator(MixedCurlIntegrator)` layout: the test side is a
