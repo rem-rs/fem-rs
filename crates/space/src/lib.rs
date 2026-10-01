@@ -19,6 +19,7 @@ pub mod ordering;
 /// Embedded (restricted) vector spaces — MFEM `ND_R2D_FECollection` /
 /// `RT_R2D_FECollection` (`fem/fe_coll.cpp`): 3-component H(curl)/H(div)
 /// fields on intrinsic 2-D meshes (MFEM `ex31` / `ex32p`).
+pub mod embedded_r1d;
 pub mod embedded_r2d;
 /// D364: single source of truth for scalar Lagrange reference-element
 /// dispatch (family constructors + purpose dispatches, domain contracts).

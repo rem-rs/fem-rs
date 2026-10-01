@@ -10920,3 +10920,65 @@ pub(crate) fn fichera_mixed_mesh() -> Mesh<3> {
     vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
     }
 }
+
+/// Uniform refinement of a 1-D Line2 mesh — MFEM `Mesh::LocalRefinement`
+/// `Dim == 1` branch (`mesh/mesh.cpp:11109-11135`) with *all* elements
+/// marked (`UniformRefinement` → `LocalRefinement(AllElements(...))`,
+/// mesh.cpp:11649).
+///
+/// * per element `j` (element order): one new midpoint vertex `cnv + j`
+///   (`AverageVertices`: bitwise `(x0 + x1) * 0.5`);
+/// * the parent element **keeps the first child** `[v0, mid]` in place; the
+///   second child `[mid, v1]` is appended after all elements with the
+///   parent's attribute;
+/// * boundary POINTs reference original vertices only and pass through.
+pub fn refine_uniform_1d(mesh: &Mesh<1>) -> Mesh<1> {
+    let nv = mesh.n_nodes();
+    let ne = mesh.n_elems();
+
+    // New midpoint vertices, element-major (MFEM `new_v = cnv + j`).
+    let mut coords = mesh.coords.clone();
+    for e in 0..ne as u32 {
+        let v = mesh.elem_nodes(e);
+        let (a, b) = (mesh.coords_of(v[0])[0], mesh.coords_of(v[1])[0]);
+        coords.push((a + b) * 0.5);
+    }
+
+    // Parents keep [v0, mid]; children [mid, v1] appended after all parents
+    // (MFEM: `elements[new_e] = new Segment(new_v, vert[1], attr)` with
+    // `new_e = cne + j`, in the same `for j` loop over marked elements).
+    let mut conn = mesh.conn.clone();
+    let mut elem_tags = mesh.elem_tags.clone();
+    conn.reserve(ne as usize);
+    elem_tags.reserve(ne as usize);
+    for e in 0..ne as u32 {
+        let v = mesh.elem_nodes(e);
+        let mid = nv as u32 + e;
+        conn[2 * e as usize + 1] = mid;
+        conn.push(mid);
+        conn.push(v[1]);
+        elem_tags.push(mesh.elem_tags[e as usize]);
+    }
+
+    Mesh {
+        coords,
+        conn,
+        elem_tags,
+        elem_type: ElementType::Line2,
+        face_conn: mesh.face_conn.clone(),
+        face_tags: mesh.face_tags.clone(),
+        face_type: mesh.face_type,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        nc_vertex_view: None,
+        geometry: None,
+        vertex_parents: vec![],
+        nc_leaf_states: None,
+        nc_face_ids: None,
+    }
+}
