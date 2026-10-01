@@ -241,13 +241,21 @@ impl<M: MeshTopology> SinvBuilder<M> {
     }
 
     /// Apply `S^{-1}` to a flat vector: `y_i = Σ_j S⁻¹_{ij} x_j`.
+    ///
+    /// The per-row accumulation runs in the **reversed local order** — the
+    /// same sequence MFEM's `matSinv` spmv produces, because the BilinearForm
+    /// linked-list assembly stores each L2 row reversed (local j = nt-1 … 0,
+    /// see [`crate::dpg::assemble_sinv_sparse`]) and its spmv is a
+    /// left-to-right dot over the stored order (D101: with the ascending
+    /// order, SinvF disagreed with MFEM by <=2 ulp on a third of the entries,
+    /// which then fed `b = B^T S^-1 F` and forked the outer PCG).
     pub fn apply(&self, x: &[f64], y: &mut [f64]) {
         y.fill(0.0);
         let nt = self.n_per_elem;
         for (block, dofs) in self.elem_blocks.iter().zip(self.elem_dofs.iter()) {
             for i in 0..nt {
                 let mut v = 0.0;
-                for j in 0..nt {
+                for j in (0..nt).rev() {
                     v += block[i * nt + j] * x[dofs[j]];
                 }
                 y[dofs[i]] += v;
@@ -265,7 +273,7 @@ impl<M: MeshTopology> SinvBuilder<M> {
             for k in 0..nrhs {
                 for i in 0..nt {
                     let mut v = 0.0;
-                    for j in 0..nt {
+                    for j in (0..nt).rev() {
                         v += block[i * nt + j] * x[dofs[j] * nrhs + k];
                     }
                     y[dofs[i] * nrhs + k] += v;
@@ -280,7 +288,7 @@ impl<M: MeshTopology> SinvBuilder<M> {
         let block = &self.elem_blocks[elem as usize];
         for i in 0..nt {
             let mut v = 0.0;
-            for j in 0..nt {
+            for j in (0..nt).rev() {
                 v += block[i * nt + j] * x_block[j];
             }
             y_block[i] = v;

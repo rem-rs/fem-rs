@@ -479,7 +479,11 @@ fn d800_straight_mesh_values_are_bitwise_stable() {
     // NOTE(d800): pins captured from the pre-fix run (tmp/d800/red_use_iso.log);
     // `assert_eq!` is exact, so any last-bit drift in the straight route fails.
     const L2_PINS: &[(&str, f64)] = &[
-        ("quad4", 1.63299316185545251e0),
+        (// D101: the straight-quad geometry element switched from the barycentric
+        // factory QuadQk to the MFEM closed-form BiLinearGeo2D (measured bitwise
+        // against MFEM PointMat/dshape/J on the ex8 star mesh, which took
+        // B0/SinvF/b bitwise), so the straight-quad value moved by 1 ulp.
+        "quad4", 1.63299316185545274e0),
         ("tri3", 1.63299316185545207e0),
         ("tet4", 3.18852107828483389e0),
         ("hex8", 3.18852107828483478e0),

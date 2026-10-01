@@ -109,7 +109,7 @@ pub fn assembly_parallel_min_elems() -> usize {
 /// (NOT the lexicographic `L2_T1` order of curved `Nodes` fields).  Using the
 /// wrong path introduces last-ulp differences in the Jacobian and hence in
 /// every element matrix of non-axis-aligned quads.
-struct BiLinearGeo2D;
+pub(crate) struct BiLinearGeo2D;
 
 impl ReferenceElement for BiLinearGeo2D {
     fn dim(&self) -> u8 { 2 }

@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CsrMatrix;
 use fem_mesh::topology::MeshTopology;
 
 use super::sinv::SinvBuilder;
@@ -28,21 +28,45 @@ pub fn assemble_sinv_sparse<M: MeshTopology>(
 ) -> CsrMatrix<f64> {
     let n = sinv.n_dofs_total();
     let nt = sinv.n_per_elem();
-    let mut coo = CooMatrix::new(n, n);
+    // MFEM's `matSinv` rows are NOT sorted: the BilinearForm assembly inserts
+    // each element's row entries in local-j order through the linked list
+    // (head insertion), and `Finalize` converts to CSR preserving that list
+    // order — so every L2 row stores its element block REVERSED (local j =
+    // nt-1 … 0; measured on the ex8 star mesh: row 0 = [3, 2, 1, 0]).  The
+    // stored order is invisible to the values but NOT to spmv: every SinvF
+    // entry is a left-to-right dot over the row, and its rounding feeds
+    // b = Bᵀ S⁻¹ F and the whole DPG solve (D101: SinvF disagreed by ≤2 ulp
+    // on 6623/20480 entries with the sorted order).
+    let nnz = sinv.n_elements() * nt * nt;
+    let mut row_ptr = vec![0usize; n + 1];
+    let mut col_idx = vec![0u32; nnz];
+    let mut values = vec![0.0_f64; nnz];
+    // Element-private L2 dofs: element e owns rows [e·nt, (e+1)·nt), each with
+    // exactly nt entries, and the elements cover the rows in ascending order.
+    let mut pos = 0usize;
     for e in 0..sinv.n_elements() {
         let block = sinv.elem_inverse(e as u32);
         let dofs = sinv.elem_dofs(e as u32);
-        for i in 0..nt {
-            let gi = dofs[i];
-            for j in 0..nt {
+        for (i, &gi) in dofs.iter().enumerate() {
+            row_ptr[gi as usize] = pos;
+            for j in (0..nt).rev() {
                 let v = block[i * nt + j];
                 if v.abs() > 1e-30 {
-                    coo.add(gi, dofs[j], v);
+                    col_idx[pos] = dofs[j] as u32;
+                    values[pos] = v;
+                    pos += 1;
                 }
             }
         }
     }
-    coo.into_csr()
+    row_ptr[n] = pos;
+    CsrMatrix {
+        nrows: n,
+        ncols: n,
+        row_ptr,
+        col_idx,
+        values,
+    }
 }
 
 // ─── DpgNormalOperator ───────────────────────────────────────────────────────

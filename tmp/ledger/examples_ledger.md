@@ -522,3 +522,29 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
   ex27 default 0 diff、ex29 0 diff；**ex18 反向受益**：误差 3.930926246114457e-3 →
   **3.930926246117042e-3**，对 C++ 17 位真值 `0.003930926246116611` 的相对差
   **5.5e-13 → 1.1e-13（贴近 5×）**；435 步不变。
+
+## round 101 增量（主会话：D864 第三波——几何行序双杀，ex8 fork iter10 仍 RUN）
+
+> 承 round-100 的残差定位（几何 J 1 ulp），本轮把 J 的成因与行序族一并清掉。
+
+- **① 几何派发双轨缺陷（本轮主修复）**：仓库里有**两个**几何元派发器——`assembler.rs::geo_ref_elem`
+  （Quad4/g≤1 → 闭式 `BiLinearGeo2D` ✓，S0 路径，故 S0 一直逐位）与
+  `vector_assembler.rs::geo_ref_elem_from_mesh`（Quad4 → **重心式工厂 QuadQk** ✗，mixed/b0/向量路径）。
+  MFEM 直边 quad 的几何元是 `BiLinear2DFiniteElement` **闭式**（解元是重心式——两者代数同、舍入异），
+  `geo_ref_elem_from_mesh` 的 quad 臂漏掉了自家 hex 臂已有的处理（HexQ1 闭式）。实证：star 0 号元
+  （det≈8e-4 薄片）QP1 的 `J[1][1]` 差 1 ulp——因子级对拍（PointMat/闭式 dshape/J）后钉死。
+  修 = `geo_ref_elem_from_mesh` quad 臂 g≤1 → `BiLinearGeo2D`（hex 臂同款先例）。修后 **B0 全表逐位**。
+- **② 行内存储序族（MFEM 链表组装语义）**：MFEM 的 BilinearForm 组装走链表**头插**，
+  `Finalize` 保序转 CSR ⇒ **元素私有行存为逆序**（star 实测：Sinv row0 = [3,2,1,0]；S0 共享 dof 行
+  = 逆时序 [4257, 1779, …]）。行序对值不可见、对 spmv/乘法累加序致命。三处对齐：
+  `assemble_sinv_sparse` 改手工逆序 CSR ⇒ **SinvF 逐位**；`SinvBuilder::{apply,apply_matrix,apply_block}`
+  改逆序累加；`assemble_b0_mfem` 改手工逆序 CSR ⇒ **b 逐位**。bhat 在 order-0 trace 下每行单条目
+  （序不敏感），高阶 trace 时需同查（记入 D864）。
+- **现状**：B0/Shat/SinvF/b **全部逐位 = C++**；ex8 轨迹分叉点 **iter9→iter10**（iter10 = 6.6511e-08 vs
+  6.65111e-08）。**唯一残差定位 = S0（H1 共享 dof 行）的行内序**——MFEM 行 = 链表逆时序
+  （S0.txt 实测 4961/5281 行非排序），修复需「MFEM 链表语义组装器」（通用装配器级爆炸半径，㉚
+  金标账先行），登记为 D864 下一刀。ex8 维持 RUN。
+- **门与 pin**：workspace 门 1 靶红 = `d800_straight_mesh_values_are_bitwise_stable` 的 L2-quad4
+  自指稳定性 pin（防漂移哨兵，非 MFEM 真值 pin）——本轮几何修复使其 1 ulp 移动
+  （1.63299316185545251 → …274），pin 值更新并留 D101 案（其余 10 pin 未受扰）；
+  复跑 6/6 绿；其余 446 靶全绿（5346+1 修后 = 5347/0/40 口径）。

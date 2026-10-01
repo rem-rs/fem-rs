@@ -278,9 +278,20 @@ pub fn geo_ref_elem_from_mesh(
             ));
         }
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
-            // Quad vector bases (RT/ND) and the QuadQk geometry share the
-            // [0,1]² reference domain — use QuadQk for every geometric order.
-            return Some(factory_ref_elem(FactoryElemType::Quad, g.max(1)));
+            // D101: a *straight* quad mesh (geom_order 1) has MFEM's
+            // `BiLinear2DFiniteElement` as its geometry map — the direct
+            // closed-form bilinear formulas (H1 topological node order), NOT
+            // the barycentric `QuadQk` the generic factory returns.  The two
+            // differ in the last bits and the Jacobian is sensitive to exactly
+            // those bits (measured on the ex8 star-mesh sliver elements: a
+            // 1-ulp `J[1][1]` at QP1 fed `b = Bᵀ S⁻¹ F` and the DPG
+            // preconditioner, forking the outer PCG at iteration 9 — the
+            // assembler's own `geo_ref_elem` Quad arm and its hex twin
+            // (`HexQ1`) already took the closed-form route).
+            if g <= 1 {
+                return Some(Box::new(crate::assembler::BiLinearGeo2D));
+            }
+            return Some(factory_ref_elem(FactoryElemType::Quad, g));
         }
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             // D721: a *straight* hex mesh (geom_order 1) has MFEM's fixed-order

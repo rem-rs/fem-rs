@@ -25,7 +25,7 @@
 //! Essential-trial-dof columns are zeroed by the caller (MFEM
 //! `EliminateTrialEssentialBC` with a zero solution vector).
 
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CsrMatrix;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
@@ -45,7 +45,13 @@ where
     let dim = mesh.dim() as usize;
     let n_test = test.n_dofs();
     let n_trial = trial.n_dofs();
-    let mut coo = CooMatrix::new(n_test, n_trial);
+    // Hand-built CSR: every L2 test row is element-private and receives
+    // exactly n_trial entries (one block), so the layout is fixed up front.
+    let nnz = n_test * n_trial;
+    let mut row_ptr = vec![0usize; n_test + 1];
+    let mut col_idx = vec![0u32; nnz];
+    let mut values = vec![0.0_f64; nnz];
+    let mut pos = 0usize;
 
     for e in mesh.elem_iter() {
         let et = mesh.element_type(e);
@@ -147,12 +153,28 @@ where
             }
         }
 
+        // MFEM scatters the element matrix into the global SparseMatrix in
+        // (test row, trial col) order through the linked list (head
+        // insertion);  preserves the list order, so every
+        // element-private L2 row stores its trial block REVERSED (local j =
+        // n_c-1 … 0) — exactly like .  The entry VALUES
+        // are unaffected, but / consume the stored order, and
+        // the sorted order carried last-ulp noise into every outer-PCG
+        // iteration (D101: the ex8 fork surfaced at iteration 9 only because
+        // the print rounds it away before that).
         for (i, &gi) in global_rows.iter().enumerate() {
-            for (j, &gj) in global_cols.iter().enumerate() {
-                coo.add(gi, gj, m_elem[i * n_c + j]);
+            row_ptr[gi as usize] = pos;
+            for (j, &gj) in global_cols.iter().enumerate().rev() {
+                let v = m_elem[i * n_c + j];
+                if v.abs() > 1e-30 {
+                    col_idx[pos] = gj as u32;
+                    values[pos] = v;
+                    pos += 1;
+                }
             }
         }
     }
 
-    coo.into_csr()
+    row_ptr[n_test] = pos;
+    return CsrMatrix { nrows: n_test, ncols: n_trial, row_ptr, col_idx, values };
 }
