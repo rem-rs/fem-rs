@@ -584,7 +584,13 @@ where
         let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+        // Curved-mesh geometry: the same contract as the vector assembler's
+        // isoparametric path (D667) — hexes/quads take the mesh's geometry
+        // table map, simplices the affine one.  The old unconditional
+        // `from_simplex_nodes` panicked on curved hexes (d103 tesla `-cr`).
+        let use_iso =
+            !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+        let geo_elem = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
 
         let n_elem_r = global_rows.len();
         let n_elem_c = global_cols.len();
@@ -595,16 +601,23 @@ where
         let mut vec_col = vec![0.0; n_c * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
+            let (det_j, j_inv_t, xp) = if use_iso {
+                let ge = geo_elem.as_ref().expect("geo_ref_elem");
+                let (j, det, xp) =
+                    isoparametric_jacobian(mesh, mesh.geometry_nodes(e), ge.as_ref(), xi, dim);
+                let j_inv_t = j.try_inverse().expect("invertible Jacobian").transpose();
+                (det, j_inv_t, xp)
+            } else {
+                let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (tr.det_j(), tr.jacobian_inv_t().clone(), tr.map_to_physical(xi))
+            };
             // D696 verdict: **signed** — MFEM mixed vector×scalar forms
             // weight with `ip.weight * Trans.Weight()` (signed det).
-            let w = quad.weights[q] * tr.det_j();
-            let det_j = tr.det_j();
-            let j_inv_t = tr.jacobian_inv_t().clone();
+            let w = quad.weights[q] * det_j;
             ref_r.eval_basis(xi, &mut phi_r);
             ref_r.eval_grad_basis(xi, &mut grad_r);
             transform_grads(&j_inv_t, &grad_r, &mut grad_phys, n_r, dim);
             ref_c.eval_basis_vec(xi, &mut vec_col);
-            let xp = tr.map_to_physical(xi);
             let qp_r = QpData {
                 n_dofs: n_elem_r, dim, weight: w, phys_weight: w,
                 ref_weight: quad.weights[q], phi: &phi_r, grad_phys: &grad_phys,
@@ -962,7 +975,10 @@ where
             // mixed forms weight with `ip.weight * Trans.Weight()`.
             let (w, det_j, xp) = if use_iso {
                 let ge = geo_elem.as_ref().expect("geo_ref_elem");
-                let (jac, det_j, x) = isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim);
+                // Same curved-mesh contract as `assemble_hcurl_hdiv_mixed`
+                // above: geometry-table node row, not corner nodes.
+                let (jac, det_j, x) =
+                    isoparametric_jacobian(mesh, mesh.geometry_nodes(e), ge.as_ref(), xi, dim);
                 j_inv_t = jac.clone().try_inverse().expect("invertible Jacobian").transpose();
                 (quad.weights[q] * det_j, det_j, x)
             } else {
@@ -1079,7 +1095,14 @@ where
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, jit, det_j, xp): (f64, nalgebra::DMatrix<f64>, f64, Vec<f64>) = if use_iso {
                 let g: &dyn ReferenceElement = ge.as_deref().unwrap();
-                let (jac, det, xp) = isoparametric_jacobian(mesh, &nodes, g, xi, dim);
+                // Curved-mesh geometry: the Jacobian must be built from the
+                // geometry table's node row (27 nodes for a P2 hex), not the
+                // 8 corner nodes — the same contract the vector assembler's
+                // isoparametric path has always used (D667 pattern); feeding
+                // it the corner row panicked on the d103 tesla ball-quad mesh
+                // and would silently use straight geometry on any curved mesh.
+                let (jac, det, xp) =
+                    isoparametric_jacobian(mesh, mesh.geometry_nodes(e), g, xi, dim);
                 (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose(), det, xp)
             } else {
                 let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
@@ -1204,7 +1227,10 @@ where
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, jit, det_j): (f64, nalgebra::DMatrix<f64>, f64) = if use_iso {
                 let g: &dyn ReferenceElement = ge.as_deref().unwrap();
-                let (jac, det, _) = isoparametric_jacobian(mesh, &nodes, g, xi, dim);
+                // Same curved-mesh contract as `assemble_hcurl_hdiv_mixed`
+                // above: geometry-table node row, not corner nodes.
+                let (jac, det, _) =
+                    isoparametric_jacobian(mesh, mesh.geometry_nodes(e), g, xi, dim);
                 (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose(), det)
             } else {
                 let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
