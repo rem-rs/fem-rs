@@ -30,6 +30,114 @@ fn source_nba(mesh: &Mesh<2>) -> i32 {
     mesh.face_tags.iter().copied().max().unwrap_or(0)
 }
 
+/// Extrude a 1-D Line2 mesh into a 2-D Quad4 mesh — MFEM
+/// `Mesh::Extrude1D(mesh, ny, sy)` in its `closed = false` branch (the only
+/// path the `extruder` miniapp takes; `Extrude1D`'s `closed = true` branch is
+/// for periodic 1-D inputs and is not produced here).
+///
+/// * vertices: source vertex `v` lifted to layer `j` (`0..=ny`) is node
+///   `v * (ny+1) + j` with `y = sy·j/ny` (MFEM's point-major layering, same
+///   scheme as [`extrude_tri3_to_prisms`]);
+/// * elements: each source edge × each layer → quad
+///   `{v0_j, v1_j, v1_{j+1}, v0_{j+1}}`, attribute = source edge attribute;
+/// * boundary segments, in MFEM's creation order: first one vertical segment
+///   per source boundary **POINT** per layer (attribute kept; odd attributes
+///   flip the segment orientation — MFEM `if (attr%2) Swap(sv[0], sv[1])`),
+///   then per source element its bottom `(v0_0, v1_0)` and top
+///   `(v1_ny, v0_ny)` segments with attribute `nba + elem attr`.
+pub fn extrude_1d(mesh: &Mesh<1>, ny: usize, sy: f64) -> Mesh<2> {
+    assert!(ny > 0, "extrude_1d: ny must be positive");
+    let nvy = ny + 1;
+    let nv1 = mesh.n_nodes();
+    let ne1 = mesh.n_elems();
+    let nba = mesh.face_tags.iter().copied().max().unwrap_or(0);
+
+    let nid = |v: NodeId, j: usize| -> u32 { v * nvy as u32 + j as u32 };
+
+    // Vertices: (x kept, y = sy·j/ny), point-major.
+    let mut coords_2d = Vec::with_capacity(nv1 * nvy * 2);
+    for v in 0..nv1 as u32 {
+        let x = mesh.coords_of(v)[0];
+        for j in 0..nvy {
+            coords_2d.push(x);
+            coords_2d.push(sy * (j as f64 / ny as f64));
+        }
+    }
+
+    // Elements: edge-major, layer-inner (MFEM `for i in NE { for j in ny }`).
+    let mut conn_2d = Vec::with_capacity(ne1 * ny * 4);
+    let mut elem_tags_2d = Vec::with_capacity(ne1 * ny);
+    for e in 0..ne1 as u32 {
+        let verts = mesh.elem_nodes(e);
+        let attr = mesh.elem_tags[e as usize];
+        for j in 0..ny {
+            conn_2d.extend_from_slice(&[
+                nid(verts[0], j),
+                nid(verts[1], j),
+                nid(verts[1], j + 1),
+                nid(verts[0], j + 1),
+            ]);
+            elem_tags_2d.push(attr);
+        }
+    }
+
+    // Boundary: source POINTs extruded vertically (attr%2 flips), then the
+    // bottom/top pair of every source element.
+    let nb1 = mesh.n_faces();
+    let n_faces = nb1 * ny + ne1 * 2;
+    let mut face_conn: Vec<NodeId> = Vec::with_capacity(n_faces * 2);
+    let mut face_tags: Vec<i32> = Vec::with_capacity(n_faces);
+    let mut face_types: Vec<ElementType> = Vec::with_capacity(n_faces);
+    let mut face_offsets: Vec<usize> = Vec::with_capacity(n_faces + 1);
+    face_offsets.push(0);
+    for b in 0..nb1 as u32 {
+        let verts = mesh.bface_nodes(b);
+        let attr = mesh.face_tags[b as usize];
+        let v0 = verts[0];
+        for j in 0..ny {
+            let (mut s0, mut s1) = (nid(v0, j), nid(v0, j + 1));
+            if attr % 2 != 0 {
+                std::mem::swap(&mut s0, &mut s1);
+            }
+            face_conn.extend_from_slice(&[s0, s1]);
+            face_tags.push(attr);
+            face_types.push(ElementType::Line2);
+            face_offsets.push(face_conn.len());
+        }
+    }
+    for e in 0..ne1 as u32 {
+        let verts = mesh.elem_nodes(e);
+        let attr = nba + mesh.elem_tags[e as usize];
+        face_conn.extend_from_slice(&[nid(verts[0], 0), nid(verts[1], 0)]);
+        face_tags.push(attr);
+        face_types.push(ElementType::Line2);
+        face_offsets.push(face_conn.len());
+        face_conn.extend_from_slice(&[nid(verts[1], ny), nid(verts[0], ny)]);
+        face_tags.push(attr);
+        face_types.push(ElementType::Line2);
+        face_offsets.push(face_conn.len());
+    }
+
+    Mesh {
+        coords: coords_2d,
+        conn: conn_2d,
+        elem_tags: elem_tags_2d,
+        elem_type: ElementType::Quad4,
+        face_conn,
+        face_tags,
+        face_type: ElementType::Line2,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: Some(face_types),
+        face_offsets: Some(face_offsets),
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
+    }
+}
+
 /// Extrude a 2-D Tri3 mesh into a 3-D Prism6 mesh.
 ///
 /// Each triangle `{a, b, c}` in layer `k` becomes prism

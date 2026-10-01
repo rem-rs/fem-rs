@@ -21,9 +21,11 @@
 //!   file carries `nodes`.  fem-rs's `nodes` writer (round 32) covers H1
 //!   hexahedra, but `fem_mesh::extrusion` drops the input curvature, so `-trans`
 //!   **exits with code 3** instead of writing a linear mesh under the same name.
-//! * `-ny`/`-wy` need `Mesh::Extrude1D` (1-D → 2-D), which fem-rs does not
-//!   have; a 1-D input mesh **exits with code 3** (the C++ autoselects
-//!   `ny = 1, nz = 0` for `dim == 1` and extrudes in y).
+//! * `-ny`/`-wy` take the `Mesh::Extrude1D` (1-D → 2-D) path, ported in
+//!   round 102 (`fem_mesh::extrusion::extrude_1d`, MFEM's `closed = false`
+//!   branch — the one the miniapp calls); the C++ autoselects `ny = 1, nz = 0`
+//!   for `dim == 1` and extrudes in y, and an explicit `-nz > 0` chains the
+//!   2-D result into the 3-D extrusion, as in C++.
 //! * A mixed 2-D input (`star-mixed.mesh`, `Mesh::Extrude2D` handles any mix of
 //!   triangles and quads) cannot be extruded by `fem_mesh::extrusion`, whose
 //!   two entry points each require a *uniform* source mesh; such an input
@@ -34,7 +36,7 @@
 //!   mesh, which is already given by the file.  It is parsed and printed.
 //! * `-vis`/`-p` are parsed and printed but no GLVis socket is opened.
 
-use fem_io::mfem::write_mfem_file_3d;
+use fem_io::mfem::{write_mfem_file, write_mfem_file_3d};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::Mesh;
 
@@ -109,18 +111,6 @@ fn main() {
     }
     print_options(&mesh_file, order, ny, wy, nz, hz, trans);
 
-    // The 1-D path (`Mesh::Extrude1D`) is not ported, and `read_mfem` rejects
-    // `dimension 1` files, so detect it from the header first and degrade
-    // honestly instead of reporting a parse error.
-    if mesh_dimension(&mesh_file) == Some(1) {
-        gap_exit(
-            "a 1-D input mesh needs `Mesh::Extrude1D` (1-D -> 2-D), which fem-rs does not have \
-(the C++ autoselects `ny = 1, nz = 0` and extrudes in y).",
-            "[1] `Mesh::Extrude1D` (1-D segment -> Quad4) for `-m ../../data/inline-segment.mesh \
--ny 8 -wy 2`; [2] `-wy`.",
-        );
-    }
-
     let file = match fem_io::mfem::read_mfem_file(&mesh_file) {
         Ok(f) => f,
         Err(e) => {
@@ -128,6 +118,41 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // ── 1-D input: `Mesh::Extrude1D` (the C++ `case 1:` branch) ─────────────
+    // The C++ autoselects `ny = 1` (if unset) and `nz = 0`, extrudes in y,
+    // and — when `-nz > 0` was passed explicitly — keeps extruding the
+    // resulting 2-D mesh to 3-D (dim is reassigned after the first extrusion).
+    if let Some(m1) = file.mesh1d {
+        if ny < 0 {
+            ny = 1;
+        }
+        let nz1 = if nz < 0 { 0 } else { nz };
+        println!("Extruding 1D mesh to a width of {wy} using {ny} elements.");
+        let mesh2d = fem_mesh::extrusion::extrude_1d(&m1, ny as usize, wy);
+        if nz1 > 0 {
+            println!("Extruding 2D mesh to a height of {hz} using {nz1} elements.");
+            let mesh3d =
+                fem_mesh::extrusion::extrude_quad4_to_hex8(&mesh2d, nz1 as usize, hz);
+            write_mfem_file_3d(OUTPUT, &mesh3d).expect("write mesh");
+            println!(
+                "Wrote {OUTPUT} ({} elements, {} boundary faces, {} nodes).",
+                mesh3d.n_elems(),
+                mesh3d.n_faces(),
+                mesh3d.n_nodes()
+            );
+        } else {
+            write_mfem_file(OUTPUT, &mesh2d).expect("write mesh");
+            println!(
+                "Wrote {OUTPUT} ({} elements, {} boundary faces, {} nodes).",
+                mesh2d.n_elems(),
+                mesh2d.n_faces(),
+                mesh2d.n_nodes()
+            );
+        }
+        return;
+    }
+
     let mesh2d: Mesh<2> = match file.mesh2d {
         Some(m) => m,
         None => {
@@ -172,7 +197,7 @@ transformations; [3] H1 prism numbering for the `Tri3` input path.",
             "a mixed 2-D input mesh (triangles + quads) needs the mixed branch of \
 `Mesh::Extrude2D`; `fem_mesh::extrusion` only extrudes uniform Quad4 -> Hex8 and uniform Tri3 -> \
 Prism6.",
-            "[1] mixed-element `Mesh::Extrude2D` (`star-mixed.mesh`); [2] the 1-D path.",
+            "[1] mixed-element `Mesh::Extrude2D` (`star-mixed.mesh`).",
         );
     }
 
@@ -192,18 +217,4 @@ Prism6.",
         mesh3d.n_faces(),
         mesh3d.n_nodes()
     );
-}
-
-/// `dimension` value of the mesh file, read from the header (the reader itself
-/// refuses `dimension 1`, so this is the only way to tell a 1-D input apart
-/// from a malformed file).
-fn mesh_dimension(path: &str) -> Option<usize> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines().map(|l| l.trim());
-    while let Some(l) = lines.next() {
-        if l == "dimension" {
-            return lines.next().and_then(|v| v.parse().ok());
-        }
-    }
-    None
 }
