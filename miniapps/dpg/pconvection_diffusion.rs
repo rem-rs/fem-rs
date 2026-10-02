@@ -48,12 +48,18 @@
 //!                           1281 2.625e-02 2.437e-02   == 1281 2.625e-02 2.437e-02
 //!                           4993 6.552e-03 6.145e-03   == 4993 6.552e-03 6.145e-03
 //! -prob 2 -eps 5e-3 -o 2 -theta 0.0 -ref 2:
-//!                          337 6.984e-01 6.401e-01   ==  337 6.984e-01 6.401e-01
+//!                          337 6.984e-01 6.401e-01   ==  337 6.985e-01 6.401e-01
 //!                         1281 4.960e-01 6.226e-01   == 1281 4.960e-01 6.226e-01
 //!                         4993 2.202e-01 2.582e-01   == 4993 2.202e-01 2.582e-01
 //! -beta '2 3' -o 2 -theta 0.0:
 //!                          337 1.331e-01 7.851e-02   ==  337 1.331e-01 7.851e-02
 //!                         1281 2.960e-02 2.064e-02   == 1281 2.960e-02 2.064e-02
+//! -theta 0.7 (literal default, NC-AMR, D1030, --ranks 1):
+//!                          113 1.033e+00 9.290e-01   ==  113 1.033e+00 9.290e-01
+//!                          275 6.838e-01 6.187e-01   ==  275 6.838e-01 6.187e-01
+//! -theta 0.7 -sc (--ranks 1):
+//!                          113 1.033e+00 9.290e-01   ==  113 1.033e+00 9.290e-01
+//!                          275 6.838e-01 6.187e-01   ==  275 6.838e-01 6.187e-01
 //! ```
 //!
 //! The **PCG iteration count is not reproduced** (D963): the C++ miniapp
@@ -69,15 +75,20 @@
 //! * The C++ **literal default** `theta = 0.7` marks the subset of elements
 //!   with `res_e > θ·max_e` and refines them with MFEM's nonconforming quad
 //!   split (`GeneralRefinement(marked,1,1)`, hanging nodes).  **D960 closed
-//!   (round 106)**: the mark set itself matches C++ (9/16 at level 0) and the
+//!   (round 106)**: the mark set matches C++ (9/16 at level 0) and the
 //!   refinement is wired to `amr::general_refinement_quad_aniso` (the
 //!   `NcQuadTree` machinery, MFEM-probe-validated in `d246_quad_aniso_nc`).
-//!   The remaining gap is **D1030**: the DPG solve lacks hanging-node
-//!   constraints for the trace blocks (level-1 dofs 305 vs C++ 275 — the
-//!   parent-edge RT-trace dofs C++ eliminates through its conforming
-//!   restriction), so a *partial* mark set still exits 3 with the precise
-//!   delta printed.  With `-theta 0.0` (mark-all) the refinement is uniform
-//!   and matches C++ exactly.
+//!   **D1030 closed (round 106)**: the hanging-node conforming restriction of
+//!   the trace blocks is implemented (`SkeletonSpace::nc_conforming_constraints`
+//!   + `DpgWeakForm::set_trace_conforming_restriction`, probe-pinned against
+//!   the MFEM 4.10 `cP` — see `tmp/d106d1030/REPORT.md`) in the **serial
+//!   (`--ranks 1`) driver**, which is the 1:1 mirror of the C++ np1 run: the
+//!   theta=0.7 table matches C++ np1 to all printed digits on both rows
+//!   (`113 1.033e+00 9.290e-01` → `275 6.838e-01 6.187e-01`, also under
+//!   `-sc`).  The multi-rank lane does not carry the restriction yet —
+//!   `--ranks 2` with a partial mark set exits 3 (registered separately).
+//!   With `-theta 0.0` (mark-all) the refinement is uniform and the parallel
+//!   path matches C++ exactly.
 //! * `-pmg` (`PRefinementMultigrid`): not ported (**D961**); exits 3.
 //! * `-prob 1` (Erickson–Johnson): the essential `f̂` boundary condition needs
 //!   `ProjectBdrCoefficientNormal` (RT-trace normal projection), which fem-rs
@@ -94,23 +105,23 @@
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 
-use fem_assembly::dpg::dpg_basis::VolKind;
+use fem_assembly::dpg::dpg_basis::{DofConstraintRow, VolKind};
 use fem_assembly::dpg::dpg_integrators::{
-    DpgDiffusionIntegrator, DpgDiffusionSpatialIntegrator, DpgDivDivIntegrator,
-    DpgDomainLFIntegrator, DpgMassSpatialIntegrator, DpgMixedScalarWeakGradientIntegrator,
-    DpgMixedScalarWeakDivergenceSpatialIntegrator, DpgNormalTraceIntegrator,
-    DpgTGradientIntegrator, DpgTraceIntegrator, DpgTVectorFEMassIntegrator,
-    DpgVectorFEMassScalarSpatialIntegrator,
+    DpgBilinear2, DpgDiffusionIntegrator, DpgDiffusionSpatialIntegrator, DpgDivDivIntegrator,
+    DpgDomainLFIntegrator, DpgLinear2, DpgMassSpatialIntegrator,
+    DpgMixedScalarWeakGradientIntegrator, DpgMixedScalarWeakDivergenceSpatialIntegrator,
+    DpgNormalTraceIntegrator, DpgTGradientIntegrator, DpgTraceBilinear2, DpgTraceIntegrator,
+    DpgTVectorFEMassIntegrator, DpgVectorFEMassScalarSpatialIntegrator,
 };
-use fem_assembly::dpg_weakform::DpgBlockGs;
-use fem_mesh::amr::general_refinement_quad_aniso;
+use fem_assembly::dpg_weakform::{DpgBlockGs, DpgSystem, DpgWeakForm};
+use fem_mesh::amr::{general_refinement_quad_aniso, HangingNodeConstraint};
 use fem_mesh::{refine_uniform, ElementType, Mesh, MeshTopology};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_dpg_weakform::ParDpgWeakForm;
 use fem_parallel::par_partition::partition_mesh_identity;
 use fem_parallel::par_solve_pcg_precond;
 use fem_parallel::WorkerConfig;
-use fem_solver::SolverConfig;
+use fem_solver::{solve_pcg_operator_precond, SolverConfig};
 
 const PI: f64 = std::f64::consts::PI;
 
@@ -341,6 +352,459 @@ struct LevelResult {
     marked: Vec<u32>,
 }
 
+/// Builder API shared by the serial [`DpgWeakForm`] and the parallel
+/// [`ParDpgWeakForm`] driver paths — lets [`register_dpg_system`] feed either.
+trait PconvBuilder {
+    fn set_quad_order(&mut self, order: u8);
+    fn set_face_quad_order(&mut self, order: u8);
+    fn add_trial_scalar_space(&mut self, order: u8) -> usize;
+    fn add_trial_vector_space(&mut self, order: u8, vdim: usize) -> usize;
+    fn add_trial_trace_space_h1(&mut self, order: u8) -> usize;
+    fn add_trial_trace_space(&mut self, order: u8) -> usize;
+    fn add_test_space(&mut self, kind: VolKind, order: u8) -> usize;
+    fn add_trial_integrator(&mut self, integ: Box<dyn DpgBilinear2>, trial: usize, test: usize);
+    fn add_trace_integrator(
+        &mut self,
+        integ: Box<dyn DpgTraceBilinear2>,
+        trial: usize,
+        test: usize,
+    );
+    fn add_test_integrator(&mut self, integ: Box<dyn DpgBilinear2>, row: usize, col: usize);
+    fn add_domain_lf_integrator(&mut self, integ: Box<dyn DpgLinear2>, test: usize);
+}
+
+impl PconvBuilder for DpgWeakForm<Mesh<2>> {
+    fn set_quad_order(&mut self, order: u8) {
+        DpgWeakForm::set_quad_order(self, order)
+    }
+    fn set_face_quad_order(&mut self, order: u8) {
+        DpgWeakForm::set_face_quad_order(self, order)
+    }
+    fn add_trial_scalar_space(&mut self, order: u8) -> usize {
+        DpgWeakForm::add_trial_scalar_space(self, order)
+    }
+    fn add_trial_vector_space(&mut self, order: u8, vdim: usize) -> usize {
+        DpgWeakForm::add_trial_vector_space(self, order, vdim)
+    }
+    fn add_trial_trace_space_h1(&mut self, order: u8) -> usize {
+        DpgWeakForm::add_trial_trace_space_h1(self, order)
+    }
+    fn add_trial_trace_space(&mut self, order: u8) -> usize {
+        DpgWeakForm::add_trial_trace_space(self, order)
+    }
+    fn add_test_space(&mut self, kind: VolKind, order: u8) -> usize {
+        DpgWeakForm::add_test_space(self, kind, order)
+    }
+    fn add_trial_integrator(&mut self, integ: Box<dyn DpgBilinear2>, trial: usize, test: usize) {
+        DpgWeakForm::add_trial_integrator(self, integ, trial, test)
+    }
+    fn add_trace_integrator(
+        &mut self,
+        integ: Box<dyn DpgTraceBilinear2>,
+        trial: usize,
+        test: usize,
+    ) {
+        DpgWeakForm::add_trace_integrator(self, integ, trial, test)
+    }
+    fn add_test_integrator(&mut self, integ: Box<dyn DpgBilinear2>, row: usize, col: usize) {
+        DpgWeakForm::add_test_integrator(self, integ, row, col)
+    }
+    fn add_domain_lf_integrator(&mut self, integ: Box<dyn DpgLinear2>, test: usize) {
+        DpgWeakForm::add_domain_lf_integrator(self, integ, test)
+    }
+}
+
+impl PconvBuilder for ParDpgWeakForm<Mesh<2>> {
+    fn set_quad_order(&mut self, order: u8) {
+        ParDpgWeakForm::set_quad_order(self, order)
+    }
+    fn set_face_quad_order(&mut self, order: u8) {
+        ParDpgWeakForm::set_face_quad_order(self, order)
+    }
+    fn add_trial_scalar_space(&mut self, order: u8) -> usize {
+        ParDpgWeakForm::add_trial_scalar_space(self, order)
+    }
+    fn add_trial_vector_space(&mut self, order: u8, vdim: usize) -> usize {
+        ParDpgWeakForm::add_trial_vector_space(self, order, vdim)
+    }
+    fn add_trial_trace_space_h1(&mut self, order: u8) -> usize {
+        ParDpgWeakForm::add_trial_trace_space_h1(self, order)
+    }
+    fn add_trial_trace_space(&mut self, order: u8) -> usize {
+        ParDpgWeakForm::add_trial_trace_space(self, order)
+    }
+    fn add_test_space(&mut self, kind: VolKind, order: u8) -> usize {
+        ParDpgWeakForm::add_test_space(self, kind, order)
+    }
+    fn add_trial_integrator(&mut self, integ: Box<dyn DpgBilinear2>, trial: usize, test: usize) {
+        ParDpgWeakForm::add_trial_integrator(self, integ, trial, test)
+    }
+    fn add_trace_integrator(
+        &mut self,
+        integ: Box<dyn DpgTraceBilinear2>,
+        trial: usize,
+        test: usize,
+    ) {
+        ParDpgWeakForm::add_trace_integrator(self, integ, trial, test)
+    }
+    fn add_test_integrator(&mut self, integ: Box<dyn DpgBilinear2>, row: usize, col: usize) {
+        ParDpgWeakForm::add_test_integrator(self, integ, row, col)
+    }
+    fn add_domain_lf_integrator(&mut self, integ: Box<dyn DpgLinear2>, test: usize) {
+        ParDpgWeakForm::add_domain_lf_integrator(self, integ, test)
+    }
+}
+
+/// The ultraweak block table — trial integrators, the coefficient-weighted
+/// test norm and the volume forcing — shared verbatim by the serial and
+/// parallel drivers (C++ `pconvection-diffusion.cpp`).  Returns the trial
+/// block ids `(u, sigma, hat_u, hat_f)`.
+fn register_dpg_system<B: PconvBuilder>(
+    a: &mut B,
+    prob: Prob,
+    eps: f64,
+    beta_const: &Arc<Vec<f64>>,
+    c1: Arc<Vec<f64>>,
+    c2: Arc<Vec<f64>>,
+    p: u8,
+    test_order: u8,
+) -> (usize, usize, usize, usize) {
+    a.set_quad_order((2 * test_order as usize).min(255) as u8);
+    a.set_face_quad_order(test_order + p - 1);
+
+    let u = a.add_trial_scalar_space(p - 1);
+    let sig = a.add_trial_vector_space(p - 1, 2);
+    let hatu = a.add_trial_trace_space_h1(p);
+    let hatf = a.add_trial_trace_space(p - 1);
+
+    let tau = a.add_test_space(VolKind::HDiv, test_order - 1);
+    let v = a.add_test_space(VolKind::Scalar, test_order);
+
+    // Trial integrators (C++ block table).
+    // -(βu , ∇v)
+    let beta_const_v = Arc::clone(beta_const);
+    a.add_trial_integrator(
+        Box::new(DpgMixedScalarWeakDivergenceSpatialIntegrator {
+            beta: Box::new(
+                move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx, out: &mut [f64]| {
+                    beta_function(&ctx.x, prob, &beta_const_v, out);
+                },
+            ),
+        }),
+        u,
+        v,
+    );
+    // (σ, ∇v)
+    a.add_trial_integrator(Box::new(DpgTGradientIntegrator { q: 1.0 }), sig, v);
+    // (u , ∇⋅τ)
+    a.add_trial_integrator(
+        Box::new(DpgMixedScalarWeakGradientIntegrator { q: -1.0 }),
+        u,
+        tau,
+    );
+    // 1/ε (σ, τ)
+    a.add_trial_integrator(
+        Box::new(DpgTVectorFEMassIntegrator { q: 1.0 / eps }),
+        sig,
+        tau,
+    );
+    //  <û, τ⋅n>
+    a.add_trace_integrator(Box::new(DpgNormalTraceIntegrator), hatu, tau);
+    //  <f̂ , v>
+    a.add_trace_integrator(Box::new(DpgTraceIntegrator), hatf, v);
+
+    // Test integrators (coefficient-weighted test norm).
+    // c1 (v, δv)
+    a.add_test_integrator(
+        Box::new(DpgMassSpatialIntegrator {
+            q: Box::new(move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx| {
+                c1[ctx.elem as usize]
+            }),
+        }),
+        v,
+        v,
+    );
+    // ε (∇v, ∇δv)
+    a.add_test_integrator(Box::new(DpgDiffusionIntegrator { q: eps }), v, v);
+    // (β·∇v, β·∇δv)
+    let beta_const_b = Arc::clone(beta_const);
+    a.add_test_integrator(
+        Box::new(DpgDiffusionSpatialIntegrator {
+            q: Box::new(
+                move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx, out: &mut [f64]| {
+                    // OuterProductCoefficient(betacoeff, betacoeff): M = ββᵀ.
+                    let mut beta_val = [0.0_f64; 2];
+                    beta_function(&ctx.x, prob, &beta_const_b, &mut beta_val);
+                    out[0] = beta_val[0] * beta_val[0];
+                    out[1] = beta_val[0] * beta_val[1];
+                    out[2] = beta_val[1] * beta_val[0];
+                    out[3] = beta_val[1] * beta_val[1];
+                },
+            ),
+        }),
+        v,
+        v,
+    );
+    // c2 (τ, δτ)
+    a.add_test_integrator(
+        Box::new(DpgVectorFEMassScalarSpatialIntegrator {
+            q: Box::new(move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx| {
+                c2[ctx.elem as usize]
+            }),
+        }),
+        tau,
+        tau,
+    );
+    // (∇⋅τ, ∇⋅δτ)
+    a.add_test_integrator(Box::new(DpgDivDivIntegrator { q: 1.0 }), tau, tau);
+
+    // (f, v) — only the sinusoidal / curved-streamlines cases force.
+    if matches!(prob, Prob::Sinusoidal | Prob::CurvedStreamlines) {
+        let beta_const_f = Arc::clone(beta_const);
+        a.add_domain_lf_integrator(
+            Box::new(DpgDomainLFIntegrator {
+                f: move |x: &[f64]| f_exact(x, prob, eps, &beta_const_f),
+            }),
+            v,
+        );
+    }
+    (u, sig, hatu, hatf)
+}
+
+/// D1030: the hanging-node conforming restriction rows of the two trace
+/// blocks (`hatu` = H1-trace, `hatf` = RT-trace) on the NC mesh — MFEM's
+/// trace-space `cP` (probe-pinned, see the module docs).
+fn trace_constraint_rows(
+    a: &DpgWeakForm<Mesh<2>>,
+    hatu: usize,
+    hatf: usize,
+    hanging: &[HangingNodeConstraint],
+) -> (Vec<DofConstraintRow>, Vec<DofConstraintRow>) {
+    let rows_h1 = a.skeleton(hatu).nc_conforming_constraints(hanging);
+    let rows_rt = a.skeleton(hatf).nc_conforming_constraints(hanging);
+    (rows_h1, rows_rt)
+}
+
+/// Essential `û` boundary dofs of the serial weak form with their physical
+/// points (`trace_boundary_dofs` of the parallel driver, global-mesh variant).
+/// The skeleton dof ids are block-local; the trial-block base makes them full
+/// system ids.  On NC meshes the skeleton marks hanging-master edges
+/// (coarse full edge and fine half-edges) as one-sided "boundary" faces —
+/// [`SkeletonSpace::true_boundary_faces`] filters them out so only the
+/// physical boundary feeds the essential values.
+fn serial_trace_boundary_dofs(
+    a: &DpgWeakForm<Mesh<2>>,
+    hatu: usize,
+    hanging: &[HangingNodeConstraint],
+) -> Vec<(usize, Vec<f64>)> {
+    let sk = a.skeleton(hatu);
+    let base = a.trial_offsets()[hatu];
+    let is_true_bdr = sk.true_boundary_faces(hanging);
+    let mut out = Vec::new();
+    for f in 0..sk.n_faces() {
+        if !is_true_bdr[f] {
+            continue;
+        }
+        for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
+            out.push((base + d, a.face_dof_point(sk, f, k)));
+        }
+    }
+    out
+}
+
+/// Serial (`--ranks 1`) driver — the 1:1 mirror of the C++ np1 run, including
+/// the D1030 conforming restriction on NC levels (`ConformingAssemble` +
+/// `FormLinearSystem` over the true dofs).
+#[allow(clippy::too_many_arguments)]
+fn solve_level_serial(
+    mesh: &Mesh<2>,
+    hanging: &[HangingNodeConstraint],
+    order: u8,
+    delta_order: u8,
+    prob: Prob,
+    static_cond: bool,
+    eps: f64,
+    beta_const: Arc<Vec<f64>>,
+    theta: f64,
+) -> LevelResult {
+    let p: u8 = order;
+    let test_order: u8 = order + delta_order;
+    let p_us = p as usize;
+    let exact_known = prob != Prob::BdrLayer;
+
+    let (c1, c2) = setup_test_norm_coeffs(mesh, eps);
+
+    let mut a = DpgWeakForm::new(mesh.clone());
+    let (u, sig, hatu, hatf) = register_dpg_system(
+        &mut a,
+        prob,
+        eps,
+        &beta_const,
+        Arc::new(c1),
+        Arc::new(c2),
+        p,
+        test_order,
+    );
+
+    a.store_matrices(true);
+    if static_cond {
+        a.enable_static_condensation();
+    }
+    a.assemble();
+
+    // D1030: hanging trace constraints (level ≥ 1 of the theta=0.7 path).
+    if !hanging.is_empty() {
+        let (rows_h1, rows_rt) = trace_constraint_rows(&a, hatu, hatf, hanging);
+        a.set_trace_conforming_restriction(hatu, &rows_h1);
+        a.set_trace_conforming_restriction(hatf, &rows_rt);
+    }
+
+    // Essential BCs: û on every global boundary face (C++ `ess_bdr_uhat = 1`).
+    // A boundary vertex dof sits on two boundary edges — dedup (the parallel
+    // driver's `merge_dof_points` does the same), else the DIAG_ONE
+    // elimination would double the unit diagonal.
+    let pairs = serial_trace_boundary_dofs(&a, hatu, hanging);
+    let mut seen = std::collections::BTreeSet::new();
+    let pairs: Vec<(usize, Vec<f64>)> = pairs
+        .into_iter()
+        .filter(|(d, _)| seen.insert(*d))
+        .collect();
+    let ess_ids: Vec<usize> = pairs.iter().map(|(d, _)| *d).collect();
+    let mut x_local = vec![0.0_f64; a.size()];
+    for (d, pt) in &pairs {
+        x_local[*d] = bdr_data(pt, prob, eps);
+    }
+
+    let (sys, x0, b) = a.form_linear_system(&ess_ids, &x_local, false);
+
+    // Block-diagonal symmetric-GS preconditioner on the formed system (the
+    // C++ np1 reference preconditions with Hypre per block — D963).  The
+    // system carries its own block offsets (full/true-dof layout, or the
+    // exposed(-true) layout under static condensation).
+    let offsets = match &sys {
+        DpgSystem::Full { offsets, .. } | DpgSystem::Condensed { offsets, .. } => offsets.clone(),
+    };
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        max_iter: 2000,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let gs = DpgBlockGs::new(&sys, &offsets);
+    let n_sys = sys.size();
+    let mut xv = x0;
+    let apply = move |x: &[f64], y: &mut [f64]| sys.spmv(x, y);
+    let pc = move |r: &[f64], z: &mut [f64]| gs.apply(r, z);
+    let res = solve_pcg_operator_precond(n_sys, apply, &b, &mut xv, pc, &cfg)
+        .expect("pconvection_diffusion: serial PCG failed");
+    let iters = res.iterations;
+
+    let x_full = a.recover_fem_solution(&xv);
+
+    // Per-element DPG residuals + global norm (serial = single rank).
+    let residuals = a.compute_residual(&x_full);
+    let residual = residuals.iter().map(|r| r * r).sum::<f64>().sqrt();
+
+    let mut maxresidual = 0.0_f64;
+    for &r in &residuals {
+        if r > maxresidual {
+            maxresidual = r;
+        }
+    }
+    let mut marked = Vec::new();
+    if theta < 1.0 || maxresidual == 0.0 {
+        for (iel, &r) in residuals.iter().enumerate() {
+            if r > theta * maxresidual {
+                marked.push(iel as u32);
+            }
+        }
+        marked.sort_unstable();
+    }
+
+    let (e_u, e_s) = if exact_known {
+        l2_errors_serial(&a, &x_full, u, sig, p_us.saturating_sub(1) as u8, prob, eps)
+    } else {
+        (0.0, 0.0)
+    };
+    let l2 = (e_u + e_s).max(0.0).sqrt();
+
+    LevelResult {
+        dofs: a.n_true_dofs(),
+        l2,
+        residual,
+        iters,
+        marked,
+    }
+}
+
+/// [`l2_errors`] on the serial weak form (single rank: every element owned).
+#[allow(clippy::too_many_arguments)]
+fn l2_errors_serial(
+    a: &DpgWeakForm<Mesh<2>>,
+    x_full: &[f64],
+    u_block: usize,
+    sig_block: usize,
+    order: u8,
+    prob: Prob,
+    eps: f64,
+) -> (f64, f64) {
+    use fem_assembly::dpg::dpg_basis::{scalar_ref_elem, vol_quadrature};
+    use fem_assembly::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
+
+    let mesh = a.mesh();
+    let offsets = a.trial_offsets();
+    let et = mesh.element_type(0);
+    let n = scalar_ref_elem(et, order).n_dofs();
+    let (qpts, qwts) = vol_quadrature(et, 2 * order + 3);
+    let fe = scalar_ref_elem(et, order);
+    let mut phi = vec![0.0_f64; n];
+    let simp = matches!(et, ElementType::Tri3);
+
+    let (mut error_u, mut error_s) = (0.0_f64, 0.0_f64);
+    for e in 0..mesh.n_elements() as u32 {
+        let mut elem_error_u = 0.0_f64;
+        let mut elem_error_s = 0.0_f64;
+        for (q, xi) in qpts.iter().enumerate() {
+            let (det, xp) = if simp {
+                let tr = fem_mesh::ElementTransformation::from_simplex_nodes(
+                    mesh,
+                    mesh.element_nodes(e),
+                );
+                (tr.det_j(), tr.map_to_physical(xi))
+            } else {
+                let geo = geo_ref_elem_from_mesh(mesh, e).expect("pconvection: geo elem");
+                let gnodes = mesh.geometry_nodes(e).to_vec();
+                let (_, det, xp) = isoparametric_jacobian(mesh, &gnodes, geo.as_ref(), xi, 2);
+                (det, xp)
+            };
+            fe.eval_basis(xi, &mut phi);
+            let w = qwts[q] * det.abs();
+            let base = offsets[u_block] + e as usize * n;
+            let mut uh = 0.0;
+            for (i, &pp) in phi.iter().enumerate() {
+                uh += x_full[base + i] * pp;
+            }
+            let err_u = uh - exact_u(&xp, prob, eps);
+            elem_error_u += w * err_u * err_u;
+            let sbase = offsets[sig_block] + e as usize * n * 2;
+            let mut ex = [0.0_f64; 2];
+            exact_sigma(&xp, prob, eps, &mut ex);
+            let (mut d0, mut d1) = (0.0_f64, 0.0_f64);
+            for (i, &pp) in phi.iter().enumerate() {
+                d0 += x_full[sbase + i] * pp;
+                d1 += x_full[sbase + n + i] * pp;
+            }
+            d0 -= ex[0];
+            d1 -= ex[1];
+            let err = (d0 * d0 + d1 * d1).sqrt();
+            elem_error_s += w * (err * err);
+        }
+        error_u += elem_error_u.abs();
+        error_s += elem_error_s.abs();
+    }
+    (error_u, error_s)
+}
+
 fn solve_level(
     mesh: &Mesh<2>,
     n_workers: usize,
@@ -381,105 +845,16 @@ fn solve_level(
         let c2 = Arc::new(c2);
 
         let mut a = ParDpgWeakForm::new(local_mesh, partition, comm.clone());
-        a.set_quad_order((2 * test_order as usize).min(255) as u8);
-        a.set_face_quad_order(test_order + p - 1);
-
-        let u = a.add_trial_scalar_space(p - 1);
-        let sig = a.add_trial_vector_space(p - 1, 2);
-        let hatu = a.add_trial_trace_space_h1(p);
-        let hatf = a.add_trial_trace_space(p - 1);
-
-        let tau = a.add_test_space(VolKind::HDiv, test_order - 1);
-        let v = a.add_test_space(VolKind::Scalar, test_order);
-
-        // Trial integrators (C++ block table).
-        // -(βu , ∇v)
-        let beta_const_v = Arc::clone(&beta_const);
-        a.add_trial_integrator(
-            Box::new(DpgMixedScalarWeakDivergenceSpatialIntegrator {
-                beta: Box::new(move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx,
-                                    out: &mut [f64]| {
-                    beta_function(&ctx.x, prob, &beta_const_v, out);
-                }),
-            }),
-            u,
-            v,
+        let (u, sig, hatu, _hatf) = register_dpg_system(
+            &mut a,
+            prob,
+            eps,
+            &beta_const,
+            Arc::clone(&c1),
+            Arc::clone(&c2),
+            p,
+            test_order,
         );
-        // (σ, ∇v)
-        a.add_trial_integrator(Box::new(DpgTGradientIntegrator { q: 1.0 }), sig, v);
-        // (u , ∇⋅τ)
-        a.add_trial_integrator(
-            Box::new(DpgMixedScalarWeakGradientIntegrator { q: -1.0 }),
-            u,
-            tau,
-        );
-        // 1/ε (σ, τ)
-        a.add_trial_integrator(
-            Box::new(DpgTVectorFEMassIntegrator { q: 1.0 / eps }),
-            sig,
-            tau,
-        );
-        //  <û, τ⋅n>
-        a.add_trace_integrator(Box::new(DpgNormalTraceIntegrator), hatu, tau);
-        //  <f̂ , v>
-        a.add_trace_integrator(Box::new(DpgTraceIntegrator), hatf, v);
-
-        // Test integrators (coefficient-weighted test norm).
-        // c1 (v, δv)
-        let c1_v = Arc::clone(&c1);
-        a.add_test_integrator(
-            Box::new(DpgMassSpatialIntegrator {
-                q: Box::new(move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx| {
-                    c1_v[ctx.elem as usize]
-                }),
-            }),
-            v,
-            v,
-        );
-        // ε (∇v, ∇δv)
-        a.add_test_integrator(Box::new(DpgDiffusionIntegrator { q: eps }), v, v);
-        // (β·∇v, β·∇δv)
-        let beta_const_b = Arc::clone(&beta_const);
-        a.add_test_integrator(
-            Box::new(DpgDiffusionSpatialIntegrator {
-                q: Box::new(move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx,
-                                  out: &mut [f64]| {
-                    // OuterProductCoefficient(betacoeff, betacoeff): M = ββᵀ.
-                    let mut beta_val = [0.0_f64; 2];
-                    beta_function(&ctx.x, prob, &beta_const_b, &mut beta_val);
-                    out[0] = beta_val[0] * beta_val[0];
-                    out[1] = beta_val[0] * beta_val[1];
-                    out[2] = beta_val[1] * beta_val[0];
-                    out[3] = beta_val[1] * beta_val[1];
-                }),
-            }),
-            v,
-            v,
-        );
-        // c2 (τ, δτ)
-        let c2_v = Arc::clone(&c2);
-        a.add_test_integrator(
-            Box::new(DpgVectorFEMassScalarSpatialIntegrator {
-                q: Box::new(move |ctx: &fem_assembly::dpg::dpg_integrators::VolCtx| {
-                    c2_v[ctx.elem as usize]
-                }),
-            }),
-            tau,
-            tau,
-        );
-        // (∇⋅τ, ∇⋅δτ)
-        a.add_test_integrator(Box::new(DpgDivDivIntegrator { q: 1.0 }), tau, tau);
-
-        // (f, v) — only the sinusoidal / curved-streamlines cases force.
-        if matches!(prob, Prob::Sinusoidal | Prob::CurvedStreamlines) {
-            let beta_const_f = Arc::clone(&beta_const);
-            a.add_domain_lf_integrator(
-                Box::new(DpgDomainLFIntegrator {
-                    f: move |x: &[f64]| f_exact(x, prob, eps, &beta_const_f),
-                }),
-                v,
-            );
-        }
 
         a.store_matrices(true);
         if static_cond {
@@ -948,19 +1323,41 @@ fn main() {
     let mut err0 = 0.0_f64;
     let mut res0 = 0.0_f64;
     let mut dof0 = 0usize;
+    // NC state of the current mesh: hanging-node constraints (D1030) + the
+    // aniso/iso flag of `general_refinement_quad_aniso`.
+    let mut hanging: Vec<HangingNodeConstraint> = Vec::new();
+    let mut iso_state = true;
 
     for it in 0..=ref_levels.max(0) {
-        let r = solve_level(
-            &mesh,
-            n_workers,
-            order,
-            delta_order,
-            prob,
-            static_cond,
-            eps,
-            Arc::clone(&beta_const),
-            theta,
-        );
+        let r = if n_workers == 1 {
+            // Serial driver: the 1:1 mirror of the C++ np1 run, including the
+            // D1030 conforming restriction on NC levels.
+            solve_level_serial(
+                &mesh,
+                &hanging,
+                order,
+                delta_order,
+                prob,
+                static_cond,
+                eps,
+                Arc::clone(&beta_const),
+                theta,
+            )
+        } else {
+            // Parallel driver: the D963 lane (uniform refinement only —
+            // multi-rank NC DPG is registered separately, see D1030).
+            solve_level(
+                &mesh,
+                n_workers,
+                order,
+                delta_order,
+                prob,
+                static_cond,
+                eps,
+                Arc::clone(&beta_const),
+                theta,
+            )
+        };
         let dim_f = dim as f64;
         let rate_err = if it > 0 && err0 > 0.0 && r.dofs != dof0 {
             dim_f * (err0 / r.l2).ln() / ((dof0 as f64) / (r.dofs as f64)).ln()
@@ -1007,31 +1404,38 @@ fn main() {
         // All-marked stays on `refine_uniform` (the fully conforming special
         // case, byte-verified against C++).
         //
-        // D960 residual (D1030): the *solve* side still lacks hanging-node
-        // constraints for the trace blocks (MFEM's conforming restriction
-        // eliminates the parent-edge RT-trace dof against its children —
-        // measured here as 30 dofs at level 1: fem-rs 305 vs C++ 275), so the
-        // partial-mark table would diverge from C++ from level 1 on.  Kept as
-        // an honest exit(3) until the DPG conforming restriction lands.
+        // D1030 (round 106): the *solve* side of the serial (`--ranks 1`)
+        // driver applies the conforming restriction of the hanging trace dofs
+        // (`SkeletonSpace::nc_conforming_constraints` + `DpgWeakForm::
+        // set_trace_conforming_restriction`, probe-pinned against the MFEM 4.10
+        // cP), so the partial-mark table matches C++ np1 digit-for-digit.
+        // Multi-rank NC DPG (the D963 lane) does not carry the restriction —
+        // kept as an honest exit(3) (registered separately from D1030).
         if r.marked.len() == mesh.n_elements() {
             mesh = refine_uniform(&mesh);
+            hanging.clear();
         } else if !r.marked.is_empty() {
             let marks: Vec<(u32, u8)> =
                 r.marked.iter().map(|&e| (e, 7u8)).collect();
-            let (m, iso, _hanging) =
-                general_refinement_quad_aniso(&mesh, &marks, 1, true, None);
-            let _ = (m, iso, _hanging);
-            eprintln!(
-                "pconvection_diffusion: GAP — partial refinement ({}/{} elements) is \
-                 wired to the NC quad refinement (D960 closed: geometry matches MFEM), \
-                 but the DPG solve lacks hanging-node constraints for the trace blocks \
-                 (D1030): fem-rs level-1 dofs 305 vs C++ 275 (30 parent-edge RT-trace \
-                 dofs to eliminate).  Re-run with `-theta 0.0` (mark-all → uniform \
-                 refinement, verified path).",
-                r.marked.len(),
-                mesh.n_elements()
-            );
-            exit(3);
+            let (m, iso_out, hang) =
+                general_refinement_quad_aniso(&mesh, &marks, 1, iso_state, None);
+            iso_state = iso_out;
+            if n_workers > 1 {
+                eprintln!(
+                    "pconvection_diffusion: GAP — partial refinement ({}/{} elements) with \
+                     --ranks {} needs the hanging-node conforming restriction on the \
+                     multi-rank DPG lane (crates/parallel), which is registered separately \
+                     from D1030 (the --ranks 1 serial driver carries it).  Re-run with \
+                     `--ranks 1`, or use `-theta 0.0` (mark-all → uniform refinement, \
+                     verified parallel path).",
+                    r.marked.len(),
+                    mesh.n_elements(),
+                    n_workers
+                );
+                exit(3);
+            }
+            mesh = m;
+            hanging = hang;
         }
     }
 }

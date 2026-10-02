@@ -908,6 +908,189 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
     pub fn dim(&self) -> usize {
         self.dim
     }
+
+    /// True (physical) boundary faces of an NC mesh: `is_boundary_face(f)`
+    /// marks every face seen by a single element, which on a non-conforming
+    /// mesh includes the faces of a hanging edge *structure* — the coarse-side
+    /// full (master) edge *and* the two fine-side half-edges are all
+    /// one-sided in the element tables while lying strictly inside the domain
+    /// (the coarse element faces the full edge, the fine elements the halves).
+    /// A face is a physical boundary face iff it is one-sided **and** not one
+    /// of those hanging-edge faces `(a,b)`, `(a,m)`, `(m,b)`.  Essential-BC
+    /// collection must use this, not [`Self::is_boundary_face`].
+    pub fn true_boundary_faces(
+        &self,
+        hanging: &[fem_mesh::amr::HangingNodeConstraint],
+    ) -> Vec<bool> {
+        let mut hang_faces: std::collections::HashSet<[u32; 2]> =
+            std::collections::HashSet::with_capacity(3 * hanging.len());
+        for c in hanging {
+            let (a, b, m) = (c.parent_a as u32, c.parent_b as u32, c.constrained as u32);
+            for (x, y) in [(a, b), (a, m), (m, b)] {
+                hang_faces.insert(if x < y { [x, y] } else { [y, x] });
+            }
+        }
+        self.face_info
+            .iter()
+            .zip(self.face_node_ids.iter())
+            .map(|(info, nodes)| {
+                if !matches!(info, SkeletonFaceInfo::Boundary { .. }) {
+                    return false;
+                }
+                let key = if nodes[0] < nodes[1] {
+                    [nodes[0], nodes[1]]
+                } else {
+                    [nodes[1], nodes[0]]
+                };
+                !hang_faces.contains(&key)
+            })
+            .collect()
+    }
+
+    /// Conforming-restriction (hanging-node) constraint rows for this
+    /// skeleton on a non-conforming (NC quad AMR) mesh — the trace-block
+    /// analogue of MFEM's `FiniteElementSpace` conforming prolongation `cP`
+    /// (`BuildConformingInterpolation`), pinned against the MFEM 4.10 probe
+    /// in round-106 D1030 (see `tmp/d106d1030/REPORT.md`).
+    ///
+    /// `hanging` carries the P1 hanging-node constraints of the refined mesh
+    /// (`fem_mesh::amr::general_refinement_quad_aniso`): one entry per
+    /// *hanging* edge midpoint `m` with its master-edge endpoints `(a, b)`.
+    /// Only edges that still exist as a face of a coarse leaf element
+    /// ("masters", MFEM `NCList::masters`) produce constraints; splits whose
+    /// both sides are refined and splits on the boundary have no master and
+    /// are already conforming — matching MFEM, where those never enter
+    /// `GetEdgeList().masters`.
+    ///
+    /// Probed MFEM semantics (mfem410, 4×4 inline-quad, marks
+    /// `{0,1,3,6,8,9,10,11,12}`, `GeneralRefinement(marks,1,1)` → 10 masters /
+    /// 20 slaves / 10 hanging vertices):
+    ///
+    /// * **H1-trace** (vertex-continuous, order 1): the hanging midpoint
+    ///   *vertex* dof is the slave, `u[m] = 0.5·u[a] + 0.5·u[b]`; the master
+    ///   edge keeps its dofs.  (Order ≥ 2 adds slave half-edge interior dofs
+    ///   constrained by the master-edge 1-D basis at t = 1/4, 3/4 —
+    ///   D1031, not implemented.)
+    /// * **RT-trace** (face-discontinuous, order 0): each half-edge dof is a
+    ///   slave, `u[half] = σ·(L_m/L_s)·0.5·u[master]` with `σ = +1` iff the
+    ///   half's canonical `(min,max)` direction equals the master's; the
+    ///   master (full coarse edge, still a leaf face of the coarse element)
+    ///   keeps its dof.  The probe measures `±0.5` in MFEM dof values (the
+    ///   ∫-type trace functional); fem-rs trace unknowns are the coefficients
+    ///   of the unnormalised face basis (φ₀ = 1), and function preservation
+    ///   adds the inverse measure ratio — the two ½ factors cancel for the
+    ///   equal halves of an iso split (`u_half = σ·u_master`).  (Order ≥ 1:
+    ///   dense master-basis transfer rows — D1031.)
+    ///
+    /// Returns rows in the skeleton's **block-local** dof ids (add the trial
+    /// block's global base before building the global restriction).
+    pub fn nc_conforming_constraints(
+        &self,
+        hanging: &[fem_mesh::amr::HangingNodeConstraint],
+    ) -> Vec<DofConstraintRow> {
+        assert_eq!(
+            self.dim, 2,
+            "nc_conforming_constraints: only 2-D quad NC meshes are supported (D1030)"
+        );
+        let mut out = Vec::new();
+        // Sorted-node-pair → face id.
+        let mut face_map: std::collections::HashMap<[u32; 2], usize> =
+            std::collections::HashMap::with_capacity(self.face_node_ids.len());
+        for (f, nodes) in self.face_node_ids.iter().enumerate() {
+            let key = if nodes[0] < nodes[1] {
+                [nodes[0], nodes[1]]
+            } else {
+                [nodes[1], nodes[0]]
+            };
+            face_map.insert(key, f);
+        }
+        let canonical = |f: usize| -> [u32; 2] {
+            let n = &self.face_node_ids[f];
+            if n[0] < n[1] { [n[0], n[1]] } else { [n[1], n[0]] }
+        };
+
+        if self.continuous {
+            // H1-trace.  Corner dofs are the mesh vertex dofs (identity with
+            // node ids in 2-D, see `build`).
+            assert!(
+                self.order == 1,
+                "nc_conforming_constraints: H1-trace order {} not implemented yet \
+                 (order-2 slave half-edge interior rows: D1031)",
+                self.order
+            );
+            for c in hanging {
+                let (a, b) = (c.parent_a as u32, c.parent_b as u32);
+                let key = if a < b { [a, b] } else { [b, a] };
+                // Only master edges (still a face of the coarse leaf) constrain.
+                if face_map.contains_key(&key) {
+                    let m = c.constrained as usize;
+                    let mut terms = vec![(a as usize, 0.5), (b as usize, 0.5)];
+                    terms.sort_unstable_by_key(|t| t.0);
+                    out.push(DofConstraintRow { slave: m, terms });
+                }
+            }
+        } else {
+            // RT-trace (face-discontinuous).
+            assert!(
+                self.order == 0,
+                "nc_conforming_constraints: RT-trace order {} not implemented yet \
+                 (dense master-basis transfer rows: D1031)",
+                self.order
+            );
+            for c in hanging {
+                let (a, b) = (c.parent_a as u32, c.parent_b as u32);
+                let key = if a < b { [a, b] } else { [b, a] };
+                let Some(&mf) = face_map.get(&key) else { continue };
+                let master = canonical(mf);
+                let mid = c.constrained as u32;
+                // Physical edge lengths: the transfer carries the measure
+                // ratio L_s/L_m (MFEM's ∫-type trace dofs) *and* the basis
+                // measure normalisation (fem-rs trace unknowns are the
+                // coefficients of the unnormalised φ₀ = 1 — see the probe
+                // derivation in tmp/d106d1030/REPORT.md: for equal halves the
+                // two 0.5 factors cancel, u_half = σ·u_master).
+                let coord = |n: u32| -> [f64; 2] {
+                    let c = self.mesh.node_coords(n);
+                    [c[0], c[1]]
+                };
+                let (ca, cb) = (coord(master[0]), coord(master[1]));
+                let l_master = ((cb[0] - ca[0]).powi(2) + (cb[1] - ca[1]).powi(2)).sqrt();
+                for &end in &[a, b] {
+                    let hk = if end < mid { [end, mid] } else { [mid, end] };
+                    let Some(&hf) = face_map.get(&hk) else { continue };
+                    let half = canonical(hf);
+                    // σ = +1 iff the half's canonical direction equals the
+                    // master's (MFEM edge_flags orientation sign, probe-pinned).
+                    let sigma: f64 = if half[0] == master[0] { 1.0 } else { -1.0 };
+                    let ce = coord(end);
+                    let cm = coord(mid);
+                    let l_half = ((cm[0] - ce[0]).powi(2) + (cm[1] - ce[1]).powi(2)).sqrt();
+                    let coeff = sigma * 0.5 * (l_master / l_half);
+                    let slave_dof = self.face_dof_lists[hf][0];
+                    let master_dof = self.face_dof_lists[mf][0];
+                    out.push(DofConstraintRow {
+                        slave: slave_dof,
+                        terms: vec![(master_dof, coeff)],
+                    });
+                }
+            }
+            out.sort_by_key(|r| r.slave);
+            out.dedup_by(|a, b| a.slave == b.slave);
+        }
+        out
+    }
+}
+
+/// One conforming-restriction row: the constrained ("slave") DOF is expressed
+/// through its master DOFs, `u[slave] = Σ (u[dof]·coeff)` — one row of MFEM's
+/// conforming prolongation `cP` (see
+/// [`SkeletonSpace::nc_conforming_constraints`]).
+#[derive(Debug, Clone)]
+pub struct DofConstraintRow {
+    /// Block-local id of the constrained (eliminated) DOF.
+    pub slave: usize,
+    /// `(master block-local dof, coefficient)` pairs.
+    pub terms: Vec<(usize, f64)>,
 }
 
 /// Local face table (node indices into the element node list), matching

@@ -35,10 +35,11 @@
 //!   [`DpgWeakForm::store_matrices`])
 //! * `RecoverFEMSolution` → [`DpgWeakForm::recover_fem_solution`]
 //! * `Update` (AMR) → [`DpgWeakForm::update`] — resets the assembly only;
-//!   see the method docs for the non-conforming-AMR kernel gap.
+//!   the NC trace-block conforming restriction is exposed through
+//!   [`DpgWeakForm::set_trace_conforming_restriction`] (D1030).
 //! * `ComplexDPGWeakForm` → [`crate::complex_dpg_weakform`].
 
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::{csr_spmm, CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
 use crate::dpg::dpg_basis::{
@@ -139,8 +140,122 @@ pub struct DpgWeakForm<M: MeshTopology + Clone + 'static> {
     reduced_y: Option<Vec<f64>>,
     store_matrices: bool,
     /// Per-element stored (`Y = L⁻¹B`, `y = L⁻¹f`, `n_trial_e`) for
-    /// [`Self::compute_residual`].
+    /// [`DpgWeakForm::compute_residual`].
     stored: Vec<(Vec<f64>, Vec<f64>, usize)>,
+    /// Conforming restriction (NC-AMR hanging trace constraints), set by
+    /// [`DpgWeakForm::set_trace_conforming_restriction`].
+    conforming: Option<ConformingRestriction>,
+    /// Cached exposed-block view of the restriction, built by
+    /// `form_linear_system` when static condensation and the restriction are
+    /// both active; consumed by `recover_fem_solution`.
+    exposed_view: Option<ExposedRestrictionView>,
+}
+
+/// Conforming restriction of the trial dofs on a non-conforming mesh:
+/// `u_full = P·u_true` with `P` the block-restricted identity (MFEM's
+/// conforming prolongation `cP`, here assembled from the per-trace-block
+/// hanging constraint rows of
+/// [`SkeletonSpace::nc_conforming_constraints`](crate::dpg::dpg_basis::SkeletonSpace::nc_conforming_constraints)).
+///
+/// `form_linear_system` assembles the true-dof system `A_t = Pᵀ·A·P`,
+/// `b_t = Pᵀ·y` (MFEM `ConformingAssemble`) before the essential elimination;
+/// `recover_fem_solution` lifts the solved true vector back with `P`.
+struct ConformingRestriction {
+    /// Constraint rows in **global** trial dof ids (sorted by slave).
+    rows: Vec<(usize, Vec<(usize, f64)>)>,
+    /// Full (unrestricted) trial dof count.
+    n_full: usize,
+    /// Ascending true-dof ids.
+    true_dofs: Vec<usize>,
+    /// `full dof → Some(true column)`; `None` for slaves.
+    true_col: Vec<Option<usize>>,
+    /// Per-trial-block dof counts in the true layout.
+    true_block_sizes: Vec<usize>,
+    /// Block offsets in the true layout (`len = nblocks + 1`).
+    true_offsets: Vec<usize>,
+    /// `P`: `n_full × n_true` (identity on true dofs, constraint rows on
+    /// slaves).
+    p: CsrMatrix<f64>,
+}
+
+/// The restriction restricted to the statically-condensed (exposed = trace)
+/// blocks, in the compact exposed-dof layout: `u_exposed_full = Pe·u_exposed_true`.
+struct ExposedRestrictionView {
+    /// Block offsets in the exposed-TRUE compact layout.
+    t_eoffs: Vec<usize>,
+    /// `exposed-compact row → Some(exposed-true compact column)`; `None` for
+    /// exposed slaves.
+    exp_true_col: Vec<Option<usize>>,
+    /// `exposed-compact row → global dof id`.
+    compact_global: Vec<usize>,
+    /// `(exposed-compact slave row, [(exposed-true compact master col, coeff)])`
+    /// — the `Pe` row terms.
+    slave_terms: Vec<(usize, Vec<(usize, f64)>)>,
+    /// `(exposed-compact slave row, [(exposed-compact master col, coeff)])`
+    /// — the same rows in the exposed-compact indexing the lifted vector
+    /// uses in `recover_fem_solution`.
+    slave_terms_exp: Vec<(usize, Vec<(usize, f64)>)>,
+}
+
+impl ExposedRestrictionView {
+    fn build<M: MeshTopology + Clone + 'static>(
+        weak: &DpgWeakForm<M>,
+        conf: &ConformingRestriction,
+        eoffs: &[usize],
+    ) -> Self {
+        let cd = weak.cond_data.as_ref().expect("condensation data missing");
+        let sizes = weak.trial_block_sizes();
+        let mut compact_global = Vec::new();
+        let mut global_to_compact = vec![usize::MAX; conf.n_full];
+        for &blk in cd.exposed_blocks.iter() {
+            let base = weak.dof_offsets[blk];
+            for k in 0..sizes[blk] {
+                global_to_compact[base + k] = compact_global.len();
+                compact_global.push(base + k);
+            }
+        }
+        let n_exp = compact_global.len();
+        let mut t_eoffs = vec![0usize];
+        let mut exp_true_col = vec![None; n_exp];
+        for (bi, &blk) in cd.exposed_blocks.iter().enumerate() {
+            let base = weak.dof_offsets[blk];
+            let mut cnt = 0usize;
+            for k in 0..sizes[blk] {
+                if conf.true_col[base + k].is_some() {
+                    exp_true_col[eoffs[bi] + k] = Some(t_eoffs[bi] + cnt);
+                    cnt += 1;
+                }
+            }
+            t_eoffs.push(t_eoffs[bi] + cnt);
+        }
+        let mut slave_terms = Vec::new();
+        let mut slave_terms_exp = Vec::new();
+        for (g, terms) in &conf.rows {
+            let sc = global_to_compact[*g];
+            if sc == usize::MAX {
+                continue; // slave outside the exposed blocks (cannot happen: trace blocks only)
+            }
+            let mut conv = Vec::new();
+            let mut conv_exp = Vec::new();
+            for &(d, c) in terms {
+                let dc = global_to_compact[d];
+                conv.push((
+                    exp_true_col[dc].expect("master dof not an exposed true dof"),
+                    c,
+                ));
+                conv_exp.push((dc, c));
+            }
+            slave_terms.push((sc, conv));
+            slave_terms_exp.push((sc, conv_exp));
+        }
+        ExposedRestrictionView {
+            t_eoffs,
+            exp_true_col,
+            compact_global,
+            slave_terms,
+            slave_terms_exp,
+        }
+    }
 }
 
 /// Static condensation descriptor (port of MFEM `BlockStaticCondensation`
@@ -339,6 +454,8 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             reduced_y: None,
             store_matrices: false,
             stored: Vec::new(),
+            conforming: None,
+            exposed_view: None,
         }
     }
 
@@ -503,6 +620,137 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
     /// [`Self::compute_residual`].
     pub fn store_matrices(&mut self, store: bool) {
         self.store_matrices = store;
+    }
+
+    /// Register the conforming restriction of trace block `block` from the
+    /// hanging-node constraint `rows` (block-local ids, as returned by
+    /// [`SkeletonSpace::nc_conforming_constraints`](crate::dpg::dpg_basis::SkeletonSpace::nc_conforming_constraints)).
+    ///
+    /// Call once per constrained trace block after all trial spaces are added
+    /// and before [`Self::assemble`].  The referenced master dofs must be
+    /// unconstrained ("true") dofs — true for the NC-quad master/slave
+    /// structure (masters are kept; at `nc_limit = 1` slaves are never
+    /// re-split).  With at least one block registered,
+    /// [`Self::form_linear_system`] assembles the true-dof system
+    /// `Pᵀ·A·P` / `Pᵀ·y` (MFEM `ConformingAssemble`), essential DOFs are
+    /// taken in the true layout, and [`Self::recover_fem_solution`] maps the
+    /// solution back through `P`.
+    pub fn set_trace_conforming_restriction(
+        &mut self,
+        block: usize,
+        rows: &[crate::dpg::dpg_basis::DofConstraintRow],
+    ) {
+        assert!(
+            matches!(self.trial_spaces[block], TrialSpace::Trace { .. }),
+            "set_trace_conforming_restriction: block {block} is not a trace space"
+        );
+        let offsets = self.trial_offsets();
+        let base = offsets[block];
+        let size = offsets[block + 1] - base;
+        let mut global: Vec<(usize, Vec<(usize, f64)>)> = rows
+            .iter()
+            .map(|r| {
+                assert!(
+                    r.slave < size,
+                    "set_trace_conforming_restriction: slave dof {} out of block {block}",
+                    r.slave
+                );
+                (
+                    base + r.slave,
+                    r.terms.iter().map(|&(d, c)| (base + d, c)).collect(),
+                )
+            })
+            .collect();
+        global.sort_by_key(|r| r.0);
+
+        // Rebuild the whole restriction from scratch on each call (the
+        // consumer registers one block at a time; the cost is trivial).
+        let n = self.size();
+        let mut all_rows = match &self.conforming {
+            Some(c) => c.rows.clone(),
+            None => Vec::new(),
+        };
+        all_rows.extend(global);
+        all_rows.sort_by_key(|r| r.0);
+        let mut is_slave = vec![false; n];
+        let mut last: Option<usize> = None;
+        for (s, _) in &all_rows {
+            assert!(
+                last.map_or(true, |l| *s > l),
+                "duplicate or unsorted slave dof {s}"
+            );
+            last = Some(*s);
+            is_slave[*s] = true;
+        }
+        let true_dofs: Vec<usize> = (0..n).filter(|&d| !is_slave[d]).collect();
+        let mut col = 0usize;
+        let true_col: Vec<Option<usize>> = (0..n)
+            .map(|d| {
+                if is_slave[d] {
+                    None
+                } else {
+                    let c = col;
+                    col += 1;
+                    Some(c)
+                }
+            })
+            .collect();
+        // Every master must itself be a true dof (no chains).
+        for (_, terms) in &all_rows {
+            for &(d, _) in terms {
+                assert!(
+                    !is_slave[d],
+                    "chained hanging constraints are not supported (master dof {d} is itself constrained)"
+                );
+            }
+        }
+        // Per-block true sizes / offsets.
+        let sizes = self.trial_block_sizes();
+        let mut true_block_sizes = sizes.clone();
+        {
+            let mut bi = 0usize;
+            let mut acc = 0usize;
+            for &(s, _) in &all_rows {
+                while acc + sizes[bi] <= s {
+                    acc += sizes[bi];
+                    bi += 1;
+                }
+                true_block_sizes[bi] -= 1;
+            }
+        }
+        let mut true_offsets = vec![0usize];
+        for s in &true_block_sizes {
+            true_offsets.push(true_offsets.last().unwrap() + s);
+        }
+        // Build P (n_full × n_true).
+        let mut coo = CooMatrix::<f64>::new(n, true_dofs.len());
+        for (ti, &t) in true_dofs.iter().enumerate() {
+            coo.add(t, ti, 1.0);
+        }
+        for (s, terms) in &all_rows {
+            for &(d, c) in terms {
+                coo.add(*s, true_col[d].expect("master not a true dof"), c);
+            }
+        }
+        self.conforming = Some(ConformingRestriction {
+            rows: all_rows,
+            n_full: n,
+            true_dofs,
+            true_col,
+            true_block_sizes,
+            true_offsets,
+            p: coo.into_csr_sorted(),
+        });
+    }
+
+    /// Number of true (unconstrained) trial dofs — the size of the system
+    /// formed by [`Self::form_linear_system`] when a conforming restriction is
+    /// registered.  Without restriction this equals [`Self::size`].
+    pub fn n_true_dofs(&self) -> usize {
+        match &self.conforming {
+            Some(c) => c.true_dofs.len(),
+            None => self.size(),
+        }
     }
 
     /// Number of trial blocks.
@@ -1270,6 +1518,14 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
     /// `FormLinearSystem(ess_tdof_list, x, ...)`: essential-BC elimination
     /// (`DIAG_ONE`) on the (possibly condensed) system.  Returns
     /// `(system, X initial guess, B rhs)`; `B = y − M_e x`.
+    ///
+    /// With a registered conforming restriction (NC-AMR hanging trace
+    /// constraints) the system is first restricted to the true dofs,
+    /// `A_t = Pᵀ·A·P`, `b_t = Pᵀ·y` (MFEM `ConformingAssemble`); the returned
+    /// `DpgSystem` carries the matching block offsets, and
+    /// [`Self::recover_fem_solution`] maps the solution back through `P`.
+    /// Essential dofs must be true dofs (at NC-quad `nc_limit = 1` the
+    /// boundary `û` dofs never hang).
     pub fn form_linear_system(
         &mut self,
         ess_dofs: &[usize],
@@ -1277,6 +1533,21 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         copy_interior: bool,
     ) -> (DpgSystem, Vec<f64>, Vec<f64>) {
         assert!(self.assembled, "assemble() must run before form_linear_system()");
+        // Take the restriction out to keep the borrow checker happy; the
+        // solve runs once per refinement level, so the round trip is free.
+        let conf = self.conforming.take();
+        let (conf, out) = self.form_linear_system_impl(ess_dofs, x, copy_interior, conf);
+        self.conforming = conf;
+        out
+    }
+
+    fn form_linear_system_impl(
+        &mut self,
+        ess_dofs: &[usize],
+        x: &[f64],
+        copy_interior: bool,
+        conf: Option<ConformingRestriction>,
+    ) -> (Option<ConformingRestriction>, (DpgSystem, Vec<f64>, Vec<f64>)) {
         let n_full = self.size();
         let mut xg = vec![0.0_f64; n_full];
         if copy_interior {
@@ -1291,93 +1562,238 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             // Translate global ess dofs to compact exposed-dof indices.
             let eoffs = self.exposed_block_offsets();
             let cd = self.cond_data.as_ref().expect("condensation data missing");
-            let mut ess_compact = Vec::with_capacity(ess_dofs.len());
-            for &d in ess_dofs {
-                let mut c = None;
-                for (bi, &blk) in cd.exposed_blocks.iter().enumerate() {
-                    let base = self.dof_offsets[blk];
-                    let sz = self.trial_block_sizes()[blk];
-                    if d >= base && d < base + sz {
-                        c = Some(eoffs[bi] + (d - base));
-                        break;
+            let exposed_blocks = cd.exposed_blocks.clone();
+            let bases: Vec<usize> =
+                exposed_blocks.iter().map(|&blk| self.dof_offsets[blk]).collect();
+            let sizes = self.trial_block_sizes();
+            let compact_of = |d: usize| -> Option<usize> {
+                for (bi, &blk) in exposed_blocks.iter().enumerate() {
+                    if d >= bases[bi] && d < bases[bi] + sizes[blk] {
+                        return Some(eoffs[bi] + (d - bases[bi]));
                     }
                 }
-                if let Some(cc) = c {
-                    ess_compact.push(cc);
-                }
-            }
-            let (mat_e, mat2) = eliminate_row_cols(&mat, &ess_compact);
-            // RHS correction with the compact ess data.
-            let mut xc = vec![0.0_f64; mat.nrows];
-            for &d in ess_dofs {
-                let mut c = None;
-                for (bi, &blk) in cd.exposed_blocks.iter().enumerate() {
-                    let base = self.dof_offsets[blk];
-                    let sz = self.trial_block_sizes()[blk];
-                    if d >= base && d < base + sz {
-                        c = Some(eoffs[bi] + (d - base));
-                        break;
+                None
+            };
+            match conf {
+                None => {
+                    let mut ess_compact = Vec::with_capacity(ess_dofs.len());
+                    for &d in ess_dofs {
+                        if let Some(cc) = compact_of(d) {
+                            ess_compact.push(cc);
+                        }
                     }
+                    let (mat_e, mat2) = eliminate_row_cols(&mat, &ess_compact);
+                    // RHS correction with the compact ess data.
+                    let mut xc = vec![0.0_f64; mat.nrows];
+                    for &d in ess_dofs {
+                        if let Some(cc) = compact_of(d) {
+                            xc[cc] = xg[d];
+                        }
+                    }
+                    let mut corr = vec![0.0_f64; mat.nrows];
+                    mat_e.spmv(&xc, &mut corr);
+                    for i in 0..b.len() {
+                        b[i] -= corr[i];
+                    }
+                    // MFEM `S->PartMult(ess_rtdof_list, X, *y)`: the eliminated
+                    // rows carry a unit diagonal, so the prescribed values (the
+                    // initial-guess entries at the essential dofs) must be written
+                    // back into `B`.  Without this step the essential rows read
+                    // `B = y − S_e x` instead of the Dirichlet data.
+                    part_mult_assign(&mat2, &ess_compact, &xc, &mut b);
+                    self.reduced_mat = Some(mat2.clone());
+                    let offsets = eoffs.clone();
+                    (None, (DpgSystem::Condensed { mat: mat2, offsets }, xc, b))
                 }
-                if let Some(cc) = c {
-                    xc[cc] = xg[d];
+                Some(conf) => {
+                    // Restrict the Schur system to the exposed TRUE dofs:
+                    // `S_t = Peᵀ·S·Pe`, `b_t = Peᵀ·b` (the restriction acts on
+                    // trace (exposed) dofs only, so this equals the Schur
+                    // complement of the fully restricted system).
+                    let view = ExposedRestrictionView::build(self, &conf, &eoffs);
+                    let n_exp = view.exp_true_col.len();
+                    let n_t = view.t_eoffs[view.t_eoffs.len() - 1];
+                    let mut coo = CooMatrix::<f64>::new(n_exp, n_t);
+                    for cc in 0..n_exp {
+                        if let Some(tc) = view.exp_true_col[cc] {
+                            coo.add(cc, tc, 1.0);
+                        }
+                    }
+                    for (sc, terms) in &view.slave_terms {
+                        for &(mc, c) in terms {
+                            coo.add(*sc, mc, c);
+                        }
+                    }
+                    let pe = coo.into_csr_sorted();
+                    let pt = pe.transpose();
+                    let ra = csr_spmm(&pt, &mat);
+                    let a_t = csr_spmm(&ra, &pe);
+                    let mut b_t = vec![0.0_f64; n_t];
+                    pt.spmv(&b, &mut b_t);
+                    // Essential dofs: must be exposed true dofs.
+                    let mut ess_true = Vec::with_capacity(ess_dofs.len());
+                    let mut xc_t = vec![0.0_f64; n_t];
+                    for &d in ess_dofs {
+                        let cc = compact_of(d).unwrap_or_else(|| {
+                            panic!("essential dof {d} outside the exposed blocks")
+                        });
+                        let tc = view.exp_true_col[cc].unwrap_or_else(|| {
+                            panic!(
+                                "essential dof {d} is a constrained (hanging) trace dof — \
+                                 essential BCs on hanging trace dofs are not supported"
+                            )
+                        });
+                        ess_true.push(tc);
+                        xc_t[tc] = xg[d];
+                    }
+                    let (mat_e, mat2) = eliminate_row_cols(&a_t, &ess_true);
+                    let mut corr = vec![0.0_f64; n_t];
+                    mat_e.spmv(&xc_t, &mut corr);
+                    for i in 0..b_t.len() {
+                        b_t[i] -= corr[i];
+                    }
+                    part_mult_assign(&mat2, &ess_true, &xc_t, &mut b_t);
+                    // Initial guess in the exposed-true compact layout.
+                    let mut xs = vec![0.0_f64; n_t];
+                    if copy_interior {
+                        for (cc, &g) in view.compact_global.iter().enumerate() {
+                            if let Some(tc) = view.exp_true_col[cc] {
+                                xs[tc] = xg[g];
+                            }
+                        }
+                    } else {
+                        for &tc in ess_true.iter() {
+                            xs[tc] = xc_t[tc];
+                        }
+                    }
+                    // Cache the exposed view for `recover_fem_solution`.
+                    let offsets = view.t_eoffs.clone();
+                    self.exposed_view = Some(view);
+                    self.reduced_mat = Some(mat2.clone());
+                    (
+                        Some(conf),
+                        (DpgSystem::Condensed { mat: mat2, offsets }, xs, b_t),
+                    )
                 }
             }
-            let mut corr = vec![0.0_f64; mat.nrows];
-            mat_e.spmv(&xc, &mut corr);
-            for i in 0..b.len() {
-                b[i] -= corr[i];
-            }
-            // MFEM `S->PartMult(ess_rtdof_list, X, *y)`: the eliminated
-            // rows carry a unit diagonal, so the prescribed values (the
-            // initial-guess entries at the essential dofs) must be written
-            // back into `B`.  Without this step the essential rows read
-            // `B = y − S_e x` instead of the Dirichlet data.
-            part_mult_assign(&mat2, &ess_compact, &xc, &mut b);
-            self.reduced_mat = Some(mat2.clone());
-            let offsets = eoffs.clone();
-            (DpgSystem::Condensed { mat: mat2, offsets }, xc, b)
         } else {
             let mat = self.mat.clone().unwrap();
             let mut b = self.y.clone().unwrap();
-            let (mat_e, mat2) = eliminate_row_cols(&mat, ess_dofs);
-            let mut corr = vec![0.0_f64; mat.nrows];
-            mat_e.spmv(&xg, &mut corr);
-            for i in 0..b.len() {
-                b[i] -= corr[i];
-            }
-            // MFEM `DPGWeakForm::EliminateVDofsInRHS` =
-            // `mat_e->AddMult(x, b, -1)` + `mat->PartMult(vdofs, x, b)`.
-            part_mult_assign(&mat2, ess_dofs, &xg, &mut b);
-            let mut xs = vec![0.0_f64; mat.nrows];
-            if copy_interior {
-                xs.copy_from_slice(&xg);
-            } else {
-                for &d in ess_dofs {
-                    xs[d] = xg[d];
+            match conf {
+                None => {
+                    let (mat_e, mat2) = eliminate_row_cols(&mat, ess_dofs);
+                    let mut corr = vec![0.0_f64; mat.nrows];
+                    mat_e.spmv(&xg, &mut corr);
+                    for i in 0..b.len() {
+                        b[i] -= corr[i];
+                    }
+                    // MFEM `DPGWeakForm::EliminateVDofsInRHS` =
+                    // `mat_e->AddMult(x, b, -1)` + `mat->PartMult(vdofs, x, b)`.
+                    part_mult_assign(&mat2, ess_dofs, &xg, &mut b);
+                    let mut xs = vec![0.0_f64; mat.nrows];
+                    if copy_interior {
+                        xs.copy_from_slice(&xg);
+                    } else {
+                        for &d in ess_dofs {
+                            xs[d] = xg[d];
+                        }
+                    }
+                    self.mat = Some(mat2.clone());
+                    let offsets = self.dof_offsets.clone();
+                    (None, (DpgSystem::Full { mat: mat2, offsets }, xs, b))
+                }
+                Some(conf) => {
+                    // True-dof assembly: `A_t = Pᵀ·A·P`, `b_t = Pᵀ·y`.
+                    let pt = conf.p.transpose();
+                    let ra = csr_spmm(&pt, &mat);
+                    let a_t = csr_spmm(&ra, &conf.p);
+                    let n_t = conf.true_dofs.len();
+                    let mut b_t = vec![0.0_f64; n_t];
+                    pt.spmv(&b, &mut b_t);
+                    let mut ess_true = Vec::with_capacity(ess_dofs.len());
+                    let mut xg_t = vec![0.0_f64; n_t];
+                    for &d in ess_dofs {
+                        let tc = conf.true_col[d].unwrap_or_else(|| {
+                            panic!(
+                                "essential dof {d} is a constrained (hanging) trace dof — \
+                                 essential BCs on hanging trace dofs are not supported"
+                            )
+                        });
+                        ess_true.push(tc);
+                        xg_t[tc] = xg[d];
+                    }
+                    let (mat_e, mat2) = eliminate_row_cols(&a_t, &ess_true);
+                    let mut corr = vec![0.0_f64; n_t];
+                    mat_e.spmv(&xg_t, &mut corr);
+                    for i in 0..b_t.len() {
+                        b_t[i] -= corr[i];
+                    }
+                    // Same `EliminateVDofsInRHS` split, true-dof layout.
+                    part_mult_assign(&mat2, &ess_true, &xg_t, &mut b_t);
+                    let mut xs = vec![0.0_f64; n_t];
+                    if copy_interior {
+                        for (ti, &t) in conf.true_dofs.iter().enumerate() {
+                            xs[ti] = xg[t];
+                        }
+                    } else {
+                        for &tc in ess_true.iter() {
+                            xs[tc] = xg_t[tc];
+                        }
+                    }
+                    self.mat = Some(mat2.clone());
+                    let offsets = conf.true_offsets.clone();
+                    (
+                        Some(conf),
+                        (DpgSystem::Full { mat: mat2, offsets }, xs, b_t),
+                    )
                 }
             }
-            self.mat = Some(mat2.clone());
-            let offsets = self.dof_offsets.clone();
-            (DpgSystem::Full { mat: mat2, offsets }, xs, b)
         }
     }
 
     /// `RecoverFEMSolution(X, x)`: map the solved vector to the full trial
     /// vector; with static condensation the private (volume) dofs are
     /// recovered element-wise: `x_p = A_pp⁻¹ (b_p − A_pe x_e)`.
+    ///
+    /// With a registered conforming restriction the solved vector lives in
+    /// the true(-exposed) layout and is first lifted through `P` (`u_full =
+    /// P·u_true`); hanging trace dofs receive their constrained values.
     pub fn recover_fem_solution(&self, xs: &[f64]) -> Vec<f64> {
         let n = self.size();
         let mut x = vec![0.0_f64; n];
         match &self.cond_data {
             Some(cd) => {
-                // `xs` is in compact exposed-dof ordering; scatter to global.
+                // `xs` is in compact exposed-dof ordering (exposed-TRUE
+                // compact when a restriction is registered); scatter to
+                // global-exposed first, then recover the element-private dofs.
                 let eoffs = self.exposed_block_offsets();
+                let n_exp = eoffs[eoffs.len() - 1];
+                let mut xs_exp = vec![0.0_f64; n_exp];
+                match &self.exposed_view {
+                    None => {
+                        xs_exp.copy_from_slice(&xs[..n_exp]);
+                    }
+                    Some(view) => {
+                        // True compact → exposed compact (true dofs), then the
+                        // constraint rows fill the slaves.
+                        for (cc, &tc) in view.exp_true_col.iter().enumerate() {
+                            if let Some(tc) = tc {
+                                xs_exp[cc] = xs[tc];
+                            }
+                        }
+                        for (sc, terms) in &view.slave_terms_exp {
+                            xs_exp[*sc] = terms.iter().map(|&(mc, c)| c * xs_exp[mc]).sum();
+                        }
+                    }
+                }
+                // The element-private recovery below reads the exposed values
+                // in the compact layout — after the lift this is `xs_exp`.
+                let xs = &xs_exp;
                 for (bi, &b) in cd.exposed_blocks.iter().enumerate() {
                     let base = self.dof_offsets[b];
                     let sz = self.trial_block_sizes()[b];
                     for k in 0..sz {
-                        x[base + k] = xs[eoffs[bi] + k];
+                        x[base + k] = xs_exp[eoffs[bi] + k];
                     }
                 }
                 for e in 0..self.mesh.n_elements() as u32 {
@@ -1421,7 +1837,15 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                 }
             }
             None => {
-                x.copy_from_slice(&xs[..n]);
+                match &self.conforming {
+                    Some(conf) => {
+                        // `xs` is the solved true-dof vector: `x_full = P·x_true`.
+                        conf.p.spmv(xs, &mut x);
+                    }
+                    None => {
+                        x.copy_from_slice(&xs[..n]);
+                    }
+                }
             }
         }
         x
@@ -1460,13 +1884,18 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
 
     /// `Update()` after mesh modification.
     ///
-    /// **TODO (kernel gap):** the C++ method supports AMR through
-    /// `ConformingAssemble` / `BuildProlongation` (block prolongation
-    /// `P` / restriction `R` between non-conforming and conforming spaces).
-    /// fem-rs does not yet expose hanging-node constraints for arbitrary
-    /// trace/volume space combinations, so this port resets the assembled
-    /// state only; uniform refinement rebuilds the weak form on the refined
-    /// mesh instead.
+    /// The C++ method supports AMR through `ConformingAssemble` /
+    /// `BuildProlongation` (block prolongation `P` / restriction `R` between
+    /// non-conforming and conforming spaces).  fem-rs exposes the NC
+    /// conforming restriction for the **trace blocks** on 2-D quad meshes
+    /// ([`Self::set_trace_conforming_restriction`] +
+    /// [`SkeletonSpace::nc_conforming_constraints`](crate::dpg::dpg_basis::SkeletonSpace::nc_conforming_constraints)
+    /// — D1030, probe-pinned against MFEM 4.10; verified end-to-end by the
+    /// `pconvection_diffusion` theta=0.7 table).  Because this port rebuilds
+    /// the weak form on the refined mesh instead of prolonging the assembled
+    /// state, this method still only resets the assembly.  Trace-face
+    /// interior dof transfers for p ≥ 2 and the multi-rank lane are
+    /// registered separately (D1031/D1032).
     pub fn update(&mut self) {
         self.mat = None;
         self.y = None;
