@@ -923,6 +923,7 @@ dependencies = [
  "fem-assembly",
  "fem-core",
  "fem-element",
+ "fem-io",
  "fem-linalg",
  "fem-linalg-gpu",
  "fem-mesh",
