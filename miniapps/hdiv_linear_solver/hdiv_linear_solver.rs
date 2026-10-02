@@ -74,7 +74,7 @@ use fem_assembly::qfunction::QuadratureFunction;
 use fem_assembly::qspace::{QuadratureSpace, QuadratureSpaceBase};
 use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::vector_assembler::VectorAssembler;
-use fem_element::lagrange::factory::{QuadL2GL, TriPk};
+use fem_element::lagrange::factory::QuadL2GL;
 use fem_element::reference::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, MeshTopology};
@@ -474,11 +474,14 @@ fn assemble_l2_mass_qf(
 }
 
 /// Reference L² element matching fem-rs' `L2Space` basis (MFEM
-/// `L2_FECollection` default Gauss-Legendre / discontinuous simplex nodes).
+/// `L2_FECollection` default `BasisType::GaussLegendre`, fe_coll.hpp:385 —
+/// **open Gauss-Legendre barycentric nodes**, NOT equispaced: D986 — the old
+/// `TriPk` pick made the QF mass a vertex-nodal matrix while the standard
+/// assembler produces the GL-nodal one; the two live in different bases).
 fn l2_ref_elem(mesh: &Mesh<2>, e: u32, order: u8) -> Box<dyn ReferenceElement> {
     match mesh.element_type(e) {
         fem_mesh::ElementType::Tri3 if order == 0 => Box::new(L2P0),
-        fem_mesh::ElementType::Tri3 => Box::new(TriPk::new(order as usize)),
+        fem_mesh::ElementType::Tri3 => Box::new(fem_element::lagrange::TriL2GL::new(order as usize)),
         fem_mesh::ElementType::Quad4 if order == 0 => Box::new(L2P0),
         fem_mesh::ElementType::Quad4 => Box::new(QuadL2GL::new(order as usize)),
         other => panic!("l2_ref_elem: unsupported element type {other:?}"),

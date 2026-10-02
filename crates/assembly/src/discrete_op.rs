@@ -1198,6 +1198,12 @@ impl DiscreteLinearOperator {
             let rt1_elem = TetRT1;
             let n_rt1 = rt1_elem.n_dofs(); // 15
 
+            // D618: the hexahedral arm (below) needs only the element crate's
+            // `HexRT1` reference tables — the Piola invariant
+            // `v_phys·cof(J)·n̂ = v̂·n̂` makes the RT1-hex dual rows purely
+            // reference quantities, and for the affine hex map
+            // `div_phys = div̂ / det J`.
+
             let eval_field = |k: usize, x: f64, y: f64, z: f64| -> [f64; 3] {
                 match k {
                     0 => [1.0, 0.0, 0.0],
@@ -1247,6 +1253,118 @@ impl DiscreteLinearOperator {
                 let hdiv_dofs = hdiv_space.element_dofs(e);
                 let l2_dofs = l2_space.element_dofs(e); // 4 (P1) or 10 (P2)
                 let nodes = mesh.element_nodes(e);
+
+                // D618: hexahedra run the reference-Piola RT1-hex arm.
+                let is_hex =
+                    matches!(mesh.element_type(e), ElementType::Hex8 | ElementType::Hex20);
+                if is_hex {
+                    let dbg_e: u32 = e;
+                    if dbg_e == 1 {
+                        eprintln!("D618DBG e=1 hdiv_dofs={:?} l2={:?}", hdiv_dofs, l2_dofs);
+                    }
+                    let rt1_hex = fem_element::raviart_thomas::HexRT1;
+                    let n_hex_rt1 = rt1_hex.n_dofs(); // 36
+                    let (hex_pts, hex_nks) =
+                        fem_element::raviart_thomas::hex_rt1::mfem_hex_nodal_dofs(1);
+                    let n_l2_local = l2_dofs.len();
+                    // Affine hex map: J = [v1-v0, v3-v0, v4-v0] (MFEM CUBE
+                    // vertex order on the [0,1]³ reference frame).
+                    let x0 = mesh.node_coords(nodes[0]);
+                    let x1 = mesh.node_coords(nodes[1]);
+                    let x3 = mesh.node_coords(nodes[3]);
+                    let x4 = mesh.node_coords(nodes[4]);
+                    let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
+                    let j1 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
+                    let j2 = [x4[0] - x0[0], x4[1] - x0[1], x4[2] - x0[2]];
+                    let det = j0[0] * (j1[1] * j2[2] - j1[2] * j2[1])
+                        - j1[0] * (j0[1] * j2[2] - j0[2] * j2[1])
+                        + j2[0] * (j0[1] * j1[2] - j0[2] * j1[1]);
+                    let signs = hdiv_space.element_signs(e);
+
+                    // L2 sample points: `L2Space::dof_coords` is PHYSICAL
+                    // (mapped through the element geometry); pull them back
+                    // to the reference cube for the reference-space
+                    // divergence.
+                    let l2_phys_pts: &[f64] = l2_space.dof_coords();
+                    let det_inv = 1.0 / det;
+                    let inv = [
+                        [
+                            (j1[1] * j2[2] - j1[2] * j2[1]) * det_inv,
+                            (j0[2] * j2[1] - j0[1] * j2[2]) * det_inv,
+                            (j0[1] * j1[2] - j0[2] * j1[1]) * det_inv,
+                        ],
+                        [
+                            (j1[2] * j2[0] - j1[0] * j2[2]) * det_inv,
+                            (j0[0] * j2[2] - j0[2] * j2[0]) * det_inv,
+                            (j0[2] * j1[0] - j0[0] * j1[2]) * det_inv,
+                        ],
+                        [
+                            (j1[0] * j2[1] - j1[1] * j2[0]) * det_inv,
+                            (j0[1] * j2[0] - j0[0] * j2[1]) * det_inv,
+                            (j0[0] * j1[1] - j0[1] * j1[0]) * det_inv,
+                        ],
+                    ];
+                    let sample_ref: Vec<[f64; 3]> = l2_dofs
+                        .iter()
+                        .map(|&g| {
+                            let b = g as usize * 3;
+                            let xp = [l2_phys_pts[b], l2_phys_pts[b + 1], l2_phys_pts[b + 2]];
+                            let d = [xp[0] - x0[0], xp[1] - x0[1], xp[2] - x0[2]];
+                            [
+                                inv[0][0] * d[0] + inv[0][1] * d[1] + inv[0][2] * d[2],
+                                inv[1][0] * d[0] + inv[1][1] * d[1] + inv[1][2] * d[2],
+                                inv[2][0] * d[0] + inv[2][1] * d[1] + inv[2][2] * d[2],
+                            ]
+                        })
+                        .collect();
+
+                    let mut dmat = vec![0.0_f64; n_hex_rt1 * n_hex_rt1];
+                    let mut ymat = vec![0.0_f64; n_l2_local * n_hex_rt1];
+                    {
+                        let mut phi = vec![0.0_f64; n_hex_rt1 * 3];
+                        let mut divs = vec![0.0_f64; n_hex_rt1];
+                        for s in 0..n_hex_rt1 {
+                            rt1_hex.eval_basis_vec(&hex_pts[s], &mut phi);
+                            for k in 0..n_hex_rt1 {
+                                dmat[s * n_hex_rt1 + k] = signs[s]
+                                    * (phi[k * 3] * hex_nks[s][0]
+                                        + phi[k * 3 + 1] * hex_nks[s][1]
+                                        + phi[k * 3 + 2] * hex_nks[s][2]);
+                            }
+                        }
+                        for (p, sp) in sample_ref.iter().enumerate() {
+                            rt1_hex.eval_div(sp, &mut divs);
+                            for k in 0..n_hex_rt1 {
+                                // div_phys = div̂ / det J (affine map).
+                                ymat[p * n_hex_rt1 + k] = divs[k] / det;
+                            }
+                        }
+                    }
+
+                    let mut dt = vec![0.0_f64; n_hex_rt1 * n_hex_rt1];
+                    for i in 0..n_hex_rt1 {
+                        for j in 0..n_hex_rt1 {
+                            dt[i * n_hex_rt1 + j] = dmat[j * n_hex_rt1 + i];
+                        }
+                    }
+                    let mut yt = vec![0.0_f64; n_hex_rt1 * n_l2_local];
+                    for p in 0..n_l2_local {
+                        for k in 0..n_hex_rt1 {
+                            yt[k * n_l2_local + p] = ymat[p * n_hex_rt1 + k];
+                        }
+                    }
+
+                    let z = solve_small(n_hex_rt1, n_l2_local, &dt, &yt);
+                    for (p_local, &global_p) in l2_dofs.iter().enumerate() {
+                        for (i_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
+                            let val = z[i_local * n_l2_local + p_local];
+                            if val.abs() > 1e-15 {
+                                coo.add(global_p as usize, global_rt1 as usize, val);
+                            }
+                        }
+                    }
+                    continue;
+                }
 
                 let mut dmat = vec![0.0_f64; n_rt1 * n_rt1];
                 let n_l2_local = l2_dofs.len();

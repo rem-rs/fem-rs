@@ -91,11 +91,21 @@ pub fn scalar_dist_to_vector<M: MeshTopology, S: FESpace<Mesh = M>>(
     let mut dist_v = vec![0.0_f64; dim * n];
     let mut magn = vec![0.0_f64; n];
     let mut der_d = vec![0.0_f64; n];
+    // MFEM `GetDerivative` averages the per-element derivatives at shared DOF
+    // nodes: `AccumulateAndCountDerivativeValues` accumulates
+    // `der(dof) += a; zones_per_dof[dof]++` and `GetDerivative` finishes with
+    // `der(i) /= overlap[i]` (fem/gridfunc.cpp, MFEM 4.10).  Missing the
+    // division multiplied interface-crossing DOF derivatives by their element
+    // overlap count (D1001).
+    let mut overlap = vec![0_u32; n];
     for d in 0..dim {
         // der_d = discrete derivative of dist_s along axis d, sampled at the
         // DOF nodes (MFEM `dist_s.GetDerivative(1, d, der)`).
         for v in der_d.iter_mut() {
             *v = 0.0;
+        }
+        for c in overlap.iter_mut() {
+            *c = 0;
         }
         for e in mesh.elem_iter() {
             let order = space.element_order(e);
@@ -115,10 +125,14 @@ pub fn scalar_dist_to_vector<M: MeshTopology, S: FESpace<Mesh = M>>(
                         dud += dist_s[dofs[j] as usize] * grad_phys[j * dim + d];
                     }
                     der_d[dofs[i] as usize] += dud;
+                    overlap[dofs[i] as usize] += 1;
                 }
             }
         }
         for i in 0..n {
+            if overlap[i] > 0 {
+                der_d[i] /= overlap[i] as f64;
+            }
             magn[i] += der_d[i] * der_d[i];
             // The vector must point towards the level zero set.
             dist_v[i + d * n] = if dist_s[i] > 0.0 { -der_d[i] } else { der_d[i] };

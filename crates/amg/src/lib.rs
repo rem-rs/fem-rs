@@ -899,14 +899,41 @@ mod tests {
         let n = 100;
         let a = laplacian_1d(n);
         let b = vec![1.0_f64; n];
+
+        // Working regime: degree ≤ 2 cycle preconditioner is SPD and CG
+        // converges (verified by explicit spectrum: λmin(B) = 1.6e-1 at
+        // degree 2 vs −3.7e-2 at degree 3 — see D1000).
         let mut x = vec![0.0_f64; n];
         let config = AmgConfig {
-            smoother: SmootherType::Chebyshev { degree: 3, ratio: 3.0 },
+            smoother: SmootherType::Chebyshev { degree: 2, ratio: 3.0 },
             ..AmgConfig::default()
         };
         let res = solve_amg_cg(&a, &b, &mut x, &config, &SolverConfig::default()).unwrap();
         assert!(res.converged, "Chebyshev AMG-CG failed: residual = {}", res.final_residual);
         assert!(res.iterations < 50, "too many iterations: {}", res.iterations);
+
+        // D1000 pin: the degree-3 Chebyshev cycle is *genuinely* indefinite
+        // (explicit symmetric spectrum on this system: λmin(B) = −3.69e-2,
+        // λmax = 5.02e+02, although every ingredient — per-level Chebyshev
+        // smoother, exact Galerkin A_c = PᵀAP, exact coarse LU — is SPD).
+        // Since D976 the linlvo CG aborts on (B r, r) < 0 exactly like MFEM
+        // `CGSolver::Mult` (linalg/solvers.cpp:938-946, MFEM 4.10) instead of
+        // riding through the negative energy via `abs()`; the degree-3 cycle
+        // therefore fails loudly.  The old `converged` expectation here was
+        // passing *through* the indefiniteness (masked energies), not proving
+        // correctness.  Flip this pin back to a convergence assertion when
+        // D1000 lands.
+        let mut x3 = vec![0.0_f64; n];
+        let config3 = AmgConfig {
+            smoother: SmootherType::Chebyshev { degree: 3, ratio: 3.0 },
+            ..AmgConfig::default()
+        };
+        let err = solve_amg_cg(&a, &b, &mut x3, &config3, &SolverConfig::default())
+            .expect_err("D1000: degree-3 Chebyshev cycle is indefinite — CG must abort");
+        assert!(
+            err.to_string().contains("not positive definite"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -926,12 +953,15 @@ mod tests {
         let n = 80;
         let a = laplacian_1d(n);
         let b = vec![1.0_f64; n];
-        let mut x = vec![0.0_f64; n];
+
+        // Working regime (degree 2 — see D1000 on the degree-3 cycle): the
+        // F-cycle with a SPD Chebyshev cycle preconditioner converges.
         let config = AmgConfig {
-            smoother: SmootherType::Chebyshev { degree: 3, ratio: 3.0 },
+            smoother: SmootherType::Chebyshev { degree: 2, ratio: 3.0 },
             ..AmgConfig::default()
         };
         let solver = AmgSolver::setup(&a, config).with_cycle(CycleType::F);
+        let mut x = vec![0.0_f64; n];
         let res = solver.solve(&a, &b, &mut x, &SolverConfig::default()).unwrap();
         assert!(res.converged, "Chebyshev+F-cycle failed: residual = {}", res.final_residual);
     }

@@ -96,19 +96,19 @@ pub fn gauss_legendre_01(n: usize) -> (Vec<f64>, Vec<f64>) {
 
 // ─── Gauss-Lobatto on [-1,1] ──────────────────────────────────────────────────
 
-/// Gauss-Lobatto-Legendre points and weights on `[-1, 1]`, for `n` points (2 ≤ n ≤ 5).
+/// Gauss-Lobatto-Legendre points and weights on `[-1, 1]`, for `n ≥ 2` points.
 ///
 /// Gauss-Lobatto rules **include the endpoints** ±1.  With `n` points they are
 /// exact for polynomials up to degree `2n − 3`.  They are the standard choice
 /// for spectral-element / nodal DG methods because the interpolation nodes
 /// coincide with the quadrature points.
 ///
-/// | n | interior pts | exactness |
-/// |---|--------------|-----------|
-/// | 2 | 0            | degree 1  |
-/// | 3 | 1            | degree 3  |
-/// | 4 | 2            | degree 5  |
-/// | 5 | 3            | degree 7  |
+/// Delegates to [`gauss_lobatto_arbitrary`] (MFEM `QuadratureFunctions1D::
+/// GaussLobatto` bit-exact port, D275); D977 removed the hard `n ≤ 5` cap
+/// here, which made `grad_div -o 5` (GLL nodes n = 6) panic while the C++
+/// miniapp ran fine (`cpp_ref/grad_div_star_o5.log`).  The `n ≤ 5` branch
+/// stays on the analytic table (which [`gauss_lobatto_arbitrary`] itself
+/// re-uses — delegating back would recurse).
 fn gauss_lobatto_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
     match n {
         2 => (vec![-1.0, 1.0], vec![1.0, 1.0]),
@@ -133,7 +133,7 @@ fn gauss_lobatto_1d(n: usize) -> (Vec<f64>, Vec<f64>) {
                 ],
             )
         }
-        _ => panic!("gauss_lobatto_1d: only n=2..5 supported, got {n}"),
+        _ => gauss_lobatto_arbitrary(n),
     }
 }
 
@@ -153,7 +153,7 @@ pub fn gauss_lobatto_01(n: usize) -> (Vec<f64>, Vec<f64>) {
 /// exact for polynomials up to degree `2n − 3`.
 pub fn seg_lobatto_rule(order: u8) -> QuadratureRule {
     // n points integrates degree 2n-3 exactly; need 2n-3 >= order => n >= (order+3)/2
-    let n = ((order as usize + 4) / 2).clamp(2, 5);
+    let n = ((order as usize + 4) / 2).clamp(2, 32);
     let (pts, wts) = gauss_lobatto_01(n);
     QuadratureRule {
         points: pts.into_iter().map(|x| vec![x]).collect(),
@@ -166,7 +166,7 @@ pub fn seg_lobatto_rule(order: u8) -> QuadratureRule {
 /// Uses `n×n` Gauss-Lobatto points; exact for polynomials of degree ≤ `2n−3`
 /// in each variable.  Points include all edges and corners of the reference quad.
 pub fn quad_lobatto_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 4) / 2).clamp(2, 5);
+    let n = ((order as usize + 4) / 2).clamp(2, 32);
     let (xs, ws) = gauss_lobatto_1d(n);
     let mut pts = Vec::with_capacity(n * n);
     let mut wts = Vec::with_capacity(n * n);
@@ -187,7 +187,7 @@ pub fn quad_lobatto_rule(order: u8) -> QuadratureRule {
 /// Uses `n×n×n` Gauss-Lobatto points; exact for polynomials of degree ≤ `2n−3`
 /// in each variable.
 pub fn hex_lobatto_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 4) / 2).clamp(2, 5);
+    let n = ((order as usize + 4) / 2).clamp(2, 32);
     let (xs, ws) = gauss_lobatto_1d(n);
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);
