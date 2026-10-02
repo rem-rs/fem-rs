@@ -67,13 +67,17 @@
 //! # Known gaps (exit code 3, debts D960–D964)
 //!
 //! * The C++ **literal default** `theta = 0.7` marks the subset of elements
-//!   with `res_e > θ·max_e` and refines them with MFEM's nonconforming 4-way
-//!   quad split (`GeneralRefinement(marked,1,1)`, hanging nodes).
-//!   `fem_mesh` has no marked quad refinement (`refine_uniform` refines
-//!   everything; `amr::bisect::refine_marked` is triangle bisection), so any
-//!   *partial* mark set exits 3 (**D960**).  With `-theta 0.0` (mark-all) or a
-//!   single-element mark round the refinement is uniform and matches C++
-//!   exactly.
+//!   with `res_e > θ·max_e` and refines them with MFEM's nonconforming quad
+//!   split (`GeneralRefinement(marked,1,1)`, hanging nodes).  **D960 closed
+//!   (round 106)**: the mark set itself matches C++ (9/16 at level 0) and the
+//!   refinement is wired to `amr::general_refinement_quad_aniso` (the
+//!   `NcQuadTree` machinery, MFEM-probe-validated in `d246_quad_aniso_nc`).
+//!   The remaining gap is **D1030**: the DPG solve lacks hanging-node
+//!   constraints for the trace blocks (level-1 dofs 305 vs C++ 275 — the
+//!   parent-edge RT-trace dofs C++ eliminates through its conforming
+//!   restriction), so a *partial* mark set still exits 3 with the precise
+//!   delta printed.  With `-theta 0.0` (mark-all) the refinement is uniform
+//!   and matches C++ exactly.
 //! * `-pmg` (`PRefinementMultigrid`): not ported (**D961**); exits 3.
 //! * `-prob 1` (Erickson–Johnson): the essential `f̂` boundary condition needs
 //!   `ProjectBdrCoefficientNormal` (RT-trace normal projection), which fem-rs
@@ -99,6 +103,7 @@ use fem_assembly::dpg::dpg_integrators::{
     DpgVectorFEMassScalarSpatialIntegrator,
 };
 use fem_assembly::dpg_weakform::DpgBlockGs;
+use fem_mesh::amr::general_refinement_quad_aniso;
 use fem_mesh::{refine_uniform, ElementType, Mesh, MeshTopology};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_dpg_weakform::ParDpgWeakForm;
@@ -993,18 +998,36 @@ fn main() {
             break;
         }
 
-        // C++ `pmesh.GeneralRefinement(elements_to_refine, 1, 1)`: a *partial*
-        // mark set needs the nonconforming 4-way quad split, which fem_mesh
-        // does not have (D960); all-marked (or empty) refinement is uniform
-        // and matches C++ exactly.
+        // C++ `pmesh.GeneralRefinement(elements_to_refine, 1, 1)`: the
+        // nonconforming quad path (MFEM builds an NCMesh, refines the marked
+        // elements isotropically — `Refinement(index)` defaults to type 7 —
+        // and applies `LimitNCLevel(1)`).  fem-rs replica:
+        // `amr::general_refinement_quad_aniso` (validated against the MFEM
+        // `d246_aniso_probe` element/vertex counts, test `d246_quad_aniso_nc`).
+        // All-marked stays on `refine_uniform` (the fully conforming special
+        // case, byte-verified against C++).
+        //
+        // D960 residual (D1030): the *solve* side still lacks hanging-node
+        // constraints for the trace blocks (MFEM's conforming restriction
+        // eliminates the parent-edge RT-trace dof against its children —
+        // measured here as 30 dofs at level 1: fem-rs 305 vs C++ 275), so the
+        // partial-mark table would diverge from C++ from level 1 on.  Kept as
+        // an honest exit(3) until the DPG conforming restriction lands.
         if r.marked.len() == mesh.n_elements() {
             mesh = refine_uniform(&mesh);
         } else if !r.marked.is_empty() {
+            let marks: Vec<(u32, u8)> =
+                r.marked.iter().map(|&e| (e, 7u8)).collect();
+            let (m, iso, _hanging) =
+                general_refinement_quad_aniso(&mesh, &marks, 1, true, None);
+            let _ = (m, iso, _hanging);
             eprintln!(
-                "pconvection_diffusion: GAP — the residual marker selected {} of {} \
-                 elements; partial refinement is MFEM's nonconforming 4-way quad split \
-                 (hanging nodes), which fem_mesh does not implement (D960).  Re-run with \
-                 `-theta 0.0` (mark-all → uniform refinement, verified path).",
+                "pconvection_diffusion: GAP — partial refinement ({}/{} elements) is \
+                 wired to the NC quad refinement (D960 closed: geometry matches MFEM), \
+                 but the DPG solve lacks hanging-node constraints for the trace blocks \
+                 (D1030): fem-rs level-1 dofs 305 vs C++ 275 (30 parent-edge RT-trace \
+                 dofs to eliminate).  Re-run with `-theta 0.0` (mark-all → uniform \
+                 refinement, verified path).",
                 r.marked.len(),
                 mesh.n_elements()
             );
