@@ -19,6 +19,34 @@
 //! (joule_solver.cpp:401-640) through MFEM's `ODESolver` family
 //! (`-s 1|2|3|22|23|34`).
 //!
+//! ## Round 106 (D1046 segment) — registration audit + `-visit` cycle 0
+//!
+//! * **The round-102 P0 registration for this file is misattributed**: the
+//!   audit line reads "joule `-vp`/`-nbcs`/AMR(`-maxit>1`) 缺", but MFEM 4.10
+//!   `joule.cpp` has **no** `-vp`, `-nbcs` or `-maxit` options at all (its full
+//!   option set is `-m -rs -rp -o -s -tf -dt -mu -cnd -f -vis -visit -vs -k
+//!   -print -amr -sc -debug -hl -p`).  Those three options belong to
+//!   **`volta.cpp`** (`-vp` voltaic-pile params, `-nbcs` Neumann-BC surfaces,
+//!   `-maxit` max-AMR-iterations) and are registered as `miniapp_volta`'s
+//!   exit(3) gaps there.  Nothing in this file corresponds to them; the
+//!   genuine joule residuals are the coupled time loop (below) and the
+//!   `-amr 1`/`-sc 1`/`-debug 1`/`-print 1`/`-vis` paths.
+//! * **`-visit` (VisItDataCollection) cycle 0 is now written** (was refused):
+//!   C++ saves cycle 0 *before* the time loop (joule.cpp:573-575, all six
+//!   fields zero).  The port writes the byte-verified file set
+//!   `Joule_000000/{mesh,Phi,E,B,T,w,F}.000000` + `Joule_000000.mfem_root`
+//!   (`--ranks 1` only): the mesh at the dc precision 6, the GF files with
+//!   MFEM's `DofTransformation::TransformPrimal` **negative-zero** pattern
+//!   (`+0 × (−1) → "-0"`, from the ND/RT orientation signs), and the
+//!   `.mfem_root` JSON.  fem-rs's ND/RT global dof numbering is
+//!   slot-for-slot MFEM's on this mesh (D120), so the -0 pattern is
+//!   reproducible; the parity target is the MFEM 4.10 MPI oracle
+//!   (`$HOME/mfem410_mpi`, `mpirun -np 1`).
+//! * **stdout purity**: the D120/D121 instrumentation moved off stdout (it is
+//!   not part of the C++ output), so the comparable stdout region — banner,
+//!   options dump, skin depths, the five dof lines — is byte-identical to the
+//!   oracle and the run then stops with status 3 before the time loop.
+//!
 //! ## Port boundary (this file)
 //!
 //! Done 1:1 here, verified against the C++ binary:
@@ -103,8 +131,9 @@
 //!   `crates/parallel/tests/d110_p2_nd2_gradient_3d_hex_par.rs`);
 //! * `-sc 1` static condensation (`ParBilinearForm::EnableStaticCondensation`),
 //!   `-amr 1` (`GeneralRefinement` + `Rebalance`), `-debug 1`
-//!   (`hypre_ParCSRMatrixPrint`), `-gfprint 1`, `-vis`, `-visit` (no
-//!   visualization layer is ported);
+//!   (`hypre_ParCSRMatrixPrint`), `-gfprint 1`, `-vis`, and `-visit` with
+//!   `--ranks > 1` (the cycle-0 serial `-visit` save is now written — see the
+//!   round-106 section; the GLVis/VisIt *display* layers are not ported);
 //! * the `.gen` sample meshes (`cylinder-hex-q2.gen`, `coil.gen`, joule.cpp:89-93)
 //!   need MFEM's NetCDF mesh reader; `fem_io::mfem::read_mfem_file` only reads
 //!   the `.mesh` v1.0 format, so the `.mesh` fixtures
@@ -117,14 +146,26 @@
 //! `-m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -no-visit`
 //! (the defaults `-o 2`, `-mu 1`, `-cnd 2*pi*10`, `-f 1/60`).
 //!
-//! Byte-identical prefix (everything fem-rs prints before it stops): the
+//! Round 106: the byte-identical region now covers the whole stdout prefix —
 //! banner, the whole `Options used:` dump, the blank line + the two
-//! `Skin depth` lines, and the five `Number of … unknowns` lines —
-//! `6456 / 2016 / 6882 / 6456 / 2443`.  The only intended difference is the
-//! `--mesh` path string itself.
+//! `Skin depth` lines, and the five `Number of … unknowns` lines
+//! (`6456 / 2016 / 6882 / 6456 / 2443`) — on the default run, the `-rs 1`
+//! refinement run (`51684 / 16128 / 55050 / 51684 / 19531`) and the `-visit`
+//! run.  The `-visit` cycle-0 file set is byte-identical too: `mesh.000000`
+//! (19,721 B), the six GF slices `Phi/E/B/T/w/F.000000` (including the
+//! `DofTransformation` `-0` pattern of E/B/F: 2430/2616/2616 negative zeros)
+//! and `Joule_000000.mfem_root` (1,771 B).
+//!
+//! One known stray stdout line remains: fem-rs's mesh reader prints
+//! `Elements with wrong orientation: 70 / 252 (not fixed)` where the C++
+//! prints nothing — the hex orientation test differs from MFEM's
+//! center-trilinear Jacobian (kernel gap, D1049); the byte pins filter that
+//! exact line.  The only other intended difference is the `--mesh` path
+//! string itself.
 //!
 //! Usage:
 //!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -no-visit
+//!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -visit
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -392,6 +433,234 @@ impl MeshDependentCoefficient {
     }
 }
 
+// ─── VisItDataCollection cycle-0 writer (joule.cpp:562-576) ─────────────────
+
+/// C++ `ostream << double` at stream precision 6 (`%.6g` semantics, including
+/// `-0` for negative zero — `Mesh::Print` has no `ZeroSubnormal`).
+fn g6_mesh(x: f64) -> String {
+    if x == 0.0 {
+        return if x.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+    }
+    let exp = x.abs().log10().floor() as i32;
+    if !(-4..6).contains(&exp) {
+        let s = format!("{:.*e}", 5, x);
+        let (mant, e) = s.split_once('e').expect("scientific form");
+        let mant = mant.trim_end_matches('0').trim_end_matches('.');
+        let e: i32 = e.parse().expect("exponent");
+        format!("{mant}e{}{:02}", if e < 0 { '-' } else { '+' }, e.abs())
+    } else {
+        let decimals = (5 - exp).max(0) as usize;
+        let s = format!("{:.*}", decimals, x);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// `VisItDataCollection::Save` mesh slice for a straight (uncurved) 3-D hex
+/// mesh at the dc precision (the MFEM 4.10 oracle prints the vertices at the
+/// stream default 6).  The crate writer (`fem_io::mfem::write_mfem_file*`) is
+/// pinned to `Mesh::Save`'s precision 16, so the v1.0 text is written here
+/// directly, following **`ParMesh::Print`** (pmesh.cpp:4856): its geometry
+/// comment block stops at PRISM (no PYRAMID line), and the boundary block is
+/// the boundary faces in **NCMesh face order** — `joule.cpp:349` calls
+/// `mesh->EnsureNCMesh()`, and the ParNCMesh-backed ParMesh rebuilds its
+/// boundary in face-discovery order (scan elements in order, MFEM
+/// `Hexahedron::faces` local order), each printed with the canonical local
+/// face rotation (`CheckBdrElementOrientation` alignment).  The *attributes*
+/// come from the file's own `boundary` section (keyed by the sorted vertex
+/// set); `fem_mesh`'s `face_nodes` canonicalizes rotations, so both the order
+/// and the rotations are rebuilt here rather than read from `MeshTopology`.
+fn write_dc_mesh_text(mesh: &fem_mesh::Mesh<3>, bdr_attrs: &BdrAttrMap) -> String {
+    use fem_mesh::topology::MeshTopology;
+
+    let ne = mesh.n_elems();
+    let nv = mesh.n_nodes();
+    let mut s = String::with_capacity(48 * 1024);
+    s.push_str("MFEM mesh v1.0\n");
+    s.push_str("\n#\n# MFEM Geometry Types (see fem/geom.hpp):\n#\n");
+    s.push_str("# POINT       = 0\n");
+    s.push_str("# SEGMENT     = 1\n");
+    s.push_str("# TRIANGLE    = 2\n");
+    s.push_str("# SQUARE      = 3\n");
+    s.push_str("# TETRAHEDRON = 4\n");
+    s.push_str("# CUBE        = 5\n");
+    s.push_str("# PRISM       = 6\n");
+    s.push_str("#\n");
+    s.push_str("\ndimension\n3");
+    s.push_str("\n\nelements\n");
+    s.push_str(&format!("{ne}\n"));
+    for e in 0..ne as u32 {
+        s.push_str(&format!("{}", mesh.element_tag(e)));
+        s.push_str(" 5"); // Geometry::CUBE
+        for &n in mesh.elem_nodes(e) {
+            s.push_str(&format!(" {n}"));
+        }
+        s.push('\n');
+    }
+    s.push_str("\nboundary\n");
+    s.push_str(&format!("{}\n", bdr_attrs.len()));
+    for e in 0..ne as u32 {
+        let nodes = mesh.elem_nodes(e);
+        for face in HEX_FACES {
+            let quad = [
+                nodes[face[0]] as usize,
+                nodes[face[1]] as usize,
+                nodes[face[2]] as usize,
+                nodes[face[3]] as usize,
+            ];
+            let mut key = quad;
+            key.sort_unstable();
+            if let Some(&attr) = bdr_attrs.get(&key) {
+                s.push_str(&format!(
+                    "{attr} 3 {} {} {} {}\n",
+                    quad[0], quad[1], quad[2], quad[3]
+                ));
+            }
+        }
+    }
+    s.push_str("\nvertices\n");
+    s.push_str(&format!("{nv}\n3\n"));
+    for v in 0..nv as u32 {
+        let c = mesh.coords_of(v);
+        s.push_str(&format!(
+            "{} {} {}\n",
+            g6_mesh(c[0]),
+            g6_mesh(c[1]),
+            g6_mesh(c[2])
+        ));
+    }
+    s
+}
+
+/// MFEM `Hexahedron::faces` (mesh/hexahedron.cpp): local faces 0..5.
+const HEX_FACES: [[usize; 4]; 6] = [
+    [3, 2, 1, 0],
+    [0, 1, 5, 4],
+    [1, 2, 6, 5],
+    [2, 3, 7, 6],
+    [3, 0, 4, 7],
+    [4, 5, 6, 7],
+];
+
+/// Boundary attribute keyed by the sorted vertex set of the face.
+type BdrAttrMap = std::collections::HashMap<[usize; 4], i32>;
+
+/// Parse a mesh file's `boundary` section into `(sorted vertex set → attr)`.
+fn read_bdr_attrs(path: &str) -> Option<BdrAttrMap> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    loop {
+        match lines.next() {
+            Some(l) if l.trim() == "boundary" => break,
+            Some(_) => continue,
+            None => return None,
+        }
+    }
+    let count: usize = lines.next()?.trim().parse().ok()?;
+    let mut map = BdrAttrMap::with_capacity(count);
+    for _ in 0..count {
+        let toks: Vec<&str> = lines.next()?.split_whitespace().collect();
+        if toks.len() != 6 {
+            return None; // not a quad bdr entry
+        }
+        let attr: i32 = toks[0].parse().ok()?;
+        if toks[1] != "3" {
+            return None; // not a SQUARE
+        }
+        let mut key = [
+            toks[2].parse::<usize>().ok()?,
+            toks[3].parse::<usize>().ok()?,
+            toks[4].parse::<usize>().ok()?,
+            toks[5].parse::<usize>().ok()?,
+        ];
+        key.sort_unstable();
+        map.insert(key, attr);
+    }
+    Some(map)
+}
+
+/// One GF slice file: `GridFunction::Save` header (the FESpace carries vdim 1
+/// even for the vector ND/RT elements — the file's `VDim:` line is 1) plus the
+/// values one per line (`Ordering: 0` → `Vector::Print(os, 1)`).
+///
+/// `signs` reproduces MFEM's `DofTransformation::TransformPrimal` on the all
+/// +0 IC projection: value[k] = `+0 × sign` → `"0"` / `"-0"`.  The grid loop
+/// is element-by-element in order with overwrite, so a dof shared between
+/// elements keeps the sign of the **last** writer — exactly C++
+/// `SetSubVector(vdofs, vals)` semantics.
+fn write_dc_field_file(
+    dir: &std::path::Path,
+    name: &str,
+    basis: &str,
+    n_values: usize,
+    signed: Option<(&[Vec<f64>], &[Vec<u32>])>,
+) -> std::io::Result<()> {
+    let mut s = String::with_capacity(4 * n_values + 128);
+    s.push_str("FiniteElementSpace\n");
+    s.push_str(&format!("FiniteElementCollection: {basis}\n"));
+    s.push_str("VDim: 1\n");
+    s.push_str("Ordering: 0\n\n");
+    match signed {
+        None => {
+            for _ in 0..n_values {
+                s.push_str("0\n");
+            }
+        }
+        Some((signs, dofs)) => {
+            let mut vals = vec![0.0f64; n_values];
+            for (e, gd) in dofs.iter().enumerate() {
+                for (k, &g) in gd.iter().enumerate() {
+                    vals[g as usize] = 0.0 * signs[e][k];
+                }
+            }
+            for v in &vals {
+                s.push_str(if v.is_sign_negative() { "-0\n" } else { "0\n" });
+            }
+        }
+    }
+    std::fs::write(dir.join(format!("{name}.000000")), s)
+}
+
+/// The `.mfem_root` body — `VisItDataCollection::GetVisItRootString` (fields
+/// sorted by name, `comps` = `GridFunction::VectorDim()` which counts the
+/// vector-FE components even though the GF file prints `VDim: 1`).
+fn dc_root_json(
+    dir_name: &str,
+    fields: &[(&str, &str, u32, u32, u32)], // (name, basis, comps, lod, order)
+) -> String {
+    let mut sorted: Vec<&(&str, &str, u32, u32, u32)> = fields.iter().collect();
+    sorted.sort_by_key(|f| f.0);
+    let mut s = String::new();
+    s.push_str("{\n  \"dsets\": {\n    \"main\": {\n");
+    s.push_str("      \"cycle\": 0,\n");
+    s.push_str("      \"domains\": 1,\n");
+    s.push_str("      \"fields\": {\n");
+    for (i, f) in sorted.iter().enumerate() {
+        s.push_str(&format!("        \"{}\": {{\n", f.0));
+        s.push_str(&format!("          \"path\": \"{dir_name}/{}.%06d\",\n", f.0));
+        s.push_str("          \"tags\": {\n");
+        s.push_str("            \"assoc\": \"nodes\",\n");
+        s.push_str(&format!("            \"basis\": \"{}\",\n", f.1));
+        s.push_str(&format!("            \"comps\": \"{}\",\n", f.2));
+        s.push_str(&format!("            \"lod\": \"{}\",\n", f.3));
+        s.push_str(&format!("            \"order\": \"{}\"\n", f.4));
+        s.push_str("          }\n        }");
+        s.push_str(if i + 1 < sorted.len() { ",\n" } else { "\n" });
+    }
+    s.push_str("      },\n");
+    s.push_str("      \"mesh\": {\n");
+    s.push_str("        \"format\": \"0\",\n");
+    s.push_str(&format!("        \"path\": \"{dir_name}/mesh.%06d\",\n"));
+    s.push_str("        \"tags\": {\n");
+    s.push_str("          \"max_lods\": \"32\",\n");
+    s.push_str("          \"spatial_dim\": \"3\",\n");
+    s.push_str("          \"topo_dim\": \"3\"\n");
+    s.push_str("        }\n      },\n");
+    s.push_str("      \"time\": 0,\n");
+    s.push_str("      \"time_step\": 0\n");
+    s.push_str("    }\n  }\n}\n");
+    s
+}
+
 // ─── main (joule.cpp) ───────────────────────────────────────────────────────
 
 /// `Tcapacity` (joule.cpp:147) — a local, not an option.
@@ -412,12 +681,6 @@ fn main() {
     if opts.visualization {
         eprintln!(
             "mfem_miniapp_joule: -vis (GLVis socket display) is not ported; pass -no-vis"
-        );
-        std::process::exit(3);
-    }
-    if opts.visit {
-        eprintln!(
-            "mfem_miniapp_joule: -visit (VisIt DataCollection output) is not ported; pass -no-visit"
         );
         std::process::exit(3);
     }
@@ -443,6 +706,40 @@ fn main() {
         eprintln!("mfem_miniapp_joule: -debug 1 (hypre matrix dumps) is not ported");
         std::process::exit(3);
     }
+    if opts.visit && opts.ranks > 1 {
+        eprintln!(
+            "mfem_miniapp_joule: -visit with --ranks > 1 (per-rank dc slice files) \
+             is not ported; pass --ranks 1"
+        );
+        std::process::exit(3);
+    }
+    // The dc mesh boundary block is rebuilt in NCMesh face order (see
+    // `write_dc_mesh_text`) with the attributes from the file's own boundary
+    // section.  Through `-rs` uniform refinement the refined boundary faces
+    // are generated in fem-mesh's own order/rotation — MFEM's refined-bdr
+    // parity is a kernel gap (D1048), so refined `-visit` runs are refused.
+    let raw_bdr = Arc::new(if opts.visit {
+        match read_bdr_attrs(&opts.mesh) {
+            Some(b) if opts.ser_ref_levels == 0 => b,
+            _ if opts.ser_ref_levels != 0 => {
+                eprintln!(
+                    "mfem_miniapp_joule: -visit with -rs > 0 (refined boundary order/rotation \
+                     through UniformRefinement is not byte-parity in fem-mesh, D1048); \
+                     pass -rs 0"
+                );
+                std::process::exit(3);
+            }
+            _ => {
+                eprintln!(
+                    "mfem_miniapp_joule: -visit needs an MFEM v1.0 .mesh with a quad \
+                     boundary section"
+                );
+                std::process::exit(3);
+            }
+        }
+    } else {
+        BdrAttrMap::new()
+    });
     if opts.par_ref_levels != 0 {
         eprintln!(
             "mfem_miniapp_joule: -rp (parallel refinement) is applied to the fem-rs \n\
@@ -553,6 +850,7 @@ fn main() {
     let unported = Arc::new(AtomicBool::new(false));
     let unported_rank = Arc::clone(&unported);
     let opts_rank = Arc::clone(&opts);
+    let raw_bdr_rank = Arc::clone(&raw_bdr);
     let launcher = ThreadLauncher::new(WorkerConfig::new(opts.ranks));
     launcher.launch(move |comm| {
         let rank = comm.rank();
@@ -652,6 +950,58 @@ fn main() {
             assert!(w.dofs_mut().iter().all(|&v| v == 0.0));
         }
         assert_eq!(f.len(), true_offset[6], "BlockVector length = true_offset[6]");
+
+        // joule.cpp:562-576 — the VisIt data collection: cycle 0 is saved
+        // *before* the time loop, with all six fields at the Init values.
+        if opts.visit {
+            let dc_dir = format!("{}_{:06}", opts.basename, 0);
+            let _ = std::fs::remove_dir_all(&dc_dir);
+            let dir = std::path::Path::new(&dc_dir);
+            std::fs::create_dir_all(dir).expect("create dc dir");
+            let mesh_txt = write_dc_mesh_text(&mesh0, &raw_bdr_rank);
+            std::fs::write(dir.join("mesh.000000"), mesh_txt).expect("write dc mesh");
+            // Field sizes: the FESpace VSize per collection (GetVSize == the
+            // local size at one rank).  E/B/F carry the DofTransformation
+            // negative-zero pattern; the scalar H1/L2 fields print plain "0".
+            let nd_l = nd.local_space();
+            let rt_l = rt.local_space();
+            let n_elems = mesh0.n_elems() as usize;
+            let nd_signs: Vec<Vec<f64>> =
+                (0..n_elems as u32).map(|e| nd_l.element_signs(e).to_vec()).collect();
+            let nd_dofs: Vec<Vec<u32>> =
+                (0..n_elems as u32).map(|e| nd_l.element_dofs(e).to_vec()).collect();
+            let rt_signs: Vec<Vec<f64>> =
+                (0..n_elems as u32).map(|e| rt_l.element_signs(e).to_vec()).collect();
+            let rt_dofs: Vec<Vec<u32>> =
+                (0..n_elems as u32).map(|e| rt_l.element_dofs(e).to_vec()).collect();
+            // Registration order (joule.cpp:566-571): E, B, T, w, Phi, F.
+            write_dc_field_file(dir, "E", "ND_3D_P2", v_nd,
+                Some((&nd_signs, &nd_dofs))).expect("write E");
+            write_dc_field_file(dir, "B", "RT_3D_P1", v_rt,
+                Some((&rt_signs, &rt_dofs))).expect("write B");
+            write_dc_field_file(dir, "T", "L2_3D_P1", v_l2, None).expect("write T");
+            write_dc_field_file(dir, "w", "L2_3D_P1", v_l2, None).expect("write w");
+            write_dc_field_file(dir, "Phi", "H1_3D_P2", v_h1, None).expect("write Phi");
+            write_dc_field_file(dir, "F", "RT_3D_P1", v_rt,
+                Some((&rt_signs, &rt_dofs))).expect("write F");
+            let fields: Vec<(&str, &str, u32, u32, u32)> = vec![
+                // (name, basis, comps=VectorDim, lod=max(1,FE order), order):
+                // the RT_3D_P1 collection's FE carries order 2 (p+1 in the
+                // normal direction), so its tags are 2/2 per the MFEM 4.10
+                // oracle (pmesh.cpp RegisterField → GetOrder()).
+                ("E", "ND_3D_P2", 3, 2, 2),
+                ("B", "RT_3D_P1", 3, 2, 2),
+                ("T", "L2_3D_P1", 1, 1, 1),
+                ("w", "L2_3D_P1", 1, 1, 1),
+                ("Phi", "H1_3D_P2", 1, 2, 2),
+                ("F", "RT_3D_P1", 3, 2, 2),
+            ];
+            std::fs::write(
+                format!("{dc_dir}.mfem_root"),
+                dc_root_json(&dc_dir, &fields),
+            )
+            .expect("write dc root");
+        }
 
         // joule.cpp:287-346 — the boundary-condition attribute masks.  The rod
         // problem fixes attributes 1..=3 for E and 1..=2 for the thermal flux
@@ -760,48 +1110,50 @@ fn main() {
         let w_max = w.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
 
         if rank == 0 {
-            println!("D120/D121 EM-half local targets (cylinder-hex, -o 2):");
-            println!(
+            // D1046 (round 106): this instrumentation is NOT part of the C++
+            // stdout — it moved from `println!` to `eprintln!` so the
+            // comparable stdout region (banner → dof banner) stays byte-exact.
+            eprintln!("D120/D121 EM-half local targets (cylinder-hex, -o 2):");
+            eprintln!(
                 "  curl_3d(ND2->RT1): {} x {}, nnz = {}",
                 curl.nrows,
                 curl.ncols,
                 curl.nnz()
             );
-            println!("  max |curl(grad P2)| = {cg_max:.3e}   (order-2 de Rham closure)");
-            println!("  dot(E, J) machinery, el = E^T M1 E = {el:.17e}");
-            println!("  joule heating W (L2 projection of sigma |E|^2): sum = {w_sum:.17e}, max = {w_max:.17e}");
-            println!("  MFEM 4.10 probe: el = 7715.3007859716654e0, sum = 7936759.0844848659e0, max = 59455.579501421256e0");
+            eprintln!("  max |curl(grad P2)| = {cg_max:.3e}   (order-2 de Rham closure)");
+            eprintln!("  dot(E, J) machinery, el = E^T M1 E = {el:.17e}");
+            eprintln!("  joule heating W (L2 projection of sigma |E|^2): sum = {w_sum:.17e}, max = {w_max:.17e}");
+            eprintln!("  MFEM 4.10 probe: el = 7715.3007859716654e0, sum = 7936759.0844848659e0, max = 59455.579501421256e0");
         }
 
         // ── Not ported: the operator + time loop ────────────────────────────
         if rank == 0 {
             eprintln!(
                 "mfem_miniapp_joule: the coupled solves + time loop are not wired yet.  The run\n\
-                 stops after the dof banner (byte-exact against the C++ binary, status 3).\n\
+                 writes the byte-exact stdout prefix (banner, options dump, skin depths, the\n\
+                 five dof lines), saves the -visit cycle-0 data collection (D1046), then stops\n\
+                 with status 3.\n\
                  Remaining gaps, in dependency order:\n\
                  1. weakCurl/weakDiv/weakDivC mixed operators (H(curl)->H(div) weak forms)\n\
                  and the A0 = Div sigma Grad solve (PCG+AMG), A1 = M1 + dt S1 solve (PCG+AMS),\n\
                  A2 = M2 + dt S2 solve (PCG+ADS), M2/M3 solves, the ODE driver and the time\n\
                  loop of MagneticDiffusionEOperator::ImplicitSolve (joule_solver.cpp:401-640).\n\
-                 The comparable C++ stdout is still only the dof banner (past it hypre prints\n\
-                 its own diagnostics); the end-to-end target remains the C++ run's last two\n\
-                 lines, 'step 1/2, t = 0.5/1.0, dot(E, J) = 1.78064984 / 5.12554673'.\n\
-                 2. CLOSED by D120: curl_3d(ND2 -> RT1) now covers hexahedra -- see\n\
-                 crates/assembly/tests/d120_curl_3d_nd2_rt1_hex3d.rs (entry-for-entry MFEM\n\
-                 CurlInterpolator parity on the unit hex; curl o grad P2 = 0 above).\n\
-                 3. CLOSED by D121: GetJouleHeating's element-aware, trilinear-aware\n\
-                 projection -- postproc::project_coefficient_element, tests\n\
-                 crates/assembly/tests/d121_element_aware_projection.rs (MFEM parity on\n\
-                 straight + warped hexes); the L2-projection number printed above is the\n\
-                 same machinery on this mesh.\n\
-                 4. CLOSED by D412: the >=2-ranks parallel ND2/RT1 DOF partition.\n\
-                 5. CLOSED by D110: the H1(P2) -> ND2 discrete gradient.\n\
-                 6. -sc 1 / -amr 1 / -debug 1 / -vis / -visit and the .gen NetCDF meshes\n\
-                 remain unported.\n\
+                 Past the dof banner the C++ stdout is hypre diagnostics; the end-to-end\n\
+                 target remains the C++ run's last two lines, 'step 1/2, t = 0.5/1.0,\n\
+                 dot(E, J) = 1.78064984 / 5.12554673'.\n\
+                 2. -amr 1 needs MFEM's 3-D nonconforming refinement of the attr-1 (rod)\n\
+                 elements + Rebalance -- fem-rs has no 3-D NCMesh; partial refinement cannot\n\
+                 be emulated with the uniform `refine_uniform_3d` (the C++ refines ONLY the\n\
+                 metal region, so the dof counts would differ).\n\
+                 3. -sc 1 / -debug 1 / -print 1 / -vis / -visit with --ranks > 1 and the .gen\n\
+                 NetCDF meshes remain unported.\n\
+                 CLOSED: curl_3d(ND2 -> RT1) hex (D120), GetJouleHeating projection (D121),\n\
+                 the >=2-ranks ND2/RT1 partition (D412), the H1(P2) -> ND2 gradient (D110).\n\
                  Ported and checked here: banner, options dump, skin depths, the four FE\n\
                  spaces with their orders, the five GlobalTrueVSize lines, the six-field\n\
-                 BlockVector layout with its make_ref views, the four material maps, and the\n\
-                 D120/D121 EM-half local targets printed above.\n\
+                 BlockVector layout with its make_ref views, the four material maps, the\n\
+                 -visit cycle-0 file set (D1046), and the D120/D121 EM-half local targets\n\
+                 on stderr above.\n\
                  Requested: -o {} -s {} -tf {} -dt {} n_bdr={n_bdr}\n\
                  local block sizes [L2,RT,H1,ND] = [{},{},{},{}]  block_len={}\n\
                  H1 true dofs = {h1_true}\n\

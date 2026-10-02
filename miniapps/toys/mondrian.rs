@@ -24,9 +24,18 @@
 //!   v1.0** format (`NCMesh::Print`: tree `elements`, `boundary`,
 //!   `vertex_parents`, `root_state`, `coordinates`) with the material-average
 //!   leaf attributes — byte-identical to C++ `Mesh::Save`.
-//! * **Gap (exit 3)**: `-vis` opens no GLVis socket (the
-//!   `Continue shaping? --> ` prompt is kept, EOF answers `break`).  Tri3
-//!   meshes keep the conforming `closure_refine` path and the legacy writer.
+//! * **Fixed (round 106, D1046)**: the port printed an extra
+//!   `Wrote mondrian.mesh (N elements).` line after `Mesh::Save` — the C++
+//!   saves silently.  The line is gone; `-no-vis` stdout is byte-identical to
+//!   the MFEM 4.10 oracle (`$HOME/mfem410_ser`, fresh `g++ -O2` build), iso
+//!   counts `16, 52, 145` and `mondrian.mesh` byte-identical (6,827 B); `-a`
+//!   counts `16, 48, 123`, 5,885 B.  A fully covered `-no-vis` quad run now
+//!   exits **0** (twist precedent); the refusal moves to argument time.
+//! * **Gap (exit 3)**: `-vis` opens no GLVis socket (the C++ opens
+//!   `socketstream`s and prompts `Continue shaping? --> ` at every 3rd
+//!   iteration).  Tri3 meshes keep the conforming `closure_refine` path and
+//!   the legacy writer — unverified against the C++ simplex
+//!   `GeneralRefinement`, hence still exit 3.
 
 use std::fs;
 
@@ -359,6 +368,19 @@ fn main() {
     println!("   --{}", if visualization { "visualization" } else { "no-visualization" });
     println!("   --send-port {visport}");
 
+    // C++ `-vis` opens GLVis `socketstream`s (and prompts at every 3rd
+    // iteration); fem-rs has no GLVis client, so the visualization run is
+    // refused up front (D1046: the refusal moved from the end of the run to
+    // argument time so a covered `-no-vis` run can exit 0).
+    if visualization {
+        eprintln!(
+            "mondrian (Rust port): -vis (GLVis socket) is not ported; pass -no-vis. \
+             The C++ opens `socketstream`s at every 3rd iteration and prompts \
+             `Continue shaping? --> `."
+        );
+        std::process::exit(3);
+    }
+
     let pgm = match PgmImage::load(&img_file) {
         Ok(img) => img,
         Err(e) => { eprintln!("Error: {e}"); std::process::exit(2); }
@@ -465,23 +487,10 @@ fn main() {
         //      << " elements. \n";` (note the trailing space).
         println!("Iteration {}: mesh has {} elements. ", iter + 1, ne);
 
+        // C++: `if ((iter+1) % 3 == 0) { if (!visualization) break; ... }` —
+        // on the `-no-vis` path (the only path after the `-vis` refusal).
         if (iter + 1) % 3 == 0 {
-            if !visualization {
-                break;
-            }
-            print!("Continue shaping? --> ");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            let mut yn = String::new();
-            if std::io::stdin().read_line(&mut yn).is_err() || yn.is_empty() {
-                // EOF on a closed stdin: break (the C++ `cin >> yn` failure
-                // would otherwise keep refining forever).
-                break;
-            }
-            let yn = yn.trim();
-            if yn == "n" || yn == "q" {
-                break;
-            }
+            break;
         }
 
         if marked.is_empty() { break; }
@@ -499,7 +508,8 @@ fn main() {
 
     // C++ `mesh.SetAttribute(i, attr(i)); mesh.SetAttributes();` before
     // saving, then `Mesh::Save` — for NC meshes `Mesh::Printer` delegates to
-    // `NCMesh::Print` ("MFEM NC mesh v1.0").
+    // `NCMesh::Print` ("MFEM NC mesh v1.0").  The C++ saves silently (no
+    // trailing stdout).
     if let Some(t) = &mut tree {
         for (i, &a) in leaf_attr.iter().enumerate() {
             t.set_leaf_attribute(i, a);
@@ -508,22 +518,19 @@ fn main() {
     } else {
         write_mfem_file("mondrian.mesh", &mesh).expect("write mesh");
     }
-    println!("Wrote mondrian.mesh ({} elements).", mesh.n_elems());
 
-    // Honest partial delivery: on quads, iso and aniso refinement plus the
-    // NC v1.0 writer now match C++ byte for byte; `-vis` still opens no
-    // GLVis socket.  Tri3 meshes keep the conforming path and legacy writer.
-    let note = if tree.is_some() {
-        format!(
-            "Refinement matches C++ (`Mesh::GeneralRefinement(refs, -1, {nclimit})`; \
-             iso: 16, 52, 145 — aniso `-a`: 16, 48, 123) and mondrian.mesh is \
-             written in the MFEM NC mesh v1.0 format (byte-identical to \
-             `Mesh::Save`)"
-        )
-    } else {
-        "Tri3 mesh: conforming `closure_refine` path and legacy MFEM writer".to_string()
-    };
-    eprintln!("mondrian (Rust port): partial delivery, exit 3. {note}; \
-               remaining gap: `-vis` opens no GLVis socket.");
+    // Round 106 (D1046): a quad `-no-vis` run is 1:1 — byte-identical stdout
+    // and `mondrian.mesh` against the MFEM 4.10 oracle — so it exits 0 (twist
+    // precedent).  The Tri3 path keeps the conforming `closure_refine` +
+    // legacy writer, which is *not* verified against the C++ simplex
+    // `GeneralRefinement`/`Mesh::Save`, and still exits 3.
+    if tree.is_some() {
+        return;
+    }
+    eprintln!(
+        "mondrian (Rust port): partial delivery, exit 3.  Tri3 mesh: the \
+         conforming `closure_refine` path and the legacy MFEM writer are not \
+         verified against the C++ simplex `GeneralRefinement`/`Mesh::Save`."
+    );
     std::process::exit(3);
 }
