@@ -130,6 +130,11 @@ pub(crate) struct DpgNumbering {
     pub n_global_dofs: usize,
     /// Global DOF count of **every** trial block (MFEM's `Σ GlobalTrueVSize`).
     pub n_global_trial: Vec<usize>,
+    /// `local face -> is a *global* boundary face` (see
+    /// [`FaceNumbering::global_boundary`]; D963).  Indexed by the local face
+    /// enumeration of the first trace block — every trace family enumerates
+    /// the same mesh faces.  Empty when there are no trace blocks.
+    pub global_boundary_face: Vec<bool>,
 }
 
 /// The numbering-relevant surface of a serial (real or complex) DPG weak form.
@@ -189,6 +194,16 @@ pub(crate) struct FaceNumbering {
     /// rebuild the exact per-global-face-interior prefix bases without further
     /// communication (a key's length tells quad (4 nodes) from tri (3)).
     pub global_keys: Vec<Vec<u32>>,
+    /// `local face -> is a *global* boundary face` — true iff the face is a
+    /// boundary face of the rank-local sub-mesh AND no rank holds it as an
+    /// interior (two-sided) face.  Under the D813-1 one-node ghost layer a
+    /// partition-interface face is a boundary face of the local mesh while
+    /// being interior in the global mesh, so the local classification alone
+    /// over-marks skeleton essential DOFs (D963).  MFEM keeps the same
+    /// distinction by attributing partition-interface faces beyond
+    /// `bdr_attributes` (`interface_bdr_attr = max + 1`, mesh/pmesh.cpp), so
+    /// `ess_bdr = 1` never selects them.
+    pub global_boundary: Vec<bool>,
     /// `local edge -> global edge id` (empty unless edges are numbered).
     pub edge_gid: Vec<u32>,
     /// `local edge -> owner rank` (lowest rank holding the edge).
@@ -204,6 +219,7 @@ impl FaceNumbering {
             n_global_faces: 0,
             n_global_nodes: 0,
             global_keys: Vec::new(),
+            global_boundary: Vec::new(),
             edge_gid: Vec::new(),
             edge_owner: Vec::new(),
             n_global_edges: 0,
@@ -369,6 +385,7 @@ where
         ghost_exchange,
         n_global_dofs: global_base,
         n_global_trial,
+        global_boundary_face: faces.global_boundary,
     }
 }
 
@@ -397,10 +414,14 @@ where
     };
     let first_is_nd = matches!(kinds[tb], DpgBlockKind::FaceNd);
 
-    // Local face keys: sorted *global* node ids.
-    let local_keys: Vec<Vec<u32>> = if first_is_nd {
+    // Local face keys: sorted *global* node ids; plus the local boundary flag
+    // (D963: a local boundary face can still be a partition interface, i.e.
+    // interior in the global mesh — the union of all ranks' locally-interior
+    // keys decides).
+    let (local_keys, local_bdry): (Vec<Vec<u32>>, Vec<bool>) = if first_is_nd {
         local.with_nd_trace(tb, |tr| {
             let mut keys = Vec::with_capacity(tr.n_faces());
+            let mut bdry = Vec::with_capacity(tr.n_faces());
             for f in 0..tr.n_faces() {
                 let mut key: Vec<u32> = tr
                     .face_nodes(f)
@@ -408,13 +429,15 @@ where
                     .map(|&n| partition.global_node(n))
                     .collect();
                 key.sort_unstable();
+                bdry.push(tr.is_boundary_face(f));
                 keys.push(key);
             }
-            keys
+            (keys, bdry)
         })
     } else {
         local.with_skeleton(tb, |sk| {
             let mut keys = Vec::with_capacity(sk.n_faces());
+            let mut bdry = Vec::with_capacity(sk.n_faces());
             for f in 0..sk.n_faces() {
                 let mut key: Vec<u32> = sk
                     .face_nodes(f)
@@ -422,18 +445,65 @@ where
                     .map(|&n| partition.global_node(n))
                     .collect();
                 key.sort_unstable();
+                bdry.push(sk.is_boundary_face(f));
                 keys.push(key);
             }
-            keys
+            (keys, bdry)
         })
     };
 
-    // Exchange the key lists: the merged map carries both the global key
-    // set (global face ids) and the lowest holder rank (face owner).
+    // Exchange the key lists: the merged map carries the global key set
+    // (global face ids).  The owner is **not** the lowest holder rank (D963):
+    // under the one-node ghost layer a rank can hold a face whose far-side
+    // element is absent, so its row for the face's trace DOFs would only carry
+    // one side's contribution.  MFEM's owner is the lowest rank among the
+    // ranks *owning an adjacent element* (`ParFiniteElementSpace` true-dof
+    // groups over the owned-element mesh), and that rank always holds both
+    // sides: it owns its element and the partner element is a node neighbour
+    // of it, hence inside the one-node closure.  Each rank proposes the min
+    // adjacent-element owner over its (possibly one-sided) view and the
+    // exchanged min is taken — the rank owning the far element always
+    // proposes the true minimum, so the reduction is view-independent.
+    let adjacent_owner: Vec<Rank> = if first_is_nd {
+        local.with_nd_trace(tb, |tr| {
+            (0..tr.n_faces())
+                .map(|f| {
+                    let (e1, e2) = tr.face_elements(f);
+                    let o1 = partition.elem_owner[e1 as usize];
+                    let o2 = e2.map(|e| partition.elem_owner[e as usize]).unwrap_or(i32::MAX);
+                    o1.min(o2)
+                })
+                .collect()
+        })
+    } else {
+        local.with_skeleton(tb, |sk| {
+            (0..sk.n_faces())
+                .map(|f| match sk.face_info(f) {
+                    fem_assembly::dpg::dpg_basis::SkeletonFaceInfo::Boundary { elem, .. } => {
+                        partition.elem_owner[*elem as usize]
+                    }
+                    fem_assembly::dpg::dpg_basis::SkeletonFaceInfo::Interior {
+                        elem_first,
+                        elem_second,
+                        ..
+                    } => partition.elem_owner[*elem_first as usize]
+                        .min(partition.elem_owner[*elem_second as usize]),
+                })
+                .collect()
+        })
+    };
     let mut key_owner: BTreeMap<Vec<u32>, Rank> = BTreeMap::new();
-    for k in &local_keys {
-        key_owner.entry(k.clone()).or_insert(rank);
+    for (k, &o) in local_keys.iter().zip(&adjacent_owner) {
+        key_owner.entry(k.clone()).and_modify(|o0| *o0 = (*o0).min(o)).or_insert(o);
     }
+    // D963: the keys held as *interior* faces anywhere in the decomposition —
+    // a local boundary face whose key is in this set is a partition interface.
+    let mut global_interior: BTreeSet<Vec<u32>> = local_keys
+        .iter()
+        .zip(&local_bdry)
+        .filter(|(_, b)| !**b)
+        .map(|(k, _)| k.clone())
+        .collect();
     if comm.size() > 1 {
         let payload = encode_keys(&local_keys);
         let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
@@ -443,19 +513,71 @@ where
         incoming.sort_by_key(|(src, _)| *src);
         for (src, bytes) in &incoming {
             for key in decode_keys(bytes) {
-                key_owner
-                    .entry(key)
-                    .and_modify(|o| *o = (*o).min(*src))
-                    .or_insert(*src);
+                key_owner.entry(key).or_insert(i32::MAX);
+            }
+        }
+        // Face-owner proposals: fixed-stride (owner, key) records, min-reduced.
+        let mut owner_payload = Vec::with_capacity(local_keys.len() * 16);
+        for (k, &o) in local_keys.iter().zip(&adjacent_owner) {
+            owner_payload.extend_from_slice(&o.to_le_bytes());
+            owner_payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            for &n in k {
+                owner_payload.extend_from_slice(&n.to_le_bytes());
+            }
+        }
+        let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, owner_payload.clone()))
+            .collect();
+        let incoming = comm.alltoallv_bytes(&sends);
+        for (_src, bytes) in &incoming {
+            let mut pos = 0usize;
+            while pos + 8 <= bytes.len() {
+                let o = Rank::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+                let n = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+                pos += 8;
+                if pos + 4 * n > bytes.len() {
+                    break;
+                }
+                let key: Vec<u32> = (0..n)
+                    .map(|i| {
+                        u32::from_le_bytes(bytes[pos + 4 * i..pos + 4 * i + 4].try_into().unwrap())
+                    })
+                    .collect();
+                pos += 4 * n;
+                key_owner.entry(key).and_modify(|o0| *o0 = (*o0).min(o)).or_insert(o);
+            }
+        }
+        let interior_payload = encode_keys(
+            &local_keys
+                .iter()
+                .zip(&local_bdry)
+                .filter(|(_, b)| !**b)
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>(),
+        );
+        let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, interior_payload.clone()))
+            .collect();
+        let incoming = comm.alltoallv_bytes(&sends);
+        for (_src, bytes) in &incoming {
+            for key in decode_keys(bytes) {
+                global_interior.insert(key);
             }
         }
     }
+    let global_boundary: Vec<bool> = local_keys
+        .iter()
+        .zip(&local_bdry)
+        .map(|(k, &b)| b && !global_interior.contains(k))
+        .collect();
     let global_keys: Vec<Vec<u32>> = key_owner.keys().cloned().collect();
     let mut key_to_gid: HashMap<&[u32], u32> = HashMap::new();
     for (i, k) in global_keys.iter().enumerate() {
         key_to_gid.insert(k.as_slice(), i as u32);
     }
     let face_gid: Vec<u32> = local_keys.iter().map(|k| key_to_gid[k.as_slice()]).collect();
+    // D963: min adjacent-element owner over all views (see above), not the
+    // lowest holder rank.
     let face_owner: Vec<Rank> = local_keys.iter().map(|k| key_owner[k.as_slice()]).collect();
 
     // Global node count (identity numbering → node ids are global ids).
@@ -477,6 +599,7 @@ where
         n_global_faces: global_keys.len(),
         n_global_nodes,
         global_keys,
+        global_boundary,
         edge_gid,
         edge_owner,
         n_global_edges,

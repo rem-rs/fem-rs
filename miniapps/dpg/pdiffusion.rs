@@ -58,6 +58,30 @@
 //! partition-independent quantity.  The residual printed by the miniapp is the
 //! *DPG* residual `‖B x − F‖_{S⁻¹}`, which is reproduced exactly.
 //!
+//! # D963 (round 105): the two-rank path broke silently and is fixed
+//!
+//! The D807-1 ghost-layer thinning (round 76, `f5a7e657`) replaced the
+//! whole-mesh layer with the one-node closure, which made the np = 2 run
+//! produce a **wrong solution** (L2 5.119 vs 1.021, PCG stalling at 2000)
+//! through two independent defects, both fixed in round 105:
+//!
+//! 1. `trace_boundary_dofs` treated "boundary face of the rank-local mesh" as
+//!    "global boundary face" — under the thin layer the partition interfaces
+//!    are locally one-sided, so 6 interior vertices were essential-constrained
+//!    (22 ess DOFs instead of 16).  The parallel trace machinery now carries
+//!    the global-boundary classification (locally one-sided **and** not held
+//!    as two-sided by any rank).
+//! 2. The face-trace row owner was the lowest rank *holding* the face; the
+//!    holder's layer need not contain the far-side element, so its row carried
+//!    only one side's contribution (A(σ̂,σ̂) = 1.02 vs 2.04).  The owner is now
+//!    the min adjacent-element owner rank (MFEM's true-dof group semantics),
+//!    whose layer provably contains both sides.
+//!
+//! Regression pin: `crates/parallel/tests/d105_d963_trace_global_boundary.rs`
+//! (np1 ≡ np2 row-for-row in global-DOF space, with the essential list
+//! applied).  Re-verified `-prob 0 -sref 0` np2: `113 1.021e+00 9.951e-01`
+//! (default and `-sc`).
+//!
 //! # Known gaps (exit code 3)
 //!
 //! * `-pref > 0` (parallel AMR driven by the DPG residual indicator): the
@@ -317,12 +341,13 @@ fn solve_level(
         }
         a.assemble();
 
-        // Essential BCs: û on every global boundary face (C++
+        // Essential BCs: û on every *global* boundary face (C++
         // `hatu_fes->GetEssentialTrueDofs(ess_bdr, ...)` with all boundary
-        // attributes).  `trace_boundary_dofs` returns absolute global ids
-        // plus the physical DOF points; the merged list is consistent on all
-        // ranks because a global boundary face is a boundary face on every
-        // rank holding it.
+        // attributes; MFEM marks partition-interface faces with an attribute
+        // beyond `bdr_attributes`, so `ess_bdr = 1` never selects them).
+        // `trace_boundary_dofs` applies the same distinction (D963): a
+        // locally-one-sided face whose far-side element lives on another rank
+        // is a partition interface, not a global boundary.
         let pairs = a.trace_boundary_dofs(hatu);
         let merged = a.merge_dof_points(&pairs);
         let ess_ids: Vec<u32> = merged.iter().map(|(g, _)| *g).collect();

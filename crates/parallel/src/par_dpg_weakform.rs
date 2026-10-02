@@ -100,6 +100,9 @@ pub struct ParDpgWeakForm<M: MeshTopology + Clone + 'static> {
     /// of the trial spaces, which is what the miniapps print even under static
     /// condensation).
     n_global_trial: Vec<usize>,
+    /// `local face -> is a *global* boundary face` (D963: the local
+    /// classification alone over-marks partition interfaces).
+    global_boundary_face: Vec<bool>,
     condensed: bool,
     built: bool,
 }
@@ -132,6 +135,7 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
             ghost_exchange: Arc::new(GhostExchange::from_trivial()),
             n_global_dofs: 0,
             n_global_trial: Vec::new(),
+            global_boundary_face: Vec::new(),
             condensed: false,
             built: false,
         }
@@ -325,6 +329,7 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
         self.ghost_exchange = Arc::new(n.ghost_exchange);
         self.n_global_dofs = n.n_global_dofs;
         self.n_global_trial = n.n_global_trial;
+        self.global_boundary_face = n.global_boundary_face;
         self.built = true;
     }
 
@@ -479,11 +484,16 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
     /// Local boundary-face DOFs of trial block `b` with their physical
     /// points: `(absolute global dof, point)`.
     ///
-    /// A face is a *global* boundary face iff it has exactly one adjacent
-    /// element, so every rank holding it sees it as a boundary face — the
-    /// sets computed here are consistent across ranks without any exchange.
-    /// The local DOF ids cover both owned and ghost copies, which is what the
-    /// column elimination needs.
+    /// A face qualifies iff it is a boundary face of the rank-local sub-mesh
+    /// **and** a boundary face of the global mesh (D963): under the one-node
+    /// ghost layer a partition-interface face is locally one-sided while being
+    /// two-sided in the global mesh, and imposing essential values on its DOFs
+    /// over-constrains the ultraweak system.  MFEM keeps the two apart by
+    /// attributing partition-interface faces beyond `bdr_attributes`
+    /// (`interface_bdr_attr = max + 1`, mesh/pmesh.cpp), so `ess_bdr = 1`
+    /// never selects them.  The sets computed here stay consistent across
+    /// ranks without any exchange.  The local DOF ids cover both owned and
+    /// ghost copies, which is what the column elimination needs.
     pub fn trace_boundary_dofs(&self, b: usize) -> Vec<(u32, Vec<f64>)> {
         let bi = self
             .blocks
@@ -494,7 +504,7 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
         let sk = self.local.skeleton(b);
         let mut out = Vec::new();
         for f in 0..sk.n_faces() {
-            if !sk.is_boundary_face(f) {
+            if !sk.is_boundary_face(f) || !self.global_boundary_face[f] {
                 continue;
             }
             for (k, &d) in sk.face_dof_list(f).iter().enumerate() {

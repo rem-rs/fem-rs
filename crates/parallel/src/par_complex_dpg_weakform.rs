@@ -85,6 +85,9 @@ pub struct ParComplexDPGWeakForm<M: MeshTopology + Clone + 'static> {
     /// Global DOF count of **every** trial block (MFEM's `Σ GlobalTrueVSize`,
     /// which is what the miniapps print).
     n_global_trial: Vec<usize>,
+    /// `local face -> is a *global* boundary face` (D963: the local
+    /// classification alone over-marks partition interfaces).
+    global_boundary_face: Vec<bool>,
     condensed: bool,
     built: bool,
 }
@@ -114,6 +117,7 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
             ghost_exchange: Arc::new(GhostExchange::from_trivial()),
             n_global_dofs: 0,
             n_global_trial: Vec::new(),
+            global_boundary_face: Vec::new(),
             condensed: false,
             built: false,
         }
@@ -332,6 +336,7 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         self.ghost_exchange = Arc::new(n.ghost_exchange);
         self.n_global_dofs = n.n_global_dofs;
         self.n_global_trial = n.n_global_trial;
+        self.global_boundary_face = n.global_boundary_face;
         self.built = true;
     }
 
@@ -550,9 +555,9 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
     /// points: `(absolute global dof, point)` — mirror of
     /// [`crate::par_dpg_weakform::ParDpgWeakForm::trace_boundary_dofs`].
     ///
-    /// A face is a *global* boundary face iff it has exactly one adjacent
-    /// element, so every rank holding it sees it as a boundary face — the
-    /// sets computed here are consistent across ranks without any exchange.
+    /// A face qualifies iff it is a boundary face of the rank-local sub-mesh
+    /// **and** of the global mesh (D963 — partition interfaces are locally
+    /// one-sided but globally two-sided; see the real weak form's doc).
     pub fn trace_boundary_dofs(&self, b: usize) -> Vec<(u32, Vec<f64>)> {
         let bi = self
             .blocks
@@ -563,7 +568,7 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         let sk = self.local.skeleton(b);
         let mut out = Vec::new();
         for f in 0..sk.n_faces() {
-            if !sk.is_boundary_face(f) {
+            if !sk.is_boundary_face(f) || !self.global_boundary_face[f] {
                 continue;
             }
             for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
@@ -597,7 +602,7 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         if matches!(self.kinds[b], DpgBlockKind::FaceNd) {
             let tr = self.local.nd_trace(b);
             for f in 0..tr.n_faces() {
-                if !tr.is_boundary_face(f) {
+                if !tr.is_boundary_face(f) || !self.global_boundary_face[f] {
                     continue;
                 }
                 for &d in tr.face_dof_list(f) {
@@ -610,7 +615,7 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         } else {
             let sk = self.local.skeleton(b);
             for f in 0..sk.n_faces() {
-                if !sk.is_boundary_face(f) {
+                if !sk.is_boundary_face(f) || !self.global_boundary_face[f] {
                     continue;
                 }
                 for &d in sk.face_dof_list(f) {

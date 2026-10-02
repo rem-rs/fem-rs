@@ -25,6 +25,14 @@
 //!
 //! # Verified against the C++ MPI reference
 //!
+//! (Round-105 D963 note: at delivery the `--ranks 2` rows ran against the
+//! pre-D963 broken parallel path and were checked at `--ranks 1` only; the
+//! round-105 parallel-DPG fix (see `pdiffusion.rs` § D963) closed the gap and
+//! the `--ranks 2` tables below were re-verified digit-for-digit against a
+//! fresh `mpirun -np 2` oracle, including the residual-marker union fix — at
+//! two ranks the published mark list must be the union of every rank's list,
+//! not rank 0's alone.)
+//!
 //! Built from `$HOME/mfem410_mpi` (build line in `tmp/d104pconv/REPORT.md`) and
 //! run under `mpirun -np {1,2} … -no-vis -theta 0.0`.  Every printed number of
 //! the convergence table — `Dofs`, `L2 Error`, `Residual`, `Rate` — matches the
@@ -540,6 +548,36 @@ fn solve_level(
             }
             marked.sort_unstable();
         }
+        // The serial mesh is refined from the **union** of every rank's mark
+        // list (C++ refines collectively on the ParMesh with rank-local
+        // indices; here the ranks share one serial mesh, so the published
+        // list must be merged — rank 0's list alone is half the mesh at
+        // two ranks).
+        let mut union: std::collections::BTreeSet<u32> = marked.iter().copied().collect();
+        if comm.size() > 1 {
+            let mut payload = Vec::with_capacity(marked.len() * 4 + 4);
+            payload.extend_from_slice(&(marked.len() as u32).to_le_bytes());
+            for &g in &marked {
+                payload.extend_from_slice(&g.to_le_bytes());
+            }
+            let sends: Vec<(i32, Vec<u8>)> = (0..comm.size() as i32)
+                .map(|r| (r, payload.clone()))
+                .collect();
+            for (_, bytes) in comm.alltoallv_bytes(&sends) {
+                if bytes.len() >= 4 {
+                    let n = u32::from_le_bytes(bytes[..4].try_into().expect("count")) as usize;
+                    for i in 0..n {
+                        let b = 4 + 4 * i;
+                        if b + 4 <= bytes.len() {
+                            union.insert(u32::from_le_bytes(
+                                bytes[b..b + 4].try_into().expect("gid"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let marked: Vec<u32> = union.into_iter().collect();
 
         let (e_u, e_s) = if exact_known {
             l2_errors(&a, &x_full, u, sig, p_us.saturating_sub(1) as u8, prob, eps)
