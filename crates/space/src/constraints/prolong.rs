@@ -2,6 +2,13 @@ use fem_mesh::topology::MeshTopology;
 
 use crate::dof_manager::DofManager;
 
+// D942: the resident heterogeneous (mixed-geometry) L² space.  Declared here
+// (rather than in `constraints/mod.rs`) so the whole D942 delivery stays
+// inside this file's territory; re-exported below.
+#[path = "l2_mixed.rs"]
+pub mod l2_mixed;
+pub use l2_mixed::MixedL2Space;
+
 /// Prolongate an H1-P2 solution from a coarse Tri3 mesh to a refined Tri3 mesh.
 ///
 /// The coarse P2 field is evaluated at every fine-space DOF coordinate using
@@ -1324,10 +1331,12 @@ impl<M: MeshTopology> L2ProlongationSpace<M> for crate::l2::L2Space<M> {
 /// exactly one element, whose parent is the coarse element containing its
 /// centroid).
 ///
-/// `GaussLegendre` (the MFEM `L2_FECollection` default, open nodes) is
-/// supported on Hex/Pyramid/Tet/Tri/Quad parents, `GaussLobatto` on
-/// Hex/Quad/Pyramid (tensor-style layouts whose reference element is shared
-/// with the space builder); other combinations are rejected explicitly.
+/// Both [`L2Basis`] placements are supported on every geometry: the
+/// `GaussLegendre` `L2_FECollection` default (open nodes) on
+/// Hex/Pyramid/Tet/Tri/Quad/Prism, and `GaussLobatto` on
+/// Hex/Quad/Pyramid/Tet/Tri (closed GLL warp — D941) and Prism
+/// ([`fem_element::lagrange::WedgeL2`], D940); other combinations are
+/// rejected explicitly.
 ///
 /// P0 (order 0) degenerates to the indicator row `[1]` per child element —
 /// MFEM's own `GetLocalInterpolation` for a single-DOF element.
@@ -1374,7 +1383,14 @@ pub fn build_l2_prolongation_matrix<
 
     // per-family reference nodes of the fine L2 elements (slot i = FE node i)
     let fine_pyr_l2_ref = crate::l2::l2_pyramid_element(p, basis);
-    let fine_tet_l2_ref = fem_element::lagrange::TetL2GL::new(p);
+    // tet children of pyramid parents — in the basis the fine space speaks
+    // (D941: the GLL collection's tet nodes sit at the closed-GLL warp, not
+    // the open GL ones; the template mapping must use the child nodes of the
+    // SAME basis the fine DOF table was built from).
+    let fine_tet_l2_ref = match basis {
+        L2Basis::GaussLegendre => fem_element::lagrange::TetL2GL::new(p),
+        L2Basis::GaussLobatto => fem_element::lagrange::TetL2GL::new_gauss_lobatto(p),
+    };
     // child P1 (layer) shape sampler for pyramid children
     let child_p1 = fem_element::lagrange::PyramidPk::new(1);
 
@@ -1486,41 +1502,38 @@ pub fn build_l2_prolongation_matrix<
                 }
             },
             (3, fem_mesh::ElementType::Pyramid5) => crate::l2::l2_pyramid_element(p, basis),
-            (3, fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10) => {
-                if basis == L2Basis::GaussLegendre {
-                    Box::new(fem_element::lagrange::TetL2GL::new(p))
-                } else {
-                    panic!(
-                        "build_l2_prolongation_matrix: GaussLobatto simplex L2 uses an \
-                         order-dependent hand-coded slot layout (crates/space/src/l2.rs \
-                         build_simplex) without a shared reference element — not wired (D941)"
-                    )
+            (3, fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10) => match basis {
+                L2Basis::GaussLegendre => Box::new(fem_element::lagrange::TetL2GL::new(p)),
+                // D941: MFEM `L2_TetrahedronElement(p, BasisType::GaussLobatto)`
+                // — the warp uses the *closed* GLL points (`OpenPoints` forwards
+                // `GetPoints`; `Quadrature1D::CheckOpen` accepts the closed
+                // type), coinciding with the equispaced lattice only at p <= 2.
+                L2Basis::GaussLobatto => {
+                    Box::new(fem_element::lagrange::TetL2GL::new_gauss_lobatto(p))
                 }
-            }
+            },
             (2, fem_mesh::ElementType::Quad4) => match basis {
                 L2Basis::GaussLegendre => Box::new(fem_element::lagrange::QuadL2GL::new(p)),
                 L2Basis::GaussLobatto => {
                     Box::new(fem_element::lagrange::factory::QuadQk::new_lex(p))
                 }
             },
-            (2, fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6) => {
-                if basis == L2Basis::GaussLegendre {
-                    Box::new(fem_element::lagrange::TriL2GL::new(p))
-                } else {
-                    panic!(
-                        "build_l2_prolongation_matrix: GaussLobatto simplex L2 uses an \
-                         order-dependent hand-coded slot layout (crates/space/src/l2.rs \
-                         build_simplex) without a shared reference element — not wired (D941)"
-                    )
+            (2, fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6) => match basis {
+                L2Basis::GaussLegendre => Box::new(fem_element::lagrange::TriL2GL::new(p)),
+                // D941: MFEM `L2_TriangleElement(p, BasisType::GaussLobatto)`.
+                L2Basis::GaussLobatto => {
+                    Box::new(fem_element::lagrange::TriL2GL::new_gauss_lobatto(p))
                 }
-            }
-            // D940: blocked by the missing L² prism arm in L2Space (same file's
-            // `L2Space currently supports …` panic) and by the missing
-            // `L2_WedgeElement` GL basis in fem_element (element crate).
-            (3, fem_mesh::ElementType::Prism6) => panic!(
-                "build_l2_prolongation_matrix: L2 prism prolongation is blocked by the \
-                 missing L2Space prism arm and L2_WedgeElement basis (D940)"
-            ),
+            },
+            // D940: MFEM `L2_WedgeElement(p, btype)` (fe_l2.hpp:166) — the
+            // prism arm of the `L2_FECollection`, triangle × segment tensor
+            // with the shared `btype` point set.
+            (3, fem_mesh::ElementType::Prism6) => match basis {
+                L2Basis::GaussLegendre => Box::new(fem_element::lagrange::WedgeL2::new(p)),
+                L2Basis::GaussLobatto => {
+                    Box::new(fem_element::lagrange::WedgeL2::new_gauss_lobatto(p))
+                }
+            },
             other => panic!("build_l2_prolongation_matrix: unsupported parent geometry {other:?}"),
         };
 
@@ -1585,6 +1598,24 @@ pub fn build_l2_prolongation_matrix<
                             None
                         }
                     }
+                }
+                // D940: the prism layer lattice lives in the mesh's own
+                // geometry element — invert that authoritative map (same
+                // scheme as the H1 prism locator, D103).  The mesh's prism
+                // frame is (layer, tri_eta, tri_zeta) (extrusion first,
+                // `transformation.rs` axis convention) while MFEM's
+                // `Geometry::PRISM` frame — and with it [`WedgeL2`] — is
+                // (tri_x, tri_y, layer), so permute to the wedge frame.
+                (3, fem_mesh::ElementType::Prism6) => {
+                    let starts = [
+                        [1.0 / 3.0, 1.0 / 3.0, 0.5],
+                        [0.25, 0.25, 0.5],
+                        [0.75, 0.75, 0.5],
+                        [0.5, 0.5, 0.25],
+                        [0.5, 0.5, 0.75],
+                    ];
+                    invert_element_map(cmesh, ep, x, &starts)
+                        .map(|u| [u[1], u[2], u[0]])
                 }
                 _ => unreachable!("parent geometry matched above"),
             };

@@ -2174,6 +2174,14 @@ impl ReferenceElement for HexL2GL {
 /// the monomial Vandermonde is used instead (identical span `Pp`, hence the
 /// same interpolating basis; see [`H1TriPk`] for why the monomial form is the
 /// safe one).
+///
+/// The MFEM element carries the `btype` argument: [`TriL2GL::new`] is
+/// `GaussLegendre` (the `L2_FECollection` default) and
+/// [`TriL2GL::new_gauss_lobatto`] is `L2_TriangleElement(p,
+/// BasisType::GaussLobatto)` — the warp then uses the *closed* GLL points
+/// (`OpenPoints` forwards `GetPoints`; `Quadrature1D::CheckOpen` accepts the
+/// closed type), which for `p <= 2` coincide with the equispaced lattice and
+/// for `p >= 3` do not (D105/D941).
 pub struct TriL2GL {
     order: usize,
     nodes: Vec<[f64; 2]>,
@@ -2190,10 +2198,24 @@ fn open_gl_points(p: usize) -> Vec<f64> {
     pts
 }
 
+/// MFEM `Poly_1D::OpenPoints(p, BasisType::GaussLobatto)`: the *closed* GLL
+/// points on `[0,1]`, ascending (see [`gauss_lobatto_01_arbitrary`]).
+fn open_gll_points(p: usize) -> Vec<f64> {
+    crate::quadrature::gauss_lobatto_01_arbitrary(p + 1).0
+}
+
 impl TriL2GL {
     pub fn new(p: usize) -> Self {
+        Self::from_op(p, open_gl_points(p))
+    }
+
+    /// `L2_TriangleElement(p, BasisType::GaussLobatto)` — D941.
+    pub fn new_gauss_lobatto(p: usize) -> Self {
+        Self::from_op(p, open_gll_points(p))
+    }
+
+    fn from_op(p: usize, op: Vec<f64>) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        let op = open_gl_points(p);
         let mut nodes = Vec::with_capacity((p + 1) * (p + 2) / 2);
         let mut lex = Vec::with_capacity(nodes.capacity());
         // MFEM fe_l2.cpp: for (j) for (i), i fastest; k = p - i - j.
@@ -2287,8 +2309,17 @@ pub struct TetL2GL {
 
 impl TetL2GL {
     pub fn new(p: usize) -> Self {
+        Self::from_op(p, open_gl_points(p))
+    }
+
+    /// `L2_TetrahedronElement(p, BasisType::GaussLobatto)` — D941 (closed GLL
+    /// warp points; coincides with the equispaced lattice only for `p <= 2`).
+    pub fn new_gauss_lobatto(p: usize) -> Self {
+        Self::from_op(p, open_gll_points(p))
+    }
+
+    fn from_op(p: usize, op: Vec<f64>) -> Self {
         assert!(p >= 1, "order must be >= 1");
-        let op = open_gl_points(p);
         let n = (p + 1) * (p + 2) * (p + 3) / 6;
         let mut nodes = Vec::with_capacity(n);
         let mut lex = Vec::with_capacity(n);
@@ -2374,6 +2405,220 @@ impl ReferenceElement for TetL2GL {
     }
     fn quadrature(&self, order: u8) -> QuadratureRule {
         tet_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
+    }
+}
+
+// ─── WedgeL2: MFEM L2_WedgeElement (prism L2, D940) ──────────────────────────
+
+/// MFEM `L2_WedgeElement(p, btype)` (fe_l2.hpp:166) — the `L2_FECollection`
+/// prism element: `(p+1)²(p+2)/2` DOFs, the tensor product of
+/// [`TriL2GL`]'s triangle factor and the `L2_SegmentElement` 1-D factor
+/// (`btype` selects GL vs GLL points for *both* factors).
+///
+/// Slot order is MFEM's: `k`-major over the `p+1` layers, then the triangle
+/// slots `i <= j` per layer, with `t_dof = j(j+1)/2 + i` indexing the
+/// triangle factor's own node table (`for (j') for (i' <= p-j')`) and the
+/// node's `z` at the 1-D point `op[k]` (fe_l2.cpp:839, the
+/// `L2_WedgeElement` constructor).  Basis functions are the products
+/// `shape[m] = tri_dual[t_dof[m]](x,y) · seg_dual[k](z)` of the two nodal
+/// (dual) bases, built here through the same monomial Vandermonde as the
+/// simplex elements (same interpolating basis, see [`TriL2GL`]).
+pub struct WedgeL2 {
+    order: usize,
+    /// Triangle-factor node table in the `L2_TriangleElement` order.
+    tri_nodes: Vec<[f64; 2]>,
+    /// Triangle-factor monomial lex `((i, j), i+j <= p)` per tri node.
+    tri_lex: Vec<(usize, usize)>,
+    /// Triangle-factor dual basis (row-major `n × n`).
+    tri_ti: Vec<f64>,
+    /// 1-D factor points (the same `op` MFEM shares with the warp).
+    seg_pts: Vec<f64>,
+    /// 1-D factor dual basis (row-major `(p+1) × (p+1)`).
+    seg_ti: Vec<f64>,
+    /// Wedge slot -> (triangle node index, layer `k`).
+    slots: Vec<(usize, usize)>,
+    nodes: Vec<[f64; 3]>,
+}
+
+impl WedgeL2 {
+    /// `L2_WedgeElement(p, GaussLegendre)` — the `L2_FECollection` default.
+    pub fn new(p: usize) -> Self {
+        Self::from_op(p, open_gl_points(p))
+    }
+
+    /// `L2_WedgeElement(p, BasisType::GaussLobatto)` — D940's GLL companion
+    /// (closed GLL points in both the warp and the `z` layers).
+    pub fn new_gauss_lobatto(p: usize) -> Self {
+        Self::from_op(p, open_gll_points(p))
+    }
+
+    fn from_op(p: usize, op: Vec<f64>) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let tri_dof = (p + 1) * (p + 2) / 2;
+
+        // Triangle factor: nodes and dual basis in L2_TriangleElement order
+        // (identical construction to TriL2GL::from_op).
+        let mut tri_nodes = Vec::with_capacity(tri_dof);
+        let mut tri_lex = Vec::with_capacity(tri_dof);
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                let k = p - i - j;
+                let w = op[i] + op[j] + op[k];
+                tri_nodes.push([op[i] / w, op[j] / w]);
+                tri_lex.push((i, j));
+            }
+        }
+        let mut t = DMatrix::<f64>::zeros(tri_dof, tri_dof);
+        for (m, node) in tri_nodes.iter().enumerate() {
+            for (o, &(i, j)) in tri_lex.iter().enumerate() {
+                t[(o, m)] = node[0].powi(i as i32) * node[1].powi(j as i32);
+            }
+        }
+        let ti_m = t.try_inverse().expect("WedgeL2: singular tri Vandermonde");
+        let mut tri_ti = vec![0.0; tri_dof * tri_dof];
+        for k in 0..tri_dof {
+            for o in 0..tri_dof {
+                tri_ti[k * tri_dof + o] = ti_m[(k, o)];
+            }
+        }
+
+        // 1-D factor: nodes op[i], dual basis via the monomial Vandermonde.
+        let p1 = p + 1;
+        let mut ts = DMatrix::<f64>::zeros(p1, p1);
+        for (m, &x) in op.iter().enumerate() {
+            for o in 0..p1 {
+                ts[(o, m)] = x.powi(o as i32);
+            }
+        }
+        let tis_m = ts.try_inverse().expect("WedgeL2: singular seg Vandermonde");
+        let mut seg_ti = vec![0.0; p1 * p1];
+        for k in 0..p1 {
+            for o in 0..p1 {
+                seg_ti[k * p1 + o] = tis_m[(k, o)];
+            }
+        }
+
+        // MFEM slot table: k-major layers, then i <= j per layer,
+        // t_dof = j(j+1)/2 + i into the triangle node table.
+        let mut slots = Vec::with_capacity(tri_dof * p1);
+        let mut nodes = Vec::with_capacity(tri_dof * p1);
+        for k in 0..p1 {
+            let mut l = 0usize;
+            for j in 0..=p {
+                for _i in 0..=j {
+                    let tn = tri_nodes[l];
+                    slots.push((l, k));
+                    nodes.push([tn[0], tn[1], op[k]]);
+                    l += 1;
+                }
+            }
+        }
+        Self { order: p, tri_nodes, tri_lex, tri_ti, seg_pts: op, seg_ti, slots, nodes }
+    }
+
+    /// 1-D factor dual shapes at `z` (the nodal basis of the `op` points).
+    fn seg_shapes(&self, z: f64, v: &mut [f64]) {
+        let p1 = self.order + 1;
+        for k in 0..p1 {
+            let mut acc = 0.0;
+            for o in 0..p1 {
+                acc += self.seg_ti[k * p1 + o] * z.powi(o as i32);
+            }
+            v[k] = acc;
+        }
+    }
+}
+
+impl ReferenceElement for WedgeL2 {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        let p = self.order;
+        (p + 1) * (p + 1) * (p + 2) / 2
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let n_tri = self.tri_nodes.len();
+        let mut tri_s = vec![0.0_f64; n_tri];
+        // Same loop as TriL2GL::eval_basis, indexed by the tri node table.
+        for k in 0..n_tri {
+            let mut acc = 0.0;
+            for (o, &(i, j)) in self.tri_lex.iter().enumerate() {
+                acc += self.tri_ti[k * n_tri + o] * xi[0].powi(i as i32)
+                    * xi[1].powi(j as i32);
+            }
+            tri_s[k] = acc;
+        }
+        let p1 = self.order + 1;
+        let mut seg_s = vec![0.0_f64; p1];
+        self.seg_shapes(xi[2], &mut seg_s);
+        for (m, &(t, k)) in self.slots.iter().enumerate() {
+            values[m] = tri_s[t] * seg_s[k];
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let n_tri = self.tri_nodes.len();
+        let mut tri_s = vec![0.0_f64; n_tri];
+        let mut tri_dx = vec![0.0_f64; n_tri];
+        let mut tri_dy = vec![0.0_f64; n_tri];
+        for k in 0..n_tri {
+            let (mut s, mut gx, mut gy) = (0.0, 0.0, 0.0);
+            for (o, &(i, j)) in self.tri_lex.iter().enumerate() {
+                let c = self.tri_ti[k * n_tri + o];
+                s += c * x.powi(i as i32) * y.powi(j as i32);
+                if i > 0 {
+                    gx += c * (i as f64) * x.powi(i as i32 - 1) * y.powi(j as i32);
+                }
+                if j > 0 {
+                    gy += c * (j as f64) * x.powi(i as i32) * y.powi(j as i32 - 1);
+                }
+            }
+            tri_s[k] = s;
+            tri_dx[k] = gx;
+            tri_dy[k] = gy;
+        }
+        let p1 = self.order + 1;
+        let mut seg_s = vec![0.0_f64; p1];
+        let mut seg_dz = vec![0.0_f64; p1];
+        for k in 0..p1 {
+            let (mut s, mut d) = (0.0, 0.0);
+            for o in 0..p1 {
+                let c = self.seg_ti[k * p1 + o];
+                s += c * z.powi(o as i32);
+                if o > 0 {
+                    d += c * (o as f64) * z.powi(o as i32 - 1);
+                }
+            }
+            seg_s[k] = s;
+            seg_dz[k] = d;
+        }
+        for (m, &(t, k)) in self.slots.iter().enumerate() {
+            grads[m * 3] = tri_dx[t] * seg_s[k];
+            grads[m * 3 + 1] = tri_dy[t] * seg_s[k];
+            grads[m * 3 + 2] = tri_s[t] * seg_dz[k];
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        // Prism rule: reference-triangle × segment tensor product.
+        let tr = tri_rule(order);
+        let n_seg = (order as usize / 2 + 1).max(1);
+        let (xs, ws) = crate::quadrature::gauss_legendre_01(n_seg);
+        let mut points = Vec::with_capacity(tr.points.len() * xs.len());
+        let mut weights = Vec::with_capacity(points.capacity());
+        for (ti, tp) in tr.points.iter().enumerate() {
+            for (&x, &w) in xs.iter().zip(&ws) {
+                points.push(vec![tp[0], tp[1], x]);
+                weights.push(tr.weights[ti] * w);
+            }
+        }
+        QuadratureRule { points, weights }
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
