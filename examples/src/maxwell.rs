@@ -48,7 +48,7 @@ use fem_assembly::{
     TangentialMassIntegrator,
     VectorAssembler,
     boundary::vector_boundary::VectorBoundaryAssembler,
-    postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff},
+    postproc::coefficient::{ConstantMatrixCoeff, FnMatrixCoeff, MatrixCoeff, ScalarMatrixCoeff},
     standard::{CurlCurlIntegrator, TangentialTraceLFIntegrator, VectorMassIntegrator, VectorMassTensorIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
@@ -853,6 +853,10 @@ pub fn build_hcurl_constraint_subspace_from_marker<M: MeshTopology>(
 ///
 /// Builds full curl-curl and mass matrices, applies MFEM-style marker semantics
 /// for essential boundaries, and returns reduced matrices plus gradient constraints.
+///
+/// Scalar-ε spelling of [`assemble_hcurl_eigen_system_tensor_from_marker`]
+/// (D996): the mass term uses `∫ (εu)·v` with `ε` the isotropic scalar times
+/// the identity, i.e. MFEM `VectorFEMassIntegrator(Coefficient&)`.
 pub fn assemble_hcurl_eigen_system_from_marker<M: MeshTopology>(
     h1: &H1Space<M>,
     hcurl: &HCurlSpace<M>,
@@ -862,9 +866,47 @@ pub fn assemble_hcurl_eigen_system_from_marker<M: MeshTopology>(
     epsilon: f64,
     quad_order: u8,
 ) -> HcurlEigenSystem {
+    assemble_hcurl_eigen_system_tensor_from_marker(
+        h1,
+        hcurl,
+        boundary_attributes,
+        marker,
+        mu,
+        ScalarMatrixCoeff(epsilon),
+        quad_order,
+    )
+}
+
+/// D996: anisotropic-ε spelling of [`assemble_hcurl_eigen_system_from_marker`]
+/// — the mass term is `∫ (ε(x) u)·v` with a **tensor** coefficient, i.e. MFEM
+/// `VectorFEMassIntegrator(MatrixConstantCoefficient&)` in `ex32p`:
+///
+/// ```text
+///   DenseMatrix epsilonMat(3);   // [[2, 1/√2, 0], [1/√2, 2, 1/√2], [0, 1/√2, 2]]
+///   MatrixConstantCoefficient epsilon(epsilonMat);
+///   m.AddDomainIntegrator(new VectorFEMassIntegrator(epsilon));
+/// ```
+///
+/// The curl-curl side stays scalar (`CurlCurlIntegrator(one)` on both sides).
+/// The tensor mass integrator is fixed-order by design (round-31 D127): the
+/// caller picks the MFEM `VectorFEMassIntegrator` rule through `quad_order`
+/// (`Trans.OrderW() + 2·GetOrder()` — order `2k+2` on affine hexes, where the
+/// scalar [`VectorMassIntegrator`] auto-hook lands as well).
+pub fn assemble_hcurl_eigen_system_tensor_from_marker<M: MeshTopology, C: MatrixCoeff>(
+    h1: &H1Space<M>,
+    hcurl: &HCurlSpace<M>,
+    boundary_attributes: &[i32],
+    marker: &[i32],
+    mu: f64,
+    epsilon: C,
+    quad_order: u8,
+) -> HcurlEigenSystem {
     let k_full = VectorAssembler::assemble_bilinear(hcurl, &[&CurlCurlIntegrator { mu }], quad_order);
-    let m_full =
-        VectorAssembler::assemble_bilinear(hcurl, &[&VectorMassIntegrator { alpha: epsilon }], quad_order);
+    let m_full = VectorAssembler::assemble_bilinear(
+        hcurl,
+        &[&VectorMassTensorIntegrator { alpha: epsilon }],
+        quad_order,
+    );
 
     let subspace = build_hcurl_constraint_subspace_from_marker(h1, hcurl, boundary_attributes, marker);
     let stiffness_free = extract_square_submatrix(&k_full, &subspace.hcurl_free_dofs);
@@ -899,6 +941,263 @@ pub fn assemble_hcurl_eigen_system_from_marker<M: MeshTopology>(
         dim: hcurl.mesh().dim() as usize,
     }
 }
+
+// ─── ND_R2D restricted-H(curl) eigen pencil (D999, MFEM ex32p 2-D branch) ──────
+
+/// MFEM ex32p 2-D default branch: the generalized eigen pencil `A x = λ M x`
+/// on the **restricted** H(curl) space `ND_R2D_FECollection` (in-plane
+/// Nédélec + out-of-plane H¹ z-component), with MFEM's integrator rules:
+///
+/// - `A` = `CurlCurlIntegrator(one)` (rule `2p−2`), plus the ε mass term when
+///   `shift` is set (ex32p's `bdr_attributes.Size() == 0 || dim == 1`
+///   closed/1-D branch);
+/// - `M` = `VectorFEMassIntegrator(epsilon)` (rule `OrderW + 2p`) with the
+///   3×3 ε tensor, row-major `epsilon` (the D996 coefficient semantics);
+/// - essential DOFs (all boundary attributes, `ess_bdr = 1`) eliminated MFEM
+///   `EliminateEssentialBCDiag` style: row+col → `e_i·val`, `A` with
+///   `val = 1.0` and `M` with `val = f64::MIN_POSITIVE`, so the linlvo AME
+///   free-DOF detection (`M_ii > 1e-100`) applies unchanged.
+///
+/// The element engine (in-plane ND + z-H¹, 3-component physical shape
+/// functions/curls on straight-sided Tri3/Quad4 cells) mirrors
+/// `mfem_ex31_anisotropic_maxwell`, which is bit-verified 1:1 against C++
+/// ex31 on this same space (15/15 cases, round-106); it lives here so both
+/// consumers share one implementation.
+pub struct HcurlR2dEigenSystem {
+    /// curl-curl stiffness (`+ ε mass` when shifted), ess-eliminated, diag 1.
+    pub a: CsrMatrix<f64>,
+    /// ε-tensor vector mass, ess-eliminated with diag `MIN_POSITIVE`.
+    pub m: CsrMatrix<f64>,
+    /// Number of essential (PEC) DOFs.
+    pub n_ess: usize,
+    /// ND_R2D space size (the `Number of H(Curl) unknowns` print).
+    pub n_dofs: usize,
+}
+
+/// Assemble the ex32p 2-D restricted-H(curl) pencil.
+pub fn assemble_ex32p_r2d_eigen_system(
+    mesh: &Mesh<2>,
+    order: u8,
+    epsilon: &[f64; 9],
+    shift: bool,
+) -> HcurlR2dEigenSystem {
+    use fem_element::embedded::{Jac2D, NdR2dQuad, NdR2dTri};
+    use fem_element::quadrature::{quad_rule_01, tri_rule};
+    use fem_element::reference::QuadratureRule;
+    use fem_mesh::ElementType;
+    use fem_space::embedded_r2d::HCurlR2dSpace;
+
+    let p = order;
+    let space = HCurlR2dSpace::new(mesh.clone(), p);
+    let n_total = space.n_dofs();
+
+    // Essential (PEC) DOFs: ALL boundary attributes (ex32p `ess_bdr = 1`).
+    let bdr_tags = mesh.unique_boundary_tags();
+    let bdr_dofs = space.boundary_dofs(&bdr_tags);
+    let n_ess = bdr_dofs.len();
+
+    /// The ND_R2D reference cell (in-plane ND + z-directed H1 parts).
+    enum Cell {
+        Tri(NdR2dTri),
+        Quad(NdR2dQuad),
+    }
+    impl Cell {
+        fn eval_vshape_phys(&self, xi: &[f64], j: &Jac2D, out: &mut [f64]) {
+            match self {
+                Cell::Tri(el) => el.eval_vshape_phys(xi, j, out),
+                Cell::Quad(el) => el.eval_vshape_phys(xi, j, out),
+            }
+        }
+        fn eval_curl_phys(&self, xi: &[f64], j: &Jac2D, out: &mut [f64]) {
+            match self {
+                Cell::Tri(el) => el.eval_curl_phys(xi, j, out),
+                Cell::Quad(el) => el.eval_curl_phys(xi, j, out),
+            }
+        }
+    }
+
+    /// Jacobian + physical point (affine Tri3 / MFEM BiLinear2D quad map).
+    fn elem_jac_at(mesh: &Mesh<2>, e: u32, xi: [f64; 2]) -> (Jac2D, [f64; 2]) {
+        let nodes = mesh.element_nodes(e);
+        match mesh.element_type(e) {
+            ElementType::Tri3 => {
+                let x0 = mesh.node_coords(nodes[0]);
+                let x1 = mesh.node_coords(nodes[1]);
+                let x2 = mesh.node_coords(nodes[2]);
+                let (j00, j01) = (x1[0] - x0[0], x2[0] - x0[0]);
+                let (j10, j11) = (x1[1] - x0[1], x2[1] - x0[1]);
+                let det = j00 * j11 - j01 * j10;
+                (
+                    Jac2D { j00, j01, j10, j11, det },
+                    [
+                        x0[0] + xi[0] * (x1[0] - x0[0]) + xi[1] * (x2[0] - x0[0]),
+                        x0[1] + xi[0] * (x1[1] - x0[1]) + xi[1] * (x2[1] - x0[1]),
+                    ],
+                )
+            }
+            ElementType::Quad4 => {
+                let c: [[f64; 2]; 4] = [
+                    { let q = mesh.node_coords(nodes[0]); [q[0], q[1]] },
+                    { let q = mesh.node_coords(nodes[1]); [q[0], q[1]] },
+                    { let q = mesh.node_coords(nodes[2]); [q[0], q[1]] },
+                    { let q = mesh.node_coords(nodes[3]); [q[0], q[1]] },
+                ];
+                let (x, y) = (xi[0], xi[1]);
+                let phi = [(1.0 - x) * (1.0 - y), x * (1.0 - y), x * y, (1.0 - x) * y];
+                let grad = [[y - 1.0, x - 1.0], [1.0 - y, -x], [y, x], [-y, 1.0 - x]];
+                let mut pt = [0.0_f64; 2];
+                let mut jm = [0.0_f64; 4];
+                for k in 0..4 {
+                    pt[0] += phi[k] * c[k][0];
+                    pt[1] += phi[k] * c[k][1];
+                    jm[0] += grad[k][0] * c[k][0];
+                    jm[1] += grad[k][0] * c[k][1];
+                    jm[2] += grad[k][1] * c[k][0];
+                    jm[3] += grad[k][1] * c[k][1];
+                }
+                (
+                    Jac2D {
+                        j00: jm[0],
+                        j01: jm[1],
+                        j10: jm[2],
+                        j11: jm[3],
+                        det: jm[0] * jm[3] - jm[1] * jm[2],
+                    },
+                    pt,
+                )
+            }
+            other => panic!(
+                "assemble_ex32p_r2d_eigen_system: unsupported element type {other:?} \
+                 (only straight-sided Tri3 and Quad4 are implemented)"
+            ),
+        }
+    }
+
+    // MFEM IsoparametricTransformation::OrderW() for straight-sided cells.
+    let order_w = |e: u32| -> u8 {
+        if mesh.element_type(e) == ElementType::Quad4 { 1 } else { 0 }
+    };
+    let cell_rule = |e: u32, order: u8| -> QuadratureRule {
+        if mesh.element_type(e) == ElementType::Quad4 {
+            quad_rule_01(order)
+        } else {
+            tri_rule(order)
+        }
+    };
+
+    let mut a_coo = fem_linalg::CooMatrix::<f64>::new(n_total, n_total);
+    let mut m_coo = fem_linalg::CooMatrix::<f64>::new(n_total, n_total);
+
+    for e in 0..mesh.n_elements() as u32 {
+        let cell = match mesh.element_type(e) {
+            ElementType::Tri3 => Cell::Tri(NdR2dTri::new(p as usize)),
+            ElementType::Quad4 => Cell::Quad(NdR2dQuad::new(p as usize)),
+            other => panic!(
+                "assemble_ex32p_r2d_eigen_system: unsupported element type {other:?}"
+            ),
+        };
+        let nd = match &cell {
+            Cell::Tri(el) => el.n_dofs(),
+            Cell::Quad(el) => el.n_dofs(),
+        };
+        let el_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e).to_vec();
+
+        let mut k_elem = vec![0.0_f64; nd * nd];
+        let mut m_elem = vec![0.0_f64; nd * nd];
+        let mut phi = vec![0.0_f64; nd * 3];
+        let mut curl = vec![0.0_f64; nd * 3];
+
+        // Pass 0: CurlCurlIntegrator (rule 2p−2, ex31-verified).
+        // Pass 1: VectorFEMassIntegrator with the ε tensor (rule OrderW + 2p).
+        for pass in 0..2 {
+            let qord: u8 = if pass == 0 { 2 * p - 2 } else { order_w(e) + 2 * p };
+            let q = cell_rule(e, qord);
+            for (qi, xiq) in q.points.iter().enumerate() {
+                let xi = [xiq[0], xiq[1]];
+                let (j, _) = elem_jac_at(mesh, e, xi);
+                let w = q.weights[qi] * j.det;
+                if pass == 0 {
+                    cell.eval_curl_phys(&xi, &j, &mut curl);
+                    for i in 0..nd {
+                        for jj in 0..nd {
+                            let mut acc = 0.0;
+                            for c in 0..3 {
+                                acc += curl[i * 3 + c] * curl[jj * 3 + c];
+                            }
+                            k_elem[i * nd + jj] += w * acc;
+                        }
+                    }
+                } else {
+                    cell.eval_vshape_phys(&xi, &j, &mut phi);
+                    for i in 0..nd {
+                        // (ε φ_i) — ε symmetric
+                        let ephi = [
+                            epsilon[0] * phi[i * 3]
+                                + epsilon[1] * phi[i * 3 + 1]
+                                + epsilon[2] * phi[i * 3 + 2],
+                            epsilon[3] * phi[i * 3]
+                                + epsilon[4] * phi[i * 3 + 1]
+                                + epsilon[5] * phi[i * 3 + 2],
+                            epsilon[6] * phi[i * 3]
+                                + epsilon[7] * phi[i * 3 + 1]
+                                + epsilon[8] * phi[i * 3 + 2],
+                        ];
+                        for jj in 0..nd {
+                            let mut acc = 0.0;
+                            for c in 0..3 {
+                                acc += ephi[c] * phi[jj * 3 + c];
+                            }
+                            m_elem[i * nd + jj] += w * acc;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scatter with the orientation signs (D384 1e-12 structural-zero drop).
+        for i in 0..nd {
+            for jj in 0..nd {
+                let va = signs[i] * signs[jj] * k_elem[i * nd + jj];
+                if va.abs() > 1e-12 {
+                    a_coo.add(el_dofs[i], el_dofs[jj], va);
+                }
+                let vm = signs[i] * signs[jj] * m_elem[i * nd + jj];
+                if vm.abs() > 1e-12 {
+                    m_coo.add(el_dofs[i], el_dofs[jj], vm);
+                }
+            }
+        }
+    }
+
+    let mut a = a_coo.into_csr();
+    let mut m = m_coo.into_csr();
+    // shift branch: A gains the same ε mass term (before elimination).
+    if shift {
+        a = csr_add_scaled(&a, &m, 1.0);
+    }
+
+    // MFEM EliminateEssentialBCDiag: row+col → e_i·val.
+    let ess: HashSet<usize> = bdr_dofs.iter().map(|&d| d as usize).collect();
+    eliminate_rowcol_diag(&mut a, &ess, 1.0);
+    eliminate_rowcol_diag(&mut m, &ess, f64::MIN_POSITIVE);
+
+    HcurlR2dEigenSystem { a, m, n_ess, n_dofs: n_total }
+}
+
+/// MFEM `SparseMatrix::EliminateRowCol(i, val)` for a set: zero row+col `i`,
+/// set the diagonal entry to `val`.
+fn eliminate_rowcol_diag(mat: &mut CsrMatrix<f64>, ess: &HashSet<usize>, val: f64) {
+    for r in 0..mat.nrows {
+        for k in mat.row_ptr[r]..mat.row_ptr[r + 1] {
+            let c = mat.col_idx[k] as usize;
+            if ess.contains(&r) || ess.contains(&c) {
+                mat.values[k] = if r == c && ess.contains(&r) { val } else { 0.0 };
+            }
+        }
+    }
+}
+
 
 impl StaticMaxwellProblem {
     pub fn new(
@@ -2929,6 +3228,121 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f64, f64::max);
         assert!(m_diff < 1e-13, "mass mismatch = {m_diff}");
+    }
+
+    /// D996: the anisotropic-ε eigen assembly (`ex32p`
+    /// `VectorFEMassIntegrator(MatrixConstantCoefficient&)` semantics).
+    ///
+    /// Three pins on the 2×2×2 hex unit cube, ND1, all-boundary PEC:
+    ///
+    /// 1. **Isotropy** — tensor ε = α·I reproduces the scalar spelling
+    ///    bit-for-bit (same CSR graph, identical values);
+    /// 2. **Scaling law** — λ(A, cM) = λ(A, M)/c: the mass coefficient enters
+    ///    exactly once, as documented;
+    /// 3. **Direction** — the ex32p tensor (eigenvalues 1, 2, 3: effective ε
+    ///    per polarisation ∈ [1, 3]) pushes the spectrum below the ε = 1 one
+    ///    but not below the ε = 3 one.  The end-to-end anchor is the fichera
+    ///    对拍: fem-rs λ₁ = 1.26794609394137e+00 vs C++ ex32p
+    ///    1.26794609394135e+00 (round-106, `tmp/d106ex32/`).
+    #[test]
+    fn d996_tensor_epsilon_scalar_isotropy_and_ex32p_spectrum_direction() {
+        let mesh = Mesh::<3>::unit_cube_hex(2);
+        let h1 = H1Space::new(mesh.clone(), 1);
+        let hcurl = HCurlSpace::new(mesh.clone(), 1);
+        let attrs: Vec<i32> = hcurl.mesh().unique_boundary_tags();
+        let ess: Vec<i32> = attrs.iter().map(|_| 1).collect();
+
+        // (1) isotropy: scalar ε = 1.5 ≡ tensor 1.5·I, bit-for-bit.
+        let scalar =
+            assemble_hcurl_eigen_system_from_marker(&h1, &hcurl, &attrs, &ess, 1.0, 1.5, 6);
+        let tensor = assemble_hcurl_eigen_system_tensor_from_marker(
+            &h1,
+            &hcurl,
+            &attrs,
+            &ess,
+            1.0,
+            ConstantMatrixCoeff::isotropic(3, 1.5),
+            6,
+        );
+        assert_eq!(scalar.mass_free.row_ptr, tensor.mass_free.row_ptr);
+        assert_eq!(scalar.mass_free.col_idx, tensor.mass_free.col_idx);
+        assert_eq!(scalar.mass_free.values, tensor.mass_free.values);
+
+        // (2)/(3) spectra through the AME dense path (machine precision).
+        let cfg = fem_solver::eigen::AmeConfig { nev: 3, ..Default::default() };
+        let lam = |sys: &HcurlEigenSystem| {
+            solve_hcurl_eigen_ame(sys, 3, &cfg).unwrap().eigenvalues
+        };
+        let s = std::f64::consts::FRAC_1_SQRT_2; // M_SQRT1_2 in C++ ex32p
+        let ex32p = assemble_hcurl_eigen_system_tensor_from_marker(
+            &h1,
+            &hcurl,
+            &attrs,
+            &ess,
+            1.0,
+            ConstantMatrixCoeff(vec![2.0, s, 0.0, s, 2.0, s, 0.0, s, 2.0]),
+            6,
+        );
+        let doubled =
+            assemble_hcurl_eigen_system_from_marker(&h1, &hcurl, &attrs, &ess, 1.0, 2.0, 6);
+        let unit =
+            assemble_hcurl_eigen_system_from_marker(&h1, &hcurl, &attrs, &ess, 1.0, 1.0, 6);
+
+        let lam_eps1 = lam(&unit);
+        let lam_eps2 = lam(&doubled);
+        let lam_ex32p = lam(&ex32p);
+
+        // λ(A, 2M) = λ(A, M)/2 (dense direct solve: ~1e-12 relative).
+        for (a, b) in lam_eps2.iter().zip(lam_eps1.iter()) {
+            assert!(
+                (a - b / 2.0).abs() <= 1e-10 * b.abs(),
+                "λ(A,2M)={a} vs λ(A,M)/2={b}"
+            );
+        }
+        // The ex32p tensor's eigenvalues are 1, 2, 3 → the spectrum sits in
+        // (λ(ε=1)/3, λ(ε=1)) and strictly below it.
+        for (x, b) in lam_ex32p.iter().zip(lam_eps1.iter()) {
+            assert!(x < b, "λ_ex32p={x} must be < λ_ε=1={b}");
+            assert!(*x > b / 3.0, "λ_ex32p={x} must be > λ_ε=1/3={}", b / 3.0);
+        }
+    }
+
+    /// D999: the ex32p 2-D default branch — the restricted ND_R2D pencil on
+    /// the inline-quad geometry (4×4 quads) with the ε tensor.  End-to-end
+    /// pin against the C++ ex32p oracle (`$HOME/work/d106/cpp32_2d_rs0.txt`,
+    /// round-106: `mpirun -np 1 ex32p_cpp -m data/inline-quad.mesh -rs 0
+    /// -rp 0 -o 1 -no-vis`): the five smallest AME eigenvalues must match the
+    /// C++ HypreAME printout to solver tolerance (they agree to ≤ 2.6e-11
+    /// absolute, ≤ 1.3e-12 relative).
+    #[test]
+    fn d999_r2d_default_branch_matches_cpp_ex32p() {
+        let mesh = Mesh::<2>::make_cartesian_2d(4, 4, 1.0, 1.0);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let eps = [2.0, s, 0.0, s, 2.0, s, 0.0, s, 2.0];
+        let sys = assemble_ex32p_r2d_eigen_system(&mesh, 1, &eps, false);
+        // C++ rs0: 65 H(Curl) unknowns / 56 H(Div), ess = 32.
+        assert_eq!(sys.n_dofs, 65, "ND_R2D o1 on 4×4 quads = 65 DOFs (C++ rs0)");
+        assert_eq!(sys.n_ess, 32, "all-boundary PEC = 32 essential DOFs");
+
+        let cfg = fem_solver::eigen::AmeConfig { nev: 5, ..Default::default() };
+        let g_dummy = CsrMatrix::new_empty(1, 1); // unused by the AME dense path
+        let res = fem_solver::eigen::ame_solve(&sys.a, &sys.m, &g_dummy, &cfg)
+            .expect("AME on the R2D pencil");
+        assert!(res.converged, "AME must converge at tol 1e-8");
+        // C++ ex32p rs0 eigenvalue table (14 significant digits).
+        let cpp = [
+            3.96658687682069e+00,
+            6.55062164525548e+00,
+            9.71300590323307e+00,
+            1.30088698014475e+01,
+            1.99466408279327e+01,
+        ];
+        for (got, want) in res.eigenvalues.iter().zip(cpp.iter()) {
+            assert!(
+                (got - want).abs() <= 3e-11,
+                "λ={got:.14e} vs C++ {want:.14e}"
+            );
+        }
     }
 
     #[test]

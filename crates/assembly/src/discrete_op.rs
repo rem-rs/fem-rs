@@ -13,6 +13,7 @@
 //! | `gradient`   | H1 (P1)    | H(curl) ND1| 1     |
 //! | `gradient`   | H1 (P2)    | H(curl) ND2| 2     |
 //! | `gradient`   | H1 (P2)    | H(curl) ND2 (3-D hex) | 2 |
+//! | `gradient`   | H1 (P3)    | H(curl) ND3 (3-D hex, D998) | 3 |
 //! | `curl_2d`    | H(curl) ND1| L2 (P0)   | 1     |
 //! | `curl_2d`    | H(curl) ND2| L2 (P1)   | 2     |
 //! | `curl_2d`    | H(curl) ND2| L2 (P2)   | 2     |
@@ -41,7 +42,7 @@ use std::collections::HashSet;
 use fem_mesh::ElementType;
 use fem_core::types::DofId;
 use fem_element::{
-    quadrature::gauss_legendre_01, HexNDk, HexQ2, HexRTk, ReferenceElement, TetRT1, TriNDk,
+    quadrature::gauss_legendre_01, HexNDk, HexQ2, HexQ3, HexRTk, ReferenceElement, TetRT1, TriNDk,
     TriND2, TriRT1, TriRT2, VectorReferenceElement,
 };
 use fem_element::lagrange::factory::TriPk;
@@ -57,11 +58,11 @@ use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 #[derive(Debug, thiserror::Error)]
 pub enum DiscreteOpError {
     /// The H1 space has an unsupported polynomial order.
-    #[error("gradient: H1 space must be order 1 (P1) or 2 (P2), got order {0}")]
+    #[error("gradient: H1 space must be order 1 (P1), 2 (P2), or 3 (P3, 3-D hexes), got order {0}")]
     UnsupportedH1Order(u8),
 
     /// The H(curl) space has an unsupported polynomial order.
-    #[error("{op}: H(curl) space must be order 1 (ND1) or 2 (ND2), got order {order}")]
+    #[error("{op}: H(curl) space must be order 1 (ND1), 2 (ND2), or 3 (ND3, 3-D hexes) matching the H1 order, got order {order}")]
     UnsupportedHCurlOrder { op: &'static str, order: u8 },
 
     /// The H(div) space has an unsupported polynomial order.
@@ -209,7 +210,7 @@ impl DiscreteLinearOperator {
 
         // Validate orders.
         match h1_order {
-            1 | 2 => {}
+            1 | 2 | 3 => {}
             o => return Err(DiscreteOpError::UnsupportedH1Order(o)),
         }
         // H1 order 1 works with any HCurl order ≥ 1 (topological edge-vertex incidence).
@@ -219,17 +220,31 @@ impl DiscreteLinearOperator {
             }
             return Self::gradient_p1_nd1(h1_space, hcurl_space);
         }
-        // h1_order == 2
-        match hcurl_order {
-            2 => match h1_space.mesh().dim() {
-                2 => Self::gradient_p2_nd2(h1_space, hcurl_space),
-                3 => Self::gradient_p2_nd2_hex3d(h1_space, hcurl_space),
-                dim => Err(DiscreteOpError::UnsupportedDimension {
-                    op: "gradient (P2→ND2)",
-                    dim,
-                }),
+        // h1_order == 2 | 3 (D998: the order-3 arm mirrors the order-2 hex one)
+        match h1_order {
+            2 => match hcurl_order {
+                2 => match h1_space.mesh().dim() {
+                    2 => Self::gradient_p2_nd2(h1_space, hcurl_space),
+                    3 => Self::gradient_p2_nd2_hex3d(h1_space, hcurl_space),
+                    dim => Err(DiscreteOpError::UnsupportedDimension {
+                        op: "gradient (P2→ND2)",
+                        dim,
+                    }),
+                },
+                o => Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: o }),
             },
-            o => Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: o }),
+            // D998: H1 order 3 pairs with ND order 3 (3-D hexes for now).
+            3 => match hcurl_order {
+                3 => match h1_space.mesh().dim() {
+                    3 => Self::gradient_p3_nd3_hex3d(h1_space, hcurl_space),
+                    dim => Err(DiscreteOpError::UnsupportedDimension {
+                        op: "gradient (P3→ND3)",
+                        dim,
+                    }),
+                },
+                o => Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: o }),
+            },
+            _ => unreachable!("h1_order validated to 1|2|3 above"),
         }
     }
 
@@ -498,6 +513,97 @@ impl DiscreteLinearOperator {
                     let val = sign * g_ref[s_local * N_P2_LOCAL + j_local];
                     if val.abs() > 1e-15 {
                         coo.add(g_nd as usize, global_p2 as usize, val);
+                    }
+                }
+            }
+        }
+
+        Ok(coo.into_csr())
+    }
+
+    // ── Order-3 numerical gradient (P3 → ND3, 3-D hexahedra) ────────────────
+
+    /// D998: `G: H1(P3) → H(curl) ND3` on a 3-D hexahedral mesh — the pex32
+    /// `-o 3` arm (H1 order = ND order = 3), MFEM
+    /// `DiscreteLinearOperator` + `GradientInterpolator` semantics.  Same
+    /// derivation as [`Self::gradient_p2_nd2_hex3d`]: every ND3 hex DOF is the
+    /// point-value functional `σ_s(Φ) = Φ(ξ_s)·τ_s` with `(ξ_s, τ_s)` from
+    /// [`HexNDk`] (unnormalized `2·e_a` reference tangents), the covariant
+    /// pullback makes every row J-independent,
+    ///
+    /// ```text
+    ///   G[nd_s, p3_j] = ∇_ref φ_j(ξ_s) · τ_s
+    /// ```
+    ///
+    /// evaluated once on the reference hex ([`HexQ3`] gradients), scattered
+    /// per element through the space's `element_dofs`/`element_signs`.
+    fn gradient_p3_nd3_hex3d<M: MeshTopology>(
+        h1_space: &H1Space<M>,
+        hcurl_space: &HCurlSpace<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = h1_space.mesh();
+        const N_P3_LOCAL: usize = 64;
+
+        match mesh.element_type(0) {
+            ElementType::Hex8 | ElementType::Hex20 => {}
+            other => {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "gradient (P3→ND3)",
+                    cell: element_type_name(other),
+                })
+            }
+        }
+
+        let nd = HexNDk::new(3);
+        let coords = nd.dof_coords();
+        let tangents = nd.dof_tangents();
+        let n_slots = coords.len();
+        if n_slots != nd.n_dofs() {
+            return Err(DiscreteOpError::UnsupportedCellType {
+                op: "gradient (P3→ND3)",
+                cell: "HexNDk::dof_coords length mismatch",
+            });
+        }
+
+        let p3 = HexQ3;
+        let mut g_ref = vec![0.0_f64; n_slots * N_P3_LOCAL];
+        {
+            let mut grads = vec![0.0_f64; N_P3_LOCAL * 3];
+            for (s, (xi, tau)) in coords.iter().zip(tangents.iter()).enumerate() {
+                let xi3 = [xi[0], xi[1], xi[2]];
+                p3.eval_grad_basis(&xi3, &mut grads);
+                for j in 0..N_P3_LOCAL {
+                    g_ref[s * N_P3_LOCAL + j] = grads[j * 3] * tau[0]
+                        + grads[j * 3 + 1] * tau[1]
+                        + grads[j * 3 + 2] * tau[2];
+                }
+            }
+        }
+
+        let n_nd = hcurl_space.n_dofs();
+        let n_p3 = h1_space.n_dofs();
+        let mut coo = CooMatrix::<f64>::new(n_nd, n_p3);
+        let mut visited = HashSet::with_capacity(n_nd);
+
+        for e in mesh.elem_iter() {
+            let h1_dofs = h1_space.element_dofs(e);
+            let nd_dofs = hcurl_space.element_dofs(e);
+            let nd_signs = hcurl_space.element_signs(e);
+            if nd_dofs.len() != n_slots || h1_dofs.len() != N_P3_LOCAL {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "gradient (P3→ND3)",
+                    cell: "element DOF count is not HexND3(144) × HexQ3(64)",
+                });
+            }
+            for (s_local, &g_nd) in nd_dofs.iter().enumerate() {
+                if !visited.insert(g_nd as usize) {
+                    continue;
+                }
+                let sign = nd_signs[s_local];
+                for (j_local, &global_p3) in h1_dofs.iter().enumerate() {
+                    let val = sign * g_ref[s_local * N_P3_LOCAL + j_local];
+                    if val.abs() > 1e-15 {
+                        coo.add(g_nd as usize, global_p3 as usize, val);
                     }
                 }
             }
