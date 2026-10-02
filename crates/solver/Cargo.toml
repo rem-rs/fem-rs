@@ -17,6 +17,7 @@ thiserror  = { workspace = true }
 
 [dev-dependencies]
 fem-assembly = { path = "../assembly" }
+fem-io       = { path = "../io" }
 fem-element  = { path = "../element" }
 fem-linalg   = { path = "../linalg" }
 fem-mesh     = { path = "../mesh" }

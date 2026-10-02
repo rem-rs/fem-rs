@@ -74,11 +74,13 @@
 //! | `IrrotationalProjector`/`DivergenceFreeProjector` (weakDiv → H1 stiffness + AMG → grad) | same operators (`assemble_hcurl_h1_weak_div`, `DiffusionIntegrator`, `par_solve_pcg_amg`, `gradient`) |
 //! | `ParGridFunction::ProjectCoefficient` (ND/RT: nodal dof functionals) | `HCurlSpace/HDivSpace::interpolate_vector` |
 //!
-//! The PCG iteration table (`||r||` columns) is this port's own log with the
-//! same column layout as hypre's print-level-2 table; hypre's `||r||_C` is its
-//! preconditioned criterion while fem-rs prints `||r||_2`, so per-row values
-//! differ even when the iteration counts agree.  `PCG Iterations = N` /
-//! `Final PCG Relative Residual Norm = X` are 1:1.
+//! The curl-curl PCG (tesla_solver.cpp:355-365 → `pcg_with_table` below) is
+//! the hypre `hypre_PCGSolve` port including its convergence semantics: MFEM
+//! sets no `SetUseTwoNorm`, so hypre runs `two_norm = 0` — the iteration
+//! table's `||r||_C` column is the preconditioned norm `sqrt((r_k, C·r_k))`
+//! and the stopping test is `gamma = <C*r,r>/<C*b,b> < tol²` (hypre
+//! `krylov/pcg.c:278`) — NOT the plain `||r||₂/||b||₂` test.  `PCG
+//! Iterations = N` / `Final PCG Relative Residual Norm = X` are 1:1.
 //!
 //! Setting the environment variable `FEMRS_TESLA_PROBE=1` prints three
 //! `PROBE ||A/B/H||_2` lines (plus `||M||_2`/`||JD||_2` on the source paths) —
@@ -165,6 +167,10 @@ fn g6(x: f64) -> String {
 
 /// `%.6e` (hypre's `<C*b,b>` line and iteration-table columns).
 fn e6(x: f64) -> String {
+    if x == 0.0 {
+        // C `%e` of zero (hypre's `<C*b,b>` line, the C++ probe's PROBE lines).
+        return "0.000000e+00".to_string();
+    }
     format!("{x:e}")
 }
 
@@ -620,6 +626,116 @@ fn keep_owned_rows(mat: &fem_linalg::CsrMatrix<f64>, n_owned: usize) -> fem_lina
     coo.into_csr()
 }
 
+/// The `IrrotationalProjector` input `xDiv = −weakDiv·x`
+/// (`pfem_extras.cpp:180-181`): the weak-divergence matrix W (H¹ test rows ×
+/// H(curl) trial columns), MFEM `VectorFEWeakDivergenceIntegrator`
+/// (bilininteg.cpp:1852-1941: `elmat(i,j) = −Σ_qps ip.weight·(adj(J)ᵀ∇̂q_i)·
+/// vshape_j`, the physical ND shape `vshape = J⁻ᵀ·û̂`), at the custom
+/// `irOrder` rule, **with the H(curl) element orientation signs applied to
+/// the trial columns** (MFEM scatters every element block through the signed
+/// `GetElementDofs` table).
+///
+/// This replaces fem-parallel's
+/// `ParMixedAssembler::assemble_hcurl_h1_weak_div` for tesla: that path
+/// assembles the RAW element-local trial shapes and its D58 face-block
+/// canonicalization is a no-op on hexes — the orientation signs never reach
+/// the columns, so `W·jr` on a discretely divergence-free field is O(‖jr‖)
+/// instead of 0 (measured d106 on ball-quad `-cr`: ‖W·jr‖ = 7.4e-1 vs the
+/// C++ probe's 7.6e-17 on the bitwise-same `jr`; debt **D1041**, the
+/// `crates/parallel`-side file is outside this lane's territory).
+///
+/// Geometry/basis conventions follow the D667-verified mixed assembler
+/// (`crates/assembly/src/mixed/mod.rs`): `ref_elem_vol_with_pyramid_basis`
+/// H¹ shapes + `ref_elem_vec(.., HCurl)` trial shapes +
+/// `geo_ref_elem_from_mesh`/`isoparametric_jacobian` curved geometry — all in
+/// the one reference convention. (Mixing `element_jacobian_at` (biunit) with
+/// the unit-cube reference shapes produced a 4×-scaled wrong operator — the
+/// ‖W·jr‖ comparison against the C++ probe is the guard.)
+fn assemble_weak_div_matrix(
+    h1: &H1Space<fem_mesh::Mesh<3>>,
+    nd: &HCurlSpace<fem_mesh::Mesh<3>>,
+    qo: u8,
+) -> Result<fem_linalg::CsrMatrix<f64>, String> {
+    use fem_mesh::element_type::ElementType;
+    use fem_mesh::topology::MeshTopology;
+
+    let mesh = h1.mesh();
+    let n_h1 = h1.n_dofs();
+    let n_nd = nd.n_dofs();
+    let mut coo = fem_linalg::CooMatrix::<f64>::new(n_h1, n_nd);
+    for e in 0..mesh.n_elements() as u32 {
+        let et = mesh.element_type(e);
+        if !matches!(et, ElementType::Hex8 | ElementType::Hex20) {
+            return Err(format!(
+                "tesla: the weak-divergence matrix is implemented for hex meshes only; \
+                 element {e} is {et:?} (the d103 acceptance meshes are hexes)"
+            ));
+        }
+        let ref_r = fem_assembly::mixed::ref_elem_vol_with_pyramid_basis(
+            et,
+            h1.get_order(),
+            h1.pyramid_basis(),
+        )?;
+        let ref_c = fem_assembly::mixed::ref_elem_vec(et, nd.order() as u8, fem_space::SpaceType::HCurl)?;
+        let h1_dofs = h1.element_dofs_u32(e);
+        let nd_dofs = nd.element_dofs(e);
+        let signs = nd.element_signs(e);
+        let n_r = h1_dofs.len();
+        let n_c = nd_dofs.len();
+        let quad = ref_r.quadrature(qo);
+        let geo_elem = fem_assembly::geo_ref_elem_from_mesh(mesh, e).expect("geo_ref_elem");
+        let geo_nds = fem_mesh::topology::MeshTopology::geometry_nodes(mesh, e);
+        let mut grad_r = vec![0.0_f64; n_r * 3];
+        let mut grad_phys = vec![0.0_f64; n_r * 3];
+        let mut vec_col = vec![0.0_f64; n_c * 3];
+        for xi in quad.points.iter() {
+            let (j, det_j, _xp) =
+                fem_assembly::isoparametric_jacobian(mesh, geo_nds, geo_elem.as_ref(), xi, 3);
+            let j_inv_t = j
+                .try_inverse()
+                .unwrap_or_else(|| panic!("tesla: singular element Jacobian at element {e}"))
+                .transpose();
+            let w = quad.weights[qo as usize] * det_j;
+            ref_r.eval_grad_basis(xi, &mut grad_r);
+            for (i, g) in grad_phys.iter_mut().enumerate() {
+                let (r, d) = (i / 3, i % 3);
+                *g = j_inv_t[(d, 0)] * grad_r[r * 3]
+                    + j_inv_t[(d, 1)] * grad_r[r * 3 + 1]
+                    + j_inv_t[(d, 2)] * grad_r[r * 3 + 2];
+            }
+            ref_c.eval_basis_vec(xi, &mut vec_col);
+            for (i, &gi) in h1_dofs.iter().enumerate() {
+                for (jj, &gj) in nd_dofs.iter().enumerate() {
+                    // physical H(curl) trial: s_j·J⁻ᵀ·û̂_j (covariant transform).
+                    let s = signs[jj] as f64;
+                    let mut dot = 0.0_f64;
+                    for d in 0..3 {
+                        let u_d = j_inv_t[(d, 0)] * vec_col[jj * 3]
+                            + j_inv_t[(d, 1)] * vec_col[jj * 3 + 1]
+                            + j_inv_t[(d, 2)] * vec_col[jj * 3 + 2];
+                        dot += grad_phys[i * 3 + d] * u_d;
+                    }
+                    coo.add(gi as usize, gj as usize, -w * s * dot);
+                }
+            }
+        }
+    }
+    Ok(coo.into_csr())
+}
+
+/// `xDiv = −W·jr` (`assemble_weak_div_matrix` action on the canonical jr).
+fn assemble_weak_div_action(
+    h1: &H1Space<fem_mesh::Mesh<3>>,
+    nd: &HCurlSpace<fem_mesh::Mesh<3>>,
+    jr: &[f64],
+    qo: u8,
+) -> Result<Vec<f64>, String> {
+    let w = assemble_weak_div_matrix(h1, nd, qo)?;
+    let mut x_div = vec![0.0_f64; w.nrows];
+    w.spmv(jr, &mut x_div);
+    Ok(x_div)
+}
+
 /// Single-rank AMS preconditioner wrapping linlvo's
 /// [`AmsPrecond::with_pi`](linlvo::precond::AmsPrecond::with_pi) — the MFEM
 /// `HypreAMS(SetSingularProblem)` cycle (block-Pi multiplicative `0345430`).
@@ -643,9 +759,20 @@ impl TeslaAms {
     }
 }
 
-/// One printed PCG solve (`HyprePCG` print level 2 analog): the
-/// `<C*b,b>` line, the iteration table, and the two summary lines.
-/// Returns `(iterations, final relative residual)`.
+/// One printed PCG solve — the exact `HyprePCG` (hypre `hypre_PCGSolve`,
+/// print level 2) port for the curl-curl solve (tesla_solver.cpp:355-365:
+/// tol 1e-12, maxit 50, print 2).  MFEM sets no `SetUseTwoNorm`, so hypre
+/// runs `two_norm = 0`: the printed `||r||_C` column is the
+/// **preconditioned** residual norm `sqrt((r_k, C·r_k))` and the stopping
+/// test is the energy-norm one (pcg.c:278)
+///
+/// ```text
+/// gamma = <C*r, r> / <C*b, b>  <  eps = tol²
+/// ```
+///
+/// — not the plain `||r||₂/||b||₂` test.  Returns `(iterations, final
+/// relative residual)` (the two `HyprePCG` getters MFEM prints).
+#[allow(clippy::too_many_arguments)]
 fn pcg_with_table(
     a: &ParCsrMatrix,
     b: &ParVector,
@@ -654,21 +781,25 @@ fn pcg_with_table(
     rtol: f64,
     max_iter: usize,
 ) -> (usize, f64) {
-    // <C*b,b> = (b, C·b), printed by hypre before the table.
+    // Pre-loop: p = C·b; bi_prod = <C*b,b> (pcg.c:357-378), printed first.
     let mut cb = ParVector::zeros_like(b);
     ams.apply(b.as_slice(), cb.as_slice_mut());
-    let cb_b = b.global_dot(&cb);
+    let bi_prod = b.global_dot(&cb);
     println!();
-    println!("<C*b,b>: {}", e6(cb_b));
+    println!("<C*b,b>: {}", e6(bi_prod));
 
-    let b_norm = b.global_norm();
-    if b_norm < 1e-30 {
-        // hypre stops at iteration 0 for a zero RHS.
+    if bi_prod <= 0.0 {
+        // pcg.c:417-431: bi_prod == 0 (zero rhs) → x = 0 and return with 0
+        // iterations, relative residual 0.
+        for v in x.as_slice_mut().iter_mut() {
+            *v = 0.0;
+        }
         println!();
         println!("PCG Iterations = 0");
         println!("Final PCG Relative Residual Norm = {}", g6(0.0));
         return (0, 0.0);
     }
+    let eps = rtol * rtol; // pcg.c:406: eps = r_tol * r_tol
 
     println!();
     println!("Iters       ||r||_C     conv.rate  ||r||_C/||b||_C");
@@ -683,45 +814,39 @@ fn pcg_with_table(
     for i in 0..n_owned {
         r.as_slice_mut()[i] = b.as_slice()[i] - ax.as_slice()[i];
     }
-    // z = M⁻¹ r
+    // p = C·r; gamma = <r, C·r>; norms[0] = sqrt(gamma) — the conv.rate
+    // denominator of iteration 1 (pcg.c:451-459, 483-493).
     let mut z = ParVector::zeros_like(b);
     ams.apply(r.as_slice(), z.as_slice_mut());
     let mut rz = r.global_dot(&z);
     let mut p = z.clone_vec();
 
-    let mut r_norm = r.global_norm();
+    let mut r_norm = rz.sqrt();
     let mut iterations = 0usize;
-    let mut rel = r_norm / b_norm;
+    let mut rel = (rz / bi_prod).sqrt();
     while iterations < max_iter {
         iterations += 1;
         let mut ap = ParVector::zeros_like(b);
         let mut pm = p.clone_vec();
         a.spmv(&mut pm, &mut ap);
-        let pap = p.global_dot(&ap);
-        let alpha = rz / pap;
-        if std::env::var("FEMRS_TESLA_PCG_DEBUG").is_ok() {
-            let px = p.global_norm();
-            let zx = z.global_norm();
-            eprintln!(
-                "[pcg] it={}: rz={rz:.3e} pap={pap:.3e} alpha={alpha:.3e} ||p||={px:.3e} ||z||={zx:.3e}",
-                iterations + 1
-            );
+        let sdotp = p.global_dot(&ap);
+        if sdotp == 0.0 {
+            // pcg.c:528-534: "Zero sdotp value in PCG" → break, iteration
+            // counted.
+            break;
         }
+        let alpha = rz / sdotp;
         for i in 0..n_owned {
             x.as_slice_mut()[i] += alpha * p.as_slice()[i];
             r.as_slice_mut()[i] -= alpha * ap.as_slice()[i];
         }
+        // s = C·r; gamma = <r, s> (pcg.c:589-591).
         ams.apply(r.as_slice(), z.as_slice_mut());
         let rz_new = r.global_dot(&z);
-        let beta = rz_new / rz;
-        for i in 0..n_owned {
-            p.as_slice_mut()[i] = z.as_slice()[i] + beta * p.as_slice()[i];
-        }
-        rz = rz_new;
 
         let prev = r_norm;
-        r_norm = r.global_norm();
-        rel = r_norm / b_norm;
+        r_norm = rz_new.sqrt();
+        rel = (rz_new / bi_prod).sqrt();
         println!(
             "{:5}    {:<13}    {:<9.6}    {}",
             iterations,
@@ -729,9 +854,20 @@ fn pcg_with_table(
             r_norm / prev,
             e6(rel)
         );
-        if rel < rtol {
+
+        // The basic convergence test (pcg.c:677): i_prod/bi_prod < eps.
+        if rz_new / bi_prod < eps {
             break;
         }
+        // Subnormal gamma guard (pcg.c:703-707): no hope of further progress.
+        if !(rz_new > f64::MIN_POSITIVE) {
+            break;
+        }
+        let beta = rz_new / rz;
+        for i in 0..n_owned {
+            p.as_slice_mut()[i] = z.as_slice()[i] + beta * p.as_slice()[i];
+        }
+        rz = rz_new;
     }
     println!();
     println!("PCG Iterations = {iterations}");
@@ -787,7 +923,7 @@ impl TeslaSolver {
         let qo_cc = self.cc_order;
 
         // ── Assemble (tesla_solver.cpp:180-213) ─────────────────────────────
-        println!("Assembling ... ");
+        print!("Assembling ... ");
 
         let mu_inv = self.mu_inv_coeff();
         let mu_inv_mass = mu_inv.clone();
@@ -936,14 +1072,38 @@ impl TeslaSolver {
                 comm_nd.clone(),
             );
             jr.update_ghosts();
+            if probe {
+                let q: f64 = (0..nd_dp.n_owned_dofs)
+                    .map(|i| {
+                        let v = jr.as_slice()[i];
+                        v * v
+                    })
+                    .sum();
+                println!("PROBE ||JR||_2 = {}", e6(comm.allreduce_sum_f64(q).sqrt()));
+            }
 
             // DivergenceFreeProjector = IrrotationalProjector with y = x −
             // grad·psi: xDiv = −weakDiv·jr; psi = S0⁻¹ xDiv (H1 stiffness,
             // all-boundary Dirichlet 0, PCG + AMG, tol 1e-14 / 200 it);
-            // j = jr − grad·psi  (pfem_extras.cpp:97-256).
-            let weak_div = ParMixedAssembler::assemble_hcurl_h1_weak_div(h1, nd, qo_ir);
-            let mut x_div = vec![0.0_f64; h1.dof_partition().n_total_dofs()];
-            weak_div.spmv(jr.as_slice(), &mut x_div);
+            // j = jr − grad·psi  (pfem_extras.cpp:97-256).  The action is
+            // assembled locally with the H(curl) orientation signs (D1041);
+            // jr feeds it in CANONICAL dof order (jr_local, pre-permutation).
+            let mut x_div = match assemble_weak_div_action(
+                h1.local_space(),
+                nd.local_space(),
+                jr_local.as_slice(),
+                qo_ir,
+            ) {
+                Ok(x) => x,
+                Err(e) => {
+                    eprintln!("mfem_miniapp_tesla: {e}");
+                    std::process::exit(3);
+                }
+            };
+            if probe {
+                let q: f64 = x_div.iter().map(|v| v * v).sum();
+                println!("PROBE ||XDIV||_2 = {}", e6(comm.allreduce_sum_f64(q).sqrt()));
+            }
             for v in &mut x_div {
                 *v = -*v;
             }
@@ -995,6 +1155,15 @@ impl TeslaSolver {
             for i in 0..nd_dp.n_owned_dofs {
                 j.as_slice_mut()[i] -= gpsi[i];
             }
+            if probe {
+                let q: f64 = (0..nd_dp.n_owned_dofs)
+                    .map(|i| {
+                        let v = j.as_slice()[i];
+                        v * v
+                    })
+                    .sum();
+                println!("PROBE ||J||_2 = {}", e6(comm.allreduce_sum_f64(q).sqrt()));
+            }
 
             // jd += hCurlMass · j
             let mut mj = ParVector::zeros(nd);
@@ -1023,8 +1192,10 @@ impl TeslaSolver {
         // payload) plus the singular-problem cycle (`0345430`: the nodal
         // gradient arm is dropped, hypre 2.28 ams.c:3688).  The options mirror
         // MFEM `HypreAMS::MakeSolver` defaults: symmetric-GS edge smoothing
-        // (`rlx_type 2`; its l1 scaling degenerates to |diag| on one rank),
-        // one relax sweep per level, multiplicative V(1,1).
+        // (`rlx_type 2` — which in hypre is the *l1-scaled* SGS: for relax
+        // types 1-4 `hypre_AMSSetup` computes the row l1 norms of A
+        // (ams.c:3041-3053) and the hybrid-SOR relax divides by them), one
+        // relax sweep per level, multiplicative V(1,1).
         let h1_dp = h1.dof_partition();
         let (pi_canonical, pi_row_key) =
             match assemble_pi_blocks(h1.local_space(), nd.local_space()) {
