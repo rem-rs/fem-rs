@@ -293,7 +293,7 @@ where
         DpgBlockKind::FaceContinuous => dim == 3,
         _ => false,
     });
-    let faces = build_face_numbering(local, kinds, partition, comm, rank, &sys_trials, needs_edges);
+    let faces = build_face_numbering(local, kinds, partition, comm, &sys_trials, needs_edges);
 
     // Number **all** trial blocks: the volume blocks that static condensation
     // eliminates still contribute to the reported global trial DOF count (MFEM
@@ -399,7 +399,6 @@ fn build_face_numbering<M, L>(
     kinds: &[DpgBlockKind],
     partition: &MeshPartition,
     comm: &Comm,
-    rank: Rank,
     sys_trials: &[usize],
     needs_edges: bool,
 ) -> FaceNumbering
@@ -511,7 +510,7 @@ where
             .collect();
         let mut incoming = comm.alltoallv_bytes(&sends);
         incoming.sort_by_key(|(src, _)| *src);
-        for (src, bytes) in &incoming {
+        for (_src, bytes) in &incoming {
             for key in decode_keys(bytes) {
                 key_owner.entry(key).or_insert(i32::MAX);
             }
@@ -588,7 +587,7 @@ where
     let n_global_nodes = (allreduce_max_u32(comm, max_local_gid) as usize) + 1;
 
     let (edge_gid, edge_owner, n_global_edges) = if needs_edges {
-        build_edge_numbering(local, partition, comm, rank)
+        build_edge_numbering(local, partition, comm)
     } else {
         (Vec::new(), Vec::new(), 0)
     };
@@ -612,11 +611,22 @@ where
 /// node key — [`TraceSpace`] and `SkeletonSpace` both enumerate exactly this
 /// way, so serial edge DOF `e * edof + j` below refers to `local_keys[e]`);
 /// the global ids come from the sorted union of all ranks' keys.
+///
+/// The owner is **not** the lowest holder rank (D963/D964): under the one-node
+/// ghost layer a rank can hold an edge while some elements incident to it are
+/// absent (it enters the layer only through a single shared node), so its row
+/// for the edge DOFs would carry only part of the contributions — in 3-D every
+/// trace DOF of an ND(p) block is an edge DOF, which halved 64 skeleton rows
+/// of the `pmaxwell` 3-D system at two ranks.  As for faces, the owner is the
+/// **minimum adjacent-element owner**: every element incident to an edge shares
+/// the edge's two nodes with any one of them, so the minimum-proposing rank
+/// (which owns that element) holds all of them inside its one-node closure and
+/// assembles complete rows.  Each rank proposes the min over its (possibly
+/// partial) view and the exchanged min is taken — view-independent.
 fn build_edge_numbering<M, L>(
     local: &L,
     partition: &MeshPartition,
     comm: &Comm,
-    rank: Rank,
 ) -> (Vec<u32>, Vec<Rank>, usize)
 where
     M: MeshTopology + Clone + 'static,
@@ -625,9 +635,12 @@ where
     let mesh = local.numbering_mesh();
     let mut local_keys: Vec<[u32; 2]> = Vec::new();
     let mut seen: BTreeSet<[u32; 2]> = BTreeSet::new();
+    // D964: min adjacent-element owner over the local view (exchanged below).
+    let mut adjacent_owner: BTreeMap<[u32; 2], Rank> = BTreeMap::new();
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
         let en = mesh.element_nodes(e);
+        let eowner = partition.elem_owner[e as usize];
         for ev in mfem_local_edges(et) {
             let a = partition.global_node(en[ev[0]]);
             let b = partition.global_node(en[ev[1]]);
@@ -635,32 +648,32 @@ where
             if seen.insert(key) {
                 local_keys.push(key);
             }
+            adjacent_owner.entry(key).and_modify(|o| *o = (*o).min(eowner)).or_insert(eowner);
         }
     }
 
-    let mut key_owner: BTreeMap<[u32; 2], Rank> = BTreeMap::new();
-    for k in &local_keys {
-        key_owner.entry(*k).or_insert(rank);
-    }
+    let mut key_owner: BTreeMap<[u32; 2], Rank> = adjacent_owner.clone();
     if comm.size() > 1 {
-        let mut payload = Vec::with_capacity(local_keys.len() * 8);
+        // (owner, key) records, min-reduced — the face-owner exchange of D963.
+        let mut owner_payload = Vec::with_capacity(local_keys.len() * 12);
         for k in &local_keys {
-            payload.extend_from_slice(&k[0].to_le_bytes());
-            payload.extend_from_slice(&k[1].to_le_bytes());
+            let o = adjacent_owner[k];
+            owner_payload.extend_from_slice(&o.to_le_bytes());
+            owner_payload.extend_from_slice(&k[0].to_le_bytes());
+            owner_payload.extend_from_slice(&k[1].to_le_bytes());
         }
         let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
-            .map(|r| (r, payload.clone()))
+            .map(|r| (r, owner_payload.clone()))
             .collect();
-        let mut incoming = comm.alltoallv_bytes(&sends);
-        incoming.sort_by_key(|(src, _)| *src);
-        for (src, bytes) in &incoming {
-            for chunk in bytes.chunks_exact(8) {
-                let a = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
-                let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
-                key_owner
-                    .entry([a, b])
-                    .and_modify(|o| *o = (*o).min(*src))
-                    .or_insert(*src);
+        let incoming = comm.alltoallv_bytes(&sends);
+        for (_src, bytes) in &incoming {
+            let mut pos = 0usize;
+            while pos + 12 <= bytes.len() {
+                let o = Rank::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+                let a = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap());
+                let b = u32::from_le_bytes(bytes[pos + 8..pos + 12].try_into().unwrap());
+                pos += 12;
+                key_owner.entry([a, b]).and_modify(|o0| *o0 = (*o0).min(o)).or_insert(o);
             }
         }
     }
