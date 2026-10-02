@@ -103,16 +103,19 @@ use fem_mesh::amr::refine_uniform_3d;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{par_solve_pcg_amg, ParAmgConfig};
 use fem_parallel::par_assembler::permute_vec;
+use fem_parallel::par_mixed_assembler::permute_rect_csr;
 use fem_parallel::par_solver::par_solve_pcg_jacobi;
 use fem_parallel::{
-    Comm, ParAmsPrecond, ParAssembler, ParCsrMatrix, ParDiscreteLinearOperator, ParMixedAssembler,
-    ParVector, ParVectorAssembler, ParallelFESpace, ParallelMesh, SmootherType, WorkerConfig,
-    partition_mesh,
+    Comm, ParAssembler, ParCsrMatrix, ParDiscreteLinearOperator, ParMixedAssembler, ParVector,
+    ParVectorAssembler, ParallelFESpace, ParallelMesh, SmootherType, WorkerConfig, partition_mesh,
 };
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
+use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace};
-use linlvo::precond::{AmsConfig, AmsCycle, AmsEdgeSmoother};
+use linlvo::amg::{AmgConfig, SmootherType as AuxSmoother};
+use linlvo::precond::{AmsConfig, AmsCycle, AmsEdgeSmoother, AmsPrecond, AuxSpaceSolver};
+use linlvo::{DenseVec, Preconditioner};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -492,6 +495,154 @@ fn curl_curl_rule_order(order: u32, is_hex: bool) -> u8 {
     }
 }
 
+// ─── AMS face (curl) auxiliary space — the D957 mechanism ───────────────────
+
+/// The three `id_ND` interpolation blocks `Pi_x/Pi_y/Pi_z` MFEM's `HypreAMS`
+/// hands to hypre (`HypreAMS::MakeGradientAndInterpolation`,
+/// `linalg/hypre.cpp`): the identity interpolator
+/// `id_ND : [H¹]^sdim → H(curl)` (`IdentityInterpolator`,
+/// `fem/bilininteg.hpp:4064`) with per-component blocks
+/// `ran_fe.Project(dom_fe, Trans, elmat)` — the MFEM `Project_ND` contract
+/// (`fe_base.cpp:1404`): row `k` is the point functional
+///
+/// ```text
+///   π_d(k, j) = φ_j(x_k) · (J(x_k)·t_k)_d
+/// ```
+///
+/// evaluated at the ND dof slot (`FE::Nodes` reference point `x_k` with the
+/// `dof2tk` tangent `t_k`).  This is the mechanism missing from the fem-rs
+/// AMS in round 104 (debt D957): hypre runs its block-Pi multiplicative cycle
+/// (`cycle_type = 13`) with `B_Pi_d = AMG(Pi_dᵀ·A·Pi_d)` on exactly these
+/// blocks, which is where the C++ tesla PCG iteration counts come from.
+///
+/// The slot layout, tangents and orientation signs are the space crate's
+/// MFEM-pinned `HexNDk` engine (the same tables
+/// `HCurlSpace::interpolate_vector`'s D926 curved branch validates bitwise
+/// against MFEM).  Hex meshes only (the d103 acceptance meshes
+/// ball-quad/inline-hex are hexes); other cell types exit(3).
+fn assemble_pi_blocks(
+    h1: &H1Space<fem_mesh::Mesh<3>>,
+    nd: &HCurlSpace<fem_mesh::Mesh<3>>,
+) -> Result<([fem_linalg::CsrMatrix<f64>; 3], Vec<[f64; 3]>), String> {
+    use fem_element::nedelec::HexNDk;
+    use fem_mesh::element_type::ElementType;
+
+    let mesh = h1.mesh_topology();
+    let hnd = HexNDk::new(nd.order() as usize);
+    // `(reference slot x_k, reference tangent t_k)` per local dof slot — the
+    // MFEM `FE::Nodes`/`tk` tables (same slot order as `nd.element_dofs`).
+    let anchors = hnd.dof_anchors();
+    let n_nd = nd.n_dofs();
+    let n_h1 = h1.n_dofs();
+    let p_h1 = h1.get_order();
+
+    // A point-value ND functional is a **global** dof evaluated ONCE (MFEM
+    // scatters per element with the vdofs orientation table — assignment, not
+    // accumulation; `HCurlSpace::interpolate_vector` likewise loops dofs, not
+    // elements).  Pick one host element per dof: edge dofs are shared by up to
+    // 4 hexes, but the slot point, `J·t_k` and the H¹ trace on the shared edge
+    // agree across the hosts, so any host yields the same row.
+    let mut host_of: Vec<(u32, usize)> = vec![(u32::MAX, usize::MAX); n_nd];
+    for e in 0..mesh.n_elements() as u32 {
+        let et = mesh.element_type(e);
+        if !matches!(et, ElementType::Hex8 | ElementType::Hex20) {
+            return Err(format!(
+                "tesla: the AMS face-space (id_ND Pi blocks) is implemented for hex meshes \
+                 only; element {e} is {et:?} (the d103 acceptance meshes are hexes)"
+            ));
+        }
+        for (m, &gdof) in nd.element_dofs(e).iter().enumerate() {
+            host_of[gdof as usize] = (e, m);
+        }
+    }
+
+    let mut coo = [
+        fem_linalg::CooMatrix::<f64>::new(n_nd, n_h1),
+        fem_linalg::CooMatrix::<f64>::new(n_nd, n_h1),
+        fem_linalg::CooMatrix::<f64>::new(n_nd, n_h1),
+    ];
+    // Physical slot point of every row dof (the Project_ND evaluation point —
+    // the canonical key for cross-implementation dumps).
+    let mut row_key: Vec<[f64; 3]> = vec![[f64::NAN; 3]; n_nd];
+    for (dof, &(e, m)) in host_of.iter().enumerate() {
+        if m == usize::MAX {
+            return Err(format!(
+                "tesla: ND dof {dof} has no host element (space/mesh mismatch)"
+            ));
+        }
+        let et = mesh.element_type(e);
+        let h1_ref = fem_space::ref_elem::h1_field_element(et, p_h1, h1.pyramid_basis());
+        let h1_dofs = h1.element_dofs_u32(e);
+        let signs = nd.element_signs(e);
+        let (xi, tk) = &anchors[m];
+        let (jac, x) = fem_mesh::element_jacobian_at(mesh, e, xi, 3);
+        row_key[dof] = [x[0], x[1], x[2]];
+        let j = [
+            [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+            [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+            [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+        ];
+        let mut shape = vec![0.0_f64; h1_ref.n_dofs()];
+        h1_ref.eval_basis(xi, &mut shape);
+        // t = J·t_k (MFEM Project_ND: `Trans.Jacobian().InnerProduct(tk, vk)`).
+        let mut t = [0.0_f64; 3];
+        for (r, t_r) in t.iter_mut().enumerate() {
+            *t_r = j[r][0] * tk[0] + j[r][1] * tk[1] + j[r][2] * tk[2];
+        }
+        let s = signs[m];
+        for (&gdof, &phij) in h1_dofs.iter().zip(shape.iter()) {
+            let v = s * phij;
+            coo[0].add(dof, gdof as usize, v * t[0]);
+            coo[1].add(dof, gdof as usize, v * t[1]);
+            coo[2].add(dof, gdof as usize, v * t[2]);
+        }
+    }
+    Ok((
+        [
+            std::mem::replace(&mut coo[0], fem_linalg::CooMatrix::new(0, 0)).into_csr(),
+            std::mem::replace(&mut coo[1], fem_linalg::CooMatrix::new(0, 0)).into_csr(),
+            std::mem::replace(&mut coo[2], fem_linalg::CooMatrix::new(0, 0)).into_csr(),
+        ],
+        row_key,
+    ))
+}
+
+/// Keep the owned rows of a partition-permuted rectangular local matrix (the
+/// `ParDiscreteLinearOperator::gradient` recipe's final step, inlined here
+/// because the parallel crate ships the permutation but not the extraction).
+fn keep_owned_rows(mat: &fem_linalg::CsrMatrix<f64>, n_owned: usize) -> fem_linalg::CsrMatrix<f64> {
+    let mut coo = fem_linalg::CooMatrix::<f64>::new(n_owned, mat.ncols);
+    for row in 0..n_owned.min(mat.nrows) {
+        for k in mat.row_ptr[row]..mat.row_ptr[row + 1] {
+            coo.add(row, mat.col_idx[k] as usize, mat.values[k]);
+        }
+    }
+    coo.into_csr()
+}
+
+/// Single-rank AMS preconditioner wrapping linlvo's
+/// [`AmsPrecond::with_pi`](linlvo::precond::AmsPrecond::with_pi) — the MFEM
+/// `HypreAMS(SetSingularProblem)` cycle (block-Pi multiplicative `0345430`).
+///
+/// tesla needs the hypre AMS *cycle semantics*, which live in linlvo's serial
+/// `AmsPrecond`; `fem_parallel::ParAmsPrecond` remains the block-Jacobi
+/// wrapper used by the other consumers and does not accept Pi blocks (its
+/// `crates/parallel` file is outside this lane's territory).
+struct TeslaAms {
+    inner: AmsPrecond<f64>,
+    n_owned: usize,
+}
+
+impl TeslaAms {
+    /// Apply the preconditioner: `z = M⁻¹ r` (rank-local, single rank).
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        let lr = DenseVec::from_vec(r.to_vec());
+        let mut lz = DenseVec::zeros(self.n_owned);
+        self.inner.apply_precond(&lr, &mut lz);
+        z.copy_from_slice(lz.as_slice());
+    }
+}
+
 /// One printed PCG solve (`HyprePCG` print level 2 analog): the
 /// `<C*b,b>` line, the iteration table, and the two summary lines.
 /// Returns `(iterations, final relative residual)`.
@@ -499,7 +650,7 @@ fn pcg_with_table(
     a: &ParCsrMatrix,
     b: &ParVector,
     x: &mut ParVector,
-    ams: &ParAmsPrecond,
+    ams: &TeslaAms,
     rtol: f64,
     max_iter: usize,
 ) -> (usize, f64) {
@@ -548,6 +699,14 @@ fn pcg_with_table(
         a.spmv(&mut pm, &mut ap);
         let pap = p.global_dot(&ap);
         let alpha = rz / pap;
+        if std::env::var("FEMRS_TESLA_PCG_DEBUG").is_ok() {
+            let px = p.global_norm();
+            let zx = z.global_norm();
+            eprintln!(
+                "[pcg] it={}: rz={rz:.3e} pap={pap:.3e} alpha={alpha:.3e} ||p||={px:.3e} ||z||={zx:.3e}",
+                iterations + 1
+            );
+        }
         for i in 0..n_owned {
             x.as_slice_mut()[i] += alpha * p.as_slice()[i];
             r.as_slice_mut()[i] -= alpha * ap.as_slice()[i];
@@ -634,17 +793,15 @@ impl TeslaSolver {
         let mu_inv_mass = mu_inv.clone();
         let mu_inv_curlm = mu_inv.clone();
 
-        // curlMuInvCurl: CurlCurlIntegrator(muInv), MFEM default rule.  A
-        // 1e-10·I shift anchors the AMS nodal problem on the singular
-        // curl-curl (the pex34 recipe; the C++ relies on
-        // HypreAMS::SetSingularProblem instead).  The shift perturbs the
-        // solution by O(1e-10) — far below the d103 tolerance.
+        // curlMuInvCurl: CurlCurlIntegrator(muInv), MFEM default rule.  The
+        // earlier 1e-6·(mass) shift (pex34 recipe) is GONE: the D957 AMS
+        // handles the singular curl-curl internally (singular_problem =>
+        // hypre `SetSingularProblem` semantics), and PCG keeps its iterates
+        // in range(A) for a consistent rhs — the C++ solves the same
+        // unshifted singular system.
         let curl_mu_inv_curl = ParVectorAssembler::assemble_bilinear(
             nd,
-            &[
-                &CurlCurlIntegrator { mu: mu_inv },
-                &VectorMassIntegrator { alpha: 1e-6 },
-            ],
+            &[&CurlCurlIntegrator { mu: mu_inv }],
             qo_cc,
         );
         // hDivHCurlMuInv: VectorFEMassIntegrator(muInv), custom IR.
@@ -859,21 +1016,219 @@ impl TeslaSolver {
 
         // FormLinearSystem with an EMPTY ess list (the -maxit 1 quirk) and
         // HypreAMS(SetSingularProblem) + HyprePCG(tol 1e-12, 50 it, print 2).
-        // The AMS config is the pex8-verified singular-curl-curl recipe
-        // (default ω, symmetric-GS edges, multiplicative V(1,1), 1e-6 nodal
-        // regularization standing in for `HYPRE_AMSSetSingularProblem`).
-        let ams = ParAmsPrecond::new(
-            &curl_mu_inv_curl,
-            &grad,
+        //
+        // D957: the AMS is the MFEM `HypreAMS` face-space mechanism — the
+        // id_ND interpolation blocks Pi_x/Pi_y/Pi_z (assembled by
+        // `assemble_pi_blocks` above, the `HYPRE_AMSSetInterpolations`
+        // payload) plus the singular-problem cycle (`0345430`: the nodal
+        // gradient arm is dropped, hypre 2.28 ams.c:3688).  The options mirror
+        // MFEM `HypreAMS::MakeSolver` defaults: symmetric-GS edge smoothing
+        // (`rlx_type 2`; its l1 scaling degenerates to |diag| on one rank),
+        // one relax sweep per level, multiplicative V(1,1).
+        let h1_dp = h1.dof_partition();
+        let (pi_canonical, pi_row_key) =
+            match assemble_pi_blocks(h1.local_space(), nd.local_space()) {
+                Ok(pi) => pi,
+                Err(e) => {
+                    eprintln!("mfem_miniapp_tesla: {e}");
+                    std::process::exit(3);
+                }
+            };
+        let pi_local: Vec<fem_linalg::CsrMatrix<f64>> = pi_canonical
+            .iter()
+            .map(|m| keep_owned_rows(&permute_rect_csr(m, nd_dp, h1_dp), nd_dp.n_owned_dofs))
+            .collect();
+        if let Ok(true) = std::env::var("FEMRS_TESLA_PI_DUMP").map(|v| v == "1") {
+            // Canonical-key dump (matches tmp/d105ams/pi_probe.cpp): each
+            // triplet keyed by the row's ND slot point and the column's H¹
+            // dof coordinate, so the two numberings can be matched.
+            let mut col_key: Vec<[f64; 3]> = vec![[f64::NAN; 3]; pi_canonical[0].ncols];
+            let dm_h1 = h1.local_space().dof_manager();
+            for dof in 0..pi_canonical[0].ncols as u32 {
+                let c = dm_h1.dof_coord(dof);
+                col_key[dof as usize] = [c[0], c[1], c[2]];
+            }
+            for (name, m) in ["pi_x", "pi_y", "pi_z"].iter().zip(pi_canonical.iter()) {
+                let path = format!("tmp/d105ams/rs_{name}.txt");
+                let mut out = String::new();
+                out.push_str(&format!("{} {} {}\n", m.nrows, m.ncols, m.nnz()));
+                for r in 0..m.nrows {
+                    for k in m.row_ptr[r]..m.row_ptr[r + 1] {
+                        let c = m.col_idx[k] as usize;
+                        out.push_str(&format!(
+                            "{:.15e} {:.15e} {:.15e} {:.15e} {:.15e} {:.15e} {:.17e}\n",
+                            pi_row_key[r][0], pi_row_key[r][1], pi_row_key[r][2],
+                            col_key[c][0], col_key[c][1], col_key[c][2], m.values[k]
+                        ));
+                    }
+                }
+                let _ = std::fs::write(&path, out);
+            }
+        }
+        let la = fem_linalg::fem_to_linlvo_csr(curl_mu_inv_curl.diag_block());
+        let lg = fem_linalg::fem_to_linlvo_csr(&grad);
+        let lpi: Vec<_> = pi_local.iter().map(fem_linalg::fem_to_linlvo_csr).collect();
+        if let Ok(true) = std::env::var("FEMRS_TESLA_PI_DUMP").map(|v| v == "2") {
+            // π·v keyed by the row slot point (v = x-coordinate field) — the
+            // numbering-free action comparison against tmp/d105ams/pi_probe.
+            let vx = h1.local_space().interpolate(&|x: &[f64]| x[0]);
+            let sv: f64 = vx.as_slice().iter().sum();
+            println!("SUM v = {sv:.17e}");
+            let mut sum_piv = 0.0_f64;
+            let mut out = String::new();
+            for (r, key) in pi_row_key.iter().enumerate() {
+                let mut yr = 0.0_f64;
+                for k in pi_canonical[0].row_ptr[r]..pi_canonical[0].row_ptr[r + 1] {
+                    let c = pi_canonical[0].col_idx[k] as usize;
+                    yr += pi_canonical[0].values[k] * vx.as_slice()[c];
+                }
+                sum_piv += yr;
+                out.push_str(&format!(
+                    "{:.15e} {:.15e} {:.15e} {:.17e}\n",
+                    key[0], key[1], key[2], yr
+                ));
+            }
+            println!("SUM piv = {sum_piv:.17e}");
+            let _ = std::fs::write("tmp/d105ams/rs_piv.txt", out);
+        }
+        if let Ok(true) = std::env::var("FEMRS_TESLA_PI_CHECK").map(|v| v == "1") {
+            // Project_ND invariant: π_d·(component dofs of v) must reproduce the
+            // space's own `interpolate_vector` point functionals (both are the
+            // MFEM `Project_ND` contract — slot layout cross-check).  The field
+            // must be one its H¹ interpolation reproduces EXACTLY at the ND
+            // slots — the geometry itself (x ↦ x) — any other field carries an
+            // O(h²) interpolation error on a curved mesh that would mask the
+            // comparison.
+            let field = |x: &[f64]| vec![x[0], x[1], x[2]];
+            let v_local: Vec<fem_linalg::Vector<f64>> = (0..3)
+                .map(|c| {
+                    let comp = move |x: &[f64]| field(x)[c];
+                    h1.local_space().interpolate(&comp)
+                })
+                .collect();
+            let ref_dofs = nd.local_space().interpolate_vector(&field);
+            let mut sum = vec![0.0_f64; pi_canonical[0].nrows];
+            for (m, v) in pi_canonical.iter().zip(v_local.iter()) {
+                let mut out = vec![0.0_f64; m.nrows];
+                m.spmv(v.as_slice(), &mut out);
+                for (s, o) in sum.iter_mut().zip(out.iter()) {
+                    *s += o;
+                }
+            }
+            let mut max_dev = 0.0_f64;
+            let mut worst = 0usize;
+            for (i, s) in sum.iter().enumerate() {
+                let d = (s - ref_dofs.as_slice()[i]).abs();
+                if d > max_dev {
+                    max_dev = d;
+                    worst = i;
+                }
+            }
+            println!(
+                "PI-CHECK max|π·v − interpolate_vector(v)| = {max_dev:.3e} (row {worst}: π·v = {}, ref = {})",
+                sum[worst], ref_dofs.as_slice()[worst]
+            );
+            {
+                // Per-host breakdown for the worst row: all (elem, slot) hosts
+                // of that dof, their sign/J·t/φ evaluations, vs the ref value.
+                let mut n_dev = 0usize;
+                for (i, s) in sum.iter().enumerate() {
+                    if (s - ref_dofs.as_slice()[i]).abs() > 1e-10 {
+                        n_dev += 1;
+                    }
+                }
+                println!("PI-CHECK rows deviating > 1e-10: {n_dev} / {}", sum.len());
+            }
+        }
+        let inner = match AmsPrecond::<f64>::with_pi(
+            &la,
+            &lg,
+            &lpi,
             AmsConfig {
                 edge_smoother: AmsEdgeSmoother::SymmetricGaussSeidel,
                 cycle: AmsCycle::MultiplicativeV11,
-                smoother_sweeps: 4,
-                singularity_regularization: 1e-6,
+                singular_problem: true,
+                // B_Pi/B_G analogues: hypre BoomerAMG(V(1,1), l1-sym-GS
+                // smoothers (relax_type 8), relaxation-based coarsest solve
+                // (SetCycleRelaxType(·, 3)) — linlvo's `with_pi` enforces the
+                // coarsest-solve part.
+                node_solver: AuxSpaceSolver::Amg(AmgConfig {
+                    smoother: AuxSmoother::L1SymmetricGaussSeidel,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-        );
-        pcg_with_table(&curl_mu_inv_curl, &jd, &mut a, &ams, 1e-12, 50);
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("mfem_miniapp_tesla: AMS setup failed: {e}");
+                std::process::exit(3);
+            }
+        };
+        let mut ams = TeslaAms {
+            inner,
+            n_owned: nd_dp.n_owned_dofs,
+        };
+        if std::env::var("FEMRS_TESLA_M_CHECK").is_ok() {
+            // M symmetry/positivity probe: uᵀ(Mv) vs vᵀ(Mu), uᵀ(Mu).
+            let n = nd_dp.n_owned_dofs;
+            let mut u = vec![0.0_f64; n];
+            let mut v = vec![0.0_f64; n];
+            let mut seed = 12345u64;
+            let mut rng = || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((seed >> 33) as f64) / (u32::MAX as f64) - 0.5
+            };
+            for x in u.iter_mut() {
+                *x = rng();
+            }
+            for x in v.iter_mut() {
+                *x = rng();
+            }
+            let mut mu = vec![0.0_f64; n];
+            let mut mv = vec![0.0_f64; n];
+            let mut mv2 = vec![0.0_f64; n];
+            ams.apply(&u, &mut mu);
+            ams.apply(&v, &mut mv);
+            ams.apply(&v, &mut mv2);
+            let umv: f64 = u.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+            let vmu: f64 = v.iter().zip(mu.iter()).map(|(a, b)| a * b).sum();
+            let umu: f64 = u.iter().zip(mu.iter()).map(|(a, b)| a * b).sum();
+            let vmv: f64 = v.iter().zip(mv.iter()).map(|(a, b)| a * b).sum();
+            let mv_sym: f64 = mv.iter().zip(mv2.iter()).map(|(a, b)| (a - b).abs()).sum();
+            println!("M-CHECK uMv = {umv:.6e}  vMu = {vmu:.6e}  uMu = {umu:.6e}  vMv = {vmv:.6e}  det-apply = {mv_sym:.3e}");
+        }
+        let (pcg_its, pcg_rel) = pcg_with_table(&curl_mu_inv_curl, &jd, &mut a, &ams, 1e-12, 50);
+        if pcg_rel >= 1e-12 && pcg_its >= 50 {
+            // D972 fallback: retry once with the three-space cycle (nodal arm
+            // kept).  The strict `SetSingularProblem` cycle's B_Pi (linlvo
+            // AMG, not BoomerAMG-grade) leaves PCG's search directions in
+            // ker(A) on smooth right-hand sides.
+            let inner = match AmsPrecond::<f64>::with_pi(
+                &la,
+                &lg,
+                &lpi,
+                AmsConfig {
+                    edge_smoother: AmsEdgeSmoother::SymmetricGaussSeidel,
+                    cycle: AmsCycle::MultiplicativeV11,
+                    singular_problem: false,
+                    node_solver: AuxSpaceSolver::Amg(AmgConfig {
+                        smoother: AuxSmoother::L1SymmetricGaussSeidel,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ) {
+                Ok(p) => p,
+                Err(_) => unreachable!("identical setup succeeded above"),
+            };
+            ams = TeslaAms {
+                inner,
+                n_owned: nd_dp.n_owned_dofs,
+            };
+            println!("AMS retry with the three-space cycle (034515430)");
+            pcg_with_table(&curl_mu_inv_curl, &jd, &mut a, &ams, 1e-12, 50);
+        }
 
         // Min-norm representative (D103): hypre's `SetSingularProblem` CG
         // keeps its iterates orthogonal to ker(curl·curl⁻¹...) = range(grad),
