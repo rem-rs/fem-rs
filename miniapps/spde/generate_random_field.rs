@@ -158,8 +158,72 @@ fn parse_args() -> Args {
     a
 }
 
+/// MFEM `args.PrintOptions(cout)` (generate_random_field.cpp:149-152), via
+/// `OptionsParser::PrintOptions` (optparser.cpp:331-360): the option echo in
+/// `AddOption` order, `   --long-name value` per entry; ENABLE pairs print the
+/// long_name whose value is true.  Doubles go through `fem_solver::fmt_g`
+/// (`ostream <<` is `%g` at the default precision 6).
+fn print_options(a: &Args) {
+    use fem_solver::fmt_g;
+    println!("Options used:");
+    println!("   --mesh {}", a.mesh_file);
+    println!("   --order {}", a.order);
+    println!("   --refs {}", a.num_refs);
+    println!("   --refs-parallel {}", a.num_parallel_refs);
+    println!("   --topology {}", a.topological_support);
+    println!("   --nu {}", fmt_g(a.nu));
+    println!("   --tau {}", fmt_g(a.tau));
+    println!("   --l1 {}", fmt_g(a.l[0]));
+    println!("   --l2 {}", fmt_g(a.l[1]));
+    println!("   --l3 {}", fmt_g(a.l[2]));
+    println!("   --e1 {}", fmt_g(a.e[0]));
+    println!("   --e2 {}", fmt_g(a.e[1]));
+    println!("   --e3 {}", fmt_g(a.e[2]));
+    println!("   --pl1 {}", fmt_g(a.pl[0]));
+    println!("   --pl2 {}", fmt_g(a.pl[1]));
+    println!("   --pl3 {}", fmt_g(a.pl[2]));
+    println!("   --uniform-min {}", fmt_g(a.uniform_min));
+    println!("   --uniform-max {}", fmt_g(a.uniform_max));
+    println!("   --offset {}", fmt_g(a.offset));
+    println!("   --scale {}", fmt_g(a.scale));
+    println!("   --level-set-threshold {}", fmt_g(a.level_set_threshold));
+    println!("   --number-of-particles {}", a.number_of_particles);
+    println!(
+        "   {}",
+        if a.paraview_export {
+            "--paraview-visualization"
+        } else {
+            "--no-paraview-visualization"
+        }
+    );
+    println!(
+        "   {}",
+        if a.glvis_export { "--visualization" } else { "--no-visualization" }
+    );
+    println!(
+        "   {}",
+        if a.uniform_rf { "--uniform-rf" } else { "--no-uniform-rf" }
+    );
+    println!(
+        "   {}",
+        if a.random_seed { "--random-seed" } else { "--no-random-seed" }
+    );
+    println!(
+        "   {}",
+        if a.compute_boundary_integrals {
+            "--compute-boundary-integrals"
+        } else {
+            "--no-compute-boundary-integrals"
+        }
+    );
+}
+
 fn main() {
     let args = parse_args();
+
+    // MFEM echoes the parsed options (`args.PrintOptions(cout)`,
+    // generate_random_field.cpp:149-152) before reading the mesh.
+    print_options(&args);
 
     let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh file");
     if mfem.mesh3d.is_some() {
@@ -192,10 +256,17 @@ where
     let boundary = spde_solver::unique_boundary_tags(&mesh);
     println!("Number of finite element unknowns: {size}");
     print!("Boundary attributes: ");
-    for t in &boundary {
-        print!("{t} ");
+    // MFEM `boundary.Print(cout, 6)` (general/array.cpp:24-38): items
+    // separated by " ", '\n' after every `width` items or at the end (no
+    // trailing space before the final newline).
+    for (i, t) in boundary.iter().enumerate() {
+        print!("{t}");
+        if (i + 1) % 6 == 0 || i + 1 == boundary.len() {
+            println!();
+        } else {
+            print!(" ");
+        }
     }
-    println!();
 
     // ========================================================================
     // II. Generate topological support
@@ -382,8 +453,7 @@ vertices
     }
 
     #[test]
-    fn white_noise_rhs_matches_cpp_2x2_quads() {
-        let path = write_temp("spde_ref_quad.mesh", reference_mesh());
+    fn white_noise_rhs_matches_cpp_2x2_quads() {        let path = write_temp("spde_ref_quad.mesh", reference_mesh());
         let mfem = read_mfem_file(path.to_str().unwrap()).unwrap();
         let mesh: Mesh<2> = mfem.mesh2d.unwrap();
         let space = H1Space::new(mesh, 1);
@@ -436,6 +506,247 @@ vertices
             assert!(
                 (got - want).abs() <= tol,
                 "hex white noise RHS mismatch at dof {i}: {got} vs {want}"
+            );
+        }
+    }
+
+    /// End-to-end solved-field comparison against the serial C++ MFEM
+    /// reference (`mpirun -np 1`, GCC, hypre BoomerAMG CG; probe dumps
+    /// embedded below, round-105): ref-square refined 3× (81 dofs, nu = 4,
+    /// anisotropic Θ, seed 2147483647 via `-no-rs`) and ref-cube refined
+    /// 2× (125 dofs, nu = 2, octet truss, same fixed seed).
+    ///
+    /// The white-noise RHS is bit-exact (tests above, same seed chain); the
+    /// solved field differs only through the linear-solve path: fem-rs AMG-CG
+    /// stops on its own (preconditioned-residual) criterion around a true
+    /// residual of 1e-7..1e-6 (8–11 iterations) where hypre BoomerAMG CG
+    /// iterates the full rtol 1e-12 (kernel debt D976), so the composed
+    /// 13-solve fractional chain agrees to the measured 3.1e-6 max relative
+    /// deviation (square, round-105).  Pins hold 1e-5.
+    /// MFEM stock `data/ref-square.mesh` (unit square, 1 quad) and
+    /// `data/ref-cube.mesh` (unit cube, 1 hex), verbatim — embedded because
+    /// `data/` is git-ignored (the tracked stock meshes are the exception).
+    fn ref_square_mesh() -> &'static str {
+        "MFEM mesh v1.0
+
+dimension
+2
+
+elements
+1
+1 3 0 1 2 3
+
+boundary
+4
+1 1 0 1
+2 1 1 2
+3 1 2 3
+4 1 3 0
+
+vertices
+4
+2
+0 0
+1 0
+1 1
+0 1
+"
+    }
+
+    fn ref_cube_mesh() -> &'static str {
+        "MFEM mesh v1.0
+
+dimension
+3
+
+elements
+1
+1 5 0 1 2 3 4 5 6 7
+
+boundary
+6
+1 3 3 2 1 0
+2 3 0 1 5 4
+3 3 1 2 6 5
+4 3 2 3 7 6
+5 3 3 0 4 7
+6 3 4 5 6 7
+
+vertices
+8
+3
+0 0 0
+1 0 0
+1 1 0
+0 1 0
+0 0 1
+1 0 1
+1 1 1
+0 1 1
+"
+    }
+
+    /// Full 81-dof C++ probe dump (serial `grf_probe -m data/ref-square.mesh
+    /// -r 3 -rp 0 -nu 4 -l1 0.09 -l2 0.03 -l3 0.05 -s 0.01 -t 0.08 -top 1
+    /// -no-rs -no-vis -no-pvis`, %.17g of `u` right after
+    /// `GenerateRandomField`, round-105).
+    fn cpp_field_square81() -> [f64; 81] {
+        [
+            -6.78849641837103168e-01,
+        1.84010049771581558e-01,
+        3.66009467559550306e+00,
+        -2.75475636106941835e+00,
+        1.07193422287158135e+00,
+        -2.23664098668094846e+00,
+        -1.23458742133698096e+00,
+        -8.15179380834383238e-01,
+        -1.59609792529443906e-01,
+        4.99803835162539012e-01,
+        8.19792338378218854e-01,
+        8.71287320125005871e-01,
+        -6.50425965460365685e-01,
+        6.27230257973367067e-01,
+        1.18322593808475152e-01,
+        6.46690435938322428e-01,
+        3.47625004550899175e-01,
+        -7.12002629111050056e-01,
+        -7.88365663260918503e-01,
+        -5.98878327641700570e-01,
+        1.06977785666427169e-02,
+        1.44973592047473510e+00,
+        4.21596973692518751e-01,
+        -2.26224971288728716e+00,
+        7.25396062881868531e-01,
+        -1.20555063822695230e+00,
+        -1.34270791338385265e+00,
+        4.04823138454060760e-01,
+        8.18785085749947239e-01,
+        5.70479491641040171e-01,
+        -1.65465942919774500e+00,
+        1.30194456097007993e+00,
+        -1.01033741298102031e+00,
+        -7.77076116154447050e-02,
+        2.49714710832830311e-01,
+        -1.01790762927155365e+00,
+        6.74021943268180879e-01,
+        2.34559877108774684e+00,
+        -7.71530076580412283e-01,
+        4.35320108779989501e-01,
+        9.58958022172134994e-01,
+        4.47952380848599840e-01,
+        9.02168730278783831e-02,
+        6.02730988013579938e-01,
+        -3.18659307058727692e-01,
+        6.79534565260084600e-01,
+        7.79878794857223001e-01,
+        9.08753171084057287e-01,
+        -1.18698736571027275e+00,
+        1.17818110706183019e-01,
+        4.20794907505839602e-02,
+        -1.14213940922442067e-01,
+        -3.01173921690041713e+00,
+        -2.38710831071047513e+00,
+        -1.91487312060814985e-01,
+        6.40602022469419663e-01,
+        2.04091094587541422e+00,
+        3.69641809315105652e-01,
+        -1.04798336360221911e+00,
+        -5.53668337915022901e-01,
+        -6.74363937918700973e-01,
+        -2.82291893998011112e+00,
+        -1.88994130958119610e+00,
+        -1.45599324072166558e+00,
+        7.09925062738768431e-01,
+        7.60418088748624377e-01,
+        -1.36607997490739419e+00,
+        3.08775932864188085e-01,
+        2.09949177170705104e-01,
+        -1.32294404048383329e+00,
+        1.61482488519002126e-01,
+        9.32475741113806711e-01,
+        -9.25447926846057756e-02,
+        -1.87401872607031061e-01,
+        1.14706960884503628e+00,
+        1.18186626187761712e-01,
+        5.10833441458647813e-02,
+        2.40285045709950018e-01,
+        -7.55808108072491658e-01,
+        -4.57446804111107053e-01,
+        1.22988070399146235e-01,
+        ]
+    }
+
+    /// First 8 dofs of the C++ cube probe (`-m data/ref-cube.mesh -r 2 -rp 0
+    /// -no-rs -no-vis -no-pvis`, round-105).
+    fn cpp_field_cube8() -> [f64; 8] {
+        [
+            1.53210264866688872e-01,
+        -1.20655384778545494e+00,
+        -7.61328053681114697e-02,
+        -6.38856754286150297e-01,
+        -4.18592176384814607e-01,
+        -1.62414243267806707e-01,
+        1.16969406779251120e-01,
+        -1.10810154577703202e+00,
+        ]
+    }
+
+    fn solve_fixed_seed_square_r3() -> Vec<f64> {
+        let path = write_temp("spde_ref_square_r105.mesh", ref_square_mesh());
+        let mfem = read_mfem_file(path.to_str().unwrap()).unwrap();
+        let mut mesh: Mesh<2> = mfem.mesh2d.unwrap();
+        for _ in 0..3 {
+            mesh = refine_uniform(&mesh);
+        }
+        let space = H1Space::new(mesh.clone(), 1);
+        let bc = Boundary::new();
+        let mut solver = SpdeSolver::new(4.0, &bc, &space, 0.09, 0.03, 0.05, 0.0, 0.0, 0.0);
+        let mut u = vec![0.0_f64; space.n_dofs()];
+        solver.generate_random_field(&space, spde_seed(false), &mut u);
+        u
+    }
+
+    fn solve_fixed_seed_cube_r2() -> Vec<f64> {
+        let path = write_temp("spde_ref_cube_r105.mesh", ref_cube_mesh());
+        let mfem = read_mfem_file(path.to_str().unwrap()).unwrap();
+        let mut mesh: Mesh<3> = mfem.mesh3d.unwrap();
+        for _ in 0..2 {
+            mesh = refine_uniform_3d(&mesh);
+        }
+        let space = H1Space::new(mesh.clone(), 1);
+        let bc = Boundary::new();
+        let mut solver = SpdeSolver::new(2.0, &bc, &space, 0.02, 0.02, 0.02, 0.0, 0.0, 0.0);
+        let mut u = vec![0.0_f64; space.n_dofs()];
+        solver.generate_random_field(&space, spde_seed(false), &mut u);
+        u
+    }
+
+    /// Full-vector field pin (engineering tolerance, see the module note).
+    #[test]
+    fn spde_field_full_vector_matches_cpp_square_r3() {
+        let u = solve_fixed_seed_square_r3();
+        assert_eq!(u.len(), 81, "ref-square r3 dof count");
+        let refs = cpp_field_square81();
+        let mut max_rel = 0.0_f64;
+        for (got, want) in u.iter().zip(refs.iter()) {
+            max_rel = max_rel.max((got - want).abs() / want.abs().max(1.0));
+        }
+        assert!(
+            max_rel < 1e-5,
+            "square field max relative deviation {max_rel:.3e} exceeds 1e-5"
+        );
+    }
+
+    #[test]
+    fn spde_field_first_dofs_match_cpp_cube_r2() {
+        let u = solve_fixed_seed_cube_r2();
+        assert_eq!(u.len(), 125, "ref-cube r2 dof count");
+        for (i, want) in cpp_field_cube8().iter().enumerate() {
+            let got = u[i];
+            let tol = 1e-5 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tol,
+                "cube field dof {i}: {got:.17e} vs {want:.17e}"
             );
         }
     }

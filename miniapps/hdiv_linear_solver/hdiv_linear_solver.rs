@@ -104,6 +104,24 @@ fn minres_params() -> IterSolveParameters {
     }
 }
 
+/// `ostream << x` under `cout.precision(4); cout << scientific;`
+/// (grad_div.cpp:131-132): `%.4e` with a sign and at least two exponent
+/// digits (`4.0635e-02`).  Rounding follows the exact binary value like
+/// glibc `printf("%.4e")` (round-half-even on true ties), which is also what
+/// Rust's `{:.4e}` does.
+pub fn fmt_sci4(x: f64) -> String {
+    let s = format!("{x:.4e}");
+    // Rust renders the exponent without zero padding (`4.0635e-2`); split and
+    // re-pad to MFEM's two-digit form.
+    let (mant, exp) = s.split_once('e').unwrap();
+    let exp: i32 = exp.parse().unwrap();
+    format!(
+        "{mant}e{}{:02}",
+        if exp < 0 { "-" } else { "+" },
+        exp.abs()
+    )
+}
+
 /// Serial port of MFEM `HdivSaddlePointSolver` (see the module docs for the
 /// serial cut deviations).
 pub struct HdivSaddlePointSolver {
@@ -649,7 +667,7 @@ mod tests {
     /// match the exact solution to discretization accuracy.
     #[test]
     fn darcy_alpha0_lifted_full_solve() {
-        use fem_assembly::standard::{DomainSourceIntegrator, VectorMassIntegrator};
+        use fem_assembly::standard::DomainSourceIntegrator;
         use fem_assembly::postproc::grid_function::GridFunction;
         use fem_assembly::postproc::coefficient::FnVectorCoeff;
         use fem_assembly::vector_assembler::VectorAssembler;

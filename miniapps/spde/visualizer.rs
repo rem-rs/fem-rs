@@ -58,7 +58,8 @@ impl<'a, const D: usize> Visualizer<'a, D> {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             }
         }
-        println!("ParaView export: {}", path.display());
+        // MFEM `ExportToParaView` (visualizer.cpp) prints nothing — the
+        // former "ParaView export: ..." line was a Rust-only addition.
         Ok(())
     }
 

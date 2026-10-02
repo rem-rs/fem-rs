@@ -2,14 +2,22 @@
 //!
 //! Solves the SPDE `(div(Θ∇) + Id)^{-α} u = b` behind the Matérn Gaussian
 //! random field construction of Lindgren–Rue–Lindström (2011), with the
-//! fractional exponent handled by the AAA rational approximation from
-//! `examples/ex33.hpp` (shared module `fem_examples::rational_approximation`).
+//! fractional exponent handled by the rational approximation from
+//! `examples/ex33.hpp`.  The pinned C++ reference builds (mfem410_ser /
+//! mfem410_mpi) carry no LAPACK, so `ComputePartialFractionApproximation`
+//! takes ex33.hpp's `#ifndef MFEM_USE_LAPACK` branch: the hard-coded
+//! partial-fraction tables for `alpha ∈ {0.33, 0.5, 0.99}` (anything else
+//! silently becomes 0.5) plus the banner — replicated locally in
+//! [`precomputed_partial_fraction_approximation`] (same pattern as
+//! `examples/mfem_ex33_fractional_diffusion.rs`); `fem_examples` itself only
+//! implements the (LAPACK) AAA path.
 //!
 //! Serial port: the C++ miniapp is parallel-only (`ParFiniteElementSpace`); on
 //! one rank the prolongation/restriction operators are identities, so the
 //! serial objects (`H1Space`, `CsrMatrix`) reproduce the same operator algebra.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use fem_amg::{solve_amg_cg, AmgConfig};
 use fem_assembly::standard::{
@@ -20,11 +28,9 @@ use fem_assembly::postproc::coefficient::ConstantMatrixCoeff;
 use fem_assembly::Assembler;
 use fem_linalg::CsrMatrix;
 use fem_mesh::topology::MeshTopology;
-use fem_solver::{PrintLevel, SolverConfig};
+use fem_solver::{fmt_g, PrintLevel, SolverConfig};
 use fem_space::fe_space::FESpace;
 use libm::tgamma;
-
-use fem_examples::rational_approximation::compute_partial_fraction_approximation;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Boundary conditions
@@ -68,7 +74,9 @@ impl Boundary {
             match ty {
                 BoundaryType::Neumann => print!("Neumann"),
                 BoundaryType::Dirichlet => print!("Dirichlet"),
-                BoundaryType::Robin => print!("Robin, coefficient: {}", self.robin_coefficient),
+                BoundaryType::Robin => {
+                    print!("Robin, coefficient: {}", fmt_g(self.robin_coefficient))
+                }
                 BoundaryType::Periodic => print!("Periodic"),
                 BoundaryType::Undefined => print!("Undefined"),
             }
@@ -83,7 +91,7 @@ impl Boundary {
                 } else {
                     first = false;
                 }
-                print!("{attr}(={c})");
+                print!("{attr}(={})", fmt_g(*c));
             }
             println!();
         }
@@ -112,15 +120,20 @@ impl Boundary {
             .copied()
             .collect();
         if !unlisted.is_empty() {
+            // The warning line is deliberately left unterminated here: the
+            // footer's leading '\n' completes it (C++ spde_solver.cpp:110-118,
+            // 130).
             print!("  Boundaries (");
             for t in &unlisted {
                 print!("{t}, ");
             }
             print!(") are defined on the mesh but not in the");
-            println!(" boundary attributes (Use Neumann).");
+            print!(" boundary attributes (Use Neumann).");
         }
-        println!("\n<Boundary Verify>");
-        println!();
+        // C++ footer (spde_solver.cpp:130): `"\n<Boundary Verify>\n\n"` —
+        // terminates the (unterminated) warning line, prints the header and
+        // one blank line.
+        print!("\n<Boundary Verify>\n\n");
     }
 
     /// Coefficients (alpha, beta, gamma) of `alpha·n·grad(u) + beta·u - gamma`
@@ -228,6 +241,9 @@ impl SpdeSolver {
         if print_output(print_level) {
             println!("<SPDESolver> Initialize Solver ..");
         }
+        // C++ `StopWatch sw; sw.Start();` right after the Initialize banner —
+        // the matrix-assembly Timing line at the end of the constructor.
+        let sw = Instant::now();
 
         let mesh = space.mesh();
 
@@ -255,9 +271,12 @@ impl SpdeSolver {
         let mut integer_order = false;
         if exponent_to_approximate.abs() > 1e-12 {
             if print_output(print_level) {
-                println!("<SPDESolver> Approximating the fractional exponent {exponent_to_approximate}");
+                println!(
+                    "<SPDESolver> Approximating the fractional exponent {}",
+                    fmt_g(exponent_to_approximate)
+                );
             }
-            let (c, p) = compute_partial_fraction_approximation(exponent_to_approximate);
+            let (c, p, _) = precomputed_partial_fraction_approximation(exponent_to_approximate);
             coeffs = c;
             poles = p;
         } else {
@@ -293,6 +312,14 @@ impl SpdeSolver {
         let one = MassIntegrator { rho: 1.0 };
         let m = Assembler::assemble_bilinear(space, &[&one], q_order);
 
+        // MFEM end-of-constructor Timing banner (spde_solver.cpp:464-467).
+        if print_output(print_level) {
+            println!(
+                "<SPDESolver::Timing> matrix assembly {} [s]",
+                fmt_g(sw.elapsed().as_secs_f64())
+            );
+        }
+
         Self {
             stiffness: k,
             mass: m,
@@ -318,6 +345,9 @@ impl SpdeSolver {
     /// exponent is larger than 1 (C++ `Solve(ParLinearForm &b, ...)`).
     pub fn solve(&mut self, b: &mut [f64], x: &mut [f64]) {
         let n = x.len();
+        // C++ `StopWatch sw; sw.Start();` at the top of Solve — the
+        // "all PCG solves" Timing line at the end.
+        let sw = Instant::now();
         for v in x.iter_mut() {
             *v = 0.0;
         }
@@ -346,7 +376,8 @@ impl SpdeSolver {
             for i in 0..self.coeffs.len() {
                 println!(
                     "\n<SPDESolver> Solving PDE -Δ u + {} u = {} g ",
-                    -self.poles[i], self.coeffs[i]
+                    fmt_g(-self.poles[i]),
+                    fmt_g(self.coeffs[i])
                 );
                 for v in helper.iter_mut() {
                     *v = 0.0;
@@ -356,6 +387,14 @@ impl SpdeSolver {
                     *xi += hi;
                 }
             }
+        }
+
+        // MFEM end-of-Solve Timing banner (spde_solver.cpp:538-542).
+        if print_output(self.print_level) {
+            println!(
+                "<SPDESolver::Timing> all PCG solves {} [s]",
+                fmt_g(sw.elapsed().as_secs_f64())
+            );
         }
     }
 
@@ -418,6 +457,73 @@ pub fn spde_seed(random_seed: bool) -> i32 {
     } else {
         i32::MAX // INT_MAX - WorldRank with WorldRank = 0
     }
+}
+
+/// MFEM ex33.hpp `ComputePartialFractionApproximation`, no-LAPACK branch (the
+/// configuration of the pinned C++ reference builds): prints the banner and
+/// returns the hard-coded partial-fraction tables for `alpha ∈ {0.33, 0.5,
+/// 0.99}`; any other exponent silently becomes 0.5 *inside* the function (the
+/// third tuple element is the exponent the banner must report).  Same pattern
+/// as `examples/mfem_ex33_fractional_diffusion.rs`; `fem_examples` itself only
+/// implements the (LAPACK) AAA path, which is why this is replicated here.
+fn precomputed_partial_fraction_approximation(alpha: f64) -> (Vec<f64>, Vec<f64>, f64) {
+    assert!(alpha < 1.0, "alpha must be less than 1");
+    assert!(alpha > 0.0, "alpha must be greater than 0");
+
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("MFEM is compiled without LAPACK.");
+    println!("Using precomputed values for PartialFractionApproximation.");
+    println!("Only alpha = 0.33, 0.5, and 0.99 are available.");
+    println!("The default is alpha = 0.5.");
+    println!("{}", "=".repeat(80));
+    println!();
+
+    const EPS: f64 = f64::EPSILON;
+    let (coeffs, poles, alpha_used) = if (alpha - 0.33).abs() < EPS {
+        (
+            vec![
+                1.821_898e3, 9.101_221e1, 2.650_611e1, 1.174_937e1, 6.140_444, 3.441_713,
+                1.985_735, 1.162_634, 6.891_560e-1, 4.111_574e-1, 2.298_736e-1,
+            ],
+            vec![
+                -4.155_583e4, -2.956_285e3, -8.331_715e2, -3.139_332e2, -1.303_448e2,
+                -5.563_385e1, -2.356_255e1, -9.595_516, -3.552_160, -1.032_136, -1.241_480e-1,
+            ],
+            alpha,
+        )
+    } else if (alpha - 0.99).abs() < EPS {
+        (
+            vec![
+                2.919_591e-2, 1.419_750e-2, 1.065_798e-2, 9.395_094e-3, 8.915_329e-3,
+                8.822_991e-3, 9.058_247e-3, 9.814_521e-3, 1.180_396e-2, 1.834_554e-2,
+                9.840_482e-1,
+            ],
+            vec![
+                -1.069_683e4, -1.769_370e3, -5.718_374e2, -2.242_095e2, -9.419_132e1,
+                -4.031_014e1, -1.701_525e1, -6.801_088, -2.382_810, -5.700_059e-1,
+                -1.384_324e-3,
+            ],
+            alpha,
+        )
+    } else {
+        (
+            vec![
+                2.290_262e2, 2.641_819e1, 1.005_566e1, 5.390_411, 3.340_725, 2.211_205,
+                1.508_883, 1.049_474, 7.462_709e-1, 5.482_686e-1, 4.232_510e-1, 3.578_967e-1,
+            ],
+            vec![
+                -3.168_211e4, -3.236_077e3, -9.868_287e2, -3.945_597e2, -1.738_889e2,
+                -7.925_178e1, -3.624_992e1, -1.629_196e1, -6.982_956, -2.679_984,
+                -7.782_607e-1, -7.649_166e-2,
+            ],
+            0.5,
+        )
+    };
+
+    println!("=> Using precomputed values for alpha = {}", fmt_g(alpha_used));
+    println!();
+    (coeffs, poles, alpha_used)
 }
 
 /// Rank-0 `WhiteGaussianNoiseDomainLFIntegrator(comm, seed)` seed mapping:

@@ -29,16 +29,14 @@ use std::time::Instant;
 #[path = "hdiv_linear_solver.rs"]
 mod hdiv_linear_solver;
 
-use fem_amg::{solve_amg_cg, AmgConfig};
 use fem_assembly::postproc::coefficient::FnVectorCoeff;
-use fem_assembly::standard::{VectorDomainLFIntegrator, VectorMassIntegrator};
+use fem_assembly::standard::VectorDomainLFIntegrator;
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::{PrintLevel, SolverConfig};
 use fem_mesh::{refine_uniform, MeshTopology};
 use fem_space::dof_manager::EdgeKey;
 use fem_space::fe_space::FESpace;
-use hdiv_linear_solver::{HdivSaddlePointSolver, Mode};
+use hdiv_linear_solver::{fmt_sci4, HdivSaddlePointSolver, Mode};
 
 /// `lor_mms.hpp` `u_vec` (2-D).
 fn u_vec(x: &[f64], out: &mut [f64]) {
@@ -115,10 +113,25 @@ fn parse_args() -> Args {
 
 fn main() {
     let args = parse_args();
+    run(&args);
+}
+
+/// The miniapp body (C++ `main` after `ParseCheck`); returns the computed
+/// L2 error (NaN when no solver ran) so the round-105 pin tests can assert
+/// against the C++ reference without reparsing the CLI.
+fn run(args: &Args) -> f64 {
+    // MFEM `args.ParseCheck()` → `OptionsParser::PrintOptions` (optparser.cpp
+    // 255-272): the "Options used:" echo, byte-for-byte.  ENABLE pairs print
+    // the long_name whose value is true.
+    print_options(args);
     if !args.use_saddle_point && !args.use_ams && !args.use_lor_ams && !args.use_hybridization {
         println!("No solver enabled. Exiting.");
-        return;
+        return f64::NAN;
     }
+    // MFEM `Device device(device_config); device.Print()` on the serial CPU
+    // cut (linalg/device.cpp: "Device configuration" / "Memory configuration").
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
 
     let mesh0 = read_mfem_file(&args.mesh)
         .unwrap_or_else(|e| panic!("cannot read mesh '{}': {e}", args.mesh))
@@ -135,7 +148,6 @@ fn main() {
     assert!(args.order >= 1, "-o must be >= 1");
     let rt_order = args.order - 1;
     let rt = fem_space::HDivSpace::new(mesh.clone(), rt_order);
-    let n_rt = rt.n_dofs();
     let qo = (2 * args.order as usize + 1).max(2) as u8;
 
     // Essential BCs: the normal component of u on the whole boundary (MFEM
@@ -149,38 +161,24 @@ fn main() {
         qo,
     );
 
-    // `x.ProjectCoefficient(u_vec_coeff); x.ParallelProject(bc)` — the RT
-    // field used for the essential values.  ParallelProject is the L2
-    // projection onto the true dofs: solve R·x = (u, φ).
-    let r_mass = VectorAssembler::assemble_bilinear(
-        &rt,
-        &[&VectorMassIntegrator { alpha: 1.0 }],
-        qo,
-    );
-    let rhs_u = VectorAssembler::assemble_linear(
-        &rt,
-        &[&VectorDomainLFIntegrator { f: FnVectorCoeff(u_vec) }],
-        qo,
-    );
-    let mut x_bc = vec![0.0_f64; n_rt];
-    solve_amg_cg(
-        &r_mass,
-        &rhs_u,
-        &mut x_bc,
-        &AmgConfig::default(),
-        &SolverConfig {
-            rtol: 1e-13,
-            atol: 1e-14,
-            max_iter: 500,
-            verbose: false,
-            print_level: PrintLevel::Silent,
-        },
-    )
-    .expect("RT projection solve failed");
+    // `x.ProjectCoefficient(u_vec_coeff); x.ParallelProject(bc)` — MFEM
+    // `VectorFiniteElement::Project_RT`: point evaluation of the flux
+    // functional `dof_k = nk_kᵀ·adj(J)·u(x_k)` at every RT interpolation node
+    // (`HDivSpace::interpolate_vector` is its exact serial analogue;
+    // `ParallelProject` is the identity on one rank).  The former global RT
+    // mass L2 projection (AMG-CG) is *not* what the C++ computes here.
+    let x_bc_v = rt.interpolate_vector(&|x: &[f64]| {
+        let mut v = [0.0_f64; 2];
+        u_vec(x, &mut v);
+        v.to_vec()
+    });
+    let x_bc = x_bc_v.as_slice();
 
     // C++ sets `cout.precision(4); cout << scientific;`.
     if args.use_saddle_point {
-        println!("\nSaddle point solver... ");
+        print!("\nSaddle point solver... ");
+        use std::io::Write as _;
+        std::io::stdout().flush().unwrap();
         let l2 = fem_space::L2Space::new(mesh.clone(), rt_order);
         let mut solver = HdivSaddlePointSolver::new(
             &mesh,
@@ -202,15 +200,16 @@ fn main() {
         let t0 = Instant::now();
         solver.mult(&b_blk, &mut x);
         println!(
-            "Done.\nIterations: {}\nElapsed: {:.4e}",
+            "Done.\nIterations: {}\nElapsed: {}",
             solver.num_iterations(),
-            t0.elapsed().as_secs_f64()
+            fmt_sci4(t0.elapsed().as_secs_f64())
         );
         if !solver.converged() {
             eprintln!("MINRES did not converge to the requested tolerance");
         }
         let error = compute_hdiv_l2_error_2d(&rt, &x[n_l2_of(&offs)..], &u_vec);
-        println!("L2 error: {error:.4e}");
+        println!("L2 error: {}", fmt_sci4(error));
+        return error;
     }
 
     if args.use_ams || args.use_lor_ams || args.use_hybridization {
@@ -221,11 +220,49 @@ fn main() {
         );
         std::process::exit(3);
     }
+    f64::NAN
 }
 
 /// Block-1 offset from the solver offsets.
 fn n_l2_of(offs: &[usize; 3]) -> usize {
     offs[1]
+}
+
+/// MFEM `OptionsParser::PrintOptions` (optparser.cpp:331-360): the option echo
+/// after `ParseCheck`, `   --long-name value` per entry in `AddOption` order;
+/// ENABLE pairs print the long_name whose value is true.  (grad_div has no
+/// DOUBLE options — all values print as plain integers / flags.)
+fn print_options(a: &Args) {
+    println!("Options used:");
+    println!("   --device cpu");
+    println!("   --mesh {}", a.mesh);
+    println!("   --serial-refine {}", a.ser_ref);
+    println!("   --parallel-refine {}", a.par_ref);
+    println!("   --order {}", a.order);
+    println!(
+        "   {}",
+        if a.use_saddle_point {
+            "--saddle-point"
+        } else {
+            "--no-saddle-point"
+        }
+    );
+    println!(
+        "   {}",
+        if a.use_ams { "--ams" } else { "--no-ams" }
+    );
+    println!(
+        "   {}",
+        if a.use_lor_ams { "--lor-ams" } else { "--no-lor-ams" }
+    );
+    println!(
+        "   {}",
+        if a.use_hybridization {
+            "--hybridization"
+        } else {
+            "--no-hybridization"
+        }
+    );
 }
 
 /// MFEM `FiniteElementSpace::GetBoundaryTrueDofs` for the RT space: the
@@ -301,4 +338,77 @@ where
         }
     }
     e2.sqrt()
+}
+
+#[cfg(test)]
+mod d105_pins {
+    use super::*;
+
+    fn star_args(order: u8) -> Args {
+        Args {
+            mesh: concat!(env!("CARGO_MANIFEST_DIR"), "/../data/star.mesh").to_string(),
+            ser_ref: 1,
+            par_ref: 1,
+            order,
+            use_saddle_point: true,
+            use_ams: false,
+            use_lor_ams: false,
+            use_hybridization: false,
+        }
+    }
+
+    /// Round-105 pin against the serial C++ MFEM reference (`mpirun -np 1`,
+    /// MFEM 4.10 `grad_div_cpp -sp`, hypre BoomerAMG Schur AMG): MINRES at
+    /// rtol 1e-12 on both sides; only the preconditioner internals differ, so
+    /// the achieved L2 errors agree to the solve tolerance.  C++ reference
+    /// values (`cpp_grad_div_star.log` / `-o4` log, round-105): 2.4754e-04
+    /// (order 3) and 7.0227e-06 (order 4).
+    #[test]
+    fn grad_div_star_sp_l2_error_matches_cpp() {
+        let error = run(&star_args(3));
+        // C++ prints 2.4754e-04 (%.4e); the pin holds the print-precision
+        // neighborhood with the MINRES tolerance scale; the C++ value is only
+        // known to its %.4e print, i.e. ±5e-9 absolute.
+        let want = 2.4754e-04;
+        assert!(
+            (error - want).abs() <= 1e-8,
+            "grad_div o3 L2 error {error:.5e} vs C++ {want:.4e}"
+        );
+    }
+
+    #[test]
+    fn grad_div_star_sp_o4_l2_error_matches_cpp() {
+        let error = run(&star_args(4));
+        // C++ prints 7.0227e-06; both solves agree to ~1e-8 in the solution
+        // (rel deviation of the error norm 2.7e-3 at port time — the error is
+        // a near-equal difference, so the pin holds the looser 1e-2 band).
+        let want = 7.0227e-06;
+        assert!(
+            (error - want).abs() <= 1e-2 * want,
+            "grad_div o4 L2 error {error:.5e} vs C++ {want:.4e}"
+        );
+    }
+
+    /// MFEM `fes_rt.GetBoundaryTrueDofs` on the refined star mesh: the C++
+    /// probe (`ess_cpp`, round-105) reports 240 essential dofs at order 3
+    /// (80 boundary edges x `order` dofs).
+    #[test]
+    fn boundary_true_dofs_count_matches_cpp() {
+        let mesh_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../data/star.mesh");
+        let mesh0 = read_mfem_file(mesh_path).unwrap().mesh2d.unwrap();
+        let mut mesh = refine_uniform(&mesh0);
+        mesh = refine_uniform(&mesh);
+        let rt = fem_space::HDivSpace::new(mesh, 2);
+        assert_eq!(boundary_true_dofs(&rt).len(), 240);
+    }
+
+    /// `cout.precision(4); cout << scientific;` formatting: two exponent
+    /// digits with sign (`4.0635e-02`), byte-checked round-105.
+    #[test]
+    fn fmt_sci4_matches_ostream_scientific() {
+        assert_eq!(fmt_sci4(4.0635e-2), "4.0635e-02");
+        assert_eq!(fmt_sci4(2.4754e-4), "2.4754e-04");
+        assert_eq!(fmt_sci4(-7.0227e-6), "-7.0227e-06");
+        assert_eq!(fmt_sci4(0.0), "0.0000e+00");
+    }
 }
