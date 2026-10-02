@@ -780,6 +780,15 @@ miniapps/
 │   │                            新增 3 项单测（`fem-parallel --lib` 232 → 235），含
 │   │                            "改前必失败"证据（回退那一行后 `pdiffusion --ranks 2 -sref 0`
 │   │                            打印 `L2 = 1.779e+00`，应为 1.021e+00）
+│   │      ⚠️→✅ **round 105（D963）：`--ranks 2` 曾被 round-76 ghost 层剪薄
+│   │      （`f5a7e657`，二分定罪；round-104 指控的 0b3ace79 经旧树实跑驳倒）
+│   │      静默打错 12 天，双缺陷修复**：
+│   │      ① trace ess 把"本地边界"当"全局边界"（分区界面被强加本质条件，
+│   │      ess 22 vs 真 16）；② face-trace 行 owner = 最低持有 rank（其层无
+│   │      远侧元素，A(σ̂,σ̂) 半值）。修后 `--ranks 2 -prob 0/-sc/-prob 1`
+│   │      与 mfem410_mpi np2 oracle 全部打印位一致；钉
+│   │      `d105_d963_trace_global_boundary`（np1≡np2 逐行逐位、双牙已验）。
+│   │      详见 `pdiffusion.rs` 头注 D963 节 + `tmp/d963/REPORT.md`
 │   ├── pacoustics.rs        ← ✅ **round 35（D172 后半）：转正，`exit 0`**。主会话亲验
 │   │                            （默认档 vs C++ MPI 参考日志）：
 │   │                            `0 | 113 | 2.0 π | 8.008e-01 | 1.374e+00` —— **Dofs/L2/Residual
@@ -839,9 +848,12 @@ miniapps/
 │                                `-prob 2` it0 末位差（≤1.4e-5，CG 容差噪声如实报）；
 │                                CG it 列不逐位 = D963（Hypre AMG/AMS 栈差）。
 │                                残留 exit(3)：字面默认 theta=0.7（**D960**：fem-mesh 缺
-│                                quad 部分标记 4 分叉 NC 细化）。**顺带发现（D963 移交）**：
-│                                HEAD `--ranks 2` 并行 DPG 已坏（pdiffusion 同病，
-│                                0b3ace79 D813-1 剪薄回归，时间线钉定）
+│                                quad 部分标记 4 分叉 NC 细化）。**round 105 D963 关闭**：
+│                                `--ranks 2` 已修复并与 mfem410_mpi np2 oracle 全部打印位
+│                                一致（-theta 0.0 两行、-o 2 -ref 2 三行、-sc；CG it 列
+│                                仍为已登记栈差）；顺带修 AMR 标记跨 rank 并集（原只发布
+│                                rank 0 的列表）。双缺陷根因与定罪见 `pdiffusion.rs`
+│                                头注与 `tmp/d963/REPORT.md`
 │      ✅ **round 34（D167）：库层已修**——`from_local_matrix` 的 ghost 列数改从
 │      `local.ncols - n_owned` 推导（矩形输入合法）+ `nrows ≥ n_owned` 断言；
 │      回归钉两层（`par_csr.rs:750` 矩形用例 + `two_rank_system_matches_serial_full_mesh`，
