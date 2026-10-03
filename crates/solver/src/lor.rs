@@ -1361,18 +1361,18 @@ mod tests {
     /// Core acceptance: PCG + block-diagonal LOR-AMG iteration counts must
     /// not grow under mesh refinement (order 2, 2-D quads).
     ///
-    /// D1000-family scope note (D976 ripple): since the linlvo CG aborts on
-    /// `(B r, r) < 0` exactly like MFEM `solvers.cpp:938`, the n = 16 case no
-    /// longer reaches its old "converged" answer: the block-diagonal LOR-AMG
-    /// preconditioner is *genuinely indefinite* there (`(B r, r) = -4.1` at
-    /// iteration 1), and the old pass rode through the negative energy via
-    /// `abs()`.  The mesh-independence assertion therefore covers the working
-    /// regime n = 4, 8; n = 16 stays pinned to the honest abort until the
-    /// LOR-AMG block SPD-ness is fixed (D1000).
+    /// D1000 closed (round 107): the block-diagonal LOR-AMG preconditioner is
+    /// SPD at every size now that the linlvo SA aggregation absorbs singleton
+    /// aggregates (a singleton's smoothed P₀ column collapses on diagonally
+    /// dominant rows, which made a Galerkin coarse operator numerically
+    /// rank-deficient and the cycle genuinely indefinite — at n = 16 the
+    /// x-block V-cycle measured λmin = −6.4e+2 and CG aborted on
+    /// `(B r, r) = −4.12` at iteration 1).  n = 16 is back in the
+    /// mesh-independence loop.
     #[test]
     fn lor_elasticity_amg_iterations_mesh_independent_2d() {
         let mut iters = Vec::new();
-        for n in [4usize, 8] {
+        for n in [4usize, 8, 16] {
             let (a, b, _x, ess, mesh) = elasticity_system_2d(n, 2);
             let prec = lor_elasticity_precond_2d(&mesh, 2, &ess);
             let mut x = vec![0.0_f64; a.nrows];
@@ -1402,8 +1402,8 @@ mod tests {
         }
         assert!(iters.iter().all(|&it| it <= 40), "iterations {iters:?}");
         assert!(
-            iters[1] <= iters[0] + 8,
-            "iteration growth n=4 -> n=8: {iters:?}"
+            iters[1] <= iters[0] + 8 && iters[2] <= iters[1] + 8,
+            "iteration growth n=4 -> n=8 -> n=16: {iters:?}"
         );
     }
 

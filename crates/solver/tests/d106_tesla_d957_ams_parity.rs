@@ -8,14 +8,26 @@
 //!
 //! Round-106 findings pinned here:
 //! * the red→green iteration counts: ball-quad `-bm` o2 **9** (C++ 8; the
-//!   residual 1-iteration gap is the linlvo SA-AMG vs BoomerAMG quality
-//!   inside `B_Pi` — fem-rs's iteration-8 C-norm ratio 1.97e-12 sits just
-//!   over the 1e-12 stop line, `tmp/d106ams_final_bm_o2_ballquad.log`),
+//!   residual 1-iteration gap was attributed in round 106 to the linlvo
+//!   SA-AMG vs BoomerAMG quality inside `B_Pi` — fem-rs's iteration-8 C-norm
+//!   ratio 1.97e-12 sits just over the 1e-12 stop line,
+//!   `tmp/d106ams_final_bm_o2_ballquad.log`),
 //!   inline-hex `-bm` o2 **7** = C++ 7;
 //! * the JD anchors (`||M||`, `||JD||`) stay bitwise against the C++ probe;
 //! * `<C*b,b>` (the AMS quadratic form on the rhs) matches the C++ probe to
 //!   0.5% (1.2417e-7 vs 1.2476e-7 ball-quad, 1.0189e-8 vs 1.0190e-8
 //!   inline-hex).
+//!
+//! Round-107 (D1042 dissection, `tmp/d107amg/REPORT.md`): the round-106
+//! attribution is **refuted** — with the B_Pi blocks replaced by exact LU
+//! solves (single-level hierarchy) ball-quad gets *worse* (14 iterations),
+//! and every B_Pi strength knob moves both tiers one step together (V(2,1):
+//! 8/6; RS: 11/6; plain GS: 7/6), so the ball-quad 9 vs 8 gap is NOT B_Pi
+//! accuracy.  The per-tier alignment (D1063, open) must come from the arm
+//! spectral character elsewhere.  After the D1000-LOR singleton-absorption
+//! fix the ball-quad `<C*b,b>` pin moves to 1.2406164773014794e-7; the
+//! `‖M‖/‖JD‖`/`‖B‖` anchors stay bitwise/13-digit
+//! (`tmp/d107amg/rs_bm_o2_*.log`).
 //!
 //! C++ truth: `tmp/d105ams/cpp_bm_o2_ballquad.log` /
 //! `cpp_bm_o2_inlinehex.log` (MFEM 4.10 tesla probe, `mpirun -np 1`).
@@ -324,8 +336,12 @@ fn run_case(mesh_path: &str, n_h1_expect: usize, n_nd_expect: usize, it_want: us
 #[test]
 fn d106_tesla_d957_ams_ballquad_o2() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d103tesla/ball-quad.mesh");
-    // C++ 8; the linlvo SA-AMG B_Pi lands one iteration later (module doc).
-    run_case(path, 517, 1460, 9, 1.241_657_277_211_414_5e-7);
+    // C++ 8; the PCG lands one iteration later (module doc + D1063).  The
+    // `<C*b,b>` pin moved 1.2416572772114145e-7 → 1.2406164773014794e-7
+    // (−0.084%) with the round-107 D1000-LOR singleton-absorption fix, which
+    // changes the ball-quad B_Pi SA hierarchies; still 0.56% off the C++
+    // probe's 1.2476e-7.
+    run_case(path, 517, 1460, 9, 1.240_616_477_301_479_4e-7);
 }
 
 #[test]

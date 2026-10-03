@@ -894,15 +894,86 @@ mod tests {
         }
     }
 
+    /// Symmetric dense eigensolver (cyclic Jacobi) — eigenvalues ascending.
+    fn sym_eigenvalues(m: &[Vec<f64>]) -> Vec<f64> {
+        let n = m.len();
+        let mut a = m.to_vec();
+        for _ in 0..200 {
+            let mut off = 0.0_f64;
+            for i in 0..n { for j in (i + 1)..n { off += a[i][j] * a[i][j]; } }
+            if off.sqrt() < 1e-16 { break; }
+            for p in 0..n {
+                for q in (p + 1)..n {
+                    if a[p][q].abs() < 1e-300 { continue; }
+                    let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+                    let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                    let c = 1.0 / (t * t + 1.0).sqrt();
+                    let s = t * c;
+                    for k in 0..n {
+                        let akp = a[k][p];
+                        let akq = a[k][q];
+                        a[k][p] = c * akp - s * akq;
+                        a[k][q] = s * akp + c * akq;
+                    }
+                    for k in 0..n {
+                        let apk = a[p][k];
+                        let aqk = a[q][k];
+                        a[p][k] = c * apk - s * aqk;
+                        a[q][k] = s * apk + c * aqk;
+                    }
+                }
+            }
+        }
+        let mut ev: Vec<f64> = (0..n).map(|i| a[i][i]).collect();
+        ev.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        ev
+    }
+
+    /// Explicit spectrum of the V-cycle preconditioner B on `laplacian_1d(100)`
+    /// with a `Chebyshev { degree }` smoother: `(λmin, λmax)` of the
+    /// symmetrized B, plus the symmetry defect `max|B − Bᵀ|`.
+    ///
+    /// This is the D1000 red/green spectral measurement: before the round-107
+    /// Chebyshev-recursion fix the degree-3 cycle measured
+    /// `λmin = −3.69e-2` (λmax = 5.02e+02) — genuinely indefinite — and this
+    /// assertion was red while the ingredients were all SPD.
+    fn chebyshev_cycle_spectrum(degree: usize) -> (f64, f64, f64) {
+        let n = 100;
+        let a = laplacian_1d(n);
+        let la = fem_to_linlvo_csr(&a);
+        let config = AmgConfig {
+            smoother: SmootherType::Chebyshev { degree, ratio: 3.0 },
+            ..AmgConfig::default()
+        };
+        let hier = AmgHierarchy::build(la, config);
+        let mut cols: Vec<Vec<f64>> = Vec::with_capacity(n);
+        for j in 0..n {
+            let mut b = DenseVec::from_vec(vec![0.0_f64; n]);
+            b.as_mut_slice()[j] = 1.0;
+            let mut x = DenseVec::from_vec(vec![0.0_f64; n]);
+            hier.apply_cycle(&b, &mut x, CycleType::V);
+            cols.push(x.as_slice().to_vec());
+        }
+        let mut asym = 0.0_f64;
+        let mut sym = vec![vec![0.0_f64; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                asym = asym.max((cols[i][j] - cols[j][i]).abs());
+                sym[i][j] = 0.5 * (cols[i][j] + cols[j][i]);
+            }
+        }
+        let ev = sym_eigenvalues(&sym);
+        (ev[0], ev[n - 1], asym)
+    }
+
     #[test]
     fn amg_cg_chebyshev_smoother() {
         let n = 100;
         let a = laplacian_1d(n);
         let b = vec![1.0_f64; n];
 
-        // Working regime: degree ≤ 2 cycle preconditioner is SPD and CG
-        // converges (verified by explicit spectrum: λmin(B) = 1.6e-1 at
-        // degree 2 vs −3.7e-2 at degree 3 — see D1000).
+        // Working regime: degree-2 cycle preconditioner is SPD and CG
+        // converges.
         let mut x = vec![0.0_f64; n];
         let config = AmgConfig {
             smoother: SmootherType::Chebyshev { degree: 2, ratio: 3.0 },
@@ -912,28 +983,41 @@ mod tests {
         assert!(res.converged, "Chebyshev AMG-CG failed: residual = {}", res.final_residual);
         assert!(res.iterations < 50, "too many iterations: {}", res.iterations);
 
-        // D1000 pin: the degree-3 Chebyshev cycle is *genuinely* indefinite
-        // (explicit symmetric spectrum on this system: λmin(B) = −3.69e-2,
-        // λmax = 5.02e+02, although every ingredient — per-level Chebyshev
-        // smoother, exact Galerkin A_c = PᵀAP, exact coarse LU — is SPD).
-        // Since D976 the linlvo CG aborts on (B r, r) < 0 exactly like MFEM
-        // `CGSolver::Mult` (linalg/solvers.cpp:938-946, MFEM 4.10) instead of
-        // riding through the negative energy via `abs()`; the degree-3 cycle
-        // therefore fails loudly.  The old `converged` expectation here was
-        // passing *through* the indefiniteness (masked energies), not proving
-        // correctness.  Flip this pin back to a convergence assertion when
-        // D1000 lands.
+        // D1000 (round 107, closed): the Chebyshev direction recursion in
+        // linlvo used the coefficient ρ(ρ−1) instead of the classical
+        // direction product ρ_kρ_{k−1} (Adams form; the same correct form
+        // lives in crates/parallel/src/par_amg.rs and in hypre par_cheby.c's
+        // explicit coefficients), which realized a *different* polynomial
+        // with |R(λmax)| ≈ 1 — no damping of the highest smoothed mode — and
+        // made the cycle genuinely indefinite at degree ≥ 3: the explicit
+        // spectrum measured λmin(B) = −3.69e-2 (λmax = 5.02e+02) although
+        // every ingredient (per-level smoother, exact Galerkin A_c = PᵀAP,
+        // exact coarse LU) is SPD.  With the corrected π-recursion the cycle
+        // is SPD and CG converges at every degree.
+        for degree in [2usize, 3, 4] {
+            let (lam_min, lam_max, asym) = chebyshev_cycle_spectrum(degree);
+            println!(
+                "D1000 spectral pin: degree {degree} λmin={lam_min:.4e} λmax={lam_max:.4e} max|B−Bᵀ|={asym:.2e}"
+            );
+            assert!(
+                lam_min > -1e-12 * lam_max,
+                "D1000: Chebyshev degree-{degree} cycle is indefinite: λmin={lam_min:.4e}"
+            );
+            assert!(
+                asym <= 1e-10 * lam_max,
+                "D1000: Chebyshev degree-{degree} cycle not symmetric: {asym:.3e}"
+            );
+        }
+
+        // Degree 3 (the pinned defect) now converges under CG.
         let mut x3 = vec![0.0_f64; n];
         let config3 = AmgConfig {
             smoother: SmootherType::Chebyshev { degree: 3, ratio: 3.0 },
             ..AmgConfig::default()
         };
-        let err = solve_amg_cg(&a, &b, &mut x3, &config3, &SolverConfig::default())
-            .expect_err("D1000: degree-3 Chebyshev cycle is indefinite — CG must abort");
-        assert!(
-            err.to_string().contains("not positive definite"),
-            "unexpected error: {err}"
-        );
+        let res3 = solve_amg_cg(&a, &b, &mut x3, &config3, &SolverConfig::default()).unwrap();
+        assert!(res3.converged, "D1000: degree-3 Chebyshev AMG-CG failed: {:?}", res3);
+        assert!(res3.iterations < 50, "degree-3 too many iterations: {}", res3.iterations);
     }
 
     #[test]
@@ -954,7 +1038,8 @@ mod tests {
         let a = laplacian_1d(n);
         let b = vec![1.0_f64; n];
 
-        // Working regime (degree 2 — see D1000 on the degree-3 cycle): the
+        // Working regime (any degree since the D1000 fix — see
+        // `amg_cg_chebyshev_smoother` for the explicit spectrum pins): the
         // F-cycle with a SPD Chebyshev cycle preconditioner converges.
         let config = AmgConfig {
             smoother: SmootherType::Chebyshev { degree: 2, ratio: 3.0 },
