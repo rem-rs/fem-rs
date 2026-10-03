@@ -626,116 +626,24 @@ fn keep_owned_rows(mat: &fem_linalg::CsrMatrix<f64>, n_owned: usize) -> fem_lina
     coo.into_csr()
 }
 
-/// The `IrrotationalProjector` input `xDiv = −weakDiv·x`
-/// (`pfem_extras.cpp:180-181`): the weak-divergence matrix W (H¹ test rows ×
-/// H(curl) trial columns), MFEM `VectorFEWeakDivergenceIntegrator`
-/// (bilininteg.cpp:1852-1941: `elmat(i,j) = −Σ_qps ip.weight·(adj(J)ᵀ∇̂q_i)·
-/// vshape_j`, the physical ND shape `vshape = J⁻ᵀ·û̂`), at the custom
-/// `irOrder` rule, **with the H(curl) element orientation signs applied to
-/// the trial columns** (MFEM scatters every element block through the signed
-/// `GetElementDofs` table).
+/// The `-cr` weak-divergence action `xDiv = −W·jr` (the `IrrotationalProjector`
+/// input, `pfem_extras.cpp:180-181`) runs through the fem-parallel kernel entry
+/// `ParMixedAssembler::assemble_hcurl_h1_weak_div` (MFEM
+/// `VectorFEWeakDivergenceIntegrator`, bilininteg.cpp:1852-1941, at the custom
+/// `irOrder` rule).
 ///
-/// This replaces fem-parallel's
-/// `ParMixedAssembler::assemble_hcurl_h1_weak_div` for tesla: that path
-/// assembles the RAW element-local trial shapes and its D58 face-block
-/// canonicalization is a no-op on hexes — the orientation signs never reach
-/// the columns, so `W·jr` on a discretely divergence-free field is O(‖jr‖)
-/// instead of 0 (measured d106 on ball-quad `-cr`: ‖W·jr‖ = 7.4e-1 vs the
-/// C++ probe's 7.6e-17 on the bitwise-same `jr`; debt **D1041**, the
-/// `crates/parallel`-side file is outside this lane's territory).
+/// D1041 closed (round 107): that entry used to route through the frozen
+/// `fem_assembly` kernel, which assembles the RAW element-local trial shapes —
+/// its D58 face-block canonicalization is a no-op on hexes and the H(curl)
+/// orientation signs never reached the columns, so `W·jr` on a discretely
+/// divergence-free field was O(‖jr‖) instead of 0 (measured d106 on ball-quad
+/// `-cr`: ‖W·jr‖ = 7.4e-1 vs the C++ probe's 7.6e-17).  Round 107 added the
+/// signed kernel `fem_parallel::par_mixed_assembler::
+/// assemble_hcurl_h1_weak_div_signed` (the frozen twin lives in the
+/// D1041-forbidden `crates/assembly`) behind the same entry, and the round-106
+/// local `assemble_weak_div_matrix` bypass was retired.  Pin:
+/// `crates/parallel/tests/d107_d1041_weak_div_signs.rs`.
 ///
-/// Geometry/basis conventions follow the D667-verified mixed assembler
-/// (`crates/assembly/src/mixed/mod.rs`): `ref_elem_vol_with_pyramid_basis`
-/// H¹ shapes + `ref_elem_vec(.., HCurl)` trial shapes +
-/// `geo_ref_elem_from_mesh`/`isoparametric_jacobian` curved geometry — all in
-/// the one reference convention. (Mixing `element_jacobian_at` (biunit) with
-/// the unit-cube reference shapes produced a 4×-scaled wrong operator — the
-/// ‖W·jr‖ comparison against the C++ probe is the guard.)
-fn assemble_weak_div_matrix(
-    h1: &H1Space<fem_mesh::Mesh<3>>,
-    nd: &HCurlSpace<fem_mesh::Mesh<3>>,
-    qo: u8,
-) -> Result<fem_linalg::CsrMatrix<f64>, String> {
-    use fem_mesh::element_type::ElementType;
-    use fem_mesh::topology::MeshTopology;
-
-    let mesh = h1.mesh();
-    let n_h1 = h1.n_dofs();
-    let n_nd = nd.n_dofs();
-    let mut coo = fem_linalg::CooMatrix::<f64>::new(n_h1, n_nd);
-    for e in 0..mesh.n_elements() as u32 {
-        let et = mesh.element_type(e);
-        if !matches!(et, ElementType::Hex8 | ElementType::Hex20) {
-            return Err(format!(
-                "tesla: the weak-divergence matrix is implemented for hex meshes only; \
-                 element {e} is {et:?} (the d103 acceptance meshes are hexes)"
-            ));
-        }
-        let ref_r = fem_assembly::mixed::ref_elem_vol_with_pyramid_basis(
-            et,
-            h1.get_order(),
-            h1.pyramid_basis(),
-        )?;
-        let ref_c = fem_assembly::mixed::ref_elem_vec(et, nd.order() as u8, fem_space::SpaceType::HCurl)?;
-        let h1_dofs = h1.element_dofs_u32(e);
-        let nd_dofs = nd.element_dofs(e);
-        let signs = nd.element_signs(e);
-        let n_r = h1_dofs.len();
-        let n_c = nd_dofs.len();
-        let quad = ref_r.quadrature(qo);
-        let geo_elem = fem_assembly::geo_ref_elem_from_mesh(mesh, e).expect("geo_ref_elem");
-        let geo_nds = fem_mesh::topology::MeshTopology::geometry_nodes(mesh, e);
-        let mut grad_r = vec![0.0_f64; n_r * 3];
-        let mut grad_phys = vec![0.0_f64; n_r * 3];
-        let mut vec_col = vec![0.0_f64; n_c * 3];
-        for xi in quad.points.iter() {
-            let (j, det_j, _xp) =
-                fem_assembly::isoparametric_jacobian(mesh, geo_nds, geo_elem.as_ref(), xi, 3);
-            let j_inv_t = j
-                .try_inverse()
-                .unwrap_or_else(|| panic!("tesla: singular element Jacobian at element {e}"))
-                .transpose();
-            let w = quad.weights[qo as usize] * det_j;
-            ref_r.eval_grad_basis(xi, &mut grad_r);
-            for (i, g) in grad_phys.iter_mut().enumerate() {
-                let (r, d) = (i / 3, i % 3);
-                *g = j_inv_t[(d, 0)] * grad_r[r * 3]
-                    + j_inv_t[(d, 1)] * grad_r[r * 3 + 1]
-                    + j_inv_t[(d, 2)] * grad_r[r * 3 + 2];
-            }
-            ref_c.eval_basis_vec(xi, &mut vec_col);
-            for (i, &gi) in h1_dofs.iter().enumerate() {
-                for (jj, &gj) in nd_dofs.iter().enumerate() {
-                    // physical H(curl) trial: s_j·J⁻ᵀ·û̂_j (covariant transform).
-                    let s = signs[jj] as f64;
-                    let mut dot = 0.0_f64;
-                    for d in 0..3 {
-                        let u_d = j_inv_t[(d, 0)] * vec_col[jj * 3]
-                            + j_inv_t[(d, 1)] * vec_col[jj * 3 + 1]
-                            + j_inv_t[(d, 2)] * vec_col[jj * 3 + 2];
-                        dot += grad_phys[i * 3 + d] * u_d;
-                    }
-                    coo.add(gi as usize, gj as usize, -w * s * dot);
-                }
-            }
-        }
-    }
-    Ok(coo.into_csr())
-}
-
-/// `xDiv = −W·jr` (`assemble_weak_div_matrix` action on the canonical jr).
-fn assemble_weak_div_action(
-    h1: &H1Space<fem_mesh::Mesh<3>>,
-    nd: &HCurlSpace<fem_mesh::Mesh<3>>,
-    jr: &[f64],
-    qo: u8,
-) -> Result<Vec<f64>, String> {
-    let w = assemble_weak_div_matrix(h1, nd, qo)?;
-    let mut x_div = vec![0.0_f64; w.nrows];
-    w.spmv(jr, &mut x_div);
-    Ok(x_div)
-}
-
 /// Single-rank AMS preconditioner wrapping linlvo's
 /// [`AmsPrecond::with_pi`](linlvo::precond::AmsPrecond::with_pi) — the MFEM
 /// `HypreAMS(SetSingularProblem)` cycle (block-Pi multiplicative `0345430`).
@@ -1085,21 +993,16 @@ impl TeslaSolver {
             // DivergenceFreeProjector = IrrotationalProjector with y = x −
             // grad·psi: xDiv = −weakDiv·jr; psi = S0⁻¹ xDiv (H1 stiffness,
             // all-boundary Dirichlet 0, PCG + AMG, tol 1e-14 / 200 it);
-            // j = jr − grad·psi  (pfem_extras.cpp:97-256).  The action is
-            // assembled locally with the H(curl) orientation signs (D1041);
-            // jr feeds it in CANONICAL dof order (jr_local, pre-permutation).
-            let mut x_div = match assemble_weak_div_action(
-                h1.local_space(),
-                nd.local_space(),
-                jr_local.as_slice(),
-                qo_ir,
-            ) {
-                Ok(x) => x,
-                Err(e) => {
-                    eprintln!("mfem_miniapp_tesla: {e}");
-                    std::process::exit(3);
-                }
-            };
+            // j = jr − grad·psi  (pfem_extras.cpp:97-256).  D1041 (round 107):
+            // the kernel entry carries the H(curl) orientation signs, so the
+            // round-106 local signed-W bypass is gone.  The kernel returns
+            // owned H¹ rows in partition order and consumes the ND columns in
+            // partition order too — jr is permuted (dual/sign transform) into
+            // that layout first.
+            let w_div = ParMixedAssembler::assemble_hcurl_h1_weak_div(&h1, &nd, qo_ir);
+            let jr_par = permute_vec(jr_local.as_slice(), nd_dp);
+            let mut x_div = vec![0.0_f64; w_div.nrows];
+            w_div.spmv(&jr_par, &mut x_div);
             if probe {
                 let q: f64 = x_div.iter().map(|v| v * v).sum();
                 println!("PROBE ||XDIV||_2 = {}", e6(comm.allreduce_sum_f64(q).sqrt()));
@@ -1117,12 +1020,9 @@ impl TeslaSolver {
             } else {
                 boundary_dofs(mesh, dm_h1, &all_tags)
             };
-            let mut rhs_h1 = ParVector::from_local_raw(
-                permute_vec(&x_div, h1_dp),
-                h1_dp.n_owned_dofs,
-                h1.dof_ghost_exchange_arc(),
-                comm_nd.clone(),
-            );
+            // x_div is already the kernel's owned H¹ rows in partition order.
+            let mut rhs_h1 = ParVector::zeros(h1);
+            rhs_h1.as_slice_mut()[..x_div.len()].copy_from_slice(&x_div);
             let mut s0 =
                 ParAssembler::assemble_bilinear(h1, &[&DiffusionIntegrator { kappa: 1.0 }], qo_ir);
             for &d in &ess_local {

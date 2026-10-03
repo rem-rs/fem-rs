@@ -5,12 +5,14 @@
 //! saddle-point systems.
 
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_space::fe_space::FESpace;
+use fem_space::fe_space::{FESpace, SpaceType};
+use fem_assembly::integrator::QpData;
 use fem_assembly::mixed::{
     MixedAssembler, MixedBilinearIntegrator, HDivL2Integrator, assemble_hdiv_l2_mixed,
     assemble_hcurl_h1_gradient, assemble_hcurl_hdiv_weak_curl,
-    assemble_hcurl_h1_weak_div, HCurlH1WeakDiv,
+    ref_elem_vec, ref_elem_vol_with_pyramid_basis, HCurlH1WeakDiv, HCurlH1WeakDivIntegrator,
 };
+use fem_assembly::vector_assembler::apply_face_block_transform_matrix_cols;
 
 use crate::dof_partition::DofPartition;
 use crate::par_space::ParallelFESpace;
@@ -223,8 +225,13 @@ impl ParMixedAssembler {
 
     /// Parallel mixed assembly for the H(curl) × H¹ weak divergence
     /// `b(v, u) = -∫ v (∇·u) dx` (MFEM `VectorFEWeakDivergenceIntegrator`
-    /// on `ParMixedBilinearForm(HCurlFESpace_, H1FESpace_)`), via the serial
-    /// [`fem_assembly::mixed::assemble_hcurl_h1_weak_div`] path.
+    /// on `ParMixedBilinearForm(HCurlFESpace_, H1FESpace_)`), via the
+    /// **signed** [`assemble_hcurl_h1_weak_div_signed`] kernel (D1041: the
+    /// frozen `fem_assembly` kernel of the same name skips the H(curl)
+    /// element orientation signs — on D58-canonicalized hexes that is a
+    /// no-op and the defect was invisible, on any mesh with reversed edges
+    /// the RHS is polluted; see the pin
+    /// `crates/parallel/tests/d107_d1041_weak_div_signs.rs`).
     ///
     /// Returns a CSR with `n_owned_row` (H¹) rows and `n_total_col`
     /// (H(curl)) columns.
@@ -237,7 +244,7 @@ impl ParMixedAssembler {
         M: fem_mesh::topology::MeshTopology + Clone + 'static,
     {
         let integ = HCurlH1WeakDiv::new(1.0_f64);
-        let local_mat = assemble_hcurl_h1_weak_div(
+        let local_mat = assemble_hcurl_h1_weak_div_signed(
             h1_par.local_space(),
             nd_par.local_space(),
             &[&integ],
@@ -327,6 +334,181 @@ pub fn permute_rect_csr(
         }
     }
 
+    coo.into_csr()
+}
+
+/// D1041 kernel: signed HCurl × H¹ weak divergence assembly
+/// `M[j,i] = -∫_K Q ∇v_j · u_i dx` (MFEM `VectorFEWeakDivergenceIntegrator`,
+/// `fem/bilininteg.cpp:1852`) with `v_j ∈ H¹` (rows) and `u_i ∈ HCurl`
+/// (columns), **with the H(curl) element orientation signs applied to the
+/// trial columns**.
+///
+/// This is the line-for-line counterpart of the frozen
+/// `fem_assembly::mixed::assemble_hcurl_h1_weak_div`
+/// (`crates/assembly/src/mixed/mod.rs`) with exactly one addition: before the
+/// quadrature loop the trial basis is scaled — per **dof** — by
+/// `col_space.element_signs(e)`.  MFEM scatters every element block through
+/// the **signed** `GetElementDofs` table (`SparseMatrix::AddSubMatrix(vdofs,
+/// vdofs, elmat)` negates the columns of negative-vdir DOFs); the fem-rs
+/// vector assembler and every other mixed kernel of the family do the same
+/// (`assemble_hcurl_h1_gradient` applies the signs to the H(curl) *rows*,
+/// `assemble_hdiv_l2_mixed`/`assemble_h1_hdiv_mixed` to the H(div) columns,
+/// `assemble_hcurl_hdiv_mixed`/`assemble_hcurl_hdiv_weak_curl` to both).  The
+/// weak-div kernel is the lone holdout: its D58 face-block canonicalization
+/// (`M ← M·S`) is a no-op on hexes and the scalar orientation signs never
+/// reach the columns, so on any mesh where an element's local edge direction
+/// disagrees with the global one (cylinder-hex, ball-quad, …) the columns for
+/// the shared edge are assembled with mismatched directions.  There the
+/// matrix is not the transpose of the gradient operator and a discretely
+/// divergence-free field has `‖W·jr‖ = O(‖jr‖)` instead of 0 (measured
+/// 7.4e-1 vs the C++ probe's 7.6e-17 on the ball-quad `-cr` ring current,
+/// round 106).  On the D58-canonicalized historical anchor meshes the defect
+/// is a no-op, which is why every previous anchor stayed green.
+///
+/// The fix lives here rather than in `crates/assembly` only because that
+/// crate is outside the D1041 lane's territory; the kernel is drop-in
+/// compatible (same signature/convention) and the algebraic pin
+/// `W = -Gᵀ` against the sign-correct gradient kernel
+/// ([`ParMixedAssembler::assemble_hcurl_h1_gradient`]) holds entry-for-entry.
+pub fn assemble_hcurl_h1_weak_div_signed<SR, SC>(
+    row_space: &SR, // H¹ (scalar test)
+    col_space: &SC, // HCurl (vector trial)
+    integrators: &[&dyn HCurlH1WeakDivIntegrator],
+    quad_order: u8,
+) -> CsrMatrix<f64>
+where
+    SR: FESpace,
+    SC: FESpace,
+{
+    use fem_assembly::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
+    use fem_mesh::{element_type::ElementType, ElementTransformation};
+    use fem_mesh::topology::MeshTopology;
+
+    // The physical H¹ gradient transform shared with the frozen kernel
+    // (`transform_grads` there is crate-private): `grad_phys[i·dim+j] =
+    // Σ_k J⁻ᵀ[(j,k)]·∇̂φ_i[k]`.
+    fn transform_grads(
+        j_inv_t: &nalgebra::DMatrix<f64>,
+        grad_ref: &[f64],
+        grad_phys: &mut [f64],
+        n: usize,
+        dim: usize,
+    ) {
+        for i in 0..n {
+            for j in 0..dim {
+                let mut s = 0.0;
+                for k in 0..dim {
+                    s += j_inv_t[(j, k)] * grad_ref[i * dim + k];
+                }
+                grad_phys[i * dim + j] = s;
+            }
+        }
+    }
+
+    let mesh = row_space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_rows = row_space.n_dofs();
+    let n_cols = col_space.n_dofs();
+    let mut coo = CooMatrix::<f64>::new(n_rows, n_cols);
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let ref_c = ref_elem_vec(elem_type, col_space.order(), SpaceType::HCurl)
+            .expect("assemble_hcurl_h1_weak_div_signed: HCurl ref elem");
+        let n_c = ref_c.n_dofs();
+        let ref_r = ref_elem_vol_with_pyramid_basis(
+            elem_type, row_space.order(), row_space.pyramid_basis(),
+        )
+        .expect("assemble_hcurl_h1_weak_div_signed: H1 ref elem");
+        let n_r = ref_r.n_dofs();
+        let quad = ref_r.quadrature(quad_order);
+
+        let global_rows: Vec<usize> =
+            row_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let global_cols: Vec<usize> =
+            col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(e);
+        let elem_tag = mesh.element_tag(e);
+        // Curved-mesh geometry: the same contract as the frozen kernel's
+        // isoparametric path (D667) — hexes/quads take the mesh's geometry
+        // table map, simplices the affine one.
+        let use_iso = !matches!(
+            elem_type,
+            ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2
+        );
+        let geo_elem = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
+
+        // D1041: the H(curl) element orientation signs — the ±1 of the
+        // element-local edge direction vs the global convention.  MFEM's
+        // scatter applies them to the trial columns; the frozen kernel never
+        // does.
+        let col_signs = col_space.element_signs(e);
+
+        let n_elem_r = global_rows.len();
+        let n_elem_c = global_cols.len();
+        let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
+        let mut phi_r = vec![0.0; n_r];
+        let mut grad_r = vec![0.0; n_r * dim];
+        let mut grad_phys = vec![0.0; n_r * dim];
+        let mut vec_col = vec![0.0; n_c * dim];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (det_j, j_inv_t, xp) = if use_iso {
+                let ge = geo_elem.as_ref().expect("geo_ref_elem");
+                let (j, det, xp) =
+                    isoparametric_jacobian(mesh, mesh.geometry_nodes(e), ge.as_ref(), xi, dim);
+                let j_inv_t = j.try_inverse().expect("invertible Jacobian").transpose();
+                (det, j_inv_t, xp)
+            } else {
+                let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+                (tr.det_j(), tr.jacobian_inv_t().clone(), tr.map_to_physical(xi))
+            };
+            // D696 verdict (frozen kernel): **signed** weight — MFEM weights
+            // this family with `ip.weight * Trans.Weight()`.
+            let w = quad.weights[q] * det_j;
+            ref_r.eval_basis(xi, &mut phi_r);
+            ref_r.eval_grad_basis(xi, &mut grad_r);
+            transform_grads(&j_inv_t, &grad_r, &mut grad_phys, n_r, dim);
+            ref_c.eval_basis_vec(xi, &mut vec_col);
+            // D1041: per-dof sign application (vec_col is [n_dofs × dim]).
+            if let Some(signs) = col_signs {
+                debug_assert_eq!(signs.len(), n_elem_c, "HCurl element_signs per trial dof");
+                for (i, dof_vals) in vec_col.chunks_exact_mut(dim).enumerate() {
+                    let s = match signs.get(i) {
+                        Some(&s) => s,
+                        None => break,
+                    };
+                    if s != 1.0 {
+                        for v in dof_vals {
+                            *v *= s;
+                        }
+                    }
+                }
+            }
+            let qp_r = QpData {
+                n_dofs: n_elem_r, dim, weight: w, phys_weight: w,
+                ref_weight: quad.weights[q], phi: &phi_r, grad_phys: &grad_phys,
+                x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
+            };
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp_r, &vec_col, dim, &j_inv_t, det_j, &mut m_elem);
+            }
+        }
+        // D58: rotate the HCurl (trial) columns into the canonical shared-face
+        // basis, `M ← M·S` — same as the frozen kernel (the face-block slots
+        // are disjoint from the scalar-sign slots, so the two corrections
+        // commute; tet NDk ≥ 2 only).
+        apply_face_block_transform_matrix_cols(
+            col_space.element_face_blocks(e),
+            &mut m_elem,
+            n_elem_c,
+        );
+        for (ir, &gr) in global_rows.iter().enumerate() {
+            for (ic, &gc) in global_cols.iter().enumerate() {
+                coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
+            }
+        }
+    }
     coo.into_csr()
 }
 
