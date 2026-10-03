@@ -79,6 +79,15 @@
 //! -theta 0.0 -sc (--ranks 2):
 //!                          113 1.033e+00 9.290e-01   ==  113 1.033e+00 9.290e-01
 //!                          417 5.172e-01 4.817e-01   ==  417 5.172e-01 4.817e-01
+//! -o 3 -theta 0.7 (D1060, --ranks 2; level 1 = NC at order 3):
+//!                          657 6.955e-03 6.416e-03   ==  657 6.955e-03 6.416e-03
+//!                         1911 2.516e-03 2.283e-03   == 1911 2.516e-03 2.283e-03
+//! -o 3 -theta 0.7 -sc (--ranks 2, D1060 × D1057):  657/1911 rows identical  ==  same
+//! -o 3 -theta 0.0 (--ranks 2, D1060; uniform refinement):
+//!                          657 6.955e-03 6.416e-03   ==  same
+//!                         2529 8.699e-04 8.140e-04   ==  same
+//! -o 3 -theta 0.7 -ref 2 (--ranks 2, D1060; two NC levels):
+//!                        2025 1.795e-03 1.712e-03   ==  same
 //! ```
 //!
 //! The **PCG iteration count is not reproduced** (D963): the C++ miniapp
@@ -110,6 +119,15 @@
 //!   `--ranks 2` reproduces the C++ `mpirun -np 2` theta=0.7 rows
 //!   (275 / 964) digit-for-digit.  With `-theta 0.0` (mark-all) the
 //!   refinement is uniform and both paths match C++ exactly.
+//! * `-o 3` (**D1058 closed round 108, D1060 closed round 109**): the
+//!   H1-trace face dofs sit on MFEM's Gauss-Lobatto nodes
+//!   (`H1_Trace_FECollection` default basis, 2-D segment path); the `-o 3`
+//!   tables now match C++ `mpirun -np 2` on every parallel tier —
+//!   `-theta 0.7` (NC at order 3), `-theta 0.7 -sc`, `-theta 0.0`
+//!   (uniform), `-theta 0.7 -ref 2` (two NC levels) — physical columns
+//!   digit-for-digit (`tmp/d109c/REPORT.md`; serial twin pinned by
+//!   `d108_d1058_o3_element_fingerprints`, parallel by
+//!   `d109_d1060_o3_par_solve`).
 //! * `-pmg` (`PRefinementMultigrid`): not ported (**D961**); exits 3.
 //! * `-prob 1` (Erickson–Johnson): the essential `f̂` boundary condition needs
 //!   `ProjectBdrCoefficientNormal` (RT-trace normal projection), which fem-rs

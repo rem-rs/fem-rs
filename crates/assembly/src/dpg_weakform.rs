@@ -43,7 +43,8 @@ use fem_linalg::{csr_spmm, CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
 use crate::dpg::dpg_basis::{
-    eval_face_lagrange, eval_vol_space, face_param_to_elem_ref, local_face_table, lobatto_points_01,
+    eval_face_lagrange, eval_vol_space, face_param_to_elem_ref, h1_tri_gl_node, local_face_table,
+    lobatto_points_01,
     ref_node_coords, scalar_ref_elem, vol_quadrature, VolKind, VolVals,
 };
 use crate::dpg::dpg_basis::SkeletonSpace;
@@ -2147,11 +2148,15 @@ fn norm3(v: &[f64]) -> f64 {
 /// * 2-D edge: node `k` at `s = k/p` (equispaced, RT-trace); the H1-trace
 ///   (`h1 = true`) sits on MFEM's Gauss-Lobatto points instead (D1058 — the
 ///   node set of `H1_Trace_FECollection`, identical at p ≤ 2).
-/// * 3-D quad: tensor node `(s,t) = (k%(p+1)/p, k/(p+1)/p)`.
+/// * 3-D quad: tensor node `(s,t)`; equispaced `(k%(p+1)/p, k/(p+1)/p)` for
+///   the RT-trace, Gauss-Lobatto `(cp[s], cp[t])` for the H1-trace (D1092 —
+///   `H1_Trace_FECollection(p,3)` = `H1_FECollection(p,2)`, fe_h1.cpp:125).
 /// * 3-D triangle: the enumeration of `eval_face_lagrange` is row-major over
 ///   `row = a + b` (`row = 0..=p`, `a = 0..=row`, `b = row − a`), so index `k`
 ///   satisfies `k = row(row+1)/2 + a` — *not* MFEM's `H1_TriangleElement`
-///   ordering `i*(p+1) − i(i−1)/2 + j` used by [`tri_face_dof_index`].
+///   ordering `i*(p+1) − i(i−1)/2 + j` used by [`tri_face_dof_index`].  The
+///   H1-trace node positions are MFEM's GL/collapsed points
+///   ([`h1_tri_gl_node`], fe_h1.cpp:451); the RT-trace keeps equispaced.
 pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize, h1: bool) -> Vec<f64> {
     if dim == 2 {
         if h1 {
@@ -2162,7 +2167,12 @@ pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize, h1: bool) 
     } else if is_quad {
         let s = k % (p + 1);
         let t = k / (p + 1);
-        vec![s as f64 / p as f64, t as f64 / p as f64]
+        if h1 {
+            let cp = lobatto_points_01(p);
+            vec![cp[s], cp[t]]
+        } else {
+            vec![s as f64 / p as f64, t as f64 / p as f64]
+        }
     } else {
         let mut row = 0usize;
         let mut acc = 0usize;
@@ -2172,8 +2182,14 @@ pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize, h1: bool) 
         }
         let a = k - acc;
         let b = row - a;
-        let pq = p as f64;
-        vec![a as f64 / pq, b as f64 / pq]
+        if h1 {
+            let cp = lobatto_points_01(p);
+            let (s, t) = h1_tri_gl_node(a, b, p, &cp);
+            vec![s, t]
+        } else {
+            let pq = p as f64;
+            vec![a as f64 / pq, b as f64 / pq]
+        }
     }
 }
 

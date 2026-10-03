@@ -1403,18 +1403,61 @@ pub fn eval_face_lagrange(
             lagrange_1d(p, param[0], out);
         }
     } else if is_quad {
-        // 3-D faces keep the equispaced convention for now (the parallel DPG
-        // lane is 2-D, D964); the 3-D GL switch is part of the full D1058 fix.
+        // D1092: `H1_QuadrilateralElement(p, GaussLobatto)` (the
+        // `H1_Trace_FECollection(p, 3)` quad face = `H1_FECollection(p, 2)`,
+        // fe_h1.cpp:125) is the tensor product of the 1-D GL Lagrange basis;
+        // the RT-trace quad face keeps the equispaced gauge.
         let mut la = vec![0.0; p + 1];
         let mut lb = vec![0.0; p + 1];
-        lagrange_1d(p, param[0], &mut la);
-        lagrange_1d(p, param[1], &mut lb);
+        if h1 {
+            lagrange_1d_gl(p, param[0], &mut la);
+            lagrange_1d_gl(p, param[1], &mut lb);
+        } else {
+            lagrange_1d(p, param[0], &mut la);
+            lagrange_1d(p, param[1], &mut lb);
+        }
         let mut k = 0;
         for t in 0..=p {
             for s in 0..=p {
                 out[k] = lb[t] * la[s];
                 k += 1;
             }
+        }
+    } else if h1 {
+        // D1092: `H1_TriangleElement(p, GaussLobatto)` (fe_h1.cpp:451).  MFEM
+        // tabulates the nodal basis `shape = Ti·u` where
+        //   u_{i,j}(x,y) = c_i(x)·c_j(y)·c_{p−i−j}(1−x−y),
+        // c_m = Chebyshev T_m(2·−1) — MFEM's *hierarchical* `Poly_1D::CalcBasis`
+        // (fe_base.hpp:1218 "k-th basis function is degree k", implemented as
+        // `CalcChebyshev`; a graded family is essential — products of degree-p
+        // Lagrange factors would have degree 3p and not span P_p) — and
+        //   T[(i,j),k] = u_{i,j}(node_k),
+        // with the nodes at: corners, GL points cp[i] along each edge, and the
+        // collapsed interior points (cp[i]/w, cp[j]/w) with
+        // w = cp[i]+cp[j]+cp[p−i−j]  (≠ (cp[i],cp[j]): the GL grid is not
+        // barycentric-symmetric).  See [`h1_tri_gl_node`] / [`tri_gl_shape_inv`].
+        let n = (p + 1) * (p + 2) / 2;
+        let mut cx = vec![0.0_f64; p + 1];
+        let mut cy = vec![0.0_f64; p + 1];
+        let mut cl = vec![0.0_f64; p + 1];
+        calc_chebyshev(p, param[0], &mut cx);
+        calc_chebyshev(p, param[1], &mut cy);
+        calc_chebyshev(p, 1.0 - param[0] - param[1], &mut cl);
+        let mut u = vec![0.0_f64; n];
+        let mut o = 0;
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                u[o] = cx[i] * cy[j] * cl[p - i - j];
+                o += 1;
+            }
+        }
+        let ti = tri_gl_shape_inv(p);
+        for (k, o) in out.iter_mut().enumerate().take(n) {
+            let mut v = 0.0;
+            for (m, &um) in u.iter().enumerate() {
+                v += ti[k * n + m] * um;
+            }
+            *o = v;
         }
     } else {
         // Equispaced barycentric nodes on the reference triangle, evaluated
@@ -1466,6 +1509,102 @@ fn lagrange_1d_gl(p: usize, x: f64, out: &mut [f64]) {
         }
         *o = v;
     }
+}
+
+/// MFEM `H1_TriangleElement(p, GaussLobatto)` node position (D1092) of the
+/// lattice point `(a, b)` (`a + b ≤ p`) in reference-triangle coordinates.
+///
+/// fe_h1.cpp:451 (constructor): corners `(cp[0],cp[0])`, `(cp[p],cp[0])`,
+/// `(cp[0],cp[p])`; edge nodes at `cp[i]` along each edge; interior nodes at
+/// the *collapsed* points `(cp[i]/w, cp[j]/w)` with
+/// `w = cp[i] + cp[j] + cp[p−i−j]` — not `(cp[i], cp[j])`, because the GL
+/// grid is not barycentric-symmetric (`cp[p−i−j] ≠ 1 − cp[i] − cp[j]`).
+/// `cp` = [`lobatto_points_01(p)`].
+pub fn h1_tri_gl_node(a: usize, b: usize, p: usize, cp: &[f64]) -> (f64, f64) {
+    debug_assert!(a + b <= p, "h1_tri_gl_node: lattice point outside P{p}");
+    if a == 0 && b == 0 {
+        (cp[0], cp[0])
+    } else if a == p {
+        (cp[p], cp[0])
+    } else if b == p {
+        (cp[0], cp[p])
+    } else if b == 0 {
+        // bottom edge, parameter from corner 0
+        (cp[a], cp[0])
+    } else if a + b == p {
+        // hypotenuse, parameter from corner 1 towards corner 2
+        (cp[a], cp[b])
+    } else if a == 0 {
+        // left edge, parameter from corner 0 towards corner 2
+        (cp[0], cp[b])
+    } else {
+        // interior: collapsed tensor-grid point
+        let w = cp[a] + cp[b] + cp[p - a - b];
+        (cp[a] / w, cp[b] / w)
+    }
+}
+
+/// MFEM `Poly_1D::CalcChebyshev(p, x, u)` (fe_base.cpp:2376): the hierarchical
+/// Chebyshev values `u[m] = T_m(2x−1)` (`T_0 = 1`, `T_1 = z`,
+/// `T_{n+1} = 2z·T_n − T_{n−1}`), the 1-D family behind
+/// `Poly_1D::CalcBasis` (fe_base.hpp:1218) that `H1_TriangleElement` uses for
+/// its nodal transform (D1092).  Degree-graded: `u[m]` is exactly degree `m`.
+fn calc_chebyshev(p: usize, x: f64, u: &mut [f64]) {
+    u[0] = 1.0;
+    if p == 0 {
+        return;
+    }
+    u[1] = 2.0 * x - 1.0;
+    let z = u[1];
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+    }
+}
+
+/// Cached `T⁻¹` per degree for [`tri_gl_shape_inv`].
+static TRI_GL_SHAPE_INV: [std::sync::OnceLock<Vec<f64>>; 24] =
+    [const { std::sync::OnceLock::new() }; 24];
+
+/// `T⁻¹` of the MFEM `H1_TriangleElement(p, GaussLobatto)` nodal transform
+/// (fe_h1.cpp:451 `Ti`): `T[(i,j), k] = u_{i,j}(node_k)` with
+/// `u_{i,j}(x,y) = c_i(x)·c_j(y)·c_{p−i−j}(1−x−y)` in the hierarchical
+/// Chebyshev family ([`calc_chebyshev`], MFEM `Poly_1D::CalcBasis`) and the
+/// nodes at [`h1_tri_gl_node`] positions in the fem-rs tri enumeration
+/// (row-major over `a + b`).  Row-major `n×n`, `n = (p+1)(p+2)/2`.
+fn tri_gl_shape_inv(p: usize) -> &'static Vec<f64> {
+    let slot = TRI_GL_SHAPE_INV
+        .get(p)
+        .unwrap_or_else(|| panic!("tri_gl_shape_inv: degree {p} outside cached range"));
+    slot.get_or_init(|| build_tri_gl_shape_inv(p))
+}
+
+fn build_tri_gl_shape_inv(p: usize) -> Vec<f64> {
+    let n = (p + 1) * (p + 2) / 2;
+    let cp = lobatto_points_01(p);
+    // Nodes in the fem-rs tri enumeration: k = row(row+1)/2 + a, (a,b), a+b = row.
+    let mut nodes: Vec<(f64, f64)> = Vec::with_capacity(n);
+    for row in 0..=p {
+        for a in 0..=row {
+            nodes.push(h1_tri_gl_node(a, row - a, p, &cp));
+        }
+    }
+    let mut t = vec![0.0_f64; n * n];
+    let mut cx = vec![0.0_f64; p + 1];
+    let mut cy = vec![0.0_f64; p + 1];
+    let mut cl = vec![0.0_f64; p + 1];
+    for (k, &(x, y)) in nodes.iter().enumerate() {
+        calc_chebyshev(p, x, &mut cx);
+        calc_chebyshev(p, y, &mut cy);
+        calc_chebyshev(p, 1.0 - x - y, &mut cl);
+        let mut o = 0;
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                t[o * n + k] = cx[i] * cy[j] * cl[p - i - j];
+                o += 1;
+            }
+        }
+    }
+    dense_inverse(&t, n)
 }
 
 /// Face dof index layout for tri faces must match `eval_face_lagrange`.
@@ -2833,12 +2972,13 @@ mod trace_tests {
                     for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
                         // The basis must be a nodal Kronecker delta at the dof
                         // nodes: evaluate at node k and require phi = e_k.
-                        // (3-D faces keep the equispaced convention — the
-                        // D1058 GL switch is 2-D only so far, so the nodal
-                        // self-check here stays on the old convention too.)
+                        // (D1092: the 3-D H1-trace face dofs sit on MFEM's
+                        // Gauss-Lobatto/collapsed points, like the 2-D
+                        // segments since D1058; the RT-trace keeps the
+                        // equispaced gauge.)
                         let node =
-                            crate::dpg_weakform::face_dof_params(3, is_qf, p as usize, k, false);
-                        eval_face_lagrange(3, is_qf, p as usize, &node, &mut phi, false);
+                            crate::dpg_weakform::face_dof_params(3, is_qf, p as usize, k, true);
+                        eval_face_lagrange(3, is_qf, p as usize, &node, &mut phi, true);
                         for (j, &v) in phi.iter().enumerate() {
                             let want = if j == k { 1.0 } else { 0.0 };
                             assert!(
@@ -2873,6 +3013,265 @@ mod trace_tests {
                 assert_eq!(owner.len(), sk.n_dofs(), "every dof must be used");
             }
             let _ = (ne, nf);
+        }
+    }
+
+    /// D1092 pin: the 3-D H1-trace face bases must be MFEM's
+    /// `H1_Trace_FECollection(p, 3)` face elements tabulated verbatim —
+    /// `H1_QuadrilateralElement(p, GaussLobatto)` (tensor product of the 1-D
+    /// GL Lagrange basis, fe_h1.cpp:125) and `H1_TriangleElement(p,
+    /// GaussLobatto)` (GL edge nodes, collapsed interior nodes
+    /// `(cp[i]/w, cp[j]/w)`, `w = cp[i]+cp[j]+cp[p−i−j]`, and the `Ti·u`
+    /// nodal transform, fe_h1.cpp:451).
+    ///
+    /// Oracle: MFEM 4.10 probe (`tmp/d109c/h1trace3d_probe.{cpp,txt}`, built
+    /// against `mfem410_ser`), printing `Nodes` and `CalcShape` at fixed
+    /// probe points.  fem-rs's face dof enumeration differs from MFEM's, so
+    /// the pin reorders through the MFEM node tables (matched by position,
+    /// checked bijective); values must agree to 1e-12 (the nodal transform
+    /// inverse differs in the linear-solve path: Gauss–Jordan here vs MFEM LU
+    /// factorisation).
+    #[test]
+    fn d1092_3d_h1_trace_faces_match_mfem_tabulation() {
+        // MFEM node tables straight from the probe output (`Nodes.IntPoint`).
+        let tri3: &[(f64, f64)] = &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.27639320225002106, 0.0),
+            (0.72360679774997894, 0.0),
+            (0.72360679774997894, 0.27639320225002106),
+            (0.27639320225002106, 0.72360679774997894),
+            (0.0, 0.72360679774997894),
+            (0.0, 0.27639320225002106),
+            (0.33333333333333331, 0.33333333333333331),
+        ];
+        let quad3: &[(f64, f64)] = &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.27639320225002106, 0.0),
+            (0.72360679774997894, 0.0),
+            (1.0, 0.27639320225002106),
+            (1.0, 0.72360679774997894),
+            (0.72360679774997894, 1.0),
+            (0.27639320225002106, 1.0),
+            (0.0, 0.72360679774997894),
+            (0.0, 0.27639320225002106),
+            (0.27639320225002106, 0.27639320225002106),
+            (0.72360679774997894, 0.27639320225002106),
+            (0.27639320225002106, 0.72360679774997894),
+            (0.72360679774997894, 0.72360679774997894),
+        ];
+        let tri4: &[(f64, f64)] = &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.17267316464601146, 0.0),
+            (0.5, 0.0),
+            (0.82732683535398854, 0.0),
+            (0.82732683535398854, 0.17267316464601146),
+            (0.5, 0.5),
+            (0.17267316464601146, 0.82732683535398854),
+            (0.0, 0.82732683535398854),
+            (0.0, 0.5),
+            (0.0, 0.17267316464601146),
+            (0.20426322166753258, 0.20426322166753258),
+            (0.59147355666493484, 0.20426322166753258),
+            (0.20426322166753258, 0.59147355666493484),
+        ];
+        let quad4: &[(f64, f64)] = &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.17267316464601146, 0.0),
+            (0.5, 0.0),
+            (0.82732683535398854, 0.0),
+            (1.0, 0.17267316464601146),
+            (1.0, 0.5),
+            (1.0, 0.82732683535398854),
+            (0.82732683535398854, 1.0),
+            (0.5, 1.0),
+            (0.17267316464601146, 1.0),
+            (0.0, 0.82732683535398854),
+            (0.0, 0.5),
+            (0.0, 0.17267316464601146),
+            (0.17267316464601146, 0.17267316464601146),
+            (0.5, 0.17267316464601146),
+            (0.82732683535398854, 0.17267316464601146),
+            (0.17267316464601146, 0.5),
+            (0.5, 0.5),
+            (0.82732683535398854, 0.5),
+            (0.17267316464601146, 0.82732683535398854),
+            (0.5, 0.82732683535398854),
+            (0.82732683535398854, 0.82732683535398854),
+        ];
+        // `CalcShape` probe vectors (MFEM dof order).
+        let tri3_shape_03_06: &[f64] = &[
+            0.07299999999999976,
+            0.0030000000000000217,
+            -0.10199999999999991,
+            -0.093541019662497241,
+            -0.026458980337503223,
+            0.0131308230375286,
+            0.61686917696247201,
+            0.18270509831248449,
+            -0.15270509831248449,
+            0.48599999999999999,
+        ];
+        let tri3_shape_01_025: &[f64] = &[
+            -0.073124999999999815,
+            0.071250000000000077,
+            0.031875000000000035,
+            0.24047357548904372,
+            -0.15922357548904356,
+            -0.080338137289060391,
+            -0.038411862710939514,
+            -0.078986046343715921,
+            0.64773604634371595,
+            0.43875000000000008,
+        ];
+        let quad3_shape_03_06: &[f64] = &[
+            0.0027999999999999939,
+            0.0011999999999999975,
+            0.0017999999999999958,
+            0.0041999999999999902,
+            -0.079565942021996447,
+            -0.0044340579780035236,
+            -0.0049750776405003685,
+            -0.013024922359499595,
+            -0.0066510869670052845,
+            -0.11934891303299465,
+            -0.030391485505499052,
+            -0.011608514494500859,
+            0.32987228258248674,
+            0.018383152252539711,
+            0.86361684774746006,
+            0.048127717417513149,
+        ];
+        let tri4_shape_03_06: &[f64] = &[
+            -0.059704789256996772,
+            0.060753278558494453,
+            -0.025559619718267999,
+            0.0743235131042492,
+            -0.01056397160394067,
+            -0.049971561557478117,
+            -0.15201777061031432,
+            0.31069706531747815,
+            0.14271006536745814,
+            -0.033895689928934498,
+            -0.10260734945108943,
+            0.11645184740192903,
+            -0.19639978901672539,
+            0.18033859653401457,
+            0.74544617486012499,
+        ];
+        let tri4_shape_third: &[f64] = &[
+            0.082502654035137443,
+            0.082502654035137249,
+            0.082502654035137152,
+            -0.148010835467452,
+            0.046588301963269102,
+            -0.14801083546745178,
+            -0.14801083546745183,
+            0.04658830196326897,
+            -0.14801083546745192,
+            -0.14801083546745186,
+            0.046588301963269151,
+            -0.14801083546745203,
+            0.50026404826982884,
+            0.5002640482698284,
+            0.50026404826982829,
+        ];
+        let quad4_shape_03_06: &[f64] = &[
+            -0.0071590399999999941,
+            0.0030681599999999977,
+            -0.0046022399999999962,
+            0.010738559999999991,
+            0.039357987544948562,
+            0.028636159999999983,
+            -0.0095032675449485647,
+            -0.010051847074948521,
+            0.049090559999999984,
+            0.018895367074948512,
+            0.014254901317422845,
+            -0.04295423999999997,
+            -0.059036981317422833,
+            -0.044089189841546521,
+            -0.11454463999999996,
+            0.023454309841546547,
+            -0.12894388557948472,
+            -0.093817239366186203,
+            0.031134423261545849,
+            0.62972780071917722,
+            0.4581785599999999,
+            -0.15205228071917709,
+            0.24238749673845406,
+            0.17635675936618614,
+            -0.05852619442051523,
+        ];
+        for (p, tri_nodes, quad_nodes, tri_probes, quad_probes) in [
+            (
+                3usize,
+                tri3,
+                quad3,
+                &[
+                    (0.3, 0.6, tri3_shape_03_06),
+                    (0.1, 0.25, tri3_shape_01_025),
+                ] as &[(_, _, &[f64])],
+                &[(0.3, 0.6, quad3_shape_03_06)] as &[(_, _, &[f64])],
+            ),
+            (
+                4,
+                tri4,
+                quad4,
+                &[
+                    (0.3, 0.6, tri4_shape_03_06),
+                    (1.0 / 3.0, 1.0 / 3.0, tri4_shape_third),
+                ],
+                &[(0.3, 0.6, quad4_shape_03_06)],
+            ),
+        ] {
+            for is_quad in [false, true] {
+                let (nodes, probes) = if is_quad {
+                    (quad_nodes, quad_probes)
+                } else {
+                    (tri_nodes, tri_probes)
+                };
+                let n = nodes.len();
+                // fem-rs node k must sit exactly on one MFEM node (bijective).
+                let mut m_of_k = Vec::with_capacity(n);
+                for k in 0..n {
+                    let par = crate::dpg_weakform::face_dof_params(3, is_quad, p, k, true);
+                    let m = nodes
+                        .iter()
+                        .position(|&(x, y)| (x - par[0]).abs() < 1e-12 && (y - par[1]).abs() < 1e-12)
+                        .unwrap_or_else(|| panic!("p={p} quad={is_quad}: fem-rs node {k} ({:?}) not in the MFEM table", &par[..]));
+                    m_of_k.push(m);
+                }
+                let mut sorted = m_of_k.clone();
+                sorted.sort_unstable();
+                assert!(
+                    sorted.iter().enumerate().all(|(i, &m)| i == m),
+                    "p={p} quad={is_quad}: node tables not bijective"
+                );
+                // Basis values at the probe points (reordered MFEM → fem-rs).
+                for &(x, y, want) in probes {
+                    let mut out = vec![0.0_f64; n];
+                    eval_face_lagrange(3, is_quad, p, &[x, y], &mut out, true);
+                    for (k, &m) in m_of_k.iter().enumerate() {
+                        assert!(
+                            (out[k] - want[m]).abs() < 1e-12,
+                            "p={p} quad={is_quad} @ ({x},{y}): dof {k} (mfem {m}) \
+                             {} vs {}",
+                            out[k],
+                            want[m]
+                        );
+                    }
+                }
+            }
         }
     }
 
