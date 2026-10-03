@@ -653,6 +653,21 @@ where
 }
 
 /// Assemble HCurl × H¹ mixed bilinear form.
+///
+/// # Surface meshes (D1100)
+///
+/// On a surface mesh (2-D elements embedded in 3-D, `topological_dim() <
+/// dim()`) the kernel takes the **surface arm**: geometry through the 3×2
+/// surface Jacobian (`crate::assembler::surface_jacobian`, the
+/// `assemble_hcurl_h1_gradient` sibling's contract — the mesh's order-`g`
+/// isoparametric map via `geo_ref_elem_from_mesh`, or the affine P1 map on
+/// straight simplices), and the physical **surface** curl of the covariantly
+/// mapped Nédélec basis `σ(Φ_i) = curl̂_i/measure` — the exact surface
+/// analogue of the planar 2-D `curl̂/detJ` (with `E = J·G⁻¹·û`, the Piola
+/// property `E·x_ξ = û₁, E·x_η = û₂` collapses the surface-curl formula
+/// `(∇_S×E)·(x_ξ×x_η) = ∂_ξ(E·x_η) − ∂_η(E·x_ξ)`).  The scalar sits in the
+/// last slot of each `[n_dofs × dim]` dof chunk; the pairing weight
+/// `q·measure` cancels the `1/measure` exactly, on curved maps too.
 pub fn assemble_hcurl_h1_mixed<SR, SC>(
     row_space: &SR,   // H¹ (scalar potential)
     col_space: &SC,   // HCurl (vector field)
@@ -665,6 +680,11 @@ where
 {
     let mesh = row_space.mesh();
     let dim = mesh.dim() as usize;
+    // D1100: 2-D elements embedded in 3-D (surface meshes, `tdim < edim`)
+    // take the surface arm below — the volume geometry and curl transforms
+    // do not apply there.
+    let tdim = mesh.topological_dim() as usize;
+    let is_surface = dim != tdim;
     let n_rows = row_space.n_dofs();
     let n_cols = col_space.n_dofs();
     let mut coo = CooMatrix::<f64>::new(n_rows, n_cols);
@@ -694,11 +714,14 @@ where
         // panicked on any hex (its `col_of = [1,2,3]` corner-difference
         // Jacobian is singular for MFEM's hex vertex layout → "degenerate
         // simplex element", `fem_mesh::transformation.rs`) and silently served
-        // curved simplices the straight corner map.
+        // curved simplices the straight corner map.  (D1100: surface elements
+        // always route through `geo_ref_elem_from_mesh`, whose straight-simplex
+        // answer `None` selects the affine P1 *surface* map in the arm below —
+        // `from_simplex_nodes` itself has no surface path.)
         let use_iso = mesh.geom_order() > 1
             || !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
-        let geo_elem = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
-        let tr_straight = if use_iso {
+        let geo_elem = if use_iso || is_surface { geo_ref_elem_from_mesh(mesh, e) } else { None };
+        let tr_straight = if use_iso || is_surface {
             None
         } else {
             Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
@@ -722,6 +745,46 @@ where
         let mut curl_ref = vec![0.0; n_c * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
+            // ── D1100 surface arm (2-D elements embedded in 3-D) ──────────────
+            // Geometry: the 3×2 surface Jacobian of the element's own
+            // order-`g` isoparametric map (or the affine P1 map when
+            // `geo_ref_elem_from_mesh` answered `None`); `measure` is MFEM's
+            // `Trans.Weight()` on a surface, `sqrt(det(JᵀJ))`.
+            if is_surface {
+                let geo_p1 = crate::assembler::ref_elem_vol(elem_type, 1);
+                let (geo, geo_nds): (&dyn ReferenceElement, &[u32]) = if let Some(ref ge) = geo_elem
+                {
+                    (ge.as_ref(), mesh.geometry_nodes(e))
+                } else {
+                    (geo_p1.as_ref(), nodes)
+                };
+                let (measure, _j32, _ginv, xp) = crate::assembler::surface_jacobian(
+                    mesh, geo_nds, geo, xi, dim, tdim,
+                );
+                let w = quad.weights[q] * measure;
+                ref_r.eval_basis(xi, &mut phi_r);
+                ref_c.eval_curl(xi, &mut curl_ref);
+                // Physical **surface** curl of the covariantly mapped Nédélec
+                // basis: `σ(Φ_i) = curl̂_i/measure` (the surface analogue of the
+                // planar `curl̂/detJ` — see the fn docs), signed per dof, in the
+                // last slot of each `[n_dofs × dim]` chunk (the D1051 layout the
+                // integrator reads).  The pairing weight `q·measure` cancels the
+                // `1/measure` exactly, straight or curved.
+                let inv_m = 1.0 / measure;
+                for i in 0..n_c {
+                    let s = col_signs.and_then(|sg| sg.get(i)).copied().unwrap_or(1.0);
+                    curl_c_vec[i * dim + dim - 1] = s * inv_m * curl_ref[i];
+                }
+                let qp_r = QpData {
+                    n_dofs: n_elem_r, dim, weight: w, phys_weight: w,
+                    ref_weight: quad.weights[q], phi: &phi_r, grad_phys: &[],
+                    x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
+                };
+                for integ in integrators {
+                    integ.add_to_element_matrix(&qp_r, &curl_c_vec, dim, &mut m_elem);
+                }
+                continue;
+            }
             // Geometry per QP on the isoparametric arm (the map is not affine);
             // the straight-simplex arm keeps the hoisted affine map unchanged.
             let (det_j, jac, xp) = if use_iso {

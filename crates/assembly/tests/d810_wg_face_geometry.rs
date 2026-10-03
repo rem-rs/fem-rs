@@ -768,10 +768,12 @@ fn d810_1_wg_maxwell_face_block_is_the_isoparametric_one() {
     assert!(rel < 1e-12, "wg maxwell face block != isoparametric ({rel:.3e})");
 }
 
-/// Independent assembly of the HCurl tangential-jump stabilizer through
-/// `face_point_geom`.  D1080: each element's block is scattered with that
-/// element's own H(curl) orientation signs (MFEM's signed `GetElementVDofs`
-/// face scatter, `bilinearform.cpp:683-697` + `sparsemat.cpp:2795-2811`).
+/// Independent assembly of the HCurl two-sided local face-mass stabilizer
+/// through `face_point_geom` (D1101: per-side blocks, no cross-element jump
+/// terms — the earlier "tangential-jump" name was wrong).  D1080: each
+/// element's block is scattered with that element's own H(curl) orientation
+/// signs (MFEM's signed `GetElementVDofs` face scatter,
+/// `bilinearform.cpp:683-697` + `sparsemat.cpp:2795-2811`).
 fn wg_maxwell_face_block<const D: usize>(
     mesh: &Mesh<D>,
     hcurl: &HCurlSpace<Mesh<D>>,

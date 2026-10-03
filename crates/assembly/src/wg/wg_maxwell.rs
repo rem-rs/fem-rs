@@ -1,10 +1,37 @@
 //! Weak Galerkin (WG) finite element method for Maxwell equations.
 //!
-//! Reference: Wang & Ye (2013), "A weak Galerkin FEM for Maxwell equations".
+//! Reference: Mu, Wang, Ye & Zhang (2013), "A weak Galerkin finite element
+//! method for the Maxwell equations" — the WG-Maxwell scheme whose
+//! stabilizer is **local**: it penalizes the mismatch between the interior
+//! trace `v_0` and the independent boundary variable `v_b` on each element's
+//! **own** boundary (`s(v,w) = Σ_T h_T⁻¹⟨(v_0−v_b)×n,(w_0−w_b)×n⟩_{∂T} +
+//! h_T⁻¹⟨(εv_0−v_b)·n,…⟩_{∂T}`; the two-component structure is explicit in
+//! e.g. Chunmei Wang, arXiv:1610.04310) — *not* a cross-element DG jump.
 //! Bilinear form: a_h(E,v) = (κ ∇_w × E, ∇_w × v)_T + s(E,v)
 //!
 //! E ∈ V_h = Nédélec order k,  flux Σ_h = [P_{k-1}]^d.
-//! Face stabilizer s(·,·) penalizes tangential jumps.
+//!
+//! # Face stabilizer semantics (D1101)
+//!
+//! This module is the **single-space reduction** of that scheme: one trace
+//! per element (the conforming Nédélec field), no `v_b`.  The stabilizer is
+//! therefore the *two-sided local face mass*
+//! `s(E,v) = Σ_F α ∫_F (E_L·v_L + E_R·v_R) dS`, `α = penalty/h` — each side
+//! contributes its own signed block, there are **no cross-element jump
+//! blocks**, and the integrand is the **full** vector dot product (tangential
+//! and normal trace components together — the single-trace analog of the
+//! two-component `s_1`'s `×n` + `·n` pair).  The earlier doc comment
+//! ("penalizes tangential jumps") was wrong twice over: (a) a DG-style jump
+//! penalty is not the WG structure, and (b) on this conforming H(curl) space
+//! the tangential trace is *identically continuous*, so a jump penalty would
+//! assemble to exactly zero and leave the volume curl–curl form (kernel =
+//! discrete gradients) singular — the stabilizer is precisely what removes
+//! that kernel.
+//!
+//! Truth: `crates/assembly/tests/d110_d1101_face_stabilizer_semantics.rs`
+//! (jump nullity + kernel removal) and pin 3 of
+//! `crates/assembly/tests/d109_d1080_wg_maxwell_signs.rs` (the exact
+//! two-sided signed block structure).
 //!
 //! The face stabilizer's geometry (measure, physical point, element reference
 //! point) comes from the family's shared isoparametric face path
@@ -127,13 +154,23 @@ fn weak_curl_matrix<M: MeshTopology>(
                 Ms[(p, q)] += wq_abs * ps[p] * ps[q];
             }}
         } else {
-            for i in 0..n_v { for j in 0..n_s {
-                let sc = j / n_ss; let sd = j % n_ss;
-                // Physical curl component: (J·curl̂_i)_sc/detJ.
-                let curl_phys_sc =
-                    (0..3).map(|k| jac[(sc, k)] * nv_curl[i * 3 + k]).sum::<f64>() / det_j;
-                Cw[(i, j)] -= wq_signed * curl_phys_sc * ps[sd];
-            }}
+            // D1102: the physical curl `(J·curl̂_i)/detJ` depends only on the
+            // ND dof `i` (not on the flux column `j`), so its three components
+            // are hoisted out of the column loop — the pre-hoist code
+            // recomputed each component `n_ss` times per (i, sc).  The
+            // arithmetic (product order, `.sum()` order, single `/detJ`) is
+            // unchanged, so the results are bit-identical — pinned by
+            // `tests/d110_d1102_wg_checksum.rs` (FNV-1a over the exact
+            // `f64::to_bits` of the assembled matrix, captured pre-change).
+            for i in 0..n_v {
+                let curl_phys: [f64; 3] = std::array::from_fn(|sc| {
+                    (0..3).map(|k| jac[(sc, k)] * nv_curl[i * 3 + k]).sum::<f64>() / det_j
+                });
+                for j in 0..n_s {
+                    let sc = j / n_ss; let sd = j % n_ss;
+                    Cw[(i, j)] -= wq_signed * curl_phys[sc] * ps[sd];
+                }
+            }
             for p in 0..n_s { let pc = p / n_ss; let pd = p % n_ss;
                 for q in 0..n_s { let qc = q / n_ss; let qd = q % n_ss;
                     if pc == qc { Ms[(p, q)] += wq_abs * ps[pd] * ps[qd]; }
@@ -156,7 +193,7 @@ fn weak_curl_matrix<M: MeshTopology>(
     (Cw, Ms)
 }
 
-// ─── Face stabilizer (tangential jump for H(curl)) ────────────────────────
+// ─── Face stabilizer (two-sided local face mass for H(curl), D1101) ───────
 //
 // D1080: both element blocks of the stabilizer scatter through the element's
 // **signed** dof table — MFEM's interior-face path concatenates the signed
@@ -258,7 +295,7 @@ where
         }}
     }
 
-    // ── Face penalty (tangential jump stabilizer) ──────────────────────────
+    // ── Face penalty (two-sided local face-trace stabilizer, D1101) ────────
     let interior_faces = crate::InteriorFaceList::build(mesh);
     for f in &interior_faces.faces {
         let h = wg_face_measure(mesh, f.elem_left, &f.face_nodes, quad_order);

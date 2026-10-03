@@ -4,7 +4,7 @@
 //! # The debt
 //!
 //! The whole WG Maxwell chain was sign-blind: the volume weak-curl stiffness
-//! `C_wᵀ M_Σ⁻¹ C_w` (`weak_curl_matrix`) and the face-penalty tangential
+//! `C_wᵀ M_Σ⁻¹ C_w` (`weak_curl_matrix`) and the face-penalty per-element
 //! scatter (`add_face_penalty_hcurl`) scattered **raw unsigned** element-local
 //! dofs — zero `element_signs` in the file.  MFEM's convention (the family
 //! every sibling follows since D1041/D1051): the scatter goes through the
