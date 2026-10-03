@@ -60,6 +60,17 @@
 //! -theta 0.7 -sc (--ranks 1):
 //!                          113 1.033e+00 9.290e-01   ==  113 1.033e+00 9.290e-01
 //!                          275 6.838e-01 6.187e-01   ==  275 6.838e-01 6.187e-01
+//! -o 2 -theta 0.7 (D1031, --ranks 1):
+//!                          337 1.052e-01 9.535e-02   ==  337 1.052e-01 9.535e-02
+//!                          964 4.345e-02 3.939e-02   ==  964 4.345e-02 3.939e-02
+//! -o 2 -theta 0.7 -ref 2 (--ranks 1):  1021 3.509e-02 3.310e-02  ==  same
+//! -o 2 -theta 0.7 -sc (--ranks 1):     337/964 rows identical   ==  same
+//! -theta 0.7 (D1032, --ranks 2):
+//!                          113 1.033e+00 9.290e-01   ==  113 1.033e+00 9.290e-01
+//!                          275 6.838e-01 6.187e-01   ==  275 6.838e-01 6.187e-01
+//! -o 2 -theta 0.7 (--ranks 2):
+//!                          337 1.052e-01 9.535e-02   ==  337 1.052e-01 9.535e-02
+//!                          964 4.345e-02 3.939e-02   ==  964 4.345e-02 3.939e-02
 //! ```
 //!
 //! The **PCG iteration count is not reproduced** (D963): the C++ miniapp
@@ -79,16 +90,18 @@
 //!   refinement is wired to `amr::general_refinement_quad_aniso` (the
 //!   `NcQuadTree` machinery, MFEM-probe-validated in `d246_quad_aniso_nc`).
 //!   **D1030 closed (round 106)**: the hanging-node conforming restriction of
-//!   the trace blocks is implemented (`SkeletonSpace::nc_conforming_constraints`
-//!   + `DpgWeakForm::set_trace_conforming_restriction`, probe-pinned against
-//!   the MFEM 4.10 `cP` — see `tmp/d106d1030/REPORT.md`) in the **serial
-//!   (`--ranks 1`) driver**, which is the 1:1 mirror of the C++ np1 run: the
-//!   theta=0.7 table matches C++ np1 to all printed digits on both rows
-//!   (`113 1.033e+00 9.290e-01` → `275 6.838e-01 6.187e-01`, also under
-//!   `-sc`).  The multi-rank lane does not carry the restriction yet —
-//!   `--ranks 2` with a partial mark set exits 3 (registered separately).
-//!   With `-theta 0.0` (mark-all) the refinement is uniform and the parallel
-//!   path matches C++ exactly.
+//!   the trace blocks is implemented in the **serial (`--ranks 1`) driver**
+//!   (probe-pinned against the MFEM 4.10 `cP` — see `tmp/d106d1030/REPORT.md`).
+//!   **D1031 closed (round 107)**: the p ≥ 2 constraint rows (H1-trace
+//!   master-basis interpolation incl. the half-edge interior rows, RT-trace
+//!   function preservation) — the `-o 2/-o 3 -theta 0.7` tables match C++ np1
+//!   digit-for-digit (see `tmp/d107nc/REPORT.md`).  **D1032 closed (round
+//!   107)**: the multi-rank lane carries the restriction too — the numbering
+//!   is built over the true dofs (`ParDpgWeakForm::
+//!   set_trace_conforming_restriction` + `trace_boundary_dofs_nc`), and
+//!   `--ranks 2` reproduces the C++ `mpirun -np 2` theta=0.7 rows
+//!   (275 / 964) digit-for-digit.  With `-theta 0.0` (mark-all) the
+//!   refinement is uniform and both paths match C++ exactly.
 //! * `-pmg` (`PRefinementMultigrid`): not ported (**D961**); exits 3.
 //! * `-prob 1` (Erickson–Johnson): the essential `f̂` boundary condition needs
 //!   `ProjectBdrCoefficientNormal` (RT-trace normal projection), which fem-rs
@@ -815,6 +828,7 @@ fn solve_level(
     eps: f64,
     beta_const: Arc<Vec<f64>>,
     theta: f64,
+    hanging: Arc<Vec<HangingNodeConstraint>>,
 ) -> LevelResult {
     let p: u8 = order;
     let test_order: u8 = order + delta_order;
@@ -845,7 +859,7 @@ fn solve_level(
         let c2 = Arc::new(c2);
 
         let mut a = ParDpgWeakForm::new(local_mesh, partition, comm.clone());
-        let (u, sig, hatu, _hatf) = register_dpg_system(
+        let (u, sig, hatu, hatf) = register_dpg_system(
             &mut a,
             prob,
             eps,
@@ -862,10 +876,32 @@ fn solve_level(
         }
         a.assemble();
 
+        // D1032: hanging-node conforming restriction of the trace blocks on
+        // the NC levels.  Every rank sees the global hanging list and derives
+        // the rows of the structures its local skeleton holds (see
+        // `ParDpgWeakForm::set_trace_conforming_restriction`); the numbering
+        // is rebuilt over the true dofs, so the solved system is the
+        // distributed `Pᵀ A P`.
+        if !hanging.is_empty() {
+            let rows_h1 = a
+                .local()
+                .skeleton(hatu)
+                .nc_conforming_constraints(hanging.as_slice());
+            let rows_rt = a
+                .local()
+                .skeleton(hatf)
+                .nc_conforming_constraints(hanging.as_slice());
+            a.set_trace_conforming_restriction(hatu, &rows_h1);
+            a.set_trace_conforming_restriction(hatf, &rows_rt);
+        }
+
         // Essential BCs: û on every global boundary face (C++
         // `ess_bdr_uhat = 1`), none for f̂ (`ess_bdr_fhat = 0`); the EJ
         // attribute split is the D962 gap and never reaches this point.
-        let pairs = a.trace_boundary_dofs(hatu);
+        // D1032: `trace_boundary_dofs_nc` excludes the one-sided faces of the
+        // hanging structures (the parallel analogue of the serial driver's
+        // `true_boundary_faces` filter) — they are interior to the domain.
+        let pairs = a.trace_boundary_dofs_nc(hatu, hanging.as_slice());
         let merged = a.merge_dof_points(&pairs);
         let ess_ids: Vec<u32> = merged.iter().map(|(g, _)| *g).collect();
 
@@ -1344,8 +1380,11 @@ fn main() {
                 theta,
             )
         } else {
-            // Parallel driver: the D963 lane (uniform refinement only —
-            // multi-rank NC DPG is registered separately, see D1030).
+            // Parallel driver (D963 lane).  D1032: it now carries the
+            // hanging-node conforming restriction on the NC levels — the
+            // `theta = 0.7` table matches C++ `mpirun -np N` to all printed
+            // digits (the physical columns are np-independent).  `-sc` on an
+            // NC level is the remaining gap (D1057).
             solve_level(
                 &mesh,
                 n_workers,
@@ -1356,6 +1395,7 @@ fn main() {
                 eps,
                 Arc::clone(&beta_const),
                 theta,
+                Arc::new(hanging.clone()),
             )
         };
         let dim_f = dim as f64;
@@ -1409,8 +1449,9 @@ fn main() {
         // (`SkeletonSpace::nc_conforming_constraints` + `DpgWeakForm::
         // set_trace_conforming_restriction`, probe-pinned against the MFEM 4.10
         // cP), so the partial-mark table matches C++ np1 digit-for-digit.
-        // Multi-rank NC DPG (the D963 lane) does not carry the restriction —
-        // kept as an honest exit(3) (registered separately from D1030).
+        // D1032 (round 107): the multi-rank lane carries the restriction too
+        // (true-dof numbering + `trace_boundary_dofs_nc`); `-sc` on an NC
+        // level with `--ranks ≥ 2` remains an honest exit(3) (D1057).
         if r.marked.len() == mesh.n_elements() {
             mesh = refine_uniform(&mesh);
             hanging.clear();
@@ -1420,14 +1461,13 @@ fn main() {
             let (m, iso_out, hang) =
                 general_refinement_quad_aniso(&mesh, &marks, 1, iso_state, None);
             iso_state = iso_out;
-            if n_workers > 1 {
+            if n_workers > 1 && static_cond {
                 eprintln!(
                     "pconvection_diffusion: GAP — partial refinement ({}/{} elements) with \
-                     --ranks {} needs the hanging-node conforming restriction on the \
-                     multi-rank DPG lane (crates/parallel), which is registered separately \
-                     from D1030 (the --ranks 1 serial driver carries it).  Re-run with \
-                     `--ranks 1`, or use `-theta 0.0` (mark-all → uniform refinement, \
-                     verified parallel path).",
+                     --ranks {} and -sc needs the conforming restriction under static \
+                     condensation on the multi-rank DPG lane (D1057; the full path carries \
+                     it since D1032).  Re-run without -sc, with `--ranks 1`, or use \
+                     `-theta 0.0` (mark-all → uniform refinement, verified parallel path).",
                     r.marked.len(),
                     mesh.n_elements(),
                     n_workers

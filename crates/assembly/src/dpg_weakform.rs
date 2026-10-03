@@ -753,6 +753,34 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         }
     }
 
+    /// Per-block true-layout maps of the registered conforming restriction:
+    /// `out[b][t]` is the **block-local** full-layout dof id of the block-`b`
+    /// true dof `t` (the identity when block `b` carries no constraint rows).
+    /// `None` when no restriction is registered — the formed system then lives
+    /// in the plain full layout.  This is the layout contract of the system
+    /// [`Self::form_linear_system`] returns under a restriction (MFEM
+    /// `ConformingAssemble` true-dof space) and of the block sizes and offsets
+    /// the parallel numbering must mirror.
+    pub fn conforming_true_layout(&self) -> Option<Vec<Vec<usize>>> {
+        let conf = self.conforming.as_ref()?;
+        let sizes = self.trial_block_sizes();
+        let offsets = self.trial_offsets();
+        let mut out = Vec::with_capacity(sizes.len());
+        for b in 0..sizes.len() {
+            let base = offsets[b];
+            let mut map = Vec::with_capacity(conf.true_offsets[b + 1] - conf.true_offsets[b]);
+            for &t in &conf.true_dofs[conf.true_offsets[b]..conf.true_offsets[b + 1]] {
+                debug_assert!(
+                    t >= base && t < base + sizes[b],
+                    "true dof {t} outside block {b}"
+                );
+                map.push(t - base);
+            }
+            out.push(map);
+        }
+        Some(out)
+    }
+
     /// Number of trial blocks.
     pub fn n_trial_blocks(&self) -> usize {
         self.trial_spaces.len()

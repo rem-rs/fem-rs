@@ -87,7 +87,8 @@ impl DpgBlockKind {
 ///
 /// "System index space" is the index space of the formed system: the full
 /// local trial vector when uncondensed, the exposed (trace) compact vector
-/// when statically condensed.
+/// when statically condensed, and the **true-dof** vector when a conforming
+/// restriction is registered (D1032 — see `SysBlock::layout`).
 pub(crate) struct SysBlock {
     /// Trial-block index inside the serial weak form.
     pub trial: usize,
@@ -95,8 +96,16 @@ pub(crate) struct SysBlock {
     pub base: usize,
     /// Base of the block in the **full** serial trial index space.
     pub full_base: usize,
-    /// Number of rank-local DOFs of the block.
+    /// Number of rank-local DOFs of the block (true dofs under a conforming
+    /// restriction).
     pub size: usize,
+    /// `true dof -> block-local full-layout dof` (the identity unless a
+    /// conforming restriction constrains the block: D1032).  The serial
+    /// `DpgWeakForm::form_linear_system` takes essential dofs and `x` in the
+    /// full layout and returns the formed system in the true layout, so every
+    /// translation between the numbering (true-indexed `gof`) and the serial
+    /// full vector goes through this map.
+    pub layout: Vec<usize>,
     /// Offset of this block in the global numbering.
     pub global_base: usize,
     /// Number of distinct global DOFs of this block.
@@ -143,6 +152,15 @@ pub(crate) trait DpgNumberingLocal<M: MeshTopology + Clone + 'static> {
     fn trial_block_sizes(&self) -> Vec<usize>;
     fn trial_offsets(&self) -> Vec<usize>;
     fn exposed_block_offsets(&self) -> Vec<usize>;
+    /// Per-block true-layout maps of the registered conforming restriction
+    /// (D1032): `out[b][t]` = block-`b`-local full-layout dof of true dof `t`;
+    /// `None` when no restriction is registered.  Default: `None` — only the
+    /// real serial weak form carries a conforming restriction so far (the
+    /// complex lane has no NC support yet).
+    fn conforming_true_layout(&self) -> Option<Vec<Vec<usize>>> {
+        let _ = self;
+        None
+    }
     /// Run `f` on the skeleton of trace block `tb`.  The real weak form hands
     /// out a stored reference; the complex one rebuilds the skeleton on
     /// demand (cheap), so the numbering only borrows it.
@@ -165,6 +183,9 @@ impl<M: MeshTopology + Clone + 'static> DpgNumberingLocal<M> for DpgWeakForm<M> 
     }
     fn exposed_block_offsets(&self) -> Vec<usize> {
         DpgWeakForm::exposed_block_offsets(self)
+    }
+    fn conforming_true_layout(&self) -> Option<Vec<Vec<usize>>> {
+        DpgWeakForm::conforming_true_layout(self)
     }
     fn with_skeleton<R>(&self, tb: usize, f: impl FnOnce(&SkeletonSpace<M>) -> R) -> R {
         f(DpgWeakForm::skeleton(self, tb))
@@ -273,6 +294,25 @@ where
     assert_eq!(n_trial, kinds.len(), "block kinds out of sync");
     let block_sizes = local.trial_block_sizes();
     let offsets = local.trial_offsets();
+    // D1032: when a conforming restriction is registered on the local weak
+    // form, the formed system — and hence the numbering's system index space —
+    // lives on the **true** dofs (`DpgWeakForm::conforming_true_layout`):
+    // `conf_layout[b][t]` maps block `b`'s true dof `t` to its block-local
+    // full-layout id, and the constrained (slave) dofs are dropped from the
+    // numbering exactly like MFEM's NC `ParFiniteElementSpace` true-dof space.
+    let conf_layout = local.conforming_true_layout();
+    if conf_layout.is_some() {
+        assert!(
+            !condensed,
+            "build_numbering: static condensation with a conforming restriction \
+             is not supported yet (D1057)"
+        );
+    }
+    // Block sizes in the system index space (true sizes under a restriction).
+    let numbering_sizes: Vec<usize> = match &conf_layout {
+        Some(m) => m.iter().map(|lm| lm.len()).collect(),
+        None => block_sizes.clone(),
+    };
 
     // Which trial blocks form the system, and their system index base?
     let (sys_trials, base_of_trial): (Vec<usize>, Vec<usize>) = if condensed {
@@ -282,7 +322,11 @@ where
         let bases: Vec<usize> = (0..exposed.len()).map(|bi| eoffs[bi]).collect();
         (exposed, bases)
     } else {
-        ((0..n_trial).collect(), offsets[..n_trial].to_vec())
+        let mut bases = vec![0usize];
+        for s in &numbering_sizes {
+            bases.push(bases.last().unwrap() + s);
+        }
+        ((0..n_trial).collect(), bases[..n_trial].to_vec())
     };
 
     let dim = local.numbering_mesh().dim();
@@ -303,6 +347,35 @@ where
     let mut n_global_trial: Vec<usize> = vec![0; n_trial];
     for tb in 0..n_trial {
         let (g, o, n) = number_block(local, kinds, partition, comm, tb, block_sizes[tb], &faces);
+        // D1032 true-dof fold: index the numbering by the block's true dofs
+        // and drop the constrained (slave) slots.  The surviving global ids
+        // are then renumbered to their **dense union rank** — the stride
+        // formulas leave holes at the dropped slave slots, and holes would let
+        // this block's id range overlap the next block's dense base (a hatu
+        // vertex with node id ≥ the union count would collide with a hatf
+        // slot), so the exact per-block global count alone is not enough.
+        let (g, o, n) = match &conf_layout {
+            None => (g, o, n),
+            Some(maps) => {
+                let map = &maps[tb];
+                let mut g2 = vec![INACTIVE; map.len()];
+                let mut o2 = vec![INACTIVE as Rank; map.len()];
+                for (t, &d) in map.iter().enumerate() {
+                    g2[t] = g[d];
+                    o2[t] = o[d];
+                }
+                let live: Vec<u32> = g2.iter().copied().filter(|&x| x != INACTIVE).collect();
+                let union = union_sorted_u32(comm, live);
+                let rank: HashMap<u32, u32> =
+                    union.iter().enumerate().map(|(i, &v)| (v, i as u32)).collect();
+                for g2i in g2.iter_mut() {
+                    if *g2i != INACTIVE {
+                        *g2i = rank[g2i];
+                    }
+                }
+                (g2, o2, union.len())
+            }
+        };
         n_global_trial[tb] = n;
         gof_all.push((g, o));
     }
@@ -312,11 +385,16 @@ where
     for (bi, &tb) in sys_trials.iter().enumerate() {
         let (gof, owner) = gof_all[tb].clone();
         let n_global = n_global_trial[tb];
+        let layout = match &conf_layout {
+            Some(maps) => maps[tb].clone(),
+            None => (0..block_sizes[tb]).collect(),
+        };
         blocks.push(SysBlock {
             trial: tb,
             base: base_of_trial[bi],
             full_base: offsets[tb],
-            size: block_sizes[tb],
+            size: layout.len(),
+            layout,
             global_base,
             n_global,
             gof,
@@ -957,7 +1035,36 @@ pub(crate) fn allreduce_max_u32(comm: &Comm, v: u32) -> u32 {
     m
 }
 
-pub(crate) fn allreduce_sum_u64(comm: &Comm, v: u64) -> u64 {
+/// Sorted union of every rank's `local` id list (D1032).  Restricted blocks'
+/// stride formulas leave holes at the dropped slave slots, and holes make the
+/// per-block id ranges of *different blocks* overlap (a later block's dense
+/// base starts at the earlier block's union *count*, not at its max id + 1) —
+/// so the surviving ids are renumbered to their dense union rank, which every
+/// rank computes identically from the exchanged sorted list.
+pub(crate) fn union_sorted_u32(comm: &Comm, mut local: Vec<u32>) -> Vec<u32> {
+    local.sort_unstable();
+    local.dedup();
+    if comm.size() <= 1 {
+        return local;
+    }
+    let mut payload = Vec::with_capacity(local.len() * 4);
+    for v in &local {
+        payload.extend_from_slice(&v.to_le_bytes());
+    }
+    let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+        .map(|r| (r, payload.clone()))
+        .collect();
+    let mut set = std::collections::BTreeSet::new();
+    set.extend(local.iter().copied());
+    for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+        let mut pos = 0usize;
+        while pos + 4 <= bytes.len() {
+            set.insert(u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+        }
+    }
+    set.into_iter().collect()
+}pub(crate) fn allreduce_sum_u64(comm: &Comm, v: u64) -> u64 {
     if comm.size() <= 1 {
         return v;
     }

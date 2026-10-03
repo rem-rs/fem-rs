@@ -964,23 +964,33 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
     ///
     /// Probed MFEM semantics (mfem410, 4×4 inline-quad, marks
     /// `{0,1,3,6,8,9,10,11,12}`, `GeneralRefinement(marks,1,1)` → 10 masters /
-    /// 20 slaves / 10 hanging vertices):
+    /// 20 slaves / 10 hanging vertices; p = 2 tables re-probed in round-107,
+    /// see `tmp/d107nc/REPORT.md`):
     ///
-    /// * **H1-trace** (vertex-continuous, order 1): the hanging midpoint
-    ///   *vertex* dof is the slave, `u[m] = 0.5·u[a] + 0.5·u[b]`; the master
-    ///   edge keeps its dofs.  (Order ≥ 2 adds slave half-edge interior dofs
-    ///   constrained by the master-edge 1-D basis at t = 1/4, 3/4 —
-    ///   D1031, not implemented.)
-    /// * **RT-trace** (face-discontinuous, order 0): each half-edge dof is a
-    ///   slave, `u[half] = σ·(L_m/L_s)·0.5·u[master]` with `σ = +1` iff the
-    ///   half's canonical `(min,max)` direction equals the master's; the
-    ///   master (full coarse edge, still a leaf face of the coarse element)
-    ///   keeps its dof.  The probe measures `±0.5` in MFEM dof values (the
-    ///   ∫-type trace functional); fem-rs trace unknowns are the coefficients
-    ///   of the unnormalised face basis (φ₀ = 1), and function preservation
-    ///   adds the inverse measure ratio — the two ½ factors cancel for the
-    ///   equal halves of an iso split (`u_half = σ·u_master`).  (Order ≥ 1:
-    ///   dense master-basis transfer rows — D1031.)
+    /// * **H1-trace** (vertex-continuous, order `p ≥ 1`): on each master edge
+    ///   the *whole* master-edge 1-D equispaced Lagrange basis is kept (its
+    ///   interior dofs are true dofs) and every dof of the two slave
+    ///   half-edges at master parameter `t` is constrained by point
+    ///   interpolation, `u[slave] = Σ_j ℓ_j^{(p)}(t)·u[master_dof_j]`:
+    ///   the hanging midpoint *vertex* is the `t = 1/2` row — at `p = 1`
+    ///   `0.5·u[a] + 0.5·u[b]`, at `p = 2` exactly `1·u[interior master dof]`
+    ///   (probe: `dof 158`), for odd `p` the split `(0.5, 0.5)` over the two
+    ///   middle nodes; each slave half-edge interior dof at `s = k/p` is the
+    ///   `t = k/(2p)` (or `1 − k/(2p)`) row — at `p = 2` the probe's
+    ///   `0.375/0.75/−0.125`.  Point values carry no orientation sign.
+    /// * **RT-trace** (face-discontinuous, order `p ≥ 0`): function
+    ///   preservation in the fem-rs coefficient conventions — the trace
+    ///   function (normal-flux component along the face's canonical
+    ///   direction) of each slave half-edge is the master edge's trace
+    ///   function restricted to the half with the orientation sign `σ = +1`
+    ///   iff the half's canonical `(min,max)` direction equals the master's:
+    ///   `c_half[k] = σ·Σ_j ℓ_j^{(p)}(t_k)·c_master[j]` with `t_k` the master
+    ///   parameter of slave node `k`.  At `p = 0` this degenerates to the
+    ///   round-106 pinned `σ·(L_m/L_s)·0.5 = σ` row; at `p = 1` it matches the
+    ///   MFEM probe table `T = (L_s/L_m)·[ℓ_j^{Gauss}(t_i)]` (which is the
+    ///   same *function space* in MFEM's Gauss-weighted dof conventions —
+    ///   verified exactly against `probe3_p2.txt`: `T = ⅛·[[3+√3, 1−√3],
+    ///   [1+√3, 3−√3]]` for σ = +1).
     ///
     /// Returns rows in the skeleton's **block-local** dof ids (add the trial
     /// block's global base before building the global restriction).
@@ -992,6 +1002,7 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             self.dim, 2,
             "nc_conforming_constraints: only 2-D quad NC meshes are supported (D1030)"
         );
+        let p = self.order as usize;
         let mut out = Vec::new();
         // Sorted-node-pair → face id.
         let mut face_map: std::collections::HashMap<[u32; 2], usize> =
@@ -1008,53 +1019,91 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             let n = &self.face_node_ids[f];
             if n[0] < n[1] { [n[0], n[1]] } else { [n[1], n[0]] }
         };
+        let coord = |n: u32| -> [f64; 2] {
+            let c = self.mesh.node_coords(n);
+            [c[0], c[1]]
+        };
+        // Equispaced Lagrange basis ℓ_j^{(p)}(x), j = 0..=p (the face trace
+        // basis, `eval_face_lagrange` in 2-D).
+        let lagrange = |j: usize, x: f64| -> f64 {
+            let mut v = 1.0;
+            for k in 0..=p {
+                if k != j {
+                    v *= (x - k as f64 / p as f64) / (j as f64 / p as f64 - k as f64 / p as f64);
+                }
+            }
+            v
+        };
 
         if self.continuous {
-            // H1-trace.  Corner dofs are the mesh vertex dofs (identity with
-            // node ids in 2-D, see `build`).
-            assert!(
-                self.order == 1,
-                "nc_conforming_constraints: H1-trace order {} not implemented yet \
-                 (order-2 slave half-edge interior rows: D1031)",
-                self.order
-            );
+            // H1-trace: point-value interpolation from the master-edge dofs
+            // (kept: masters + their interior dofs are true dofs).  Corner
+            // dofs are the mesh vertex dofs (identity with node ids in 2-D,
+            // see `build`).
             for c in hanging {
                 let (a, b) = (c.parent_a as u32, c.parent_b as u32);
                 let key = if a < b { [a, b] } else { [b, a] };
                 // Only master edges (still a face of the coarse leaf) constrain.
-                if face_map.contains_key(&key) {
-                    let m = c.constrained as usize;
-                    let mut terms = vec![(a as usize, 0.5), (b as usize, 0.5)];
-                    terms.sort_unstable_by_key(|t| t.0);
-                    out.push(DofConstraintRow { slave: m, terms });
+                let Some(&mf) = face_map.get(&key) else { continue };
+                let master = canonical(mf);
+                let master_dofs = &self.face_dof_lists[mf];
+                debug_assert_eq!(master_dofs.len(), p + 1);
+                let mid = c.constrained as u32;
+                // Hanging midpoint vertex: the t = 1/2 interpolation row.
+                let mut terms: Vec<(usize, f64)> = master_dofs
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &d)| (d, lagrange(j, 0.5)))
+                    .filter(|(_, v)| *v != 0.0)
+                    .collect();
+                terms.sort_unstable_by_key(|tt| tt.0);
+                out.push(DofConstraintRow {
+                    slave: mid as usize,
+                    terms,
+                });
+                // Slave half-edge interior dofs: the t = k/(2p) / 1 − k/(2p)
+                // rows (the corner dofs of a half are free shared vertices).
+                for &end in &[a, b] {
+                    let hk = if end < mid { [end, mid] } else { [mid, end] };
+                    let Some(&hf) = face_map.get(&hk) else { continue };
+                    let half = canonical(hf);
+                    let slave_dofs = &self.face_dof_lists[hf];
+                    for k in 1..p {
+                        let t = if half[0] == master[0] {
+                            (k as f64 / p as f64) * 0.5
+                        } else {
+                            1.0 - (k as f64 / p as f64) * 0.5
+                        };
+                        let mut terms: Vec<(usize, f64)> = master_dofs
+                            .iter()
+                            .enumerate()
+                            .map(|(j, &d)| (d, lagrange(j, t)))
+                            .filter(|(_, v)| *v != 0.0)
+                            .collect();
+                        terms.sort_unstable_by_key(|tt| tt.0);
+                        out.push(DofConstraintRow {
+                            slave: slave_dofs[k],
+                            terms,
+                        });
+                    }
                 }
             }
         } else {
-            // RT-trace (face-discontinuous).
-            assert!(
-                self.order == 0,
-                "nc_conforming_constraints: RT-trace order {} not implemented yet \
-                 (dense master-basis transfer rows: D1031)",
-                self.order
-            );
+            // RT-trace: function preservation — each slave half-edge dof
+            // (coefficient of the equispaced Lagrange face basis along the
+            // canonical direction) is the master trace function's value at
+            // that point, with the orientation sign σ.
             for c in hanging {
                 let (a, b) = (c.parent_a as u32, c.parent_b as u32);
                 let key = if a < b { [a, b] } else { [b, a] };
                 let Some(&mf) = face_map.get(&key) else { continue };
                 let master = canonical(mf);
+                let master_dofs = &self.face_dof_lists[mf];
+                debug_assert_eq!(master_dofs.len(), p + 1);
                 let mid = c.constrained as u32;
-                // Physical edge lengths: the transfer carries the measure
-                // ratio L_s/L_m (MFEM's ∫-type trace dofs) *and* the basis
-                // measure normalisation (fem-rs trace unknowns are the
-                // coefficients of the unnormalised φ₀ = 1 — see the probe
-                // derivation in tmp/d106d1030/REPORT.md: for equal halves the
-                // two 0.5 factors cancel, u_half = σ·u_master).
-                let coord = |n: u32| -> [f64; 2] {
-                    let c = self.mesh.node_coords(n);
-                    [c[0], c[1]]
-                };
-                let (ca, cb) = (coord(master[0]), coord(master[1]));
-                let l_master = ((cb[0] - ca[0]).powi(2) + (cb[1] - ca[1]).powi(2)).sqrt();
+                let (ma, mb) = (coord(master[0]), coord(master[1]));
+                let dm = [mb[0] - ma[0], mb[1] - ma[1]];
+                let l2m = dm[0] * dm[0] + dm[1] * dm[1];
                 for &end in &[a, b] {
                     let hk = if end < mid { [end, mid] } else { [mid, end] };
                     let Some(&hf) = face_map.get(&hk) else { continue };
@@ -1062,21 +1111,32 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                     // σ = +1 iff the half's canonical direction equals the
                     // master's (MFEM edge_flags orientation sign, probe-pinned).
                     let sigma: f64 = if half[0] == master[0] { 1.0 } else { -1.0 };
-                    let ce = coord(end);
-                    let cm = coord(mid);
-                    let l_half = ((cm[0] - ce[0]).powi(2) + (cm[1] - ce[1]).powi(2)).sqrt();
-                    let coeff = sigma * 0.5 * (l_master / l_half);
-                    let slave_dof = self.face_dof_lists[hf][0];
-                    let master_dof = self.face_dof_lists[mf][0];
-                    out.push(DofConstraintRow {
-                        slave: slave_dof,
-                        terms: vec![(master_dof, coeff)],
-                    });
+                    let slave_dofs = &self.face_dof_lists[hf];
+                    debug_assert_eq!(slave_dofs.len(), p + 1);
+                    let (ha, hb) = (coord(half[0]), coord(half[1]));
+                    let dh = [hb[0] - ha[0], hb[1] - ha[1]];
+                    for k in 0..=p {
+                        let s = k as f64 / p as f64;
+                        // Master parameter of slave node k (affine edge).
+                        let t = ((ha[0] + s * dh[0] - ma[0]) * dm[0]
+                            + (ha[1] + s * dh[1] - ma[1]) * dm[1])
+                            / l2m;
+                        let mut terms: Vec<(usize, f64)> = master_dofs
+                            .iter()
+                            .enumerate()
+                            .map(|(j, &d)| (d, sigma * lagrange(j, t)))
+                            .filter(|(_, v)| *v != 0.0)
+                            .collect();
+                        terms.sort_unstable_by_key(|tt| tt.0);
+                        out.push(DofConstraintRow {
+                            slave: slave_dofs[k],
+                            terms,
+                        });
+                    }
                 }
             }
-            out.sort_by_key(|r| r.slave);
-            out.dedup_by(|a, b| a.slave == b.slave);
         }
+        out.sort_by_key(|r| r.slave);
         out
     }
 }

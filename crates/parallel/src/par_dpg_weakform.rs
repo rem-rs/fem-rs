@@ -234,6 +234,32 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
         self.local.store_matrices(store);
     }
 
+    /// Register the NC-AMR hanging-node conforming restriction of trace block
+    /// `block` (D1032): forwards the rows to the rank-local serial weak form
+    /// and rebuilds the distributed numbering over the **true-dof** layout —
+    /// the constrained (slave) dofs are dropped from the global numbering
+    /// exactly like MFEM's NC `ParFiniteElementSpace` true-dof space, so the
+    /// solved system is the distributed `Pᵀ A P` (`ConformingAssemble`).
+    ///
+    /// Call after [`Self::assemble`] (the rows come from the local skeletons'
+    /// `nc_conforming_constraints`, which needs the assembled face tables).
+    /// Every rank must hand in the **global** hanging-node list; each rank
+    /// generates the rows of the hanging structures its local skeleton holds,
+    /// which under the one-node ghost layer is consistent across ranks (a rank
+    /// holding a slave face always holds the master face too — both share the
+    /// structure's nodes).  The rows must reference only true dofs of the
+    /// local skeleton (guaranteed at `nc_limit = 1`).  Combined with static
+    /// condensation this is not supported yet (D1057).
+    pub fn set_trace_conforming_restriction(
+        &mut self,
+        block: usize,
+        rows: &[fem_assembly::dpg::dpg_basis::DofConstraintRow],
+    ) {
+        assert!(self.built, "set_trace_conforming_restriction: assemble() first");
+        self.local.set_trace_conforming_restriction(block, rows);
+        self.build_numbering();
+    }
+
     // ── accessors ───────────────────────────────────────────────────────────
 
     /// The rank-local serial weak form (skeleton, block sizes, geometry).
@@ -355,7 +381,9 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
         let ess_set: BTreeSet<u32> = ess_global.iter().copied().collect();
         // `DpgWeakForm::form_linear_system` takes the essential DOFs and the
         // prescribed values in the **full** serial trial numbering, while the
-        // returned system is indexed by the system index space.
+        // returned system is indexed by the system index space (the true-dof
+        // layout when a conforming restriction is registered — D1032 — so the
+        // full-layout id of a numbered dof goes through `SysBlock::layout`).
         let mut ess_local: Vec<usize> = Vec::new();
         for blk in &self.blocks {
             for d in 0..blk.size {
@@ -364,7 +392,7 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
                 }
                 let g = blk.global_base as u32 + blk.gof[d];
                 if ess_set.contains(&g) {
-                    ess_local.push(blk.full_base + d);
+                    ess_local.push(blk.full_base + blk.layout[d]);
                 }
             }
         }
@@ -481,20 +509,25 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
         self.comm.allreduce_sum_f64(acc).max(0.0).sqrt()
     }
 
-    /// Local boundary-face DOFs of trial block `b` with their physical
-    /// points: `(absolute global dof, point)`.
+    /// NC-aware [`Self::trace_boundary_dofs`] (D1032): on a non-conforming
+    /// mesh the one-sided faces of a hanging *structure* (the coarse master
+    /// edge and the two fine half-edges) are local boundary faces while lying
+    /// strictly inside the domain — [`SkeletonSpace::true_boundary_faces`]
+    /// excludes them, exactly like the serial driver's collection.  The D963
+    /// partition-interface filter still applies on top.  Conforming callers
+    /// (`hanging` empty) behave identically to [`Self::trace_boundary_dofs`].
     ///
-    /// A face qualifies iff it is a boundary face of the rank-local sub-mesh
-    /// **and** a boundary face of the global mesh (D963): under the one-node
-    /// ghost layer a partition-interface face is locally one-sided while being
-    /// two-sided in the global mesh, and imposing essential values on its DOFs
-    /// over-constrains the ultraweak system.  MFEM keeps the two apart by
-    /// attributing partition-interface faces beyond `bdr_attributes`
-    /// (`interface_bdr_attr = max + 1`, mesh/pmesh.cpp), so `ess_bdr = 1`
-    /// never selects them.  The sets computed here stay consistent across
-    /// ranks without any exchange.  The local DOF ids cover both owned and
-    /// ghost copies, which is what the column elimination needs.
-    pub fn trace_boundary_dofs(&self, b: usize) -> Vec<(u32, Vec<f64>)> {
+    /// Both collectors translate the skeleton's **full-layout** face dof ids
+    /// through the inverse of `SysBlock::layout`: under a conforming
+    /// restriction `gof` is true-indexed, so a face dof that is a dropped
+    /// slave has no numbering entry (boundary dofs never hang at
+    /// `nc_limit = 1`, but the translation must not read a foreign row).
+    fn trace_boundary_dofs_impl(
+        &self,
+        b: usize,
+        hanging: &[fem_mesh::amr::HangingNodeConstraint],
+        nc_filter: bool,
+    ) -> Vec<(u32, Vec<f64>)> {
         let bi = self
             .blocks
             .iter()
@@ -502,22 +535,54 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
             .expect("trace_boundary_dofs: block not in the system");
         let blk = &self.blocks[bi];
         let sk = self.local.skeleton(b);
+        // Inverse of `SysBlock::layout`: full-layout dof -> true index.  The
+        // domain is the block's FULL dof count (the max layout target + 1),
+        // not `blk.size` (the true count).
+        let full_size = blk.layout.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+        let mut full2true = vec![None; full_size];
+        for (t, &f) in blk.layout.iter().enumerate() {
+            full2true[f] = Some(t);
+        }
+        let is_true_bdr = if nc_filter {
+            sk.true_boundary_faces(hanging)
+        } else {
+            vec![true; sk.n_faces()]
+        };
         let mut out = Vec::new();
         for f in 0..sk.n_faces() {
-            if !sk.is_boundary_face(f) || !self.global_boundary_face[f] {
+            if !is_true_bdr[f] || !self.global_boundary_face[f] {
                 continue;
             }
             for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
-                if d >= blk.size || blk.gof[d] == INACTIVE {
+                let Some(t) = full2true.get(d).copied().flatten() else {
+                    continue;
+                };
+                if blk.gof[t] == INACTIVE {
                     continue;
                 }
                 out.push((
-                    blk.global_base as u32 + blk.gof[d],
+                    blk.global_base as u32 + blk.gof[t],
                     self.local.face_dof_point(sk, f, k),
                 ));
             }
         }
         out
+    }
+
+    /// Local boundary-face DOFs of trial block `b` with their physical points
+    /// (see [`Self::trace_boundary_dofs_impl`]).
+    pub fn trace_boundary_dofs(&self, b: usize) -> Vec<(u32, Vec<f64>)> {
+        self.trace_boundary_dofs_impl(b, &[], false)
+    }
+
+    /// NC-aware [`Self::trace_boundary_dofs`] (D1032): excludes the one-sided
+    /// faces of the hanging structures (`hanging` = the global hanging list).
+    pub fn trace_boundary_dofs_nc(
+        &self,
+        b: usize,
+        hanging: &[fem_mesh::amr::HangingNodeConstraint],
+    ) -> Vec<(u32, Vec<f64>)> {
+        self.trace_boundary_dofs_impl(b, hanging, true)
     }
 
     /// Write prescribed values into the rank-local vector for every essential
@@ -545,7 +610,9 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
                 }
                 let g = blk.global_base as u32 + blk.gof[d];
                 if let Some(&v) = by_id.get(&g) {
-                    let t = blk.full_base + d;
+                    // Full-layout slot of the true dof `d` (D1032; the
+                    // identity without a conforming restriction).
+                    let t = blk.full_base + blk.layout[d];
                     if t < x_local.len() {
                         x_local[t] = v;
                     }
