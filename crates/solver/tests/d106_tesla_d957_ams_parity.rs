@@ -29,6 +29,22 @@
 //! `‖M‖/‖JD‖`/`‖B‖` anchors stay bitwise/13-digit
 //! (`tmp/d107amg/rs_bm_o2_*.log`).
 //!
+//! Round-109 (D1076 close, `tmp/d109a/REPORT.md`): the B_Pi arm is now the
+//! **hypre-faithful HMIS(10)+aggressive(`Create2ndS`)+interp-6 stack**
+//! (`CoarsenStrategy::HmisAms`), verified stage-by-stage against hypre 2.28
+//! itself (level-0 multipass P bitwise equal, V-cycle arm equal to ~1e-13)
+//! after correcting the round-108 ledger: BoomerAMG relax-8's l1 comes from
+//! `ComputeL1Norms` option 4, which degenerates to the signed diagonal on
+//! one rank ⇒ plain symmetric Gauss-Seidel (`par_amg_setup.c:3280`,
+//! `ams.c:678-692`).  Iterations drop to **7 / 6** (C++ 8 / 7) — one BETTER
+//! than the C++ probe on both tiers, because linlvo's assembled `A_Pi`
+//! operators are measurably different from hypre's `PixᵀAPix`
+//! (`tmp/d109a/`: hypre's own arm gives ‖y‖² = 3.433e-8 on ours vs
+//! 2.794e-8 on C++'s; first PCG residual 7.6e-6 vs 1.36e-5).  The
+//! `<C*b,b>` pins move to 1.262911894545921e-7 / 1.0190330289083565e-8.
+//! The residual assembly-parity delta is registered as D1095 (assembly
+//! lane territory, not the AMG).
+//!
 //! C++ truth: `tmp/d105ams/cpp_bm_o2_ballquad.log` /
 //! `cpp_bm_o2_inlinehex.log` (MFEM 4.10 tesla probe, `mpirun -np 1`).
 
@@ -336,16 +352,16 @@ fn run_case(mesh_path: &str, n_h1_expect: usize, n_nd_expect: usize, it_want: us
 #[test]
 fn d106_tesla_d957_ams_ballquad_o2() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d103tesla/ball-quad.mesh");
-    // C++ 8; the PCG lands one iteration later (module doc + D1063).  The
-    // `<C*b,b>` pin moved 1.2416572772114145e-7 → 1.2406164773014794e-7
-    // (−0.084%) with the round-107 D1000-LOR singleton-absorption fix, which
-    // changes the ball-quad B_Pi SA hierarchies; still 0.56% off the C++
-    // probe's 1.2476e-7.
-    run_case(path, 517, 1460, 9, 1.240_616_477_301_479_4e-7);
+    // C++ 8; since the round-109 hypre-faithful B_Pi arm (HMIS+aggressive +
+    // interp-6, plain-SGS levels) the PCG lands one iteration EARLIER
+    // (module doc + D1095): 9 → 7.  The `<C*b,b>` pin moved
+    // 1.2406164773014794e-7 → 1.262911894545921e-7 (+1.8%, now 1.2% above
+    // the C++ probe's 1.2476e-7).
+    run_case(path, 517, 1460, 7, 1.262_911_894_545_921e-7);
 }
 
 #[test]
 fn d106_tesla_d957_ams_inlinehex_o2() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d103tesla/inline-hex.mesh");
-    run_case(path, 729, 1944, 7, 1.018_930_337_377_041_7e-8);
+    run_case(path, 729, 1944, 6, 1.019_033_028_908_356_5e-8);
 }
