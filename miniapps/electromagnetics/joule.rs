@@ -156,12 +156,15 @@
 //! `DofTransformation` `-0` pattern of E/B/F: 2430/2616/2616 negative zeros)
 //! and `Joule_000000.mfem_root` (1,771 B).
 //!
-//! One known stray stdout line remains: fem-rs's mesh reader prints
-//! `Elements with wrong orientation: 70 / 252 (not fixed)` where the C++
-//! prints nothing — the hex orientation test differs from MFEM's
-//! center-trilinear Jacobian (kernel gap, D1049); the byte pins filter that
-//! exact line.  The only other intended difference is the `--mesh` path
-//! string itself.
+//! One known stray stdout line is gone (round 107, D1049 closed): the mesh
+//! reader no longer prints `Elements with wrong orientation: 70 / 252 (not
+//! fixed)` — `check_element_orientation` now checks wedge/pyramid/hex
+//! through the MFEM center trilinear Jacobian in the linear case too
+//! (`crates/mesh/src/simplex.rs`).  The full 36-line stdout prefix compares
+//! byte-identical to the C++ oracle **unfiltered** (default / `-rs 1` /
+//! `-visit`); the d106 byte pin's filter for that exact string is now a
+//! no-op (it lives in `examples/tests/`, outside this lane's territory).
+//! The only other intended difference is the `--mesh` path string itself.
 //!
 //! Usage:
 //!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -no-visit

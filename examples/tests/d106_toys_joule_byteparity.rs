@@ -9,12 +9,12 @@
 //! the oracle run (relative `data/...` paths, so the `Options used:` dump
 //! matches too), and md5-compare stdout and every written file.
 //!
-//! One filtered line: fem-rs's mesh reader prints
-//! `Elements with wrong orientation: 70 / 252 (not fixed)` on
-//! cylinder-hex.mesh where MFEM 4.10 prints nothing — the hex orientation
-//! test differs from MFEM's center-trilinear Jacobian (kernel gap **D1049**,
-//! `crates/mesh` `check_element_orientation`).  The joule stdout pins filter
-//! that exact line; everything else is byte-exact.
+//! Round 107 (D1049 closed, D1066 dead filter removed): the former stray
+//! line `Elements with wrong orientation: 70 / 252 (not fixed)` is gone —
+//! `crates/mesh` `check_element_orientation` now judges wedge/pyramid/hex
+//! through the MFEM center-trilinear Jacobian, and the joule stdout pins
+//! below compare the **unfiltered** stdout (hashes re-recorded in
+//! `3957857c`; pin labels kept md5-equal, only the filtering is history).
 //!
 //! Residual registered gaps (not pinned): mandel/mondrian `-vis` (no GLVis
 //! client; refusal), lissajous `-vis`/`-o != 2`, the joule coupled time loop,
@@ -293,7 +293,7 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
     );
     assert_eq!(code, 3, "joule stops with 3 before the (unported) time loop");
     assert_md5(
-        "joule default stdout (D1049-filtered)",
+        "joule default stdout (unfiltered)",
         &out,
         "bf6ff61808a8f38e08e23d6295a6a56d",
     );
@@ -317,7 +317,7 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
     );
     assert_eq!(code, 3);
     assert_md5(
-        "joule -rs 1 stdout (D1049-filtered)",
+        "joule -rs 1 stdout (unfiltered)",
         &out,
         "41e3407d37032e084f6464c1578f62b1",
     );
@@ -339,7 +339,7 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
     );
     assert_eq!(code, 3);
     assert_md5(
-        "joule visit stdout (D1049-filtered)",
+        "joule visit stdout (unfiltered)",
         &out,
         "87d8d2f601f139a1516161478aa0b255",
     );
