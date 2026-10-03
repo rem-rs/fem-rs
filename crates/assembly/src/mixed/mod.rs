@@ -684,9 +684,25 @@ where
         let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let det_j = tr.det_j();
-        let jac = tr.jacobian().clone();
+        // D1081: geometry selection by the mesh's own geometry order — the
+        // `assemble_hdiv_l2_mixed` sibling's contract (D667/D614 pattern):
+        // curved simplices (`geom_order() > 1`) and every non-simplex
+        // (Quad/Hex/Prism/Pyramid, affine or not) take the isoparametric map
+        // through the mesh's geometry-table row; only *straight simplices*
+        // keep the affine `from_simplex_nodes` fast path (bit-identical — the
+        // d1051 Whitney pins).  The old unconditional `from_simplex_nodes`
+        // panicked on any hex (its `col_of = [1,2,3]` corner-difference
+        // Jacobian is singular for MFEM's hex vertex layout → "degenerate
+        // simplex element", `fem_mesh::transformation.rs`) and silently served
+        // curved simplices the straight corner map.
+        let use_iso = mesh.geom_order() > 1
+            || !matches!(elem_type, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2);
+        let geo_elem = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
+        let tr_straight = if use_iso {
+            None
+        } else {
+            Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+        };
         // D1051: the H(curl) element orientation signs — MFEM's mixed scatter
         // goes through the **signed** `GetElementDofs` table
         // (`SparseMatrix::AddSubMatrix` negates the columns of negative-vdir
@@ -706,12 +722,22 @@ where
         let mut curl_ref = vec![0.0; n_c * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
+            // Geometry per QP on the isoparametric arm (the map is not affine);
+            // the straight-simplex arm keeps the hoisted affine map unchanged.
+            let (det_j, jac, xp) = if use_iso {
+                let ge = geo_elem.as_ref().expect("geo_ref_elem");
+                let (j, det, xp) =
+                    isoparametric_jacobian(mesh, mesh.geometry_nodes(e), ge.as_ref(), xi, dim);
+                (det, j, xp)
+            } else {
+                let tr = tr_straight.as_ref().unwrap();
+                (tr.det_j(), tr.jacobian().clone(), tr.map_to_physical(xi))
+            };
             // D696 verdict: **signed** — MFEM `MixedScalarCurlIntegrator`
             // weights with `ip.weight * Trans.Weight()` (signed det).
             let w = quad.weights[q] * det_j;
             ref_r.eval_basis(xi, &mut phi_r);
             ref_c.eval_curl(xi, &mut curl_ref);
-            let xp = tr.map_to_physical(xi);
             // Curl Piola + [n_dofs × dim] normalization.  The physical curl of
             // the covariantly mapped H(curl) basis is `curl̂/detJ` (2-D scalar)
             // resp. `J·curl̂/detJ` (3-D vector) — the old code fed the raw

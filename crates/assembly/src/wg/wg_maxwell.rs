@@ -16,6 +16,15 @@
 //! `ElementTransformation::Jacobian()` — so body and face terms see the same
 //! element on a curved mesh.  Truth: `tmp/d87b/d814_probe.cpp` +
 //! `crates/assembly/tests/d831_wg_volume_geometry.rs`.
+//!
+//! The dof tables are **signed** throughout (D1080): the volume
+//! `C_wᵀM_Σ⁻¹C_w` carries the H(curl) `element_signs` on the `C_w` rows and
+//! each face-penalty block is scattered with its own element's signs — MFEM's
+//! signed `GetElementDofs`/`GetElementVDofs` + `SparseMatrix::AddSubMatrix`
+//! product-of-signs scatter — and the volume curl is the *physical* curl of
+//! the mapped basis (`curl̂/detJ`, `(J·curl̂)/detJ`; MFEM
+//! `CalcPhysCurlShape`).  Truth:
+//! `crates/assembly/tests/d109_d1080_wg_maxwell_signs.rs`.
 
 use nalgebra::DMatrix;
 use fem_element::{
@@ -34,9 +43,24 @@ use super::{wg_boundary_face_map, wg_face_measure, wg_face_point, wg_face_rule};
 // ─── Weak curl matrix ─────────────────────────────────────────────────────
 // C_w[i,j] = ∫_T (∇_w × φ_j) · σ_i dV  where φ_j ∈ V_h (Nédélec), σ_i ∈ Σ_h
 // M_Σ[m,n] = ∫_T σ_m · σ_n dV  (flux mass matrix, used to recover curl)
+//
+// D1080: the rows of `C_w` are the element's H(curl) dofs, so the weak-curl
+// coefficients of the *global* basis are the **signed** rows
+// `S·C_w` (`S = diag(element_signs)`): MFEM's element scatter multiplies every
+// entry by the product of the row/column signs of the signed
+// `GetElementDofs` table (`linalg/sparsemat.cpp:2795-2811`; element matrices
+// land at `mat->AddSubMatrix(vdofs_, vdofs_, elmat)`, `fem/bilinearform.cpp:420`)
+// — signing the rows here makes `C_wᵀM_Σ⁻¹C_w = (SC_w)ᵀM_Σ⁻¹(SC_w)` exactly
+// that signed scatter.  D1080 (same stroke, D1051's second disease): the
+// physical curl of the covariantly mapped Nédélec basis is `curl̂/detJ`
+// (2-D scalar) resp. `(J·curl̂)/detJ` (3-D) — MFEM `CalcPhysCurlShape` —
+// paired with the D696 **signed** weight `ip.weight·Trans.Weight()`, so detJ
+// cancels exactly on affine elements instead of leaving detJ²-scaled (2-D) /
+// J-less (3-D) entries.
 
 fn weak_curl_matrix<M: MeshTopology>(
     mesh: &M, e: u32, dim: usize, order: usize, quad_order: u8,
+    signs: Option<&[f64]>,
 ) -> (DMatrix<f64>, DMatrix<f64>) {
     let nd_elem: Box<dyn VectorReferenceElement> = if dim == 2 {
         Box::new(TriNDk::new(order))
@@ -62,10 +86,10 @@ fn weak_curl_matrix<M: MeshTopology>(
 
     let mut Cw = DMatrix::zeros(n_v, n_s);
     let mut Ms = DMatrix::zeros(n_s, n_s);
-    let mut nv_basis = vec![0.0_f64; n_v * dim];
+    // `eval_curl` native layout: 2-D n_v scalars, 3-D n_v × 3; normalized to
+    // physical curl per dof below (2-D scalar, 3-D vector).
     let mut nv_curl = vec![0.0_f64; n_v * dim];
     let mut ps = vec![0.0_f64; n_ss];
-    let mut gsp = vec![0.0_f64; n_ss * dim];
 
     for (pt, &w) in qr.points.iter().zip(qr.weights.iter()) {
         // D814-3: the body path's geometry is the element's own order-`g`
@@ -75,24 +99,19 @@ fn weak_curl_matrix<M: MeshTopology>(
         let (jac, _xp) = element_jacobian_at(mesh, e, pt, dim);
         let det_j = jac.determinant();
         if det_j.abs() < 1e-30 { continue; }
-        let wq = w * det_j.abs();
-        let jit = jac.try_inverse().unwrap().transpose();
-        nd_elem.eval_basis_vec(pt, &mut nv_basis);
+        // D696 verdict: **signed** weight for the curl pairing (the det in the
+        // physical-curl normalization below cancels it); the flux mass
+        // matrix keeps the |detJ| measure.
+        let wq_signed = w * det_j;
+        let wq_abs = w * det_j.abs();
         nd_elem.eval_curl(pt, &mut nv_curl);
 
-        // Sigma basis values and gradients
+        // Sigma basis values
         if os == 0 {
             ps[0] = 1.0;
         } else {
             let rs = ref_s.as_ref().unwrap();
-            let mut gs = vec![0.0_f64; n_ss * dim];
             rs.eval_basis(pt, &mut ps);
-            rs.eval_grad_basis(pt, &mut gs);
-            for i in 0..n_ss {
-                for d in 0..dim {
-                    gsp[i * dim + d] = (0..dim).map(|k| jit[(d, k)] * gs[i * dim + k]).sum();
-                }
-            }
         }
 
         // Weak curl assembly: flux space sigma is
@@ -100,21 +119,36 @@ fn weak_curl_matrix<M: MeshTopology>(
         //   3D: vector [P_{k-1}]^d  (curl is vector)
         if dim == 2 {
             for i in 0..n_v { for j in 0..n_s {
-                // nv_curl[i] = scalar curl, sigma[j] = scalar basis
-                Cw[(i, j)] -= wq * nv_curl[i] * ps[j];
+                // Physical scalar curl: nv_curl[i] = reference curl̂_i.
+                let curl_phys = nv_curl[i] / det_j;
+                Cw[(i, j)] -= wq_signed * curl_phys * ps[j];
             }}
             for p in 0..n_s { for q in 0..n_s {
-                Ms[(p, q)] += wq * ps[p] * ps[q];
+                Ms[(p, q)] += wq_abs * ps[p] * ps[q];
             }}
         } else {
             for i in 0..n_v { for j in 0..n_s {
                 let sc = j / n_ss; let sd = j % n_ss;
-                // nv_curl[i*3+sc] = sc-th curl component, sigma basis ps[sd]
-                Cw[(i, j)] -= wq * nv_curl[i * 3 + sc] * ps[sd];
+                // Physical curl component: (J·curl̂_i)_sc/detJ.
+                let curl_phys_sc =
+                    (0..3).map(|k| jac[(sc, k)] * nv_curl[i * 3 + k]).sum::<f64>() / det_j;
+                Cw[(i, j)] -= wq_signed * curl_phys_sc * ps[sd];
             }}
             for p in 0..n_s { let pc = p / n_ss; let pd = p % n_ss;
                 for q in 0..n_s { let qc = q / n_ss; let qd = q % n_ss;
-                    if pc == qc { Ms[(p, q)] += wq * ps[pd] * ps[qd]; }
+                    if pc == qc { Ms[(p, q)] += wq_abs * ps[pd] * ps[qd]; }
+                }
+            }
+        }
+    }
+    // D1080: per-dof orientation signs on the H(curl) rows — row i *is* dof i
+    // (one curl per row), so the sign multiplies the whole row.
+    if let Some(signs) = signs {
+        for i in 0..n_v {
+            let s = signs.get(i).copied().unwrap_or(1.0);
+            if s != 1.0 {
+                for j in 0..n_s {
+                    Cw[(i, j)] *= s;
                 }
             }
         }
@@ -123,6 +157,14 @@ fn weak_curl_matrix<M: MeshTopology>(
 }
 
 // ─── Face stabilizer (tangential jump for H(curl)) ────────────────────────
+//
+// D1080: both element blocks of the stabilizer scatter through the element's
+// **signed** dof table — MFEM's interior-face path concatenates the signed
+// `GetElementVDofs` of *both* elements and adds the (block) face matrix at
+// `[vdofs; vdofs2]²` (`fem/bilinearform.cpp:683-697`), so each element's own
+// block is congruent with that element's signs (`A ← S A S` on the block);
+// `SparseMatrix::AddSubMatrix` supplies the per-entry product of the row and
+// column signs (`linalg/sparsemat.cpp:2795-2811`).
 #[allow(clippy::too_many_arguments)]
 fn add_face_penalty_hcurl<M: MeshTopology>(
     coo: &mut CooMatrix<f64>, mesh: &M,
@@ -138,6 +180,7 @@ fn add_face_penalty_hcurl<M: MeshTopology>(
     };
     let ne = nd_elem.n_dofs();
     let qf = wg_face_rule(dim, qo);
+    let signs_l = hcurl_space.element_signs(el);
     let dofs_l: Vec<usize> = hcurl_space.element_dofs(el).iter().map(|&d| d as usize).collect();
     let dofs_r: Vec<usize> = if el != er {
         hcurl_space.element_dofs(er).iter().map(|&d| d as usize).collect()
@@ -150,16 +193,21 @@ fn add_face_penalty_hcurl<M: MeshTopology>(
         let mut pb = vec![0.0_f64; ne * dim];
         nd_elem.eval_basis_vec(&g.eip, &mut pb);
         for i in 0..ne { for j in 0..ne {
+            let s_i = signs_l.and_then(|s| s.get(i)).copied().unwrap_or(1.0);
+            let s_j = signs_l.and_then(|s| s.get(j)).copied().unwrap_or(1.0);
             let v = alpha * w * (0..dim).map(|d| pb[i*dim+d] * pb[j*dim+d]).sum::<f64>();
-            if v.abs() > 1e-30 { coo.add(dofs_l[i], dofs_l[j], v); }
+            if v.abs() > 1e-30 { coo.add(dofs_l[i], dofs_l[j], s_i * s_j * v); }
         }}
         if el != er {
+            let signs_r = hcurl_space.element_signs(er);
             let gr = wg_face_point(mesh, er, fnodes, xi);
             let mut pb = vec![0.0_f64; ne * dim];
             nd_elem.eval_basis_vec(&gr.eip, &mut pb);
             for i in 0..ne { for j in 0..ne {
+                let s_i = signs_r.and_then(|s| s.get(i)).copied().unwrap_or(1.0);
+                let s_j = signs_r.and_then(|s| s.get(j)).copied().unwrap_or(1.0);
                 let v = alpha * w * (0..dim).map(|d| pb[i*dim+d] * pb[j*dim+d]).sum::<f64>();
-                if v.abs() > 1e-30 { coo.add(dofs_r[i], dofs_r[j], v); }
+                if v.abs() > 1e-30 { coo.add(dofs_r[i], dofs_r[j], s_i * s_j * v); }
             }}
         }
     }
@@ -195,7 +243,11 @@ where
 
     // ── Volume stiffness: A_elem = C_w^T * M_Σ^{-1} * C_w ──────────────────
     for e in 0..ne as u32 {
-        let (Cw, Ms) = weak_curl_matrix(mesh, e, dim, order, quad_order);
+        // D1080: the element's H(curl) orientation signs — the volume block is
+        // scattered through the signed `GetElementDofs` table (MFEM
+        // `bilinearform.cpp:420` + `sparsemat.cpp:2795-2811`).
+        let signs = hcurl_space.element_signs(e);
+        let (Cw, Ms) = weak_curl_matrix(mesh, e, dim, order, quad_order, signs);
         let n_v = Cw.nrows(); let n_s = Cw.ncols();
         let X = Ms.clone().lu().solve(&Cw.transpose()).unwrap_or(DMatrix::zeros(n_s, n_v));
         let A_elem = &Cw * X;

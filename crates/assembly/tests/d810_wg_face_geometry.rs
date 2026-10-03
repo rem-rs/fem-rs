@@ -769,7 +769,9 @@ fn d810_1_wg_maxwell_face_block_is_the_isoparametric_one() {
 }
 
 /// Independent assembly of the HCurl tangential-jump stabilizer through
-/// `face_point_geom`.
+/// `face_point_geom`.  D1080: each element's block is scattered with that
+/// element's own H(curl) orientation signs (MFEM's signed `GetElementVDofs`
+/// face scatter, `bilinearform.cpp:683-697` + `sparsemat.cpp:2795-2811`).
 fn wg_maxwell_face_block<const D: usize>(
     mesh: &Mesh<D>,
     hcurl: &HCurlSpace<Mesh<D>>,
@@ -790,14 +792,20 @@ fn wg_maxwell_face_block<const D: usize>(
         let dofs_r: Vec<usize> = hcurl.element_dofs(er).iter().map(|&d| d as usize).collect();
         for (qi, xi) in qf.points.iter().enumerate() {
             for (es, dofs) in [(el, &dofs_l), (er, &dofs_r)] {
+                let signs = hcurl.element_signs(es);
                 let g = rs_face(mesh, es, fnodes, xi);
                 let w = qf.weights[qi] * g.nor.iter().map(|v| v * v).sum::<f64>().sqrt();
                 let mut pb = vec![0.0_f64; ne * dim];
                 nd.eval_basis_vec(&g.eip, &mut pb);
                 for i in 0..ne {
+                    let si = signs[i];
                     for j in 0..ne {
-                        let v: f64 =
-                            alpha * w * (0..dim).map(|d| pb[i * dim + d] * pb[j * dim + d]).sum::<f64>();
+                        let sj = signs[j];
+                        let v: f64 = si
+                            * sj
+                            * alpha
+                            * w
+                            * (0..dim).map(|d| pb[i * dim + d] * pb[j * dim + d]).sum::<f64>();
                         if v.abs() > 1e-30 {
                             k[dofs[i]][dofs[j]] += v;
                         }

@@ -456,6 +456,10 @@ fn grad_blocks<const D: usize>(
 
 /// `(C_w, M_Σ)` of the wg Maxwell weak curl — the module's
 /// `weak_curl_matrix` with the geometry source abstracted into `route`.
+/// D1080 arithmetic: the pairing uses the **physical** curl of the mapped
+/// Nédélec basis (`2-D curl̂/detJ`, `3-D (J·curl̂)/detJ`) with the D696
+/// **signed** weight (`ip.weight·Trans.Weight()` — det cancels on affine
+/// elements); the flux mass matrix keeps the |detJ| measure.
 #[allow(clippy::needless_range_loop)]
 fn curl_blocks<const D: usize>(
     mesh: &Mesh<D>, e: u32, order: usize, qo: u8, route: Route,
@@ -479,42 +483,32 @@ fn curl_blocks<const D: usize>(
     let qr = if dim == 2 { tri_rule(qo) } else { tet_rule(qo) };
     let mut cw = DMatrix::zeros(n_v, n_s);
     let mut ms = DMatrix::zeros(n_s, n_s);
-    let mut nv_basis = vec![0.0_f64; n_v * dim];
     let mut nv_curl = vec![0.0_f64; n_v * dim];
     let mut ps = vec![0.0_f64; n_ss];
-    let mut gsp = vec![0.0_f64; n_ss * dim];
     for (pt, &w) in qr.points.iter().zip(qr.weights.iter()) {
         let (jac, _xp) = route_geom(mesh, e, pt, dim, route);
         let det_j = jac.determinant();
         if det_j.abs() < 1e-30 {
             continue;
         }
-        let wq = w * det_j.abs();
-        let jit = jac.try_inverse().unwrap().transpose();
-        nd_elem.eval_basis_vec(pt, &mut nv_basis);
+        let wq_signed = w * det_j;
+        let wq_abs = w * det_j.abs();
         nd_elem.eval_curl(pt, &mut nv_curl);
         if os == 0 {
             ps[0] = 1.0;
         } else {
             let rs = ref_s.as_ref().unwrap();
-            let mut gs = vec![0.0_f64; n_ss * dim];
             rs.eval_basis(pt, &mut ps);
-            rs.eval_grad_basis(pt, &mut gs);
-            for i in 0..n_ss {
-                for d in 0..dim {
-                    gsp[i * dim + d] = (0..dim).map(|k| jit[(d, k)] * gs[i * dim + k]).sum();
-                }
-            }
         }
         if dim == 2 {
             for i in 0..n_v {
                 for j in 0..n_s {
-                    cw[(i, j)] -= wq * nv_curl[i] * ps[j];
+                    cw[(i, j)] -= wq_signed * (nv_curl[i] / det_j) * ps[j];
                 }
             }
             for p in 0..n_s {
                 for q in 0..n_s {
-                    ms[(p, q)] += wq * ps[p] * ps[q];
+                    ms[(p, q)] += wq_abs * ps[p] * ps[q];
                 }
             }
         } else {
@@ -522,7 +516,9 @@ fn curl_blocks<const D: usize>(
                 for j in 0..n_s {
                     let sc = j / n_ss;
                     let sd = j % n_ss;
-                    cw[(i, j)] -= wq * nv_curl[i * 3 + sc] * ps[sd];
+                    let curl_phys_sc =
+                        (0..3).map(|k| jac[(sc, k)] * nv_curl[i * 3 + k]).sum::<f64>() / det_j;
+                    cw[(i, j)] -= wq_signed * curl_phys_sc * ps[sd];
                 }
             }
             for p in 0..n_s {
@@ -532,7 +528,7 @@ fn curl_blocks<const D: usize>(
                     let qc = q / n_ss;
                     let qd = q % n_ss;
                     if pc == qc {
-                        ms[(p, q)] += wq * ps[pd] * ps[qd];
+                        ms[(p, q)] += wq_abs * ps[pd] * ps[qd];
                     }
                 }
             }
@@ -559,6 +555,9 @@ fn poisson_volume_dense<const D: usize>(
 }
 
 /// The wg Maxwell volume block (`C_w M_Σ⁻¹ C_wᵀ`, scattered), through `route`.
+/// D1080: the scatter carries the element's H(curl) orientation signs —
+/// `A ← S·A·S` per element (MFEM's signed `GetElementDofs` scatter,
+/// `sparsemat.cpp:2795-2811`).
 fn maxwell_volume_dense<const D: usize>(
     mesh: &Mesh<D>, order: usize, qo: u8, route: Route,
 ) -> Vec<Vec<f64>> {
@@ -571,7 +570,14 @@ fn maxwell_volume_dense<const D: usize>(
             ms.clone().lu().solve(&cw.transpose()).unwrap_or(DMatrix::zeros(cw.ncols(), cw.nrows()));
         let a = &cw * x;
         let dofs: Vec<usize> = sp.element_dofs(e).iter().map(|&d| d as usize).collect();
-        scatter(&mut d, &dofs, &a);
+        let signs: &[f64] = sp.element_signs(e);
+        for (i, &di) in dofs.iter().enumerate() {
+            let si = signs.get(i).copied().unwrap_or(1.0);
+            for (j, &dj) in dofs.iter().enumerate() {
+                let sj = signs.get(j).copied().unwrap_or(1.0);
+                d[di][dj] += si * sj * a[(i, j)];
+            }
+        }
     }
     d
 }
