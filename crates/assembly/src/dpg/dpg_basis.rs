@@ -1023,13 +1023,26 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             let c = self.mesh.node_coords(n);
             [c[0], c[1]]
         };
-        // Equispaced Lagrange basis ℓ_j^{(p)}(x), j = 0..=p (the face trace
-        // basis, `eval_face_lagrange` in 2-D).
+        // Equispaced Lagrange basis ℓ_j^{(p)}(x), j = 0..=p (the RT-trace face
+        // basis, `eval_face_lagrange` with `h1 = false` in 2-D; kept as a pure
+        // gauge — the RT-trace carries no essential data).
         let lagrange = |j: usize, x: f64| -> f64 {
             let mut v = 1.0;
             for k in 0..=p {
                 if k != j {
                     v *= (x - k as f64 / p as f64) / (j as f64 / p as f64 - k as f64 / p as f64);
+                }
+            }
+            v
+        };
+        // H1-trace face basis: MFEM's Gauss-Lobatto nodes (D1058) — the node
+        // set of `H1_Trace_FECollection`.  Identical to `lagrange` at p ≤ 2.
+        let gl_nodes = lobatto_points_01(p); // degree p → p + 1 GL points
+        let lagrange_gl = |j: usize, x: f64| -> f64 {
+            let mut v = 1.0;
+            for (k, &xk) in gl_nodes.iter().enumerate() {
+                if k != j {
+                    v *= (x - xk) / (gl_nodes[j] - xk);
                 }
             }
             v
@@ -1053,7 +1066,7 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                 let mut terms: Vec<(usize, f64)> = master_dofs
                     .iter()
                     .enumerate()
-                    .map(|(j, &d)| (d, lagrange(j, 0.5)))
+                    .map(|(j, &d)| (d, lagrange_gl(j, 0.5)))
                     .filter(|(_, v)| *v != 0.0)
                     .collect();
                 terms.sort_unstable_by_key(|tt| tt.0);
@@ -1061,8 +1074,9 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                     slave: mid as usize,
                     terms,
                 });
-                // Slave half-edge interior dofs: the t = k/(2p) / 1 − k/(2p)
-                // rows (the corner dofs of a half are free shared vertices).
+                // Slave half-edge interior dofs: the interpolation rows at the
+                // GL parameters of the slave nodes (mapped to the master edge;
+                // the corner dofs of a half are free shared vertices).
                 for &end in &[a, b] {
                     let hk = if end < mid { [end, mid] } else { [mid, end] };
                     let Some(&hf) = face_map.get(&hk) else { continue };
@@ -1070,14 +1084,14 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                     let slave_dofs = &self.face_dof_lists[hf];
                     for k in 1..p {
                         let t = if half[0] == master[0] {
-                            (k as f64 / p as f64) * 0.5
+                            gl_nodes[k] * 0.5
                         } else {
-                            1.0 - (k as f64 / p as f64) * 0.5
+                            1.0 - gl_nodes[k] * 0.5
                         };
                         let mut terms: Vec<(usize, f64)> = master_dofs
                             .iter()
                             .enumerate()
-                            .map(|(j, &d)| (d, lagrange(j, t)))
+                            .map(|(j, &d)| (d, lagrange_gl(j, t)))
                             .filter(|(_, v)| *v != 0.0)
                             .collect();
                         terms.sort_unstable_by_key(|tt| tt.0);
@@ -1370,10 +1384,27 @@ fn lagrange_1d(p: usize, x: f64, out: &mut [f64]) {
 /// (row-major over `(t, s)`: index `t*(p+1) + s`); 3-D tri faces: equispaced
 /// nodal `P_p` (index `row*(p+1) - row*(row-1)/2 + col`, node
 /// `(a,b)` with `a+b ≤ p`, ordered lex by `(a, b)`).
-pub fn eval_face_lagrange(dim: usize, is_quad: bool, p: usize, param: &[f64], out: &mut [f64]) {
+pub fn eval_face_lagrange(
+    dim: usize,
+    is_quad: bool,
+    p: usize,
+    param: &[f64],
+    out: &mut [f64],
+    h1: bool,
+) {
     if dim == 2 {
-        lagrange_1d(p, param[0], out);
+        // D1058: the H1-trace face basis sits on MFEM's Gauss-Lobatto nodes
+        // (`H1_FECollection`/`H1_Trace_FECollection` default basis); the
+        // RT-trace face basis keeps the equispaced gauge (identical span, no
+        // essential data).  At p ≤ 2 the two node sets coincide.
+        if h1 {
+            lagrange_1d_gl(p, param[0], out);
+        } else {
+            lagrange_1d(p, param[0], out);
+        }
     } else if is_quad {
+        // 3-D faces keep the equispaced convention for now (the parallel DPG
+        // lane is 2-D, D964); the 3-D GL switch is part of the full D1058 fix.
         let mut la = vec![0.0; p + 1];
         let mut lb = vec![0.0; p + 1];
         lagrange_1d(p, param[0], &mut la);
@@ -1418,6 +1449,23 @@ fn lagrange_1d_at(n: usize, m: usize, x: f64) -> f64 {
         v *= (x - xj) / (xm - xj);
     }
     v
+}
+
+/// 1-D Lagrange basis on MFEM's Gauss-Lobatto nodes: `ℓ^{(p)}_j(x)` for the
+/// `p + 1` points of [`lobatto_points_01`] — the node set of MFEM's
+/// `H1_FECollection` / `H1_Trace_FECollection` (D1058).  Coincides with the
+/// equispaced [`lagrange_1d_at`] at p ≤ 2.
+fn lagrange_1d_gl(p: usize, x: f64, out: &mut [f64]) {
+    let nodes = lobatto_points_01(p); // degree p → p + 1 GL points
+    for (j, o) in out.iter_mut().enumerate() {
+        let mut v = 1.0;
+        for (k, &xk) in nodes.iter().enumerate() {
+            if k != j {
+                v *= (x - xk) / (nodes[j] - xk);
+            }
+        }
+        *o = v;
+    }
 }
 
 /// Face dof index layout for tri faces must match `eval_face_lagrange`.
@@ -2492,7 +2540,7 @@ mod tests {
     #[test]
     fn face_lagrange_partition_of_unity() {
         let mut out = vec![0.0; 6];
-        eval_face_lagrange(3, false, 2, &[1.0 / 3.0, 1.0 / 3.0], &mut out);
+        eval_face_lagrange(3, false, 2, &[1.0 / 3.0, 1.0 / 3.0], &mut out, false);
         let sum: f64 = out.iter().sum();
         assert!((sum - 1.0).abs() < 1e-12);
     }
@@ -2500,7 +2548,7 @@ mod tests {
     #[test]
     fn face_lagrange_quad_partition_of_unity() {
         let mut out = vec![0.0; 9];
-        eval_face_lagrange(3, true, 2, &[0.3, 0.6], &mut out);
+        eval_face_lagrange(3, true, 2, &[0.3, 0.6], &mut out, false);
         let sum: f64 = out.iter().sum();
         assert!((sum - 1.0).abs() < 1e-12);
     }
@@ -2785,9 +2833,12 @@ mod trace_tests {
                     for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
                         // The basis must be a nodal Kronecker delta at the dof
                         // nodes: evaluate at node k and require phi = e_k.
+                        // (3-D faces keep the equispaced convention — the
+                        // D1058 GL switch is 2-D only so far, so the nodal
+                        // self-check here stays on the old convention too.)
                         let node =
-                            crate::dpg_weakform::face_dof_params(3, is_qf, p as usize, k);
-                        eval_face_lagrange(3, is_qf, p as usize, &node, &mut phi);
+                            crate::dpg_weakform::face_dof_params(3, is_qf, p as usize, k, false);
+                        eval_face_lagrange(3, is_qf, p as usize, &node, &mut phi, false);
                         for (j, &v) in phi.iter().enumerate() {
                             let want = if j == k { 1.0 } else { 0.0 };
                             assert!(

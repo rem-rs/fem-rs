@@ -583,7 +583,8 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         let nodes = sk.face_nodes(f);
         let coords: Vec<Vec<f64>> =
             nodes.iter().map(|&n| self.mesh.node_coords(n).to_vec()).collect();
-        let params = crate::dpg_weakform::face_dof_params(dim, sk.is_quad_face(f), p, k);
+        let params =
+            crate::dpg_weakform::face_dof_params(dim, sk.is_quad_face(f), p, k, sk.is_continuous());
         let mut x = vec![0.0; dim];
         if dim == 2 {
             let s = params[0];
@@ -1244,7 +1245,14 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                                 let (k, o) = &self.test_kinds[*tb];
                                 eval_vol_space(*k, *o, et, dim, &jac, det, &jit, &xiref, None, &mut tv);
                                 let mut fphi = vec![0.0_f64; nfd];
-                                eval_face_lagrange(dim, is_qf, sk.order() as usize, fparam, &mut fphi);
+                                eval_face_lagrange(
+                                    dim,
+                                    is_qf,
+                                    sk.order() as usize,
+                                    fparam,
+                                    &mut fphi,
+                                    sk.is_continuous(),
+                                );
                                 let ctx = FaceCtx {
                                     ip_weight: fwts[q],
                                     measure,

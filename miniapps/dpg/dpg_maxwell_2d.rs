@@ -341,7 +341,9 @@ fn solve_level(
                         &mut tv,
                     );
                     let mut fphi = vec![0.0_f64; 2];
-                    fem_assembly::dpg::dpg_basis::eval_face_lagrange(2, false, 1, fparam, &mut fphi);
+                    fem_assembly::dpg::dpg_basis::eval_face_lagrange(
+                        2, false, 1, fparam, &mut fphi, false,
+                    );
                     let w = fwts[q];
                     for i in 0..tv.n_scalar {
                         let cross = normal[1] * tv.phi[i * 2] - normal[0] * tv.phi[i * 2 + 1];

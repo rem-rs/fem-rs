@@ -43,8 +43,8 @@ use fem_linalg::{csr_spmm, CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
 use crate::dpg::dpg_basis::{
-    eval_face_lagrange, eval_vol_space, face_param_to_elem_ref, local_face_table, ref_node_coords,
-    scalar_ref_elem, vol_quadrature, VolKind, VolVals,
+    eval_face_lagrange, eval_vol_space, face_param_to_elem_ref, local_face_table, lobatto_points_01,
+    ref_node_coords, scalar_ref_elem, vol_quadrature, VolKind, VolVals,
 };
 use crate::dpg::dpg_basis::SkeletonSpace;
 use crate::dpg::dpg_integrators::{
@@ -875,7 +875,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         let nodes = sk.face_nodes(f);
         let coords: Vec<Vec<f64>> =
             nodes.iter().map(|&n| self.mesh.node_coords(n).to_vec()).collect();
-        let params = face_dof_params(dim, sk.is_quad_face(f), p, k);
+        let params = face_dof_params(dim, sk.is_quad_face(f), p, k, sk.is_continuous());
         let mut x = vec![0.0; dim];
         if dim == 2 {
             let s = params[0];
@@ -1305,7 +1305,14 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                             ts.kind, ts.order, et, dim, &jac, det, &jit, &xiref, None, &mut tv,
                         );
                         let mut fphi = vec![0.0_f64; nfd];
-                        eval_face_lagrange(dim, is_qf, sk.order() as usize, fparam, &mut fphi);
+                        eval_face_lagrange(
+                            dim,
+                            is_qf,
+                            sk.order() as usize,
+                            fparam,
+                            &mut fphi,
+                            sk.is_continuous(),
+                        );
                         let ctx = FaceCtx {
                             ip_weight: fwts[q],
                             measure,
@@ -2137,15 +2144,21 @@ fn norm3(v: &[f64]) -> f64 {
 
 /// Face-DOF parameter coordinates matching `eval_face_lagrange`'s node order.
 ///
-/// * 2-D edge: node `k` at `s = k/p`.
+/// * 2-D edge: node `k` at `s = k/p` (equispaced, RT-trace); the H1-trace
+///   (`h1 = true`) sits on MFEM's Gauss-Lobatto points instead (D1058 — the
+///   node set of `H1_Trace_FECollection`, identical at p ≤ 2).
 /// * 3-D quad: tensor node `(s,t) = (k%(p+1)/p, k/(p+1)/p)`.
 /// * 3-D triangle: the enumeration of `eval_face_lagrange` is row-major over
 ///   `row = a + b` (`row = 0..=p`, `a = 0..=row`, `b = row − a`), so index `k`
 ///   satisfies `k = row(row+1)/2 + a` — *not* MFEM's `H1_TriangleElement`
 ///   ordering `i*(p+1) − i(i−1)/2 + j` used by [`tri_face_dof_index`].
-pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize) -> Vec<f64> {
+pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize, h1: bool) -> Vec<f64> {
     if dim == 2 {
-        vec![k as f64 / p as f64]
+        if h1 {
+            vec![lobatto_points_01(p)[k]] // degree p → p + 1 GL points
+        } else {
+            vec![k as f64 / p as f64]
+        }
     } else if is_quad {
         let s = k % (p + 1);
         let t = k / (p + 1);
