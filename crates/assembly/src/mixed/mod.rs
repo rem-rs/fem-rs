@@ -431,6 +431,12 @@ where
 // ─── HCurl × H¹ mixed assembly (gauge fixing / potential coupling) ─────
 
 /// Integrator for HCurl×H¹ mixed bilinear form `b(E, φ) = ∫ φ · α·curl(E) dx`.
+///
+/// `curl_col` carries the **physical** curl of the HCurl trial basis at the
+/// quadrature point, laid out `[n_dofs × dim]` (`curl_col[i·dim + c]` =
+/// component `c` of `curl(Φ_i)`; in 2-D the scalar curl sits in the last
+/// slot of each dof chunk).  The assembler applies the H(curl) element
+/// orientation signs per dof **before** this call (D1051).
 pub trait HCurlH1Integrator: Send + Sync {
     fn add_to_element_matrix(
         &self,
@@ -522,7 +528,9 @@ impl<C: ScalarCoeff> HCurlH1WeakDivIntegrator for HCurlH1WeakDiv<C> {
     }
 }
 
-/// ∫ φ · curl(E) dx — curl coupling for Maxwell gauge fixing.
+/// ∫ φ · curl(E) dx — curl coupling for Maxwell gauge fixing (MFEM
+/// `MixedScalarCurlIntegrator`: the scalar test φ against the z-component of
+/// the physical curl of the H(curl) trial field).
 pub struct HCurlH1CurlIntegrator;
 
 impl HCurlH1Integrator for HCurlH1CurlIntegrator {
@@ -677,20 +685,71 @@ where
         let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
         let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+        let det_j = tr.det_j();
+        let jac = tr.jacobian().clone();
+        // D1051: the H(curl) element orientation signs — MFEM's mixed scatter
+        // goes through the **signed** `GetElementDofs` table
+        // (`SparseMatrix::AddSubMatrix` negates the columns of negative-vdir
+        // dofs); every sibling kernel of the family applies them, this one
+        // never did (see the D1041 weak-div twin).
+        let col_signs = col_space.element_signs(e);
 
         let n_elem_r = global_rows.len();
         let n_elem_c = global_cols.len();
         let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
         let mut phi_r = vec![0.0; n_r];
+        // Physical curl columns, [n_dofs × dim], z-component last
+        // (2-D: (0, curl_z) per dof).
         let mut curl_c_vec = vec![0.0; n_c * dim];
+        // `eval_curl` native-layout scratch: 2-D writes n_c scalars, 3-D
+        // n_c × 3 (`VectorReferenceElement` contract).
+        let mut curl_ref = vec![0.0; n_c * dim];
 
         for (q, xi) in quad.points.iter().enumerate() {
             // D696 verdict: **signed** — MFEM `MixedScalarCurlIntegrator`
             // weights with `ip.weight * Trans.Weight()` (signed det).
-            let w = quad.weights[q] * tr.det_j();
+            let w = quad.weights[q] * det_j;
             ref_r.eval_basis(xi, &mut phi_r);
-            ref_c.eval_curl(xi, &mut curl_c_vec);
+            ref_c.eval_curl(xi, &mut curl_ref);
             let xp = tr.map_to_physical(xi);
+            // Curl Piola + [n_dofs × dim] normalization.  The physical curl of
+            // the covariantly mapped H(curl) basis is `curl̂/detJ` (2-D scalar)
+            // resp. `J·curl̂/detJ` (3-D vector) — the old code fed the raw
+            // reference curls (entries scaled by detJ; 3-D missing the J
+            // factor) through a 2-D slot shift (`[i·dim + dim−1]` reads over a
+            // stride-1 buffer), so only the first 2-D column was even the
+            // right *kind* of wrong.
+            if dim == 2 {
+                let inv_det = 1.0 / det_j;
+                for (i, dof_vals) in curl_c_vec.chunks_exact_mut(dim).enumerate() {
+                    dof_vals[dim - 1] = inv_det * curl_ref[i];
+                }
+            } else {
+                for i in 0..n_c {
+                    for r in 0..dim {
+                        let c = (0..dim)
+                            .map(|k| jac[(r, k)] * curl_ref[i * dim + k])
+                            .sum::<f64>();
+                        curl_c_vec[i * dim + r] = c / det_j;
+                    }
+                }
+            }
+            // D1051: per-dof trial signs — `curl_c_vec` is [n_dofs × dim], so
+            // sign the whole dof chunk (`chunks_exact_mut`), never flat-zip
+            // against the scalar sign table (the D1041 per-dof lesson).
+            if let Some(signs) = col_signs {
+                for (i, dof_vals) in curl_c_vec.chunks_exact_mut(dim).enumerate() {
+                    let s = match signs.get(i) {
+                        Some(&s) => s,
+                        None => break,
+                    };
+                    if s != 1.0 {
+                        for v in dof_vals {
+                            *v *= s;
+                        }
+                    }
+                }
+            }
             let qp_r = QpData {
                 n_dofs: n_elem_r, dim, weight: w, phys_weight: w,
                 ref_weight: quad.weights[q], phi: &phi_r, grad_phys: &[],
@@ -833,7 +892,15 @@ where
             // gauge-coupling forms weight with `ip.weight * Trans.Weight()`.
             let (w, jit): (f64, nalgebra::DMatrix<f64>) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
-                let (jac, det, _xp) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+                // D1052: the geometry reference element (27-node Q2 lattice on
+                // curved hexes) indexes the mesh's **geometry table** row, not
+                // the 8 corner nodes — the same contract the vector
+                // assembler's isoparametric path and every mixed sibling use
+                // (D667 pattern); the corner row panicked with
+                // index-out-of-bounds on any curved non-simplex mesh (the
+                // d103 tesla ball-quad).
+                let (jac, det, _xp) =
+                    crate::isoparametric_jacobian(mesh, mesh.geometry_nodes(e), ge.as_ref(), xi, dim);
                 (quad.weights[qi] * det, jac.try_inverse().unwrap().transpose())
             } else {
                 let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
