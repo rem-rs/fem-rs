@@ -2182,9 +2182,11 @@ impl<const D: usize> Mesh<D> {
     ///   element center instead) must have positive determinant.  A flipped
     ///   TRIANGLE is repaired by swapping `vi[0] ↔ vi[1]`, a QUADRILATERAL by
     ///   `vi[1] ↔ vi[3]`.
-    /// - 3D: a flipped TETRAHEDRON (vertex/center Jacobian) is repaired by
-    ///   `vi[0] ↔ vi[1]`, a PYRAMID (center Jacobian) by `vi[1] ↔ vi[3]`;
-    ///   WEDGE/HEXAHEDRON are counted but cannot be repaired (MFEM "// how?").
+    /// - 3D: a flipped TETRAHEDRON (corner determinant when `Nodes == NULL`,
+    ///   center Jacobian otherwise) is repaired by `vi[0] ↔ vi[1]`, a PYRAMID
+    ///   (always center Jacobian) by `vi[1] ↔ vi[3]`; WEDGE/HEXAHEDRON (always
+    ///   center Jacobian, D1049) are counted but cannot be repaired
+    ///   (MFEM "// how?").
     ///
     /// When anything is flagged, MFEM's one-line warning
     /// `Elements with wrong orientation: <wo> / <n> (<fixed|not fixed>)` is
@@ -2250,10 +2252,23 @@ impl<const D: usize> Mesh<D> {
         wo
     }
 
-    /// Signed orientation determinant of element `e`: `det[v_{j+1} − v_0]`
-    /// from the corner vertices for linear geometry, the Jacobian determinant
-    /// at the MFEM geometry center for curved geometry (`None` for
-    /// non-cell types, which MFEM's checker never sees).
+    /// Signed orientation determinant of element `e`, MFEM
+    /// `Mesh::CheckElementOrientation` semantics (`mesh/mesh.cpp:7346`, 4.10):
+    ///
+    /// - linear geometry (`Nodes == NULL`): the corner-vertex determinant
+    ///   `det[v_{j+1} − v_0]` is used **only** for the 2-D types (read off the
+    ///   first three vertices, TRIANGLE and QUADRILATERAL alike) and the 3-D
+    ///   TETRAHEDRON;
+    /// - every other 3-D geometry (WEDGE / PYRAMID / HEXAHEDRON) is checked
+    ///   through the Jacobian at the MFEM geometry center (`GetElementJacobian`
+    ///   at `Geometries.GetCenter`) in **both** the linear and the curved case —
+    ///   D1049: the tet formula on a hex's first four corners measures the
+    ///   bottom *face*'s warpedness and flagged 70/252 straight cylinder-hex
+    ///   elements MFEM accepts;
+    /// - the center det itself is bit-identical to C++ on that mesh (probe,
+    ///   `tmp/d1049/`).
+    ///
+    /// `None` for non-cell types, which MFEM's checker never sees.
     fn element_orientation_det(&self, e: u32, et: ElementType) -> Option<f64> {
         if et == ElementType::Polygon {
             return None;
@@ -2261,7 +2276,13 @@ impl<const D: usize> Mesh<D> {
         if et.dim() as usize != D {
             return None;
         }
-        if self.geometry.is_none() {
+        let linear_vertex_det = match (D, et) {
+            (2, ElementType::Tri3 | ElementType::Tri6) => true,
+            (2, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9) => true,
+            (3, ElementType::Tet4 | ElementType::Tet10) => true,
+            _ => false,
+        };
+        if self.geometry.is_none() && linear_vertex_det {
             // Linear geometry: corner-vertex determinant (MFEM `Nodes == NULL`).
             let nodes = self.elem_nodes(e);
             let v0 = self.coords_of(nodes[0]);
@@ -2281,8 +2302,13 @@ impl<const D: usize> Mesh<D> {
                 - r0[1] * (r1[0] * r2[2] - r1[2] * r2[0])
                 + r0[2] * (r1[0] * r2[1] - r1[1] * r2[0]));
         }
-        // Curved geometry: MFEM checks only the Jacobian at the element
-        // center (`Geometries.GetCenter` values, fem/geom.cpp:176-198).
+        // Jacobian at the element center (MFEM `GetElementJacobian` at
+        // `Geometries.GetCenter`, fem/geom.cpp:176-198): the curved-geometry
+        // check for every type, and the **only** 3-D check for wedge /
+        // pyramid / hex — with `geometry.is_none()` this evaluates the P1
+        // isoparametric map on the corner vertices, exactly MFEM's
+        // `Nodes == NULL` `IsoparametricTransformation` over
+        // `GetTransformationFEforElementType`'s order-1 FE.
         let center: &[f64] = match et {
             ElementType::Tri3 | ElementType::Tri6 => &[1.0 / 3.0, 1.0 / 3.0],
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => &[0.5, 0.5],
@@ -5272,5 +5298,73 @@ mod tet_geometry_family_tests {
         tet.conn[1] = conn0[0];
         assert_eq!(tet.check_element_orientation(true), 1);
         assert_eq!(&tet.conn[0..4], &conn0[..]);
+    }
+
+    /// D1049: MFEM's 3-D dispatch — WEDGE/HEXAHEDRON are always checked
+    /// through the center Jacobian (linear geometry included) and counted
+    /// but never repaired ("// how?"), while the TETRAHEDRON keeps the
+    /// corner determinant and its `Swap(vi[0], vi[1])` fix.  A hex whose
+    /// center-Jacobian determinant is negative must therefore still be
+    /// *flagged* (the check is not disabled for hexes — only the corner
+    /// formula was wrong).
+    #[test]
+    fn d1049_3d_orientation_check_is_the_center_jacobian_per_type() {
+        // Hexahedron: the unit cube has center det = +1; mirroring it in z
+        // (an orientation-reversing isometry of the trilinear map) gives
+        // center det = −1.
+        let mut hex = Mesh::<3>::unit_cube_hex(1);
+        assert_eq!(hex.element_jacobian(0, &[0.5, 0.5, 0.5]).1, 1.0);
+        assert_eq!(hex.check_element_orientation(false), 0);
+        let conn0: Vec<u32> = hex.conn.clone();
+        for z in hex.coords.iter_mut().skip(2).step_by(3) {
+            *z = -*z;
+        }
+        assert_eq!(hex.element_jacobian(0, &[0.5, 0.5, 0.5]).1, -1.0);
+        // counted, not fixed (MFEM "// how?"): detect-only and fix passes
+        // both report the flip and leave the connectivity untouched.
+        assert_eq!(hex.check_element_orientation(false), 1);
+        assert_eq!(hex.check_element_orientation(true), 1);
+        assert_eq!(hex.conn, conn0);
+
+        // Wedge (MFEM vertex order, straight prisms): same counted-not-fixed
+        // semantics through the center Jacobian at (1/3, 1/3, 1/2).
+        let mut prism = Mesh::<3>::uniform(
+            vec![
+                0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0,
+            ],
+            vec![0, 1, 2, 3, 4, 5],
+            vec![1],
+            ElementType::Prism6,
+            vec![],
+            vec![],
+            ElementType::Line2,
+        );
+        assert_eq!(prism.check_element_orientation(false), 0);
+        prism.conn.swap(0, 1);
+        assert_eq!(prism.check_element_orientation(true), 1);
+        assert_eq!(&prism.conn[..], &[1, 0, 2, 3, 4, 5]);
+
+        // Pyramid (MFEM vertex order): checked at (0.375, 0.375, 0.25);
+        // a flipped base is counted and MFEM's repair `Swap(vi[1], vi[3])`
+        // restores it.
+        let mut pyr = Mesh::<3>::uniform(
+            vec![
+                0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+                0.5, 0.5, 1.0,
+            ],
+            vec![0, 1, 2, 3, 4],
+            vec![1],
+            ElementType::Pyramid5,
+            vec![],
+            vec![],
+            ElementType::Line2,
+        );
+        assert_eq!(pyr.check_element_orientation(false), 0);
+        pyr.conn.swap(1, 3);
+        assert_eq!(pyr.check_element_orientation(true), 1);
+        // the fix pass applied MFEM's `Swap(vi[1], vi[3])` — the base order
+        // is restored
+        assert_eq!(pyr.conn, vec![0, 1, 2, 3, 4]);
     }
 }

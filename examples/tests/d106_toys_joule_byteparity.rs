@@ -155,16 +155,6 @@ fn read_file(dir: &Path, rel: &str) -> Vec<u8> {
     std::fs::read(dir.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-/// joule prints one kernel-gap warning line the C++ does not (D1049); the
-/// byte pins filter exactly that line.
-fn filter_d1049(stdout: &[u8]) -> Vec<u8> {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .filter(|l| !l.starts_with("Elements with wrong orientation:"))
-        .map(|l| format!("{l}\n"))
-        .collect::<String>()
-        .into_bytes()
-}
 
 // ─── Pins: toys ──────────────────────────────────────────────────────────────
 
@@ -304,7 +294,7 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
     assert_eq!(code, 3, "joule stops with 3 before the (unported) time loop");
     assert_md5(
         "joule default stdout (D1049-filtered)",
-        &filter_d1049(&out),
+        &out,
         "bf6ff61808a8f38e08e23d6295a6a56d",
     );
 
@@ -328,7 +318,7 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
     assert_eq!(code, 3);
     assert_md5(
         "joule -rs 1 stdout (D1049-filtered)",
-        &filter_d1049(&out),
+        &out,
         "41e3407d37032e084f6464c1578f62b1",
     );
 
@@ -350,7 +340,7 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
     assert_eq!(code, 3);
     assert_md5(
         "joule visit stdout (D1049-filtered)",
-        &filter_d1049(&out),
+        &out,
         "87d8d2f601f139a1516161478aa0b255",
     );
     let dc = dir.join("Joule_000000");
