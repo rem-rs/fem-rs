@@ -301,13 +301,6 @@ where
     // full-layout id, and the constrained (slave) dofs are dropped from the
     // numbering exactly like MFEM's NC `ParFiniteElementSpace` true-dof space.
     let conf_layout = local.conforming_true_layout();
-    if conf_layout.is_some() {
-        assert!(
-            !condensed,
-            "build_numbering: static condensation with a conforming restriction \
-             is not supported yet (D1057)"
-        );
-    }
     // Block sizes in the system index space (true sizes under a restriction).
     let numbering_sizes: Vec<usize> = match &conf_layout {
         Some(m) => m.iter().map(|lm| lm.len()).collect(),
@@ -316,10 +309,27 @@ where
 
     // Which trial blocks form the system, and their system index base?
     let (sys_trials, base_of_trial): (Vec<usize>, Vec<usize>) = if condensed {
-        let eoffs = local.exposed_block_offsets();
         let exposed: Vec<usize> = (0..n_trial).filter(|&b| kinds[b].is_trace()).collect();
         assert!(!exposed.is_empty(), "static condensation requires a trace block");
-        let bases: Vec<usize> = (0..exposed.len()).map(|bi| eoffs[bi]).collect();
+        // Bases of the exposed blocks inside the system index space.  The
+        // formed serial system is the exposed-compact Schur complement — the
+        // exposed-TRUE compact layout when a conforming restriction is
+        // registered (D1057: `DpgSystem::Condensed` then carries the true
+        // exposed offsets, so the numbering blocks must mirror them).
+        let bases: Vec<usize> = match &conf_layout {
+            None => {
+                let eoffs = local.exposed_block_offsets();
+                (0..exposed.len()).map(|bi| eoffs[bi]).collect()
+            }
+            Some(maps) => {
+                let mut bases = vec![0usize];
+                for &tb in &exposed {
+                    bases.push(bases.last().unwrap() + maps[tb].len());
+                }
+                bases.truncate(exposed.len());
+                bases
+            }
+        };
         (exposed, bases)
     } else {
         let mut bases = vec![0usize];

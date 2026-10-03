@@ -40,7 +40,11 @@
 //!
 //! `enable_static_condensation()` is forwarded to the serial weak form; the
 //! parallel system is then the Schur complement over the exposed (trace)
-//! blocks, with the same global trace numbering.
+//! blocks, with the same global trace numbering.  Under a conforming
+//! restriction (NC-AMR, D1032/D1057) the Schur system is the exposed blocks'
+//! `Peᵀ S Pe` over their **true** dofs — the numbering mirrors the serial
+//! exposed-true compact layout (`SysBlock::base` = exposed-true offsets), the
+//! dense-union global renumbering of D1032 applies unchanged.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -248,8 +252,11 @@ impl<M: MeshTopology + Clone + 'static> ParDpgWeakForm<M> {
     /// which under the one-node ghost layer is consistent across ranks (a rank
     /// holding a slave face always holds the master face too — both share the
     /// structure's nodes).  The rows must reference only true dofs of the
-    /// local skeleton (guaranteed at `nc_limit = 1`).  Combined with static
-    /// condensation this is not supported yet (D1057).
+    /// local skeleton (guaranteed at `nc_limit = 1`).  Under static
+    /// condensation the numbering lives on the exposed (trace) blocks' **true**
+    /// dofs — the distributed `Peᵀ S Pe` Schur system (D1057) — so the
+    /// restriction may be registered before `form_linear_system` regardless of
+    /// [`Self::enable_static_condensation`].
     pub fn set_trace_conforming_restriction(
         &mut self,
         block: usize,

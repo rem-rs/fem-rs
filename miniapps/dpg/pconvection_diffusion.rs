@@ -71,6 +71,14 @@
 //! -o 2 -theta 0.7 (--ranks 2):
 //!                          337 1.052e-01 9.535e-02   ==  337 1.052e-01 9.535e-02
 //!                          964 4.345e-02 3.939e-02   ==  964 4.345e-02 3.939e-02
+//! -o 2 -theta 0.7 -sc (--ranks 2, D1057):
+//!                          337 1.052e-01 9.535e-02   ==  337 1.052e-01 9.535e-02
+//!                          964 4.345e-02 3.939e-02   ==  964 4.345e-02 3.939e-02
+//! -o 2 -theta 0.7 -sc -ref 2 (--ranks 2, D1057; two NC levels under -sc):
+//!                         1021 3.509e-02 3.310e-02   == 1021 3.509e-02 3.310e-02
+//! -theta 0.0 -sc (--ranks 2):
+//!                          113 1.033e+00 9.290e-01   ==  113 1.033e+00 9.290e-01
+//!                          417 5.172e-01 4.817e-01   ==  417 5.172e-01 4.817e-01
 //! ```
 //!
 //! The **PCG iteration count is not reproduced** (D963): the C++ miniapp
@@ -1383,8 +1391,10 @@ fn main() {
             // Parallel driver (D963 lane).  D1032: it now carries the
             // hanging-node conforming restriction on the NC levels — the
             // `theta = 0.7` table matches C++ `mpirun -np N` to all printed
-            // digits (the physical columns are np-independent).  `-sc` on an
-            // NC level is the remaining gap (D1057).
+            // digits (the physical columns are np-independent).  D1057: the
+            // restriction works under `-sc` too (the exposed-block numbering
+            // lives on the trace blocks' true dofs), so `-o 2 -theta 0.7 -sc
+            // --ranks 2` matches C++ `mpirun -np 2 -sc` as well.
             solve_level(
                 &mesh,
                 n_workers,
@@ -1450,8 +1460,10 @@ fn main() {
         // set_trace_conforming_restriction`, probe-pinned against the MFEM 4.10
         // cP), so the partial-mark table matches C++ np1 digit-for-digit.
         // D1032 (round 107): the multi-rank lane carries the restriction too
-        // (true-dof numbering + `trace_boundary_dofs_nc`); `-sc` on an NC
-        // level with `--ranks ≥ 2` remains an honest exit(3) (D1057).
+        // (true-dof numbering + `trace_boundary_dofs_nc`).  D1057 (round 108):
+        // `-sc` composes with the restriction on the multi-rank lane — the
+        // numbering of the condensed system lives on the exposed trace blocks'
+        // true dofs (distributed `Peᵀ S Pe`).
         if r.marked.len() == mesh.n_elements() {
             mesh = refine_uniform(&mesh);
             hanging.clear();
@@ -1461,19 +1473,6 @@ fn main() {
             let (m, iso_out, hang) =
                 general_refinement_quad_aniso(&mesh, &marks, 1, iso_state, None);
             iso_state = iso_out;
-            if n_workers > 1 && static_cond {
-                eprintln!(
-                    "pconvection_diffusion: GAP — partial refinement ({}/{} elements) with \
-                     --ranks {} and -sc needs the conforming restriction under static \
-                     condensation on the multi-rank DPG lane (D1057; the full path carries \
-                     it since D1032).  Re-run without -sc, with `--ranks 1`, or use \
-                     `-theta 0.0` (mark-all → uniform refinement, verified parallel path).",
-                    r.marked.len(),
-                    mesh.n_elements(),
-                    n_workers
-                );
-                exit(3);
-            }
             mesh = m;
             hanging = hang;
         }
