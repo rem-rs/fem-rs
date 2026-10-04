@@ -45,6 +45,10 @@
 //!   after the BDF order increases).  Reproduced here on purpose: `h_diag` is
 //!   snapshotted in [`NavierSolver::setup`].
 //! * The `PrintInfo` banner omits the `MFEM version` / `MFEM GIT` lines.
+//! * [`NavierConfig::convection_stabilization`] =
+//!   [`ConvectionStabilization::DeferredUpwind`] is a fem-rs-only extension
+//!   (D1125): the step's `H` gains `beta·D_up(u_lag)`, the lagged upwind
+//!   defect.  The default `Off` is byte-identical to the C++ path.
 //!
 //! # The `D`/`G` pairing and its boundary term
 //!
@@ -95,6 +99,59 @@ pub const NAVIER_VERSION: &str = "0.1";
 
 // ─── Solver configuration (navier_solver.hpp members) ────────────────────────
 
+/// Convection treatment of the split scheme
+/// ([`NavierConfig::convection_stabilization`]).
+///
+/// MFEM's `navier::NavierSolver` evaluates the nonlinear terms with the
+/// centered Galerkin `VectorConvectionNLFIntegrator`
+/// (navier_solver.cpp:124-126, `nlcoeff.constant = -1`) extrapolated
+/// explicitly in time (EXTk, navier_solver.cpp:411-427).  That is the
+/// [`ConvectionStabilization::Off`] default, and the solver stays
+/// item-for-item identical to the C++ miniapp with it.
+///
+/// The remaining variant is a fem-rs extension (D1125) for cell-Re regimes
+/// where the centered + explicit combination has a time-step stability
+/// ceiling (round-109/110: re1000 @ dt=5e-3 diverges, cell-Re ~ 15.6).
+///
+/// # Why the upwind defect rides the implicit operator
+///
+/// The textbook deferred-correction blend puts `beta·(N_upwind − N_gal)` in
+/// the *residual*; evaluated through this scheme's EXTk extrapolation it is
+/// an explicit diffusion, and the exact BDF2/EXT2 characteristic
+/// `1.5g² + (−2 + 2(iθ + x))g + (0.5 − (iθ + x)) = 0` with
+/// `x = beta·ν_up·k²·dt` has `|g| > 1` at the grid scale for **every**
+/// `beta > 0` (measured stability table in `tmp/d114nav/REPORT.md`; a seeded
+/// n=16/dt=5e-2 cavity run diverged to 3.5e4 with beta = 0.3).  The blend
+/// therefore adds the — lagged, linear, SPD — upwind defect to the
+/// *implicit* Helmholtz operator instead:
+/// `H = (bd0/dt)·Mv + ν·Kv + beta·D_up(u_lag)`.  That damps every mode
+/// unconditionally, keeps the three-solve projection structure (no nonlinear
+/// iteration: `u_lag` is the EXTk-extrapolated velocity the step already
+/// forms — Picard-style lagged defect correction), and `beta → 1` is the
+/// full upwind.  Everything else — residual, pressure solve, curl-curl,
+/// boundary terms — stays on the MFEM path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConvectionStabilization {
+    /// Centered Galerkin convection, plain Helmholtz operator
+    /// (MFEM-identical default).
+    Off,
+    /// Deferred-correction upwind blend (D1125): the Helmholtz operator of
+    /// the step gains `beta * D_up(u_lag)` with
+    ///
+    /// ```text
+    /// D_up(u)_{i,j} = ∫ ν_up ∇φ_j · ∇φ_i dx ,  ν_up = |u_h| · h_e / 2 ,
+    /// ```
+    ///
+    /// the FE form of first-order upwinding (`beta → 0` recovers `Off` exactly,
+    /// `beta = 1` is the full upwind).  `u_lag` is the extrapolated velocity
+    /// `ab1·un + ab2·unm1 + ab3·unm2` of the current step, so the added
+    /// operator is linear and lagged.
+    DeferredUpwind {
+        /// Blend factor `beta` (0 = Off-equivalent, 1 = full upwind).
+        beta: f64,
+    },
+}
+
 /// Relative tolerances / iteration caps / print levels of the three solves.
 ///
 /// Mirrors the double-precision `NavierSolver` member defaults of
@@ -129,6 +186,9 @@ pub struct NavierConfig {
     /// cannot converge the 26k-dof pure-Neumann pressure within the 200
     /// iteration cap — MFEM 4.10's own serial mirror stagnates identically).
     pub pressure_amg: bool,
+    /// Convection treatment ([`ConvectionStabilization::Off`] = the
+    /// MFEM-identical default; D1125 for the stabilized variants).
+    pub convection_stabilization: ConvectionStabilization,
 }
 
 impl Default for NavierConfig {
@@ -143,6 +203,7 @@ impl Default for NavierConfig {
             pl_hsolve: 0,
             verbose: true,
             pressure_amg: false,
+            convection_stabilization: ConvectionStabilization::Off,
         }
     }
 }
@@ -216,6 +277,27 @@ pub trait NavierDiscretization {
     /// evaluated with `Q = 1` (the driver applies the `nlcoeff = -1` factor of
     /// the C++ form).
     fn convection_residual(&self, u: &[f64], out: &mut [f64]);
+
+    /// The upwind-defect operator of
+    /// [`ConvectionStabilization::DeferredUpwind`]
+    /// ([`NavierConfig::convection_stabilization`]): the SPD block
+    ///
+    /// ```text
+    /// D_up(u)_{i,j} = ∫ ν_up ∇φ_j · ∇φ_i dx ,  ν_up = |u_h| · h_e / 2 ,
+    /// ```
+    ///
+    /// evaluated with the lagged velocity `u` (the step's EXTk-extrapolated
+    /// velocity).  Never called with the default
+    /// [`ConvectionStabilization::Off`]; the default implementation aborts
+    /// loudly so a discretization that does not implement the stabilized
+    /// operator cannot silently run unstabilized.
+    fn assemble_upwind_defect(&self, u: &[f64]) -> CsrMatrix<f64> {
+        let _ = u;
+        panic!(
+            "ConvectionStabilization::DeferredUpwind requires the discretization \
+             to implement `assemble_upwind_defect`"
+        );
+    }
 
     /// `∇×∇×u` at the velocity DOFs, i.e. the C++ `ComputeCurl2D` applied
     /// twice (without the `kin_vis` factor, which the driver applies).
@@ -706,11 +788,33 @@ impl<D: NavierDiscretization> NavierSolver<D> {
         // (`H_form->Update(); H_form->Assemble(); H_form->FormSystemMatrix()`).
         let mut h = self.disc.assemble_helmholtz(self.bd0 / dt, self.kin_vis);
 
+        // D1125: the lagged velocity `u_lag = ab1·un + ab2·unm1 + ab3·unm2`
+        // (the extrapolated velocity whose curl feeds the pressure step
+        // below) drives the deferred-correction upwind defect; the SPD block
+        // joins the IMPLICIT operator (`beta → 0` keeps `H` bit-identical).
+        let mut lext = vec![0.0_f64; nv];
+        for i in 0..nv {
+            lext[i] = self.ab1 * self.vel.un[i]
+                + self.ab2 * self.vel.unm1[i]
+                + self.ab3 * self.vel.unm2[i];
+        }
+        if let ConvectionStabilization::DeferredUpwind { beta } =
+            self.cfg.convection_stabilization
+        {
+            if beta != 0.0 {
+                let dup = self.disc.assemble_upwind_defect(&lext);
+                h = h.add(&dup);
+            }
+        }
+
         // Extrapolated f^{n+1}: the acceleration coefficient time is set to
         // t + dt before the linear form is reassembled.
         let accel = self.disc.assemble_accel(t_now);
 
-        // Nonlinear extrapolated terms: N(u) = -C(u)·u on un, unm1, unm2.
+        // Nonlinear extrapolated terms: N(u) = -C(u)·u on un, unm1, unm2 —
+        // always the MFEM path (`N->Mult` on the three history levels,
+        // navier_solver.cpp:411-413); the D1125 stabilization never touches
+        // the residual.
         let mut nun = vec![0.0_f64; nv];
         let mut nunm1 = vec![0.0_f64; nv];
         let mut nunm2 = vec![0.0_f64; nv];
@@ -766,15 +870,10 @@ impl<D: NavierDiscretization> NavierSolver<D> {
                 / dt;
         }
 
-        // Pressure Poisson: Lext = ab1·un + ab2·unm1 + ab3·unm2, then
-        // Lext *= ν after the two curl applications (`ComputeCurl2D`).
+        // Pressure Poisson: Lext = ab1·un + ab2·unm1 + ab3·unm2 (already
+        // formed above, where the D1125 defect reads it), then Lext *= ν
+        // after the two curl applications (`ComputeCurl2D`).
         t_sub = Instant::now();
-        let mut lext = vec![0.0_f64; nv];
-        for i in 0..nv {
-            lext[i] = self.ab1 * self.vel.un[i]
-                + self.ab2 * self.vel.unm1[i]
-                + self.ab3 * self.vel.unm2[i];
-        }
         let (curlu, cc) = self.disc.curl_curl_and_vorticity(&lext);
         self.curlu = curlu;
         for i in 0..nv {
