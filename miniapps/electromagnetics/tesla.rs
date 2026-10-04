@@ -626,6 +626,32 @@ fn keep_owned_rows(mat: &fem_linalg::CsrMatrix<f64>, n_owned: usize) -> fem_lina
     coo.into_csr()
 }
 
+/// Row/column permutation of a linlvo CSR matrix: `out[perm[r], c'] = m[r, c]`
+/// per permuted axis (`None` = identity).  Pattern-preserving — explicit zeros
+/// are carried over, so the sparsity the AMG sees only moves, never shrinks.
+fn permute_linlvo_csr(
+    m: &linlvo::sparse::CsrMatrix<f64>,
+    row_perm: Option<&[usize]>,
+    col_perm: Option<&[usize]>,
+) -> linlvo::sparse::CsrMatrix<f64> {
+    let mut coo = linlvo::sparse::CooMatrix::<f64>::new(m.nrows(), m.ncols());
+    for r in 0..m.nrows() {
+        let nr = match row_perm {
+            Some(p) => p[r],
+            None => r,
+        };
+        for k in m.row_ptr()[r]..m.row_ptr()[r + 1] {
+            let c = m.col_idx()[k];
+            let nc = match col_perm {
+                Some(p) => p[c],
+                None => c,
+            };
+            coo.push(nr, nc, m.values()[k]);
+        }
+    }
+    linlvo::sparse::CsrMatrix::from_coo(&coo)
+}
+
 /// The `-cr` weak-divergence action `xDiv = −W·jr` (the `IrrotationalProjector`
 /// input, `pfem_extras.cpp:180-181`) runs through the fem-parallel kernel entry
 /// `ParMixedAssembler::assemble_hcurl_h1_weak_div` (MFEM
@@ -655,15 +681,38 @@ fn keep_owned_rows(mat: &fem_linalg::CsrMatrix<f64>, n_owned: usize) -> fem_lina
 struct TeslaAms {
     inner: AmsPrecond<f64>,
     n_owned: usize,
+    /// D1095 serial parity map: partition dof id → canonical (space) dof id.
+    /// Empty on the multi-rank path (identity — hypre's parallel orderings are
+    /// its own and no serial-parity target exists there).
+    perm: Vec<usize>,
 }
 
 impl TeslaAms {
     /// Apply the preconditioner: `z = M⁻¹ r` (rank-local, single rank).
+    ///
+    /// With `perm` set the wrapper maps the partition-ordered residual into
+    /// the canonical order the inner `AmsPrecond` was built in (the C++/hypre
+    /// ordering) and maps the correction back; the PCG outer loop stays in
+    /// partition order and is permutation-invariant.
     fn apply(&self, r: &[f64], z: &mut [f64]) {
-        let lr = DenseVec::from_vec(r.to_vec());
-        let mut lz = DenseVec::zeros(self.n_owned);
-        self.inner.apply_precond(&lr, &mut lz);
-        z.copy_from_slice(lz.as_slice());
+        if self.perm.is_empty() {
+            let lr = DenseVec::from_vec(r.to_vec());
+            let mut lz = DenseVec::zeros(self.n_owned);
+            self.inner.apply_precond(&lr, &mut lz);
+            z.copy_from_slice(lz.as_slice());
+        } else {
+            let mut rc = vec![0.0_f64; self.n_owned];
+            for (p, &c) in self.perm.iter().enumerate() {
+                rc[c] = r[p];
+            }
+            let lr = DenseVec::from_vec(rc);
+            let mut lz = DenseVec::zeros(self.n_owned);
+            self.inner.apply_precond(&lr, &mut lz);
+            let lz = lz.as_slice();
+            for (p, &c) in self.perm.iter().enumerate() {
+                z[p] = lz[c];
+            }
+        }
     }
 }
 
@@ -1139,6 +1188,53 @@ impl TeslaSolver {
         let la = fem_linalg::fem_to_linlvo_csr(curl_mu_inv_curl.diag_block());
         let lg = fem_linalg::fem_to_linlvo_csr(&grad);
         let lpi: Vec<_> = pi_local.iter().map(fem_linalg::fem_to_linlvo_csr).collect();
+        // D1095 serial parity: C++ hands hypre the canonical (space) dof
+        // numbering — a one-rank `ParFiniteElementSpace` is unpermuted — while
+        // the fem-parallel solver view renames the same dofs into the
+        // partition layout (owned edge dofs sorted by global vertex pair,
+        // owned faces by face key; `DofPartition`).  Both layouts carry
+        // bitwise-identical values (measured d110a: the Pi-block row scalars
+        // match C++ 1460/1460 bitwise), but BoomerAMG's index-ordered steps
+        // (HMIS greedy C-point scan, symmetric-GS sweeps, Multipass pass
+        // order) make the preconditioner ORDER-dependent — the partition
+        // layout converged one PCG step faster than C++ (7/6/4 vs 8/7/5)
+        // purely through tie-breaks.  At one rank, permute the linlvo handoff
+        // back to the canonical order (`DofPartition::unpermute_dof`; the H¹
+        // partition is already identity there) and map the wrapper's vectors
+        // in/out, exactly reproducing the C++→hypre handoff.
+        let nd_canon: Vec<usize> = if comm.size() == 1 {
+            (0..nd_dp.n_total_dofs())
+                .map(|p| nd_dp.unpermute_dof(p as u32) as usize)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // The H¹ partition permutes the same way (owned edge dofs by vertex
+        // pair, faces by face key); measured d110a: our A_Pi edge columns ran
+        // in sorted-pair order while C++ runs first-encounter — 3188/3188
+        // edge and 2064/2064 face couplings of the vertex rows re-verified
+        // under exactly that rule.  Unpermute the G/Pi columns so the AMG's
+        // H¹-space index order is C++'s too.
+        let h1_canon: Vec<usize> = if comm.size() == 1 {
+            (0..h1_dp.n_total_dofs())
+                .map(|p| h1_dp.unpermute_dof(p as u32) as usize)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let (la, lg, lpi) = if nd_canon.is_empty() {
+            (la, lg, lpi)
+        } else {
+            let rp = Some(&nd_canon[..]);
+            let cp = Some(&h1_canon[..]);
+            (
+                permute_linlvo_csr(&la, rp, rp),
+                permute_linlvo_csr(&lg, rp, cp),
+                lpi.iter()
+                    .map(|m| permute_linlvo_csr(m, rp, cp))
+                    .collect(),
+            )
+        };
         if let Ok(true) = std::env::var("FEMRS_TESLA_PI_DUMP").map(|v| v == "2") {
             // π·v keyed by the row slot point (v = x-coordinate field) — the
             // numbering-free action comparison against tmp/d105ams/pi_probe.
@@ -1239,6 +1335,7 @@ impl TeslaSolver {
         let mut ams = TeslaAms {
             inner,
             n_owned: nd_dp.n_owned_dofs,
+            perm: nd_canon.clone(),
         };
         if std::env::var("FEMRS_TESLA_M_CHECK").is_ok() {
             // M symmetry/positivity probe: uᵀ(Mv) vs vᵀ(Mu), uᵀ(Mu).
@@ -1296,6 +1393,7 @@ impl TeslaSolver {
             ams = TeslaAms {
                 inner,
                 n_owned: nd_dp.n_owned_dofs,
+                perm: nd_canon.clone(),
             };
             println!("AMS retry with the three-space cycle (034515430)");
             pcg_with_table(&curl_mu_inv_curl, &jd, &mut a, &ams, 1e-12, 50);

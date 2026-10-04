@@ -363,5 +363,5 @@ fn d106_tesla_d957_ams_ballquad_o2() {
 #[test]
 fn d106_tesla_d957_ams_inlinehex_o2() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d103tesla/inline-hex.mesh");
-    run_case(path, 729, 1944, 6, 1.019_033_028_908_356_5e-8);
+    run_case(path, 729, 1944, 6, 1.019_032_998_316_868_3e-8);
 }
