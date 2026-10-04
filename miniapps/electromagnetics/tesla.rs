@@ -756,6 +756,18 @@ fn pcg_with_table(
         println!("Final PCG Relative Residual Norm = {}", g6(0.0));
         return (0, 0.0);
     }
+    if let Some(dir) = std::env::var("FEMRS_TESLA_CB_DUMP").ok() {
+        // D114A probe: dump b and C·b (partition order) so the first AMS
+        // action can be replayed offline against the A dumps.
+        let mut out = String::with_capacity(2 * b.as_slice().len() * 26);
+        for (i, &v) in b.as_slice().iter().enumerate() {
+            out.push_str(&format!("b {i} {v:.17e}\n"));
+        }
+        for (i, &v) in cb.as_slice().iter().enumerate() {
+            out.push_str(&format!("cb {i} {v:.17e}\n"));
+        }
+        let _ = std::fs::write(dir, out);
+    }
     let eps = rtol * rtol; // pcg.c:406: eps = r_tol * r_tol
 
     println!();
@@ -1235,6 +1247,26 @@ impl TeslaSolver {
                     .collect(),
             )
         };
+        if let Ok(path) = std::env::var("FEMRS_TESLA_A_DUMP") {
+            // Canonical-order curl-curl A triplet dump (`row col %.17e`,
+            // row-major over the stored CSR pattern) — the numbering and the
+            // quantity of the C++ probe's `Aop` dump (`tmp/d110a/cpp_A.txt`,
+            // 141448 entries on ball-quad o2).  The D1115 bitwise-alignment
+            // instrument: any residual assembly ulp shows up here before it
+            // can reach the HMIS strength ties.
+            let mut out = String::with_capacity(la.nnz() * 32);
+            for r in 0..la.nrows() {
+                for k in la.row_ptr()[r]..la.row_ptr()[r + 1] {
+                    out.push_str(&format!(
+                        "{} {} {:.17e}\n",
+                        r,
+                        la.col_idx()[k],
+                        la.values()[k]
+                    ));
+                }
+            }
+            let _ = std::fs::write(&path, out);
+        }
         if let Ok(true) = std::env::var("FEMRS_TESLA_PI_DUMP").map(|v| v == "2") {
             // π·v keyed by the row slot point (v = x-coordinate field) — the
             // numbering-free action comparison against tmp/d105ams/pi_probe.

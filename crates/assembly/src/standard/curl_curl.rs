@@ -38,25 +38,49 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
         );
         let w_mu = qp.weight * self.mu.eval(&ctx);
 
+        // MFEM closes `CurlCurlIntegrator::AssembleElementMatrix` with
+        // `AddMult_a_AAt(w, curlshape, elmat)` (bilininteg.cpp:2236 →
+        // densemat.cpp:3241): per entry the component products are **summed
+        // first** (left-assoc `d = ((0+p0)+p1)+p2` over the curl dim), the
+        // sum is scaled by w once and added once, off-diagonals via the
+        // `j < i` loop with the same increment added to both triangles.
+        // The per-entry form (not a per-component rank-1 accumulation) is
+        // load-bearing for MFEM bit-parity: at ND-o2 the three components are
+        // generic reals and `(w·cᵢ)·cⱼ` per component rounds differently than
+        // `w·(Σ cᵢcⱼ)` (D1115: the o2 tesla A carried 2-5 ulp noise on
+        // ‖A‖≈5.8e6 entries, flipping HMIS strength ties → 7/6 PCG iterations
+        // vs C++ 8/7).
         if qp.dim == 2 || qp.is_surface {
-            // Scalar curl (2-D, or 2-D surface embedded in 3-D): curl[i] is a
-            // single f64 — already outer-product form.
+            // Scalar curl (2-D, or 2-D surface embedded in 3-D): single
+            // component — `d = CS(i)*CS(j)` then `d *= w`, one add per entry.
             for i in 0..n {
-                for j in 0..n {
-                    k_elem[i * n + j] += w_mu * qp.curl[i] * qp.curl[j];
+                let ci = qp.curl[i];
+                for j in 0..i {
+                    let d = w_mu * (ci * qp.curl[j]);
+                    k_elem[i * n + j] += d;
+                    k_elem[j * n + i] += d;
                 }
+                k_elem[i * n + i] += w_mu * (ci * ci);
             }
         } else {
-            // 3-D vector curl: outer product over 3 components.
-            // K += w_mu · (c₀·c₀ᵀ + c₁·c₁ᵀ + c₂·c₂ᵀ) where cₖ is column k
-            // of the n×3 vector-curl matrix.
-            for c in 0..3 {
-                for i in 0..n {
-                    let ci = qp.curl[i * 3 + c];
-                    for j in 0..n {
-                        k_elem[i * n + j] += w_mu * ci * qp.curl[j * 3 + c];
+            // 3-D vector curl: `aat = c₀ᵢc₀ⱼ + c₁ᵢc₁ⱼ + c₂ᵢc₂ⱼ` first, then
+            // one `w·aat` add per entry (K = w·(c₀c₀ᵀ + c₁c₁ᵀ + c₂c₂ᵀ) as
+            // VALUES, with MFEM's summation order).
+            for i in 0..n {
+                for j in 0..i {
+                    let mut aat = 0.0;
+                    for c in 0..3 {
+                        aat += qp.curl[i * 3 + c] * qp.curl[j * 3 + c];
                     }
+                    let d = w_mu * aat;
+                    k_elem[i * n + j] += d;
+                    k_elem[j * n + i] += d;
                 }
+                let mut aat = 0.0;
+                for c in 0..3 {
+                    aat += qp.curl[i * 3 + c] * qp.curl[i * 3 + c];
+                }
+                k_elem[i * n + i] += w_mu * aat;
             }
         }
     }
