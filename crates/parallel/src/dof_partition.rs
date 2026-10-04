@@ -2294,6 +2294,31 @@ impl DofPartition {
             }
         }
 
+        // D1054/D1091 root cause: the first pass seeds `dof_to_pos` with the
+        // first-seen element's own slot index as a *fallback* for faces whose
+        // canonical anchor is not local ("kept only as the fallback … the
+        // canonical pass below overwrites it").  When the anchor's row is
+        // published (D813-1) the second pass below overwrites every DOF of
+        // such a face with the **anchor's** slot — which in general differs
+        // from the fallback, because the anchor and the local carrier
+        // enumerate the shared face in different vertex orders (slot `i` of
+        // one is slot `j ≠ i` of the other).  The overwrite IS the intended
+        // semantics; the old `debug_assert_eq!(prev, p_a)` compared it against
+        // exactly that stale fallback and tripped for every cross-order
+        // carrier (the d122*/d807 debug-profile failures — release overwrites
+        // identically and was never wrong).  Drop the fallbacks of
+        // published-anchor faces so the relabel pass starts clean and the
+        // remaining debug assert only ever compares two *canonical* writers.
+        // Such duplicate writers cannot occur for a manifold mesh: a face's
+        // element carriers are the anchor and at most one other element, so
+        // with a remote anchor the local carrier is unique and every DOF of
+        // the face is relabeled exactly once (asserted below).
+        for (&dof_id, &key) in dof_to_face.iter() {
+            if anchor_pos_inv.contains_key(&key) {
+                dof_to_pos.remove(&dof_id);
+            }
+        }
+
         // D412: the position within the face must be cross-rank consistent.
         // The first-seen element's slot order is NOT — across a partition
         // boundary the two ranks' local traversals first-see different
@@ -2341,15 +2366,32 @@ impl DofPartition {
                     let b = (dof_id.checked_sub(first).unwrap_or(u32::MAX)) as usize;
                     if let Some(&p_a) = inv.get(b) {
                         if let Some(prev) = dof_to_pos.insert(dof_id, p_a) {
+                            // D1054/D1091: after the fallback cleanup above,
+                            // any previous value is itself a canonical write
+                            // (the anchor's own, or a relabel) — those must
+                            // agree.  With a remote anchor the local carrier
+                            // is unique (see the cleanup comment), so this
+                            // firing would mean a real cross-rank
+                            // inconsistency, not the fallback overwrite.
                             debug_assert_eq!(
                                 prev, p_a,
-                                "D813-1: two elements disagree on the RT face position"
+                                "D1054/D1091: two canonical writers disagree on the RT face position"
                             );
                         }
                     }
                 }
             }
         }
+
+        // D1054/D1091: every DOF of a published-anchor face must have been
+        // relabeled — the cleanup removed its fallback, so a miss here would
+        // surface downstream as a missing position.
+        debug_assert!(
+            dof_to_face
+                .iter()
+                .all(|(&d, &k)| !anchor_pos_inv.contains_key(&k) || dof_to_pos.contains_key(&d)),
+            "D1054/D1091: a published-anchor face DOF was not relabeled"
+        );
 
         // ── Step 2: classify owned / ghost faces and compute sign corrections
         let mut owned_faces: Vec<FaceDofInfo> = Vec::new();

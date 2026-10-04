@@ -966,3 +966,42 @@ fn d807_np1_is_untouched() {
         assert_eq!(owned, tv, "{f}: np = 1 owned {owned} != MFEM {tv}");
     }
 }
+
+/// D1054/D1091 pin — the D813-1 anchor relabel **overwrites** the first-seen
+/// fallback position, and the debug assert guarding it must compare *canonical*
+/// writers only.
+///
+/// Root cause of the debug-profile failures: the first pass seeds
+/// `dof_to_pos[d]` with the first-seen element's own slot index as a fallback
+/// for faces whose canonical anchor is not local; the relabel pass then writes
+/// the **anchor's** slot for the same DOF.  Anchor and local carrier enumerate
+/// the shared face in different vertex orders, so the two generally differ —
+/// the old `debug_assert_eq!(prev, p_a)` flagged exactly that intended
+/// overwrite (`left: 0, right: 1`).  Release was never wrong: the relabel is
+/// the value MFEM's cross-rank rule requires, the overwrite is unconditional
+/// there, and the owned split below matches MFEM `GetTrueVSize` bit for bit.
+/// A duplicate canonical writer is topologically impossible (a face's carriers
+/// are the anchor plus at most one other element), so with the fallbacks of
+/// published-anchor faces dropped before the pass, the assert compares two
+/// canonical writes only — and this construction is the red bar: at HEAD~ the
+/// `probe` panics at `dof_partition.rs` in every debug run of this file.
+#[test]
+fn d1054_d1091_anchor_relabel_overwrites_the_first_seen_fallback() {
+    let mesh = cyl_hex();
+    for np in [2usize, 4] {
+        let rows = probe(&mesh, np);
+        assert_eq!(rows.len(), np);
+        for r in &rows {
+            for (f, owned, _ghost, _total, tv) in &r.spaces {
+                if !f.starts_with("RT") {
+                    continue;
+                }
+                assert_eq!(
+                    owned, tv,
+                    "np={np} rank {} {f}: relabeled owned split != MFEM GetTrueVSize",
+                    r.rank
+                );
+            }
+        }
+    }
+}

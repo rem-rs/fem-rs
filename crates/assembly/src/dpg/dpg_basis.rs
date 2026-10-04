@@ -1435,7 +1435,7 @@ pub fn eval_face_lagrange(
         // with the nodes at: corners, GL points cp[i] along each edge, and the
         // collapsed interior points (cp[i]/w, cp[j]/w) with
         // w = cp[i]+cp[j]+cp[p−i−j]  (≠ (cp[i],cp[j]): the GL grid is not
-        // barycentric-symmetric).  See [`h1_tri_gl_node`] / [`tri_gl_shape_inv`].
+        // barycentric-symmetric).  See [`h1_tri_gl_node`] / [`tri_gl_shape_lu`].
         let n = (p + 1) * (p + 2) / 2;
         let mut cx = vec![0.0_f64; p + 1];
         let mut cy = vec![0.0_f64; p + 1];
@@ -1451,13 +1451,31 @@ pub fn eval_face_lagrange(
                 o += 1;
             }
         }
-        let ti = tri_gl_shape_inv(p);
-        for (k, o) in out.iter_mut().enumerate().take(n) {
-            let mut v = 0.0;
-            for (m, &um) in u.iter().enumerate() {
-                v += ti[k * n + m] * um;
+        // D1105: `Ti.Mult(u, shape)` (densemat.cpp:4062) verbatim — y = u,
+        // then `LUFactors::Solve` = `LSolve` + `USolve` (kernels.hpp:1760 /
+        // 1785) on the MFEM-ordered LU factors; scatter MFEM node order →
+        // fem-rs face layout.
+        let TriGlLu { lu, ipiv, node_to_out } = tri_gl_shape_lu(p);
+        // LSolve: y ← P·y, then y ← L⁻¹·y.
+        for i in 0..n {
+            u.swap(i, (ipiv[i] - 1) as usize);
+        }
+        for j in 0..n {
+            let yj = u[j];
+            for i in (j + 1)..n {
+                u[i] -= lu[i + j * n] * yj;
             }
-            *o = v;
+        }
+        // USolve: y ← U⁻¹·y.
+        for j in (0..n).rev() {
+            u[j] /= lu[j + j * n];
+            let yj = u[j];
+            for i in 0..j {
+                u[i] -= lu[i + j * n] * yj;
+            }
+        }
+        for (k, &s) in node_to_out.iter().enumerate() {
+            out[s] = u[k];
         }
     } else {
         // Equispaced barycentric nodes on the reference triangle, evaluated
@@ -1561,58 +1579,145 @@ fn calc_chebyshev(p: usize, x: f64, u: &mut [f64]) {
     }
 }
 
-/// Cached `T⁻¹` per degree for [`tri_gl_shape_inv`].
-static TRI_GL_SHAPE_INV: [std::sync::OnceLock<Vec<f64>>; 24] =
-    [const { std::sync::OnceLock::new() }; 24];
-
-/// `T⁻¹` of the MFEM `H1_TriangleElement(p, GaussLobatto)` nodal transform
-/// (fe_h1.cpp:451 `Ti`): `T[(i,j), k] = u_{i,j}(node_k)` with
-/// `u_{i,j}(x,y) = c_i(x)·c_j(y)·c_{p−i−j}(1−x−y)` in the hierarchical
-/// Chebyshev family ([`calc_chebyshev`], MFEM `Poly_1D::CalcBasis`) and the
-/// nodes at [`h1_tri_gl_node`] positions in the fem-rs tri enumeration
-/// (row-major over `a + b`).  Row-major `n×n`, `n = (p+1)(p+2)/2`.
-fn tri_gl_shape_inv(p: usize) -> &'static Vec<f64> {
-    let slot = TRI_GL_SHAPE_INV
-        .get(p)
-        .unwrap_or_else(|| panic!("tri_gl_shape_inv: degree {p} outside cached range"));
-    slot.get_or_init(|| build_tri_gl_shape_inv(p))
+/// MFEM `H1_TriangleElement(p, GaussLobatto)` nodal transform in its exact
+/// factorised form (D1105): `Ti.Factor(T)` (fe_h1.cpp:529) stores the **LU
+/// factors** (`LUFactors::data`, column-major `n×n`, plus the 1-based pivot
+/// rows `LUFactors::ipiv`) — MFEM never forms the explicit inverse; its
+/// `CalcShape` evaluates `shape = T⁻¹·u` as `DenseMatrixInverse::Mult`
+/// (densemat.cpp:4062) = copy `u` and run `LUFactors::Solve` = `LSolve` +
+/// `USolve` (linalg/kernels.hpp:1760/1785).  Replicating that path verbatim
+/// (instead of a Gauss–Jordan explicit inverse) makes the tri-face H1-trace
+/// shapes bit-identical to MFEM's `CalcShape` — every upstream input already
+/// is: the GL nodes are MFEM's `ClosedPoints(p, GaussLobatto)` to the last
+/// bit (D275, `gauss_lobatto_01_newton_mfem`) and the hierarchical basis is
+/// `Poly_1D::CalcChebyshev` (fe_base.cpp:2376) verbatim, whose values
+/// `Poly_1D::CalcBasis` (fe_base.hpp:1220) feeds into
+/// `T(o,k) = sx(i)·sy(j)·sl(p−i−j)`.
+///
+/// The factorisation is **not** column-permutation invariant, so `T` is
+/// factored with its columns in MFEM's own node order (fe_h1.cpp:451
+/// constructor: corners, bottom edge, hypotenuse, left edge, interior
+/// lattice); [`TriGlLu::node_to_out`] maps each MFEM node to the fem-rs
+/// face-dof slot ([`tri_face_dof_index`]) the evaluated shape is scattered
+/// into.
+struct TriGlLu {
+    /// `LUFactors::data`, column-major: `lu[i + j*n]`, `i` = row = basis
+    /// index in the `(i,j)` j-outer enumeration, `j` = column = node.
+    lu: Vec<f64>,
+    /// `LUFactors::ipiv` (1-based).
+    ipiv: Vec<i32>,
+    /// MFEM node `k` → fem-rs face-dof index.
+    node_to_out: Vec<usize>,
 }
 
-fn build_tri_gl_shape_inv(p: usize) -> Vec<f64> {
+/// Cached [`TriGlLu`] per degree for the 3-D H1-trace tri faces.
+static TRI_GL_SHAPE_LU: [std::sync::OnceLock<TriGlLu>; 24] =
+    [const { std::sync::OnceLock::new() }; 24];
+
+fn tri_gl_shape_lu(p: usize) -> &'static TriGlLu {
+    let slot = TRI_GL_SHAPE_LU
+        .get(p)
+        .unwrap_or_else(|| panic!("tri_gl_shape_lu: degree {p} outside cached range"));
+    slot.get_or_init(|| build_tri_gl_lu(p))
+}
+
+fn build_tri_gl_lu(p: usize) -> TriGlLu {
     let n = (p + 1) * (p + 2) / 2;
     let cp = lobatto_points_01(p);
-    // Nodes in the fem-rs tri enumeration: k = row(row+1)/2 + a, (a,b), a+b = row.
-    let mut nodes: Vec<(f64, f64)> = Vec::with_capacity(n);
-    for row in 0..=p {
-        for a in 0..=row {
-            nodes.push(h1_tri_gl_node(a, row - a, p, &cp));
+    // MFEM's node order (fe_h1.cpp:489-527), as lattice points (a, b).
+    let mut lattice: Vec<(usize, usize)> = Vec::with_capacity(n);
+    if p == 0 {
+        lattice.push((0, 0));
+    } else {
+        lattice.push((0, 0));
+        lattice.push((p, 0));
+        lattice.push((0, p));
+        for i in 1..p {
+            lattice.push((i, 0));
+        }
+        for i in 1..p {
+            lattice.push((p - i, i));
+        }
+        for i in 1..p {
+            lattice.push((0, p - i));
+        }
+        for j in 1..p {
+            for i in 1..(p - j) {
+                lattice.push((i, j));
+            }
         }
     }
-    let mut t = vec![0.0_f64; n * n];
+    let node_to_out: Vec<usize> = lattice
+        .iter()
+        .map(|&(a, b)| tri_face_dof_index(a, b, p))
+        .collect();
+    // T column-major, exactly MFEM's construction loop (fe_h1.cpp:516-528):
+    // the products round in the same order as `sx*sy*sl`.
+    let mut lu = vec![0.0_f64; n * n];
     let mut cx = vec![0.0_f64; p + 1];
     let mut cy = vec![0.0_f64; p + 1];
     let mut cl = vec![0.0_f64; p + 1];
-    for (k, &(x, y)) in nodes.iter().enumerate() {
+    for (k, &(a, b)) in lattice.iter().enumerate() {
+        let (x, y) = h1_tri_gl_node(a, b, p, &cp);
         calc_chebyshev(p, x, &mut cx);
         calc_chebyshev(p, y, &mut cy);
         calc_chebyshev(p, 1.0 - x - y, &mut cl);
         let mut o = 0;
         for j in 0..=p {
             for i in 0..=(p - j) {
-                t[o * n + k] = cx[i] * cy[j] * cl[p - i - j];
+                lu[o + k * n] = cx[i] * cy[j] * cl[p - i - j];
                 o += 1;
             }
         }
     }
-    dense_inverse(&t, n)
+    // `LUFactors::Factor(m, TOL = 0.0)` (densemat.cpp:3415), the non-LAPACK
+    // path (the mfem410 oracle builds run `MFEM_USE_LAPACK = NO`) — verbatim,
+    // including the multiply-by-reciprocal scaling and the column-outer
+    // rank-1 update.
+    let mut ipiv = vec![0_i32; n];
+    for i in 0..n {
+        let mut piv = i;
+        let mut a = lu[piv + i * n].abs();
+        for j in (i + 1)..n {
+            let b = lu[j + i * n].abs();
+            if b > a {
+                a = b;
+                piv = j;
+            }
+        }
+        ipiv[i] = (piv + 1) as i32;
+        if piv != i {
+            for j in 0..n {
+                lu.swap(i + j * n, piv + j * n);
+            }
+        }
+        if lu[i + i * n].abs() <= 0.0 {
+            panic!("build_tri_gl_lu: singular Chebyshev nodal matrix (p={p})");
+        }
+        let a_ii_inv = 1.0 / lu[i + i * n];
+        for j in (i + 1)..n {
+            lu[j + i * n] *= a_ii_inv;
+        }
+        for k in (i + 1)..n {
+            let a_ik = lu[i + k * n];
+            for j in (i + 1)..n {
+                lu[j + k * n] -= a_ik * lu[j + i * n];
+            }
+        }
+    }
+    TriGlLu { lu, ipiv, node_to_out }
 }
 
-/// Face dof index layout for tri faces must match `eval_face_lagrange`.
-/// (Node `(a, b)` with `a + b ≤ p` at index `row*(p+1) - row*(row-1)/2 + a`
-/// where `row = a + b`.)  This helper returns the index of `(a, b)`.
+/// Face dof index layout for tri faces must match `eval_face_lagrange`'s H1
+/// branch and `dpg_weakform::face_dof_params`: row-major over rows of
+/// constant `a + b`, `a` inner — node `(a, b)` sits at `row(row+1)/2 + a`
+/// with `row = a + b`.  (D1105: the D1092-era formula `row(p+1) −
+/// row(row−1)/2 + a` disagreed with that layout everywhere except
+/// `row = p`; the helper had no in-repo callers, so nothing noticed.)
 pub fn tri_face_dof_index(a: usize, b: usize, p: usize) -> usize {
     let row = a + b;
-    row * (p + 1) - row * (row - 1) / 2 + a
+    debug_assert!(row <= p, "tri_face_dof_index: ({a},{b}) outside P{p}");
+    row * (row + 1) / 2 + a
 }
 
 // ─── MFEM reference-interval point sets ──────────────────────────────────────
@@ -3028,9 +3133,10 @@ mod trace_tests {
     /// against `mfem410_ser`), printing `Nodes` and `CalcShape` at fixed
     /// probe points.  fem-rs's face dof enumeration differs from MFEM's, so
     /// the pin reorders through the MFEM node tables (matched by position,
-    /// checked bijective); values must agree to 1e-12 (the nodal transform
-    /// inverse differs in the linear-solve path: Gauss–Jordan here vs MFEM LU
-    /// factorisation).
+    /// checked bijective); since D1105 the nodal transform follows MFEM's
+    /// exact `LUFactors` factor/solve path (nodes and the Chebyshev basis
+    /// were already bit-exact), so the tri-face values agree to the last
+    /// oracle-printed digit.
     #[test]
     fn d1092_3d_h1_trace_faces_match_mfem_tabulation() {
         // MFEM node tables straight from the probe output (`Nodes.IntPoint`).
@@ -3262,13 +3368,29 @@ mod trace_tests {
                     let mut out = vec![0.0_f64; n];
                     eval_face_lagrange(3, is_quad, p, &[x, y], &mut out, true);
                     for (k, &m) in m_of_k.iter().enumerate() {
-                        assert!(
-                            (out[k] - want[m]).abs() < 1e-12,
-                            "p={p} quad={is_quad} @ ({x},{y}): dof {k} (mfem {m}) \
-                             {} vs {}",
-                            out[k],
-                            want[m]
-                        );
+                        if is_quad {
+                            // D1092: the quad face is the tensor GL product;
+                            // agreement to the oracle's printed precision.
+                            assert!(
+                                (out[k] - want[m]).abs() < 1e-12,
+                                "p={p} quad @ ({x},{y}): dof {k} (mfem {m}) \
+                                 {} vs {}",
+                                out[k],
+                                want[m]
+                            );
+                        } else {
+                            // D1105: with the MFEM `LUFactors` factor/solve
+                            // path (nodes and Chebyshev basis already
+                            // bit-exact) the tri shapes are bit-identical to
+                            // MFEM's `CalcShape` — the oracle prints 17
+                            // significant digits, which round-trips f64, so
+                            // exact equality is assertable.
+                            assert_eq!(
+                                out[k], want[m],
+                                "p={p} tri @ ({x},{y}): dof {k} (mfem {m}) \
+                                 not bit-identical to MFEM CalcShape"
+                            );
+                        }
                     }
                 }
             }
