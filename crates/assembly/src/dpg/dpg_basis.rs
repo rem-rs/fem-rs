@@ -1478,44 +1478,150 @@ pub fn eval_face_lagrange(
             out[s] = u[k];
         }
     } else {
-        // Equispaced barycentric nodes on the reference triangle, evaluated
-        // through the collapsed coordinate x = s/(1−t):
-        //   L_{a,b}(s,t) = ℓ^{(p−b)}_a(s/(1−t)) · ℓ^{(p)}_b(t)
-        // where ℓ^{(n)}_m is the 1-D Lagrange basis of degree n for the node
-        // m/n ∈ [0,1].  This spans exactly P_p and satisfies partition of
-        // unity.
-        let s = param[0];
-        let t = param[1];
-        let x = if (1.0 - t).abs() < 1e-30 { s / (1.0 - 1e-30) } else { s / (1.0 - t) };
-        let mut k = 0;
-        for row in 0..=p {
-            for a in 0..=row {
-                let b = row - a;
-                out[k] = lagrange_1d_at(p - b, a, x) * lagrange_1d_at(p, b, t);
-                k += 1;
+        // D1235: the RT-trace tri-face basis is the nodal Lagrange
+        // interpolation basis on the EQUISPACED barycentric lattice (fem-rs's
+        // documented RT-trace face gauge — identical span to MFEM's
+        // Gauss-Legendre-closed nodal basis, D1236).  The previous
+        // collapsed-coordinate tensor products
+        // ℓ^{(p−b)}_a(s/(1−t))·ℓ^{(p)}_b(t) are *rational* functions for
+        // p ≥ 2 (e.g. L_{2,0} = s²(1−2t)/(1−t)) and do NOT span P_p — the
+        // tet-mesh û (RT-trace) space was wrong from face order 2 on
+        // (acoustics `-o 3`), while hex quad faces (true tensor Lagrange) and
+        // face order 1 (the collapsed factors degenerate to the true P1
+        // lattice) were unaffected.
+        let n = (p + 1) * (p + 2) / 2;
+        debug_assert_eq!(out.len(), n, "eval_face_lagrange: tri equi out size");
+        let TriEquiLu { lu, ipiv } = tri_equi_shape_lu(p);
+        let mut cx = vec![0.0_f64; p + 1];
+        let mut cy = vec![0.0_f64; p + 1];
+        let mut cl = vec![0.0_f64; p + 1];
+        calc_chebyshev(p, param[0], &mut cx);
+        calc_chebyshev(p, param[1], &mut cy);
+        calc_chebyshev(p, 1.0 - param[0] - param[1], &mut cl);
+        // Graded Chebyshev basis in the same (i, j) j-outer order as the LU
+        // rows, then the D1105 MFEM `LUFactors::Solve` verbatim.  The LU
+        // columns are the lattice nodes in the fem-rs face layout, so the
+        // solved vector IS the shape-function vector (no scatter).
+        let mut u = vec![0.0_f64; n];
+        let mut o = 0;
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                u[o] = cx[i] * cy[j] * cl[p - i - j];
+                o += 1;
             }
         }
+        for i in 0..n {
+            u.swap(i, (ipiv[i] - 1) as usize);
+        }
+        for j in 0..n {
+            let yj = u[j];
+            for i in (j + 1)..n {
+                u[i] -= lu[i + j * n] * yj;
+            }
+        }
+        for j in (0..n).rev() {
+            u[j] /= lu[j + j * n];
+            let yj = u[j];
+            for i in 0..j {
+                u[i] -= lu[i + j * n] * yj;
+            }
+        }
+        out.copy_from_slice(&u);
     }
 }
 
-/// 1-D Lagrange basis `ℓ^{(n)}_m(x)`: degree-`n` basis for the node `m/n`.
-fn lagrange_1d_at(n: usize, m: usize, x: f64) -> f64 {
-    let mut v = 1.0;
-    for j in 0..=n {
-        if j == m {
-            continue;
+/// Cached nodal-Lagrange interpolation matrix for the EQUISPACED lattice on
+/// the reference triangle, in the fem-rs face-dof layout (row-major over
+/// constant `a + b`, `a` inner — the previous D1235-defective branch's
+/// layout), stored as an `LUFactors`-style factorization of the
+/// Chebyshev-graded Vandermonde `T[(i,j),node] = cx_i·cy_j·cl_{p−i−j}(node)`
+/// (the D1092/D1105 trick: the graded family keeps the factorization
+/// well-conditioned; a degree-`p` nodal Lagrange matrix is what MFEM's own
+/// `NodalFiniteElement::Project` infrastructure inverts per element).
+struct TriEquiLu {
+    /// `LUFactors::data`, column-major: `lu[i + j*n]`.
+    lu: Vec<f64>,
+    /// `LUFactors::ipiv` (1-based).
+    ipiv: Vec<i32>,
+}
+
+static TRI_EQUI_SHAPE_LU: [std::sync::OnceLock<TriEquiLu>; 24] =
+    [const { std::sync::OnceLock::new() }; 24];
+
+fn tri_equi_shape_lu(p: usize) -> &'static TriEquiLu {
+    let slot = TRI_EQUI_SHAPE_LU
+        .get(p)
+        .unwrap_or_else(|| panic!("tri_equi_shape_lu: degree {p} outside cached range"));
+    slot.get_or_init(|| build_tri_equi_lu(p))
+}
+
+fn build_tri_equi_lu(p: usize) -> TriEquiLu {
+    let n = (p + 1) * (p + 2) / 2;
+    let mut lu = vec![0.0_f64; n * n];
+    let mut cx = vec![0.0_f64; p + 1];
+    let mut cy = vec![0.0_f64; p + 1];
+    let mut cl = vec![0.0_f64; p + 1];
+    // Column k = the graded-basis values at lattice node k, with k in the
+    // fem-rs face layout (row = a+b, a inner; node (a,b) at (a/p, b/p)).
+    let mut k = 0usize;
+    for row in 0..=p {
+        for a in 0..=row {
+            let b = row - a;
+            let (s, t) = (a as f64 / p as f64, b as f64 / p as f64);
+            calc_chebyshev(p, s, &mut cx);
+            calc_chebyshev(p, t, &mut cy);
+            calc_chebyshev(p, 1.0 - s - t, &mut cl);
+            let mut o = 0;
+            for j in 0..=p {
+                for i in 0..=(p - j) {
+                    lu[o + k * n] = cx[i] * cy[j] * cl[p - i - j];
+                    o += 1;
+                }
+            }
+            k += 1;
         }
-        let xj = j as f64 / n as f64;
-        let xm = m as f64 / n as f64;
-        v *= (x - xj) / (xm - xj);
     }
-    v
+    debug_assert_eq!(k, n);
+    // `LUFactors::Factor(m, TOL = 0.0)` (densemat.cpp:3415), the non-LAPACK
+    // path, verbatim (see `build_tri_gl_lu`).
+    let mut ipiv = vec![0_i32; n];
+    for i in 0..n {
+        let mut piv = i;
+        let mut a = lu[piv + i * n].abs();
+        for j in (i + 1)..n {
+            let b = lu[j + i * n].abs();
+            if b > a {
+                a = b;
+                piv = j;
+            }
+        }
+        ipiv[i] = (piv + 1) as i32;
+        if piv != i {
+            for j in 0..n {
+                lu.swap(i + j * n, piv + j * n);
+            }
+        }
+        if lu[i + i * n].abs() <= 0.0 {
+            panic!("build_tri_equi_lu: singular equispaced nodal matrix (p={p})");
+        }
+        let a_ii_inv = 1.0 / lu[i + i * n];
+        for j in (i + 1)..n {
+            lu[j + i * n] *= a_ii_inv;
+        }
+        for k2 in (i + 1)..n {
+            let a_ik = lu[i + k2 * n];
+            for j in (i + 1)..n {
+                lu[j + k2 * n] -= a_ik * lu[j + i * n];
+            }
+        }
+    }
+    TriEquiLu { lu, ipiv }
 }
 
 /// 1-D Lagrange basis on MFEM's Gauss-Lobatto nodes: `ℓ^{(p)}_j(x)` for the
 /// `p + 1` points of [`lobatto_points_01`] — the node set of MFEM's
 /// `H1_FECollection` / `H1_Trace_FECollection` (D1058).  Coincides with the
-/// equispaced [`lagrange_1d_at`] at p ≤ 2.
+/// equispaced 1-D Lagrange basis at p ≤ 2.
 fn lagrange_1d_gl(p: usize, x: f64, out: &mut [f64]) {
     let nodes = lobatto_points_01(p); // degree p → p + 1 GL points
     for (j, o) in out.iter_mut().enumerate() {

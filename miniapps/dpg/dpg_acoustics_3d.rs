@@ -313,7 +313,14 @@ fn solve_level(
         off2.push(half + sys.offsets[k]);
     }
     let precond = DpgBlockGs::from_matrix(&big, &off2);
-    let cfg = SolverConfig { rtol: 1e-10, max_iter: 2000, ..SolverConfig::default() };
+    // `DPG_RTOL` overrides the PCG relative tolerance (default 1e-10 = the
+    // C++ acoustics.cpp value; used by the d116b probes to show the tet `-o 3`
+    // L2 is solver-tolerance-stable down to 1e-14).
+    let rtol: f64 = std::env::var("DPG_RTOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1e-10);
+    let cfg = SolverConfig { rtol, max_iter: 2000, ..SolverConfig::default() };
     let apply = |x: &[f64], y: &mut [f64]| big.spmv(x, y);
     let no_precond = std::env::var("DPG_NO_PRECOND").is_ok();
     let pc = move |r: &[f64], z: &mut [f64]| {

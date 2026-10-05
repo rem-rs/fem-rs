@@ -39,6 +39,8 @@
 //!   [`DpgWeakForm::set_trace_conforming_restriction`] (D1030).
 //! * `ComplexDPGWeakForm` → [`crate::complex_dpg_weakform`].
 
+use std::collections::HashMap;
+
 use fem_linalg::{csr_spmm, CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
@@ -444,7 +446,18 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             lf_integs: Vec::new(),
             trace_integs: Vec::new(),
             quad_order: 6,
-            face_quad_order: 4,
+            // 0 = auto: each trace integrator's face rule is sized the MFEM
+            // way, `test_fe.GetOrder() + trial_face_fe.GetOrder()`
+            // (bilininteg.cpp TraceIntegrator :4429, NormalTraceIntegrator
+            // :4480, TangentTraceIntegrator :4582).  A fixed default (the old
+            // `4`) under-integrates every pair with `p_face + test_order > 5`
+            // on quad faces (`quad_rule_01(4)` = 3×3 Gauss points, exact
+            // degree 5) — the D1221 defect of the complex twin, mirrored here
+            // so the real weak form cannot reintroduce it (D1237).  Every
+            // production caller (the ex31-family serial/parallel miniapps and
+            // the NC/SC test suites) passes the value explicitly, so their
+            // behaviour is unchanged.
+            face_quad_order: 0,
             mat: None,
             y: None,
             dof_offsets: Vec::new(),
@@ -465,14 +478,18 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         self.quad_order = order;
     }
 
-    /// Set the face (trace) quadrature order — the rule used by the trace
-    /// integrators on the skeleton.  MFEM sizes each trace integrator's rule
-    /// from the two spaces it couples (`NormalTraceIntegrator` /
-    /// `TraceIntegrator`: `test_fe.GetOrder() + trial_face_fe.GetOrder()`),
-    /// which for the DPG trial/test pairs is `test_order + p − 1` (`p` the
-    /// trace order).  The face integrands are polynomials in the trace pair,
-    /// so any rule at least that high reproduces MFEM exactly; the default
-    /// `4` is too low for `test_order + p − 1 > 4` (e.g. `-o 3 -do 1`).
+    /// Override the face (trace) quadrature order with one fixed rule for
+    /// every trace integrator.  By default (`face_quad_order == 0`) each
+    /// trace integrator's rule is sized the MFEM way, from the two spaces it
+    /// couples: `test_fe.GetOrder() + trial_face_fe.GetOrder()`
+    /// (bilininteg.cpp TraceIntegrator :4429, NormalTraceIntegrator :4480,
+    /// TangentTraceIntegrator :4582) — for the ultraweak Poisson pairs this
+    /// is `test_order + p − 1` (`p` the H1-trace order).  The face integrands
+    /// are polynomials in the trace pair, so any rule at least that high
+    /// reproduces MFEM; the historical fixed default `4` was too low on quad
+    /// faces for `test_order + p − 1 > 5` (D1221/D1237).  The ex31-family
+    /// serial and parallel miniapps have always passed exactly this value
+    /// explicitly, so the override keeps their single-rule behaviour.
     pub fn set_face_quad_order(&mut self, order: u8) {
         self.face_quad_order = order;
     }
@@ -944,16 +961,57 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         let (qpts, qwts) = vol_quadrature(et, q_order);
         let n_qp = qpts.len();
 
-        let face_rule_tri = if dim == 3 {
-            Some(crate::dpg::dpg_basis::face_quadrature(3, false, self.face_quad_order))
-        } else {
-            None
-        };
-        let face_rule_quad = if dim == 3 {
-            Some(crate::dpg::dpg_basis::face_quadrature(3, true, self.face_quad_order))
-        } else {
-            Some(crate::dpg::dpg_basis::face_quadrature(2, false, self.face_quad_order))
-        };
+        // Face rules per trace integrator.  MFEM sizes every trace
+        // integrator's rule from the two spaces it couples —
+        // `test_fe.GetOrder() + trial_face_fe.GetOrder()` (bilininteg.cpp
+        // TraceIntegrator :4429, NormalTraceIntegrator :4480,
+        // TangentTraceIntegrator :4582) — so the rule is per (trial, test)
+        // pair, not global.  `face_quad_order > 0` (explicit
+        // `set_face_quad_order`) keeps the historical single-rule behaviour.
+        let fixed_face_order = self.face_quad_order;
+        let mut face_pair_order: HashMap<(usize, usize), u8> = HashMap::new();
+        for (tbb, tb, _) in &self.trace_integs {
+            let o = match fixed_face_order {
+                0 => {
+                    let p_face = match &self.trial_spaces[*tbb] {
+                        TrialSpace::Trace { skeleton } => skeleton.order(),
+                        TrialSpace::TraceNd { trace } => trace.order(),
+                        TrialSpace::Volume { .. } => {
+                            panic!("trace integrator on a volume trial block {tbb}")
+                        }
+                    };
+                    p_face + self.test_spaces[*tb].order
+                }
+                o => o,
+            };
+            face_pair_order.insert((*tbb, *tb), o);
+        }
+        // dim 3 keeps a tri and a quad slot per pair; dim 2 stores the 1-D
+        // edge rule in the tri slot (the dim-2 sites index `tri`... here the
+        // edge rule rides the `quad` slot, matching the historical access
+        // pattern below).
+        let face_rules: HashMap<
+            (usize, usize),
+            ((Vec<Vec<f64>>, Vec<f64>), (Vec<Vec<f64>>, Vec<f64>)),
+        > = face_pair_order
+            .iter()
+            .map(|(&k, &o)| {
+                (
+                    k,
+                    if dim == 3 {
+                        (
+                            crate::dpg::dpg_basis::face_quadrature(3, false, o),
+                            crate::dpg::dpg_basis::face_quadrature(3, true, o),
+                        )
+                    } else {
+                        (
+                            (Vec::new(), Vec::new()),
+                            crate::dpg::dpg_basis::face_quadrature(2, false, o),
+                        )
+                    },
+                )
+            })
+            .collect();
         let _ = ref_node_coords(et); // reference tables kept for curved-face extension
 
         let cond_info = self.cond.clone(); // Option<(exposed, private)>
@@ -1149,10 +1207,11 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                         let fid = trace.elem_face_id(e, li);
                         let is_qf = trace.is_quad_face(fid);
                         let nfd = crate::dpg::dpg_basis::nd_face_dofs(p_us, is_qf);
+                        let rule = face_rules.get(&(*tbb, *tb)).expect("face rule for ND trace pair");
                         let (fpts, fwts): (&Vec<Vec<f64>>, &Vec<f64>) = if is_qf {
-                            (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                            (&rule.1 .0, &rule.1 .1)
                         } else {
-                            (&face_rule_tri.as_ref().unwrap().0, &face_rule_tri.as_ref().unwrap().1)
+                            (&rule.0 .0, &rule.0 .1)
                         };
                         let scale = trace.elem_face_orientation(e, li) as f64;
                         let signed = trace.face_signed_dofs(fid);
@@ -1241,14 +1300,16 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                     let fid = sk.elem_face_id(e, li);
                     let nfd = sk.dofs_per_face(fid);
                     let is_qf = if dim == 3 { sk.is_quad_face(fid) } else { false };
+                    let rule = face_rules.get(&(*tbb, *tb)).expect("face rule for trace pair");
                     let (fpts, fwts): (&Vec<Vec<f64>>, &Vec<f64>) = if dim == 3 {
                         if is_qf {
-                            (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                            (&rule.1 .0, &rule.1 .1)
                         } else {
-                            (&face_rule_tri.as_ref().unwrap().0, &face_rule_tri.as_ref().unwrap().1)
+                            (&rule.0 .0, &rule.0 .1)
                         }
                     } else {
-                        (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                        // dim 2: the 1-D edge rule rides the quad slot.
+                        (&rule.1 .0, &rule.1 .1)
                     };
                     // Sign of the element-side face contribution: the element's
                     // local face cycle against the canonical (global face
