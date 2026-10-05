@@ -3,47 +3,35 @@
 //! blocks + singular block-Pi cycle `0345430`) under the **hypre PCG
 //! convergence semantics** (`two_norm = 0`: the printed/stopped norm is the
 //! preconditioned one, `gamma = <C*r,r>/<C*b,b> < tol²`, hypre
-//! `krylov/pcg.c:278`), pinned against the d106 acceptance runs
-//! (`tmp/d106ams_final_*.log`).
+//! `krylov/pcg.c:278`), pinned against the d116a acceptance values.
 //!
-//! Round-106 findings pinned here:
-//! * the red→green iteration counts: ball-quad `-bm` o2 **9** (C++ 8; the
-//!   residual 1-iteration gap was attributed in round 106 to the linlvo
-//!   SA-AMG vs BoomerAMG quality inside `B_Pi` — fem-rs's iteration-8 C-norm
-//!   ratio 1.97e-12 sits just over the 1e-12 stop line,
-//!   `tmp/d106ams_final_bm_o2_ballquad.log`),
-//!   inline-hex `-bm` o2 **7** = C++ 7;
-//! * the JD anchors (`||M||`, `||JD||`) stay bitwise against the C++ probe;
-//! * `<C*b,b>` (the AMS quadratic form on the rhs) matches the C++ probe to
-//!   0.5% (1.2417e-7 vs 1.2476e-7 ball-quad, 1.0189e-8 vs 1.0190e-8
-//!   inline-hex).
+//! Round-116 (D1230 close, `tmp/d116a/REPORT.md`): **exact C++ parity** —
+//! ball-quad `-bm` o2 **8** and inline-hex `-bm` o2 **7** = the C++ probe's
+//! 8/7, with `<C*b,b>` = 1.2476451863821637e-7 / 1.0190254659113007e-8
+//! matching the C++ probe's printed `1.247645e-07` / `1.019025e-08` in every
+//! digit (`tmp/d105ams/cpp_bm_o2_*.log`).  Three mechanisms closed together:
+//! * the linlvo singular cycle ran "03455430" — one EXTRA `B_Piz` arm —
+//!   where hypre 2.28 `ams.c:3710` spells case-13 (singular) as `"0345430"`
+//!   = GS Px Py Pz **Py Px** GS (the reverse sweep drops the second Pz;
+//!   `hypre_ParCSRSubspacePrec` digit table ams.c:3625-3632/3965-3968);
+//! * `rap_hypre_order` emitted the KT coarse operator through
+//!   `from_coo`, sorting each row — hypre stores the RAP rows in their
+//!   first-touch creation order (par_rap.c build loop), and the next AMG
+//!   level's l1 norms / HMIS measures sum over that stored order;
+//! * the linlvo handoff now carries the D1230 in-row storage order (A =
+//!   [diagonal] + reverse first-touch insertion, `hypre.cpp:943`
+//!   `hypre_CSRMatrixReorder` swap over MFEM's prepended linked list; Pi =
+//!   reverse of the first-inserting host's trial-dof list, `SetSubMatrix`
+//!   prepend `bilinearform.cpp:2502`, no rectangular reorder) plus the
+//!   D1095 canonical renumbering — level-0 `A_Pix` is bitwise 29521/29521
+//!   against the real MFEM 4.10 + hypre 2.28 run dump and its row order
+//!   matches 438/517 (the residual 79 rows carry the fem-rs-vs-MFEM H1 hex
+//!   local dof order, registered as D1246: measured effect ≤ 1.5e-7
+//!   relative on `<C*b,b>`, no hierarchy tie flips).
 //!
-//! Round-107 (D1042 dissection, `tmp/d107amg/REPORT.md`): the round-106
-//! attribution is **refuted** — with the B_Pi blocks replaced by exact LU
-//! solves (single-level hierarchy) ball-quad gets *worse* (14 iterations),
-//! and every B_Pi strength knob moves both tiers one step together (V(2,1):
-//! 8/6; RS: 11/6; plain GS: 7/6), so the ball-quad 9 vs 8 gap is NOT B_Pi
-//! accuracy.  The per-tier alignment (D1063, open) must come from the arm
-//! spectral character elsewhere.  After the D1000-LOR singleton-absorption
-//! fix the ball-quad `<C*b,b>` pin moves to 1.2406164773014794e-7; the
-//! `‖M‖/‖JD‖`/`‖B‖` anchors stay bitwise/13-digit
-//! (`tmp/d107amg/rs_bm_o2_*.log`).
-//!
-//! Round-109 (D1076 close, `tmp/d109a/REPORT.md`): the B_Pi arm is now the
-//! **hypre-faithful HMIS(10)+aggressive(`Create2ndS`)+interp-6 stack**
-//! (`CoarsenStrategy::HmisAms`), verified stage-by-stage against hypre 2.28
-//! itself (level-0 multipass P bitwise equal, V-cycle arm equal to ~1e-13)
-//! after correcting the round-108 ledger: BoomerAMG relax-8's l1 comes from
-//! `ComputeL1Norms` option 4, which degenerates to the signed diagonal on
-//! one rank ⇒ plain symmetric Gauss-Seidel (`par_amg_setup.c:3280`,
-//! `ams.c:678-692`).  Iterations drop to **7 / 6** (C++ 8 / 7) — one BETTER
-//! than the C++ probe on both tiers, because linlvo's assembled `A_Pi`
-//! operators are measurably different from hypre's `PixᵀAPix`
-//! (`tmp/d109a/`: hypre's own arm gives ‖y‖² = 3.433e-8 on ours vs
-//! 2.794e-8 on C++'s; first PCG residual 7.6e-6 vs 1.36e-5).  The
-//! `<C*b,b>` pins move to 1.262911894545921e-7 / 1.0190330289083565e-8.
-//! The residual assembly-parity delta is registered as D1095 (assembly
-//! lane territory, not the AMG).
+//! Historical pins (rounds 106-115, superseded by the exact parity):
+//! 9/7→7/6 (r109), `<C*b,b>` 1.2417e-7→1.2406e-7→1.2629e-7 (d106/d107/r109),
+//! 1.0190330289083565e-8→1.0190329983168683e-8 (d110a).
 //!
 //! C++ truth: `tmp/d105ams/cpp_bm_o2_ballquad.log` /
 //! `cpp_bm_o2_inlinehex.log` (MFEM 4.10 tesla probe, `mpirun -np 1`).
@@ -177,25 +165,63 @@ fn keep_owned_rows(mat: &fem_linalg::CsrMatrix<f64>, n_owned: usize) -> fem_lina
     coo.into_csr()
 }
 
+/// Row/column renumbering of a linlvo CSR (the D1095 canonical handoff; the
+/// tesla miniapp's twin).  Pattern-preserving — entries move, values stay.
+/// NOTE: emitted through COO + `from_coo`, so rows come out sorted; used only
+/// for G (order-insensitive in the singular AMS cycle, ams.c).
+fn permute_linlvo_csr(
+    m: &linlvo::CsrMatrix<f64>,
+    row_perm: Option<&[usize]>,
+    col_perm: Option<&[usize]>,
+) -> linlvo::CsrMatrix<f64> {
+    let mut coo = linlvo::sparse::CooMatrix::<f64>::new(m.nrows(), m.ncols());
+    for r in 0..m.nrows() {
+        let nr = match row_perm {
+            Some(p) => p[r],
+            None => r,
+        };
+        for k in m.row_ptr()[r]..m.row_ptr()[r + 1] {
+            let c = m.col_idx()[k];
+            let nc = match col_perm {
+                Some(p) => p[c],
+                None => c,
+            };
+            coo.push(nr, nc, m.values()[k]);
+        }
+    }
+    linlvo::sparse::CsrMatrix::from_coo(&coo)
+}
+
 /// The hypre `hypre_PCGSolve` port (`two_norm = 0`, MFEM sets no
 /// `SetUseTwoNorm`): preconditioned-norm table, stop at
-/// `gamma = <C*r,r>/<C*b,b> < tol²` (pcg.c:406/677).  Returns
-/// `(iterations, <C*b,b>)`.
+/// `gamma = <C*r,r>/<C*b,b> < tol²` (pcg.c:406/677).  `perm` is the D1095
+/// partition→canonical map the AMS was built under (vectors swapped in/out
+/// at the preconditioner boundary, the tesla miniapp's `TeslaAms::apply`
+/// twin).  Returns `(iterations, <C*b,b>)`.
 fn ams_pcg_iterations(
     a: &fem_parallel::ParCsrMatrix,
     b: &ParVector,
     ams: &AmsPrecond<f64>,
-    n_owned: usize,
+    perm: &[usize],
     rtol: f64,
     max_iter: usize,
 ) -> (usize, f64) {
     let apply = |r: &[f64], z: &mut [f64]| {
-        let lr = DenseVec::from_vec(r.to_vec());
-        let mut lz = DenseVec::zeros(n_owned);
+        // partition → canonical → AMS → canonical → partition.
+        let mut rc = vec![0.0_f64; perm.len()];
+        for (p, &c) in perm.iter().enumerate() {
+            rc[c] = r[p];
+        }
+        let lr = DenseVec::from_vec(rc);
+        let mut lz = DenseVec::zeros(perm.len());
         ams.apply_precond(&lr, &mut lz);
-        z.copy_from_slice(lz.as_slice());
+        let lz = lz.as_slice();
+        for (p, &c) in perm.iter().enumerate() {
+            z[p] = lz[c];
+        }
     };
     // Pre-loop: p = C·b; bi_prod = <C*b,b> (pcg.c:357-378).
+    let n_owned = b.as_slice().len();
     let mut cb = ParVector::zeros_like(b);
     apply(b.as_slice(), cb.as_slice_mut());
     let bi_prod = b.global_dot(&cb);
@@ -309,19 +335,76 @@ fn run_case(mesh_path: &str, n_h1_expect: usize, n_nd_expect: usize, it_want: us
             *v *= MU0;
         }
 
-        // The D957 face-space AMS (tesla_solver.cpp:355-365 semantics).
+        // The D957 face-space AMS (tesla_solver.cpp:355-365 semantics) under
+        // the exact C++→hypre handoff: the D1095 canonical dof renumbering
+        // plus the D1230 in-row storage order — A = [diagonal] + reverse
+        // first-touch insertion with the diagonal swapped into slot 0
+        // (`hypre.cpp:943` + MFEM's prepended linked list), Pi = reverse of
+        // the first-inserting host's trial-dof list (`SetSubMatrix` prepend,
+        // `bilinearform.cpp:2502`, no rectangular reorder).  Without it the
+        // HMIS measures of the level-1+ operators divert at the ulp level and
+        // the run tie-breaks away from the C++ probe (d116a).
         let nd_dp = nd.dof_partition();
         let h1_dp = h1.dof_partition();
+        let nd_canon: Vec<usize> = (0..nd_dp.n_total_dofs())
+            .map(|p| nd_dp.unpermute_dof(p as u32) as usize)
+            .collect();
+        let h1_canon: Vec<usize> = (0..h1_dp.n_total_dofs())
+            .map(|p| h1_dp.unpermute_dof(p as u32) as usize)
+            .collect();
+        let nd_canon_u32: Vec<u32> = nd_canon.iter().map(|&c| c as u32).collect();
+        let h1_canon_u32: Vec<u32> = h1_canon.iter().map(|&c| c as u32).collect();
+        let nd_local = nd.local_space();
+        let element_dofs: Vec<Vec<u32>> = (0..nd_local.mesh_topology().n_elements() as u32)
+            .map(|e| nd_local.element_dofs(e).to_vec())
+            .collect();
+        // First-inserting host per canonical ND dof: later `SetSubMatrix`
+        // hosts overwrite values but insert nothing new, so the first host
+        // alone fixes the handoff row order.
+        let mut first_host = vec![u32::MAX; nd_dp.n_total_dofs()];
+        for e in 0..nd_local.mesh_topology().n_elements() as u32 {
+            for &d in nd_local.element_dofs(e) {
+                if first_host[d as usize] == u32::MAX {
+                    first_host[d as usize] = e;
+                }
+            }
+        }
+        let host_part: Vec<u32> = (0..nd_dp.n_total_dofs())
+            .map(|p| first_host[nd_canon[p]])
+            .collect();
+        let h1_local = h1.local_space();
+        let h1_element_dofs: Vec<Vec<u32>> = (0..h1_local.mesh_topology().n_elements() as u32)
+            .map(|e| h1_local.element_dofs_u32(e).to_vec())
+            .collect();
         let pi_canonical = assemble_pi_blocks(h1.local_space(), nd.local_space());
         let pi_local: Vec<fem_linalg::CsrMatrix<f64>> = pi_canonical
             .iter()
             .map(|m| keep_owned_rows(&permute_rect_csr(m, nd_dp, h1_dp), nd_dp.n_owned_dofs))
             .collect();
-        let la = fem_linalg::fem_to_linlvo_csr(curl_mu_inv_curl.diag_block());
+        let a_canon = fem_parallel::par_ptap_handoff::mfem_ptap_handoff_matrix(
+            curl_mu_inv_curl.diag_block(),
+            &nd_canon_u32,
+            &element_dofs,
+        );
+        let la = fem_linalg::fem_to_linlvo_csr(&a_canon);
         let grad = ParDiscreteLinearOperator::gradient(&h1, &nd);
-        let lg = fem_linalg::fem_to_linlvo_csr(&grad);
-        let lpi: Vec<linlvo::CsrMatrix<f64>> =
-            pi_local.iter().map(fem_linalg::fem_to_linlvo_csr).collect();
+        let lg = permute_linlvo_csr(
+            &fem_linalg::fem_to_linlvo_csr(&grad),
+            Some(&nd_canon),
+            Some(&h1_canon),
+        );
+        let lpi: Vec<linlvo::CsrMatrix<f64>> = pi_local
+            .iter()
+            .map(|m| {
+                fem_linalg::fem_to_linlvo_csr(&fem_parallel::par_ptap_handoff::mfem_discrete_op_handoff_matrix(
+                    m,
+                    &nd_canon_u32,
+                    &h1_canon_u32,
+                    &host_part,
+                    &h1_element_dofs,
+                ))
+            })
+            .collect();
         let ams = AmsPrecond::<f64>::with_pi(
             &la,
             &lg,
@@ -340,7 +423,7 @@ fn run_case(mesh_path: &str, n_h1_expect: usize, n_nd_expect: usize, it_want: us
         .expect("AMS setup");
 
         let (iters, cb_b) =
-            ams_pcg_iterations(&curl_mu_inv_curl, &jd, &ams, nd_dp.n_owned_dofs, 1e-12, 50);
+            ams_pcg_iterations(&curl_mu_inv_curl, &jd, &ams, &nd_canon, 1e-12, 50);
         assert_eq!(iters, it_want, "D957 AMS PCG iterations vs the d106 pin");
         assert!(
             (cb_b - cb_want).abs() / cb_want < 1e-6,
@@ -352,16 +435,18 @@ fn run_case(mesh_path: &str, n_h1_expect: usize, n_nd_expect: usize, it_want: us
 #[test]
 fn d106_tesla_d957_ams_ballquad_o2() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d103tesla/ball-quad.mesh");
-    // C++ 8; since the round-109 hypre-faithful B_Pi arm (HMIS+aggressive +
-    // interp-6, plain-SGS levels) the PCG lands one iteration EARLIER
-    // (module doc + D1095): 9 → 7.  The `<C*b,b>` pin moved
-    // 1.2406164773014794e-7 → 1.262911894545921e-7 (+1.8%, now 1.2% above
-    // the C++ probe's 1.2476e-7).
-    run_case(path, 517, 1460, 7, 1.262_911_894_545_921e-7);
+    // Round-116 (D1230 close): **exact C++ parity** — 8 iterations and
+    // `<C*b,b>` = 1.2476451863821637e-7 against the C++ probe's printed
+    // 1.247645e-07 (`tmp/d105ams/cpp_bm_o2_ballquad.log`; the module doc
+    // carries the three mechanisms: the 03455430→0345430 cycle fix, the
+    // rap first-touch emission, the D1095+D1230 handoff order).
+    run_case(path, 517, 1460, 8, 1.247_645_186_382_163_7e-7);
 }
 
 #[test]
 fn d106_tesla_d957_ams_inlinehex_o2() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d103tesla/inline-hex.mesh");
-    run_case(path, 729, 1944, 6, 1.019_032_998_316_868_3e-8);
+    // Round-116: 7 iterations = C++ 7; `<C*b,b>` matches the C++ probe's
+    // printed 1.019025e-08 in every digit.
+    run_case(path, 729, 1944, 7, 1.019_025_465_911_300_7e-8);
 }

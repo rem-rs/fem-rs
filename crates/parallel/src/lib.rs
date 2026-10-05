@@ -143,6 +143,7 @@ pub mod par_l2zz_rt1;
 pub mod par_l2zz_3d;
 pub mod par_lobpcg;
 pub mod par_projection;
+pub mod par_ptap_handoff;
 pub mod par_space;
 pub mod par_vector;
 pub mod par_vector_assembler;

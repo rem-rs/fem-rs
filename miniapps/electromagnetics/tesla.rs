@@ -1239,12 +1239,66 @@ impl TeslaSolver {
         } else {
             let rp = Some(&nd_canon[..]);
             let cp = Some(&h1_canon[..]);
+            // D1230: on top of the canonical renumbering, A and the Pi blocks
+            // carry the MFEM→hypre handoff in-row storage order — C++ hands
+            // hypre A rows as [diagonal] + reverse first-touch insertion order
+            // (the `hypre.cpp:943` `hypre_CSRMatrixReorder` diag swap applied
+            // to MFEM's prepended linked-list CSR) and the Pi rows as the
+            // reverse of the host element's trial-dof list (`SetSubMatrix`
+            // prepend, no rectangular reorder).  The RAP slot accumulation
+            // order — hence every level-0 A_Pi value and its own stored entry
+            // order at the last ulp — follows from these (d115a: 12511/29521
+            // entries differed, max 4.657e-10).  G keeps the sorted canonical
+            // layout: hypre's singular `0345430` cycle and its interpolation
+            // path never touch G (ams.c — G only under interior_nodes /
+            // coordinate vectors / cycle 9), so its order cannot reach the
+            // preconditioner.
+            let nd_canon_u32: Vec<u32> = nd_canon.iter().map(|&c| c as u32).collect();
+            let h1_canon_u32: Vec<u32> = h1_canon.iter().map(|&c| c as u32).collect();
+            let nd_local = nd.local_space();
+            let n_el = nd_local.mesh_topology().n_elements() as u32;
+            let element_dofs: Vec<Vec<u32>> =
+                (0..n_el).map(|e| nd_local.element_dofs(e).to_vec()).collect();
+            let a_canon = fem_parallel::par_ptap_handoff::mfem_ptap_handoff_matrix(
+                curl_mu_inv_curl.diag_block(),
+                &nd_canon_u32,
+                &element_dofs,
+            );
+            // Host element per partition row: the FIRST mesh element holding
+            // the canonical ND dof — MFEM's `SetSubMatrix` prepends new
+            // columns at the first writer while later hosts only overwrite
+            // values, so the first host alone fixes the row's handoff order.
+            let mut first_host_canon = vec![u32::MAX; nd_dp.n_total_dofs()];
+            for e in 0..n_el {
+                for &d in nd_local.element_dofs(e) {
+                    if first_host_canon[d as usize] == u32::MAX {
+                        first_host_canon[d as usize] = e;
+                    }
+                }
+            }
+            let host_part: Vec<u32> = (0..nd_dp.n_total_dofs())
+                .map(|p| first_host_canon[nd_canon[p]])
+                .collect();
+            let h1_local = h1.local_space();
+            let n_el_h1 = h1_local.mesh_topology().n_elements() as u32;
+            let h1_element_dofs: Vec<Vec<u32>> =
+                (0..n_el_h1).map(|e| h1_local.element_dofs_u32(e).to_vec()).collect();
+            let pi_canon: Vec<fem_linalg::CsrMatrix<f64>> = pi_local
+                .iter()
+                .map(|m| {
+                    fem_parallel::par_ptap_handoff::mfem_discrete_op_handoff_matrix(
+                        m,
+                        &nd_canon_u32,
+                        &h1_canon_u32,
+                        &host_part,
+                        &h1_element_dofs,
+                    )
+                })
+                .collect();
             (
-                permute_linlvo_csr(&la, rp, rp),
+                fem_linalg::fem_to_linlvo_csr(&a_canon),
                 permute_linlvo_csr(&lg, rp, cp),
-                lpi.iter()
-                    .map(|m| permute_linlvo_csr(m, rp, cp))
-                    .collect(),
+                pi_canon.iter().map(fem_linalg::fem_to_linlvo_csr).collect(),
             )
         };
         if let Ok(path) = std::env::var("FEMRS_TESLA_A_DUMP") {
