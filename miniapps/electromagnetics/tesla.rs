@@ -1267,6 +1267,30 @@ impl TeslaSolver {
             }
             let _ = std::fs::write(&path, out);
         }
+        if let Ok(prefix) = std::env::var("FEMRS_TESLA_PI_DUMP") {
+            // D1215 instrument: the canonical-order Pi blocks handed to
+            // `AmsPrecond::with_pi` (exactly the matrices the level-0
+            // `rap_hypre_order` consumes), `<prefix>_<d>.ij`, `row col %.17e`.
+            // On the C++ side these are hypre's `Pix/Piy/Piz` (MFEM
+            // `HypreAMS::SetInterpolations`); the d115a C harness feeds the
+            // same files to `hypre_BoomerAMGBuildCoarseOperator` for the
+            // bitwise level-0 RAP comparison.
+            for (d, m) in lpi.iter().enumerate() {
+                let path = format!("{prefix}_{d}.ij");
+                let mut out = String::with_capacity(m.nnz() * 32);
+                for r in 0..m.nrows() {
+                    for k in m.row_ptr()[r]..m.row_ptr()[r + 1] {
+                        out.push_str(&format!(
+                            "{} {} {:.17e}\n",
+                            r,
+                            m.col_idx()[k],
+                            m.values()[k]
+                        ));
+                    }
+                }
+                let _ = std::fs::write(&path, out);
+            }
+        }
         if let Ok(true) = std::env::var("FEMRS_TESLA_PI_DUMP").map(|v| v == "2") {
             // π·v keyed by the row slot point (v = x-coordinate field) — the
             // numbering-free action comparison against tmp/d105ams/pi_probe.
