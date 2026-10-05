@@ -34,6 +34,13 @@
 //! i.e. the C++ `-m data/inline-hex.mesh` (`MakeCartesian3D(n,n,n,HEX)`,
 //! `nx=ny=nz=4` for the shipped file), refined `-ref` times.
 //!
+//! D1220: `-m <file>` reads an arbitrary serial MFEM 3-D mesh (hex **or
+//! tet** — `fem_io::mfem::read_mfem_file`, the C++ `Mesh mesh(mesh_file, 1, 1)`
+//! path), giving the tri-face H1-trace basis its first end-to-end carrier
+//! (tet skeleton).  Tet meshes go through the simplex branches of the
+//! assembler (`from_simplex_nodes` geometry, tri-face trace evaluation,
+//! D1092/D1105 GL-Chebyshev H1-trace basis).
+//!
 //! Output table matches the C++ miniapp:
 //! `Ref | Dofs | ω | L2 Error | Rate | PCG it`.
 //!
@@ -65,6 +72,42 @@
 //! Newton-refined mirrored seed drifted `~2e-16` off the exact reference
 //! face plane, crossing a branch of the reference bases).  All levels now
 //! agree with the C++ serial harness to <0.1%.
+//!
+//! **Status (round 115):** `-m` lands (D1220) and the `-o≥2` deviation is
+//! CLOSED (D1221): the serial complex weak form sized ONE face quadrature
+//! rule (order 4, exact to degree 5) for every trace integrator, while MFEM
+//! sizes each from its coupled pair (`test_fe.GetOrder() +
+//! trial_face_fe.GetOrder()`).  At `-o 3 -do 1` the NormalTrace (3+3) and
+//! TraceIntegrator (2+4) pairs need degree 6 — the under-integrated B blocks
+//! corrupted the normal equations.  After the per-pair sizing fix
+//! (`complex_dpg_weakform.rs`), all hex rows below match C++ to the printed
+//! digits and the 1-hex `-o 3 -do 1` assembled normal equations match the
+//! C++ harness at ≤ 1.4e-14 (all 47524 nonzeros; the only residual is the
+//! documented equispaced RT-trace face gauge vs MFEM's Gauss-Legendre —
+//! solution-invariant, pinned in
+//! `crates/assembly/tests/d115b_d1221_face_rule_pins.rs`).
+//!
+//! Reference (C++ MFEM 4.10, `inline-hex.mesh` = 4×4×4, `-rnum 1.0`, `-do 1`;
+//! fem-rs matches every L2 to the printed digit after D1221; PCG counts
+//! equal where noted, otherwise the DpgBlockGs-vs-GSSmoother gap):
+//!
+//! ```text
+//!   o  do | Ref |  Dofs  | C++ L2     | rs L2      | C++ PCG | rs PCG
+//!   1  1  |  0  |   621  |  7.765e-01 |            |   44    |
+//!   2  1  |  0  |  3673  |  7.531e-02 |  7.531e-2  |   66    | 107
+//!   3  0  |  0  | 10757  |  5.721e-03 |  5.721e-3  |  321    | 459
+//!   3  1  |  0  | 10757  |  5.793e-03 |  5.793e-3  |   93    | 110
+//!   3  2  |  0  | 10757  |  5.763e-03 |  5.763e-3  |   78    | 78 (=)
+//!   4  0  |  0  | 23409  |  3.268e-04 |  3.268e-4  |  398    | 675
+//!   1  3  |  0  |   621  |  7.828e-01 |  7.828e-1  |   40    | 40 (=)
+//!   2  2  |  0  |  3673  |  7.614e-02 |  7.614e-2  |   64    | 77
+//! ```
+//!
+//! Tet carrier (D1220, `-m data/inline-tet.mesh`, 384 tets, tri-face
+//! skeleton): dofs EXACT at every level/order; L2 matches C++ to the printed
+//! digit at `-o 2` (ref 0/1: 3.492e-01/5.350e-02); `-o 3 -do 1` within 0.5%
+//! (3.094e-2 vs 3.079e-02 — residual recorded as D1235, not solver noise:
+//! C++ is unchanged at rtol 1e-13).
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
 use fem_assembly::dpg::dpg_basis::VolKind;
@@ -203,6 +246,39 @@ fn solve_level(
 
     a.store_matrices(true);
     a.assemble();
+
+    // DPG_DUMP_PREFIX=<path>: dump the assembled raw normal-equation blocks
+    // (`block_mat_r`/`block_mat_i`, pre-BC) in the MFEM-harness `adump`
+    // format — `E <R|I> <bi> <bj> <row> <col> <value>` (block-local indices,
+    // %.17g round-trip) — for the C++-probe bitwise comparison (D1221).
+    if let Ok(prefix) = std::env::var("DPG_DUMP_PREFIX") {
+        let offs = a.trial_offsets();
+        let nb = offs.len() - 1;
+        let mut out = String::new();
+        for (tag, m) in [("R", a.block_mat_r()), ("I", a.block_mat_i())] {
+            for bi in 0..nb {
+                for bj in 0..nb {
+                    for r in offs[bi]..offs[bi + 1] {
+                        for p in m.row_ptr[r]..m.row_ptr[r + 1] {
+                            let c = m.col_idx[p] as usize;
+                            if c >= offs[bj] && c < offs[bj + 1] {
+                                out.push_str(&format!(
+                                    "E {} {} {} {} {} {:.17e}\n",
+                                    tag,
+                                    bi,
+                                    bj,
+                                    r - offs[bi],
+                                    c - offs[bj],
+                                    m.values[p]
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::write(format!("{prefix}.txt"), out).unwrap();
+    }
 
     // Essential BCs: p̂ = p₀ = p on the whole boundary.
     let sk = a.skeleton(hatp);
@@ -362,11 +438,16 @@ fn main() {
     let mut delta_order = 1i32;
     let mut ref_levels = 0i32;
     let mut rnum = 1.0f64;
+    let mut mesh_file: Option<String> = None;
     let mut i = 1;
     let args: Vec<String> = std::env::args().collect();
     while i < args.len() {
         match args[i].as_str() {
             "-n" => n = args[i + 1].parse().unwrap(),
+            "-m" | "--mesh" => {
+                mesh_file = Some(args[i + 1].clone());
+                i += 1;
+            }
             "-o" | "--order" => order = args[i + 1].parse().unwrap(),
             "-do" | "--delta-order" => delta_order = args[i + 1].parse().unwrap(),
             "-ref" | "--refinements" => ref_levels = args[i + 1].parse().unwrap(),
@@ -378,11 +459,24 @@ fn main() {
     let omega = 2.0 * PI * rnum;
     println!("Ultraweak DPG for Helmholtz (MFEM acoustics.cpp port, 3-D, plane wave)");
     println!("  ω = {omega}, order={order}, delta_order={delta_order}");
-    println!("  mesh: unit_cube_hex({n}) (C++ -m data/inline-hex.mesh, nx=ny=nz={n})");
+    let mut mesh = match &mesh_file {
+        Some(f) => {
+            let mfem = fem_io::mfem::read_mfem_file(f)
+                .unwrap_or_else(|e| panic!("dpg_acoustics_3d: cannot read {f}: {e}"));
+            let m = mfem.mesh3d.unwrap_or_else(|| {
+                panic!("dpg_acoustics_3d: {f} is not a 3-D mesh (this is the 3-D miniapp)")
+            });
+            println!("  mesh: {f} ({} elements)", m.n_elements());
+            m
+        }
+        None => {
+            println!("  mesh: unit_cube_hex({n}) (C++ -m data/inline-hex.mesh, nx=ny=nz={n})");
+            Mesh::<3>::unit_cube_hex(n)
+        }
+    };
     println!("\n  Ref |    Dofs    |    ω    |  L2 Error  |  Rate  | PCG it |");
     println!("{}", "-".repeat(62));
 
-    let mut mesh = Mesh::<3>::unit_cube_hex(n);
     let mut err0 = 0.0;
     let mut dof0 = 0usize;
     for it in 0..=ref_levels {
