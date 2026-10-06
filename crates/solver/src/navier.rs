@@ -767,6 +767,30 @@ impl<D: NavierDiscretization> NavierSolver<D> {
     pub fn iter_hsolve(&self) -> i32 {
         self.iter_hsolve
     }
+    /// `MvInv->GetFinalNorm()` of the last step: the final preconditioned
+    /// residual norm `√((B r, r))` (MFEM's CG stopping norm, B = the
+    /// Setup-time Jacobi diagonal of `Mv`) of the CG solve of the momentum
+    /// system `Mv·x = F(uⁿ) + f^{n+1}` with a zero initial guess; `0.0`
+    /// before the first [`Self::step`].
+    pub fn res_mvsolve(&self) -> f64 {
+        self.res_mvsolve
+    }
+    /// `SpInv->GetFinalNorm()` of the last step: the final preconditioned
+    /// residual norm `√((B r, r))` (B = `OrthoSolver(GSSmoother)` or the
+    /// Setup-time AMG V-cycle, as selected by the pressure BCs) of the CG
+    /// solve of the pressure Poisson system `Sp·p = B1` warm-started from
+    /// the previous pressure; `0.0` before the first [`Self::step`].
+    pub fn res_spsolve(&self) -> f64 {
+        self.res_spsolve
+    }
+    /// `HInv->GetFinalNorm()` of the last step: the final preconditioned
+    /// residual norm `√((B r, r))` (B = the Setup-time Jacobi diagonal of
+    /// the BDF-scaled Helmholtz matrix `H`) of the CG solve of the viscous
+    /// system `H·u^{n+1} = B2` warm-started from the projected boundary
+    /// data; `0.0` before the first [`Self::step`].
+    pub fn res_hsolve(&self) -> f64 {
+        self.res_hsolve
+    }
 
     /// MFEM `NavierSolver::Step(time, dt, cur_step, provisional = false)`.
     ///
@@ -1441,6 +1465,43 @@ mod tests {
         assert!(cfl > 0.0);
         assert!(s.iter_mvsolve() > 0);
         assert!(s.iter_hsolve() > 0);
+    }
+
+    /// The `res_*` accessors pair with the `iter_*` ones: they expose the
+    /// final preconditioned residual norm `√((B r, r))` each sub-solve of
+    /// the last `step` recorded in `res_mvsolve`/`res_spsolve`/`res_hsolve`
+    /// (the MFEM `MvInv/SpInv/HInv->GetFinalNorm()` triple).  `0.0` on a
+    /// fresh solver, overwritten by every sub-solve; on the toy diagonal
+    /// operators the CG can land on an exactly-zero residual (e.g. the
+    /// 1-DOF pure-Neumann pressure RHS vanishes under `Orthogonalize`, and
+    /// `Mv = 2·I` with the matching Jacobi preconditioner solves exactly),
+    /// so only finiteness/non-negativity is asserted here — strict
+    /// positivity of the norms is covered by the real-operator cavity
+    /// driver on the pro-fluid side (`step_monitors_over_one_cavity_step`).
+    #[test]
+    fn res_accessors_track_last_step_norms() {
+        // Fresh solver: no sub-solve has ever run.
+        let mut s = NavierSolver::new(
+            ToyDisc::new(2, 1, true),
+            0.5,
+            NavierConfig { verbose: false, ..Default::default() },
+        );
+        assert_eq!(s.res_mvsolve(), 0.0);
+        assert_eq!(s.res_spsolve(), 0.0);
+        assert_eq!(s.res_hsolve(), 0.0);
+
+        s.velocity_mut().copy_from_slice(&[1.0, 0.0]);
+        s.setup(0.1);
+        let mut t = 0.0;
+        s.step(&mut t, 0.1, 0, false);
+        for (name, res) in [
+            ("mvsolve", s.res_mvsolve()),
+            ("spsolve", s.res_spsolve()),
+            ("hsolve", s.res_hsolve()),
+        ] {
+            assert!(res.is_finite(), "{name} final norm not finite: {res}");
+            assert!(res >= 0.0, "{name} final norm negative: {res}");
+        }
     }
 
     /// D433 regression: the `eliminate_bc` test double must take reactions
