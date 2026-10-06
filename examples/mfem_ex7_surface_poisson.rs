@@ -203,7 +203,7 @@ fn main() {
     } else if is_quad {
         quad4_l2_error(mesh_ptr, &u, &exact_fn)
     } else if use_tri6 {
-        tri6_l2_error(mesh_ptr, &u, &exact_fn)
+        tri6_l2_error(mesh_ptr, &space, &u, &exact_fn)
     } else {
         tri3_l2_error(mesh_ptr, &u, &exact_fn)
     };
@@ -484,10 +484,12 @@ fn quad4_l2_error(mesh: &Mesh<3>, u: &[f64], exact: &dyn Fn(&[f64; 3]) -> f64) -
     err2
 }
 
-fn tri6_l2_error(mesh: &Mesh<3>, u: &[f64], exact: &dyn Fn(&[f64; 3]) -> f64) -> f64 {
+fn tri6_l2_error(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, u: &[f64],
+                 exact: &dyn Fn(&[f64; 3]) -> f64) -> f64 {
     use fem_assembly::boundary::surface_tri6::{surface_jacobian_tri6, p2_basis_tri6};
     let mut err2 = 0.0;
     for e in 0..mesh.n_elems() as u32 {
+        let dofs = space.element_dofs(e);
         let ns = mesh.element_nodes(e);
         let x: [[f64; 3]; 6] = core::array::from_fn(|i| {
             let c = mesh.node_coords(ns[i]); [c[0], c[1], c[2]]
@@ -501,7 +503,7 @@ fn tri6_l2_error(mesh: &Mesh<3>, u: &[f64], exact: &dyn Fn(&[f64; 3]) -> f64) ->
                 phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[1]).sum::<f64>(),
                 phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[2]).sum::<f64>(),
             ];
-            let uh = phi.iter().zip(ns.iter()).map(|(&p, &n)| p * u[n as usize]).sum::<f64>();
+            let uh = phi.iter().zip(dofs.iter()).map(|(&p, &d)| p * u[d as usize]).sum::<f64>();
             let ue = exact(&xp);
             err2 += (uh - ue).powi(2) * (1.0/6.0) * sqrt_det_g;
         }

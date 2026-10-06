@@ -69,7 +69,7 @@ miniapps 102→101 勘误：round-63 台账的 100 文件口径未含 r63 后新
 | mfem_ex4_darcy_simple | — | **UNREG** | 未注册死文件、无 exe（D133 在案） |
 | mfem_ex5_mixed_darcy | `-m data/star.mesh -no-vis` | **BIT** | vs `d98runbit/cpp_ex5_novis_copy.out` 412 行中 1 diff = `MINRES solver took …s.`（MFEM RealTime，具名豁免） |
 | mfem_ex6_flux_recovery | 无参 -no-vis | **BIT** | vs `ref/ex6.out` 131 行中 2 difflines = mesh 行（r93 全档 BIT 本轮复证 ✓） |
-| mfem_ex7_surface_poisson | 无参 | **RO ⚠ D1255** | rc=0 但**数值漂移**：L2 error 9.4026555405e-3(r61/r84 锚) → **1.0904089632e-1**（11.6×）；本轮现编 C++ oracle（`-e 0` tri 同 258 dof）：C++ **0.00543013**、ARF 0.482721 vs Rust ARF 0.493151——HEAD 比 r61 **远离** C++ → 新债 **D1255**（窗口 r84(c5a06dd6)..r116(e4a819c5)） |
+| mfem_ex7_surface_poisson | 无参 | **NUM（D1255 已闭，2026-10-06）** | r117 审计发现的 11.6× L2 漂移已根因+修复：**求解从未错**（PCG 轨迹逐位）——D838 将 Tri6 空间换 build_q2_tri（边界 dof=单元扫描序=节点 id 置换）后，例子 `tri6_l2_error` 仍按**节点 id** 索引解向量；修复=按 dof 索引（d1255 handoff 补丁），L2 恢复 **9.4026530972e-3**（锚 7 位；钉 d1255_tri6_p2_dof_node_correspondence 4/4）。余差 9.40e-3 vs C++ 5.43e-3 = **L2 度量规则差**（3 点/中心 Jac vs MFEM order-7 积分，D1271）；故状态 NUM 非 BIT |
 | mfem_ex8_dpg_2x2 | `-m data/star.mesh -no-vis` | **NUM** | vs `cpp_ex8_novis_copy.out`：前 20 行逐字，分叉 @iter10（6.65111e-08 vs 6.6511e-08）= D864 三波后 recorded 现值；29 vs 28 it |
 | mfem_ex9_dg_advection | 无参 -no-vis | **BIT** | vs `$HOME/work/d76main/ex9_rerun` oracle：stdout 2 difflines = mesh 行；`ex9-init.gf` md5 `21f26d72…` = oracle 逐字节；`ex9-final.gf` maxdiff = **1.0e-8**（r78 D813-3 设计档复现） |
 | mfem_ex10_hyperelastic_dyn | 无参 beam-quad | **BIT** | vs `ref/ex10_quad.out` 2 difflines = mesh 行；step100 EE/KE/ΔTE = 0.0119584/0.000784203/−0.0196383 = C++（r92 复证 ✓） |
