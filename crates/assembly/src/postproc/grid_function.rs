@@ -1343,7 +1343,25 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let nodes = mesh.element_nodes(e);
 
             // Check for high-order geometry (curved surface).
-            let g_order = mesh.geom_order();
+            // D1271: a row-geometry element type carries its own order-2
+            // geometry *in the connectivity rows* (Tri6 = [v0 v1 v2 e01 e12
+            // e20]) — the fem-rs equivalent of MFEM's `Nodes` field on the
+            // program-built meshes `SetNodalFESpace` curves (ex7's octahedron
+            // sphere), where `Mesh::geom_order()` stays 1 because no separate
+            // geometry table exists.  Such a row's isoparametric map is
+            // quadratic by construction, so the metric cannot take the affine
+            // corner arm; `MeshTopology::geometry_nodes`/`geom_coords_of`
+            // fall back to the rows themselves, and the geometry basis is the
+            // same lattice the rows are laid out on
+            // (`geometry_node_element(Tri6, 2)` = `TriPk(2)`, the
+            // vertices→edges (0,1),(1,2),(2,0) slot order).  Tet10/Quad9/…
+            // row meshes keep their historical arms until a consumer with an
+            // MFEM oracle demands them.
+            let row_geo_order = match elem_type {
+                ElementType::Tri6 => 2,
+                _ => 1,
+            };
+            let g_order = mesh.geom_order().max(row_geo_order);
             let use_ho_geo = g_order > 1;
 
             // Surface mesh: compute edge vectors for correct 3D coordinate mapping.

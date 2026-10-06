@@ -44,6 +44,28 @@
 //! them at the mapping level (this note + the `dim == 1` element arms); a
 //! space-layer wrapper can be added on the same pattern as
 //! `fem_space::embedded_r2d` when a consumer appears.
+//!
+//! ## `GetTraceCollection()` upstream truths (D1260/D1261, recorded 2026-10-06)
+//!
+//! Probed against MFEM 4.10 (`fe_coll.cpp`) and pinned as recorded truth in
+//! `fem-space`'s `d117b_rcoll_collection_truth.rs` (+ `d117b_rcoll_ref.txt`):
+//!
+//! * `ND_R2D_FECollection::GetTraceCollection()` **aborts on default-named
+//!   collections for every `dim`** — it tests `nd_name[5]=='_'` but
+//!   `"ND_R2D_…"[5]=='D'`, so it falls into `BasisType::GetType('_')`
+//!   (`fe_coll.cpp:3325-3343`). Upstream defect (D1260): recorded, protected
+//!   against local "fixes" — fem-rs pins the abort, it does not reproduce it.
+//! * `RT_R1D_FECollection::GetTraceCollection()` is a plain `MFEM_ABORT`
+//!   (`fe_coll.cpp:3217`); and every `dim == 1` R2D variant aborts building
+//!   its dim-1 trace (`MFEM_VERIFY(dim==2)` in `RT_R2D_Trace_FECollection`
+//!   `fe_coll.cpp:3532`, ND `dim>=1` `fe_coll.cpp:3239`) (D1261).
+//! * `ND_R1D_FECollection::GetTraceCollection()` returns NULL; the only
+//!   default-named variant that resolves a trace collection is `RT_R2D(p, 2)`
+//!   → `RT_R2D_Trace_2D_Pp`.
+//!
+//! Debt D1262 records the fem-rs stance for the two trace collections
+//! themselves: mapping-level only (this section), no space-layer wrapper
+//! until a consumer appears (extends D900/D901/D914).
 
 mod nd_r2d;
 mod r1d;

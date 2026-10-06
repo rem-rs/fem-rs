@@ -2423,16 +2423,28 @@ fn nodes_dof_values<const D: usize>(
     let dim = mesh.topological_dim() as usize;
     let et = mesh.element_type_at(0);
     if dim != D {
-        // The one faithful surface representation (`Mesh::MakeCartesian2D` +
-        // `SetCurvature(order, …, 3, Ordering::byVDIM)`, as in the
-        // mobius-strip / klein-bottle miniapps): a dimension-2 mesh whose
-        // elements are the intrinsically 2-D `Quad4`, stored in 3-D
-        // coordinates.  The 2-D `Quad4` numbering below is element-local, so
-        // it applies unchanged; only the node values then carry `D = 3`
-        // components (`VDim: 3`).  Everything else (a "2-D hex", a 1-D
-        // element in 2-D, …) has no faithful MFEM numbering here and stays
-        // refused rather than silently mis-numbered.
-        if !(D == 3 && dim == 2 && et == ElementType::Quad4) {
+        // The faithful surface representations:
+        //   * `Mesh::MakeCartesian2D` + `SetCurvature(order, …, 3,
+        //     Ordering::byVDIM)` (the mobius-strip / klein-bottle miniapps): a
+        //     dimension-2 mesh whose elements are the intrinsically 2-D
+        //     `Quad4`, stored in 3-D coordinates — the 2-D `Quad4` numbering
+        //     is element-local, so it applies unchanged; only the node values
+        //     then carry `D = 3` components (`VDim: 3`).
+        //   * D1272: a **row-geometry cell** surface (`Tri6` rows — MFEM ex7's
+        //     `SetNodalFESpace`-curved octahedron sphere).  The row-geometry
+        //     arm below derives the `nodes` payload from the element rows
+        //     themselves, whose slot order is dimension-agnostic, and the
+        //     file layout it produces is MFEM's own
+        //     (`vertices / <corner count>` + `H1_2D_P2` / `VDim: 3` section —
+        //     structure-verified against the 17-digit C++ snapshot
+        //     `tmp/d118ex7/cpp_mesh17_r2.mesh`).
+        //     Everything else (a "2-D hex", a 1-D element in 2-D, …) has no
+        //     faithful MFEM numbering here and stays refused rather than
+        //     silently mis-numbered.
+        if !(D == 3
+            && dim == 2
+            && (et == ElementType::Quad4 || row_geometry_row(et).is_some()))
+        {
             return Err(FemError::Mesh(format!(
                 "write_mfem: `nodes` section for a {dim}-dimensional mesh in {D}-D space \
                  (spaceDim > dim) is not supported"

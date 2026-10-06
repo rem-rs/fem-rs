@@ -16,7 +16,8 @@
 //! position (the mesh's authoritative prism map inverted, permuted from the
 //! mesh's extrusion-first frame to MFEM's `(x, y, z)` wedge frame).
 //!
-//! Both GL (the collection default, p = 1..3) and GLL (p = 1..2) are pinned;
+//! Both GL (the collection default, p = 1..3) and GLL (p = 1..3; the p = 3
+//! GLL dump added by d118, §4-3b) are pinned;
 //! the element-major global numbering and the per-element slot order are
 //! pinned through the CDOF/FDOF tables before the entrywise comparison, so
 //! the entries compare directly by global index.
@@ -36,6 +37,11 @@ const PRL2_GL_P2: &str = include_str!("data/d105/prl2_2.txt");
 const PRL2_GL_P3: &str = include_str!("data/d105/prl2_3.txt");
 const PRL2_GLL_P1: &str = include_str!("data/d105/prl2gll_1.txt");
 const PRL2_GLL_P2: &str = include_str!("data/d105/prl2gll_2.txt");
+// d118 (§4-3b verification depth): MFEM accepts any btype at any p for the
+// prism arm (`L2_WedgeElement(p, btype)` = triangle⊗segment, fe_l2.cpp:839;
+// `L2_FECollection(p, 3, btype)`, fe_coll.cpp:2340) — round-105 had pinned
+// GLL p = 1..2 only; p = 3 closes the GLL column of the supported range.
+const PRL2_GLL_P3: &str = include_str!("data/d105/prl2gll_3.txt");
 
 fn prism_l2_prolongation_matches(dumps: &[(u8, &str)], basis: L2Basis) {
     for (p, dump_text) in dumps {
@@ -95,5 +101,8 @@ fn l2_prism_prolongation_matches_mfem_operator_gauss_legendre() {
 
 #[test]
 fn l2_prism_prolongation_matches_mfem_operator_gauss_lobatto() {
-    prism_l2_prolongation_matches(&[(1, PRL2_GLL_P1), (2, PRL2_GLL_P2)], L2Basis::GaussLobatto);
+    prism_l2_prolongation_matches(
+        &[(1, PRL2_GLL_P1), (2, PRL2_GLL_P2), (3, PRL2_GLL_P3)],
+        L2Basis::GaussLobatto,
+    );
 }

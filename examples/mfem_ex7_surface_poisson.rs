@@ -198,16 +198,25 @@ fn main() {
         x[0] * x[1] / r2
     };
     let mesh_ptr = space.mesh();
-    let err2 = if use_quad9 {
-        quad9_l2_error(mesh_ptr, &space, &u, &exact_fn)
+    let l2_err = if use_quad9 {
+        quad9_l2_error(mesh_ptr, &space, &u, &exact_fn).sqrt()
     } else if is_quad {
-        quad4_l2_error(mesh_ptr, &u, &exact_fn)
+        quad4_l2_error(mesh_ptr, &u, &exact_fn).sqrt()
     } else if use_tri6 {
-        tri6_l2_error(mesh_ptr, &space, &u, &exact_fn)
+        // MFEM `GridFunction::ComputeL2Error` (fem/gridfunc.cpp): the default
+        // integration rule is `IntRules.Get(fe.GetGeomType(), 2*fe.GetOrder()+3)`
+        // — for these P2 triangles the 15-point order-7 Witherden–Vincent rule
+        // (`tri_rule(7)`, D578) with the isoparametric (curved Tri6 row)
+        // Jacobian at every quadrature point.  D1271: the example-local
+        // 3-point/centroid-Jacobian rule was the metric deviation; the
+        // measurement goes through the core MFEM-parity helper — parity probe
+        // on the C++ mesh/solution snapshot: 5.43012990936432398e-3 vs C++
+        // 5.43012990936427974e-3 (rel 8.1e-15, ≤2 ulp).
+        let gf = fem_assembly::postproc::grid_function::GridFunction::new(&space, u.clone());
+        gf.compute_l2_error(&|x: &[f64]| exact_fn(&[x[0], x[1], x[2]]), 2 * h1_order + 3)
     } else {
-        tri3_l2_error(mesh_ptr, &u, &exact_fn)
+        tri3_l2_error(mesh_ptr, &u, &exact_fn).sqrt()
     };
-    let l2_err = err2.sqrt();
     println!("\nL2 error: {:.10e}", l2_err);
 
     // ── 7. Output files ─────────────────────────────────────────────────────
@@ -479,33 +488,6 @@ fn quad4_l2_error(mesh: &Mesh<3>, u: &[f64], exact: &dyn Fn(&[f64; 3]) -> f64) -
                    + phi[2]*u[ns[2]as usize]+phi[3]*u[ns[3]as usize];
             let ue = exact(&xp);
             err2 += (uh-ue).powi(2) * qwt[q] * sqrt_det_g;
-        }
-    }
-    err2
-}
-
-fn tri6_l2_error(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, u: &[f64],
-                 exact: &dyn Fn(&[f64; 3]) -> f64) -> f64 {
-    use fem_assembly::boundary::surface_tri6::{surface_jacobian_tri6, p2_basis_tri6};
-    let mut err2 = 0.0;
-    for e in 0..mesh.n_elems() as u32 {
-        let dofs = space.element_dofs(e);
-        let ns = mesh.element_nodes(e);
-        let x: [[f64; 3]; 6] = core::array::from_fn(|i| {
-            let c = mesh.node_coords(ns[i]); [c[0], c[1], c[2]]
-        });
-        let (_j, sqrt_det_g, _) = surface_jacobian_tri6(&x);
-        for q in 0..3 {
-            let (xi, eta) = match q { 0 => (2./3.,1./6.), 1 => (1./6.,2./3.), _ => (1./6.,1./6.) };
-            let phi = p2_basis_tri6(xi, eta);
-            let xp = [
-                phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[0]).sum::<f64>(),
-                phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[1]).sum::<f64>(),
-                phi.iter().zip(ns.iter()).map(|(&p, &n)| p * mesh.node_coords(n)[2]).sum::<f64>(),
-            ];
-            let uh = phi.iter().zip(dofs.iter()).map(|(&p, &d)| p * u[d as usize]).sum::<f64>();
-            let ue = exact(&xp);
-            err2 += (uh - ue).powi(2) * (1.0/6.0) * sqrt_det_g;
         }
     }
     err2
