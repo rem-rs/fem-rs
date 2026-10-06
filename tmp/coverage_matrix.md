@@ -151,7 +151,13 @@
 
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
-1. **examples/miniapps 逐个三态台账**（估计是最大的 "?" 集合——一次性批跑脚本 + 汇总表）；
+1. **examples/miniapps 逐个三态台账**——**round-117 已执行并关闭**：一次性批跑（examples 44 串行 +
+   40 并行 + miniapps 92 实体，HEAD `e4a819c5`，windows release + gate pins 亲跑全绿
+   [d106 toys/joule 5/5、tesla d957 2/2、ex18 d822 4/4]）三态定性，**唯一现行口径 =
+   `tmp/ledger/examples_three_state.md`**（serial BIT 14 / NUM 15 / RO 14；miniapps BIT 18 文件 /
+   NUM 31 / RO 31 / DEV 8 / RUN-LONG 4；未注册+模块 9 [examples 侧 1] 登记在案）。新债 **D1255 ex7 数值回归**
+   （L2 err 9.4e-3→1.09e-1，现编 C++ oracle 仲裁，窗口 r84..r116）、D1256 ex19 默认 mesh 1:1 偏差、
+   D1257 shifted/pex5 自锚漂移账、D1258 ex33 默认档偏差、D1259 死 oracle 快照卫生；
 2. 简化 collection 逐个盘点（LinearFE/QuadraticFE/Const3D/RT0_2D/RT1_2D/RT2_2D/ND1_3D/
    RefinedLinear/LinearNonConf 等——fem-rs 是否都有对应、是否有 pin）——**round 72 已执行**
    （`tmp/collections_inventory.md`；§1.5 的 `?` 已改写为 LAT，剩 3 条子项各带 recipe：
