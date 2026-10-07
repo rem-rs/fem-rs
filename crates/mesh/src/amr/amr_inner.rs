@@ -783,12 +783,25 @@ pub fn refine_nonconforming(
 /// Uniformly refine all elements of a 2-D mesh.
 ///
 /// - Tri3  → 4 Tri3  (newest-vertex bisection).
+/// - Tri6  → 4 Tri6  (P2-isoparametric refinement, [`refine_uniform_tri6_rows`]).
 /// - Quad4 → 4 Quad4 (conforming split matching MFEM UniformRefinement2D_base).
 ///
-/// A high-order element *type* (`Tri6`, `Quad8`, `Quad9`) first takes its
-/// [linear view](linear_view) — corners only, `nodes` geometry table carried —
-/// and then the same family path, so a quadratic import refines into its
-/// family's linear type carrying the transported geometry (D113).
+/// A high-order element *type* (`Tri6`, `Quad8`, `Quad9`) whose high-order
+/// geometry lives in an explicit [geometry table](GeometryData) first takes its
+/// [linear view](linear_view) — corners only, the `nodes` geometry table
+/// carried — and then the same family path, so a quadratic import refines into
+/// its family's linear type carrying the transported geometry (D113).
+///
+/// D1273: a `Tri6` mesh with `geometry: None` keeps its P2 geometry *implicit*
+/// in the node table (the row midside nodes' `coords`), which the linear view
+/// drops — it used to refine into straight `Tri3` children, silently
+/// flattening the mesh.  Such meshes now take the direct Tri6 path
+/// ([`refine_uniform_tri6_rows`], MFEM `UniformRefinement2D_base` + `Nodes`
+/// prolongation semantics: new nodes are evaluated on the parent's P2 map).
+///
+/// Quad8/9 still take the linear view; a `Quad8/9` mesh with implicit
+/// (coordinate-carried) high-order geometry has the same flattening defect as
+/// the pre-D1273 Tri6 path (registered, not fixed, in D1273 scope).
 pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     // Mixed Tri3+Quad4 meshes: per-element-type refinement with a shared
@@ -796,8 +809,14 @@ pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
     if mesh.elem_types.is_some() {
         return refine_uniform_2d_mixed(mesh);
     }
-    // High-order element *types* (`Tri6`, `Quad8/9`) work on the linear view
-    // of their family (corners + the carried `nodes` geometry table) — D113.
+    // D1273: Tri6 with implicit P2 geometry (curvature carried by the row
+    // midside nodes themselves) refines directly into curved Tri6 children.
+    if mesh.elem_type == ElementType::Tri6 && mesh.geometry.is_none() {
+        return refine_uniform_tri6_rows(mesh);
+    }
+    // High-order element *types* (`Quad8/9`, and `Tri6` with an explicit
+    // geometry table) work on the linear view of their family (corners + the
+    // carried `nodes` geometry table) — D113.
     if let Some(lin) = linear_view(mesh) {
         return refine_uniform(&lin);
     }
@@ -2941,6 +2960,186 @@ pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
             nc_vertex_view: None,
 vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
 }
+}
+
+/// Uniformly refine all Tri6 elements of a **surface** mesh (`Mesh<3>`) into
+/// 4 curved Tri6 children, a 1:1 port of MFEM's curved uniform refinement
+/// (`Mesh::UniformRefinement2D_base` + the `Nodes` grid-function prolongation
+/// through `FiniteElementSpace::RefinementOperator`).
+///
+/// Semantics fixed against MFEM 4.10 (D1273):
+/// * child order per parent is MFEM's
+///   `[v0, m01, m20], [m12, m20, m01], [m01, v1, m12], [m20, m12, v2]`
+///   (the central child is *second* — `mesh.cpp` UniformRefinement2D_base);
+/// * new-node ids are assigned in the refined-element × local-edge
+///   first-encounter scan (MFEM's new-dof numbering), so fem-rs dof ids match
+///   MFEM H1 dof ids level by level;
+/// * each new node is the parent P2 field evaluated at the child dof's
+///   pre-image in the parent reference triangle, with the exact-dyadic
+///   interpolation coefficients MFEM's `localP` carries (verified bitwise via
+///   `H1_TriangleElement::GetLocalInterpolation`, 4.10 probe) accumulated in
+///   ascending parent-dof order (`kernels::Mult` column order);
+/// * children inherit the parent attribute (the attr=0 defect is fixed);
+/// * boundary edges split at the parent's existing midside node, tags kept.
+pub fn refine_uniform_surface_tri6(mesh: &Mesh<3>) -> Mesh<3> {
+    refine_uniform_tri6_rows(mesh)
+}
+
+/// Evaluate `P2_ROWS[r]` against a parent Tri6 row
+/// `[v0, v1, v2, m01, m12, m20]` in ascending parent-dof order (MFEM
+/// `DenseMatrix::Mult` → `kernels::Mult` column accumulation), per component.
+fn tri6_eval_row<const D: usize>(r: usize, row: &[u32; 6], coords: &[f64]) -> [f64; D] {
+    const P2_ROWS: [[f64; 6]; 9] = [
+        // mid(v0, m01)   ref (1/4, 0)
+        [0.375, -0.125, 0.0, 0.75, 0.0, 0.0],
+        // mid(m01, m20)  ref (1/4, 1/4)
+        [0.0, -0.125, -0.125, 0.5, 0.25, 0.5],
+        // mid(m20, v0)   ref (0, 1/4)
+        [0.375, 0.0, -0.125, 0.0, 0.0, 0.75],
+        // mid(m12, m20)  ref (1/4, 1/2)
+        [-0.125, -0.125, 0.0, 0.25, 0.5, 0.5],
+        // mid(m01, m12)  ref (1/2, 1/4)
+        [-0.125, 0.0, -0.125, 0.5, 0.5, 0.25],
+        // mid(m01, v1)   ref (3/4, 0)
+        [-0.125, 0.375, 0.0, 0.75, 0.0, 0.0],
+        // mid(v1, m12)   ref (3/4, 1/4)
+        [0.0, 0.375, -0.125, 0.0, 0.75, 0.0],
+        // mid(m12, v2)   ref (1/4, 3/4)
+        [0.0, -0.125, 0.375, 0.0, 0.75, 0.0],
+        // mid(v2, m20)   ref (0, 3/4)
+        [-0.125, 0.0, 0.375, 0.0, 0.0, 0.75],
+    ];
+    let coeffs = &P2_ROWS[r];
+    let mut out = [0.0_f64; D];
+    for (j, &n) in row.iter().enumerate() {
+        if coeffs[j] == 0.0 {
+            // `kernels::Mult` adds `x_col * 0.0` — a signed zero that cannot
+            // change the running sum; skip it explicitly.
+            continue;
+        }
+        let base = n as usize * D;
+        for d in 0..D {
+            out[d] += coeffs[j] * coords[base + d];
+        }
+    }
+    out
+}
+
+/// Shared Tri6 → 4×Tri6 kernel for 2-D meshes and `Mesh<3>` surface meshes
+/// ([`refine_uniform_surface_tri6`], and the [`refine_uniform`] Tri6 branch).
+fn refine_uniform_tri6_rows<const D: usize>(mesh: &Mesh<D>) -> Mesh<D> {
+    debug_assert!(D == 2 || D == 3, "Tri6 refinement is 2-D/surface only");
+    const TRI6: usize = 6;
+    let n_elems = mesh.n_elems();
+    let mut coords = mesh.coords.clone();
+    let mut next_node = mesh.n_nodes() as u32;
+
+    // New fine-edge mid nodes, keyed by the (sorted) endpoint pair.  The
+    // parent's own edge mids are the existing row slots — the new ids number
+    // exactly MFEM's new H1 dofs because the traversal below scans the
+    // children in MFEM order × local-edge order with first-encounter ids.
+    let mut edge_map: HashMap<(u32, u32), u32> = HashMap::with_capacity(n_elems * 12);
+    // Parent edge (sorted pair) → the parent's row midside node: used to
+    // split the boundary segments at existing nodes (MFEM `be_to_face`).
+    let mut parent_edge_mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(n_elems * 3);
+
+    // Exact-dyadic interpolation rows of MFEM's localP live in
+    // [`tri6_eval_row`]: fine dof = the new edge mid, columns = parent dofs
+    // [v0, v1, v2, m01, m12, m20] in H1 slot order — the P2 Lagrange basis at
+    // the child dof's parent-reference pre-image.  MFEM 4.10 carries every
+    // entry bitwise exactly (probe: 0x1.8p-2, -0x1p-3, 0x1.8p-1, 0x1p-1,
+    // 0x1p-2 families), so the ascending parent-dof accumulation reproduces
+    // the MFEM node values bit for bit.
+
+    let mut conn = Vec::with_capacity(n_elems * 4 * TRI6);
+    let mut tags = Vec::with_capacity(n_elems * 4);
+
+    for e in 0..n_elems as u32 {
+        let ns = mesh.elem_nodes(e);
+        let row: [u32; TRI6] = [ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]];
+        let tag = mesh.elem_tags[e as usize];
+        let (v0, v1, v2, m01, m12, m20) = (row[0], row[1], row[2], row[3], row[4], row[5]);
+        parent_edge_mid.insert((v0.min(v1), v0.max(v1)), m01);
+        parent_edge_mid.insert((v1.min(v2), v1.max(v2)), m12);
+        parent_edge_mid.insert((v2.min(v0), v2.max(v0)), m20);
+
+        // MFEM UniformRefinement2D_base child order (center second):
+        // [v0, m01, m20], [m12, m20, m01], [m01, v1, m12], [m20, m12, v2].
+        const CHILD_CORNERS: [[usize; 3]; 4] = [[0, 3, 5], [4, 5, 3], [3, 1, 4], [5, 4, 2]];
+        // Each child's local edges (corner slot pairs) → the P2_ROWS index of
+        // its midpoint: child 0 edges (0,3)/(3,5)/(5,0) → rows 0/1/2, child 1
+        // (4,5)/(5,3)/(3,4) → rows 3/1/4, child 2 (3,1)/(1,4)/(4,3) →
+        // rows 5/6/4, child 3 (5,4)/(4,2)/(2,5) → rows 3/7/8.
+        const CHILD_EDGE_ROWS: [[usize; 3]; 4] = [[0, 1, 2], [3, 1, 4], [5, 6, 4], [3, 7, 8]];
+
+        for c in 0..4 {
+            let corners = [
+                row[CHILD_CORNERS[c][0]],
+                row[CHILD_CORNERS[c][1]],
+                row[CHILD_CORNERS[c][2]],
+            ];
+            let mut mids = [0u32; 3];
+            for (k, r) in CHILD_EDGE_ROWS[c].iter().enumerate() {
+                // Child local edge k = (corner k → corner k+1); slot 3+k of
+                // the child row carries its midside node.
+                let (a, b) = (corners[k], corners[(k + 1) % 3]);
+                let key = (a.min(b), a.max(b));
+                let id = *edge_map.entry(key).or_insert_with(|| {
+                    let id = next_node;
+                    next_node += 1;
+                    let xyz: [f64; D] = tri6_eval_row(*r, &row, &coords);
+                    coords.extend_from_slice(&xyz);
+                    id
+                });
+                mids[k] = id;
+            }
+            conn.extend_from_slice(&[corners[0], corners[1], corners[2], mids[0], mids[1], mids[2]]);
+            tags.push(tag);
+        }
+    }
+
+    // Boundary: each boundary segment splits at the parent edge's existing
+    // midside node; tags inherited (MFEM UniformRefinement2D_base boundary).
+    let n_faces = mesh.n_faces();
+    let mut face_conn = Vec::with_capacity(n_faces * 4);
+    let mut face_tags = Vec::with_capacity(n_faces * 2);
+    for f in 0..n_faces {
+        let a = mesh.face_conn[f * 2];
+        let b = mesh.face_conn[f * 2 + 1];
+        let key = (a.min(b), a.max(b));
+        let mid = *parent_edge_mid.get(&key).unwrap_or_else(|| {
+            panic!("refine_uniform_tri6_rows: boundary edge {a}-{b} is not a Tri6 element edge")
+        });
+        face_conn.push(a);
+        face_conn.push(mid);
+        face_conn.push(mid);
+        face_conn.push(b);
+        let tag = mesh.face_tags[f];
+        face_tags.push(tag);
+        face_tags.push(tag);
+    }
+
+    Mesh {
+        coords,
+        conn,
+        elem_tags: tags,
+        elem_type: ElementType::Tri6,
+        face_conn,
+        face_tags,
+        face_type: ElementType::Line2,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None,
+        nc_vertex_view: None,
+        vertex_parents: vec![],
+        nc_leaf_states: None,
+        nc_face_ids: None,
+    }
 }
 
 /// Refine elements of a Tri3 surface mesh near a target vertex, matching

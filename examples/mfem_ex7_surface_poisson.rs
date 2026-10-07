@@ -42,10 +42,11 @@ use fem_assembly::boundary::surface_tri6::{
 };
 use fem_mesh::{
     Mesh, MeshTopology, element_type::ElementType,
-    amr::{refine_at_vertex_surface, refine_uniform_surface_quad4, refine_uniform_surface_tri3},
+    amr::{refine_at_vertex_surface, refine_uniform_surface_quad4, refine_uniform_surface_tri3,
+          refine_uniform_surface_tri6},
 };
 use fem_linalg::CsrMatrix;
-use fem_solver::{fem_to_linlvo_csr, solve_pcg, SolveResult};
+use fem_solver::{fem_to_linlvo_csr, fmt_g, solve_pcg, SolveResult};
 use fem_space::{H1Space, fe_space::FESpace};
 use fem_solver::GSSmoother;
 
@@ -74,28 +75,34 @@ fn main() {
         build_octahedron_mesh()
     };
 
-    // For P2 (Tri6): elevate before refinement so refinements preserve mid-edge nodes
+    // For P2 (Tri6): elevate before refinement so refinements preserve mid-edge
+    // nodes.  MFEM builds the nodes as an H1(order) grid function whose values
+    // start at the *linear* interpolation of the vertices (SetNodalFESpace →
+    // ProjectCoefficient of the identity) — chord midpoints, unsnapped.
     let use_tri6 = !is_quad && args.order >= 2;
     if use_tri6 {
         mesh = elevate_to_tri6(&mesh);
     }
 
+    // MFEM ex7 step 3, 1:1:
+    // `for (l = 0; l <= ref_levels; l++) { if (l > 0) UniformRefinement();
+    //  if (always_snap || l == ref_levels) SnapNodes(*mesh); }`
+    // — with the default `always_snap == false` the nodes stay on the parent
+    // P2 field through every refinement round and snap once at the end; the
+    // refinement interpolates that field (D1273: curved UniformRefinement).
     for l in 0..=args.ref_levels {
         if l > 0 {
             mesh = if is_quad {
                 refine_uniform_surface_quad4(&mesh)
             } else if use_tri6 {
-                refine_uniform_tri6(&mesh)
+                refine_uniform_surface_tri6(&mesh)
             } else {
                 refine_uniform_surface_tri3(&mesh)
             };
-            if args.always_snap {
-                snap_nodes(&mut mesh);
-            }
         }
-    }
-    if !args.always_snap || args.ref_levels == 0 {
-        snap_nodes(&mut mesh);
+        if args.always_snap || l == args.ref_levels {
+            snap_nodes(&mut mesh);
+        }
     }
 
     // AMR: refine near north pole (MFEM ex7 -amr 1)
@@ -217,7 +224,9 @@ fn main() {
     } else {
         tri3_l2_error(mesh_ptr, &u, &exact_fn).sqrt()
     };
-    println!("\nL2 error: {:.10e}", l2_err);
+    // MFEM ex7 step 11: `cout << "\nL2 norm of error: " << err << endl`
+    // (default 6-significant-digit operator<< formatting).
+    println!("\nL2 norm of error: {}", fmt_g(l2_err));
 
     // ── 7. Output files ─────────────────────────────────────────────────────
     {
@@ -289,13 +298,39 @@ fn build_cube_mesh() -> Mesh<3> {
 }
 
 fn snap_nodes(mesh: &mut Mesh<3>) {
+    // MFEM ex7 `SnapNodes`: `node /= node.Norml2()` — and MFEM's
+    // `Vector::Norml2` (linalg/vector.cpp:968) is *not* `sqrt(Σx²)`: it is the
+    // LAPACK `dnrm2`-style scaled norm (running (scale, sumsq) with per-entry
+    // rescaling, sequential in index order, final `scale * sqrt(sumsq)`).
+    // D1273 probe: with this port the snapped mesh is bitwise identical to
+    // C++ (the naive sqrt form deviates by up to 2 ulp on ~40% of nodes).
     for n in 0..mesh.n_nodes() as u32 {
         let i = n as usize * 3;
         let (x, y, z) = (mesh.coords[i], mesh.coords[i+1], mesh.coords[i+2]);
-        let r = (x*x + y*y + z*z).sqrt();
-        mesh.coords[i] = x / r;
-        mesh.coords[i+1] = y / r;
-        mesh.coords[i+2] = z / r;
+        let mut sumsq = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for &v in &[x, y, z] {
+            let n = v.abs();
+            if n > 0.0 {
+                if scale <= n {
+                    let arg = scale / n;
+                    sumsq = sumsq * (arg * arg) + 1.0;
+                    scale = n;
+                } else {
+                    let arg = n / scale;
+                    sumsq += arg * arg;
+                }
+            }
+        }
+        let r = scale * sumsq.sqrt();
+        // MFEM `node /= r` is `Vector::operator/=` (linalg/vector.cpp):
+        // multiply by the pre-inverted reciprocal — `y[i] *= 1.0/c` — NOT a
+        // per-component division; the reciprocal rounding is visible at the
+        // last bit.
+        let m = 1.0 / r;
+        mesh.coords[i] = x * m;
+        mesh.coords[i+1] = y * m;
+        mesh.coords[i+2] = z * m;
     }
 }
 
@@ -304,7 +339,13 @@ fn snap_nodes(mesh: &mut Mesh<3>) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn elevate_to_tri6(mesh: &Mesh<3>) -> Mesh<3> {
-    // ... unchanged from original ...
+    // Tri3 → Tri6 elevation mirroring MFEM ex7's `SetNodalFESpace(H1(2))`:
+    // the new mid-edge dofs start at the *linear* interpolation of their edge
+    // (ProjectCoefficient of the identity on the straight mesh) — plain chord
+    // midpoints, NOT snapped to the sphere (ex7 only snaps inside its refine
+    // loop).  Edge scan order is the triangle's local edge order
+    // (0,1), (1,2), (2,0) — MFEM `GetElementToEdgeTable` — so the node ids
+    // match MFEM's H1 dof numbering.
     let ne = mesh.n_elems();
     let tri3_conn = &mesh.conn;
     let n3 = mesh.n_nodes() as u32;
@@ -313,107 +354,31 @@ fn elevate_to_tri6(mesh: &Mesh<3>) -> Mesh<3> {
     let mut next_node = n3;
     let mut new_conn = Vec::with_capacity(ne * 6);
 
-    for e in 0..ne {
-        let i = e * 3;
-        let a = tri3_conn[i];
-        let b = tri3_conn[i + 1];
-        let c = tri3_conn[i + 2];
-        let key = |x: u32, y: u32| if x < y { (x, y) } else { (y, x) };
-
-        let ab = *edge_map.entry(key(a, b)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
-            let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
-            let cx = (xa + xb) / 2.0; let cy = (ya + yb) / 2.0; let cz = (za + zb) / 2.0;
-            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
-            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
-            j
-        });
-        let ac = *edge_map.entry(key(a, c)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            /* same pattern */
-            let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
-            let (xc, yc, zc) = (coords[c as usize*3], coords[c as usize*3+1], coords[c as usize*3+2]);
-            let cx = (xa + xc) / 2.0; let cy = (ya + yc) / 2.0; let cz = (za + zc) / 2.0;
-            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
-            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
-            j
-        });
-        let bc = *edge_map.entry(key(b, c)).or_insert_with(|| {
-            let j = next_node; next_node += 1;
-            let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
-            let (xc, yc, zc) = (coords[c as usize*3], coords[c as usize*3+1], coords[c as usize*3+2]);
-            let cx = (xb + xc) / 2.0; let cy = (yb + yc) / 2.0; let cz = (zb + zc) / 2.0;
-            let r = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-30);
-            coords.extend_from_slice(&[cx/r, cy/r, cz/r]);
-            j
-        });
-        new_conn.extend_from_slice(&[a, b, c, ab, bc, ac]);
-    }
-
-    Mesh {
-        coords, conn: new_conn,
-        elem_tags: mesh.elem_tags.clone(),
-        elem_type: ElementType::Tri6,
-        face_conn: vec![], face_tags: vec![],
-        face_type: ElementType::Line2,
-        elem_types: None, elem_offsets: None,
-        face_types: None, face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
-        vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
-    }
-}
-
-fn refine_uniform_tri6(mesh: &Mesh<3>) -> Mesh<3> {
-    let ne = mesh.n_elems();
-    let conn6 = &mesh.conn;
-    let mut coords = mesh.coords.clone();
-    let mut edge_map = std::collections::HashMap::<(u32, u32), u32>::new();
-    let mut next_node = mesh.n_nodes() as u32;
-    let mut new_conn = Vec::with_capacity(ne * 24);
-
-    let add_edge = |a: u32, b: u32, coords: &mut Vec<f64>, map: &mut std::collections::HashMap<(u32, u32), u32>, next: &mut u32| -> u32 {
+    let mid = |a: u32, b: u32, coords: &mut Vec<f64>,
+                   map: &mut std::collections::HashMap<(u32, u32), u32>,
+                   next: &mut u32| -> u32 {
         let key = if a < b { (a, b) } else { (b, a) };
         *map.entry(key).or_insert_with(|| {
             let j = *next; *next += 1;
             let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
             let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
-            let cx = (xa + xb) / 2.0; let cy = (ya + yb) / 2.0; let cz = (za + zb) / 2.0;
-            coords.extend_from_slice(&[cx, cy, cz]);
+            coords.extend_from_slice(&[(xa + xb) / 2.0, (ya + yb) / 2.0, (za + zb) / 2.0]);
             j
         })
     };
 
     for e in 0..ne {
-        let i = e * 6;
-        let (v0, v1, v2) = (conn6[i], conn6[i+1], conn6[i+2]);
-        let (m01, m12, m20) = (conn6[i+3], conn6[i+4], conn6[i+5]);
-
-        let a = add_edge(v0, m01, &mut coords, &mut edge_map, &mut next_node);
-        let b = add_edge(v0, m20, &mut coords, &mut edge_map, &mut next_node);
-        let c = add_edge(m01, m20, &mut coords, &mut edge_map, &mut next_node);
-        new_conn.extend_from_slice(&[v0, m01, m20, a, c, b]);
-
-        let a = add_edge(v1, m12, &mut coords, &mut edge_map, &mut next_node);
-        let b = add_edge(v1, m01, &mut coords, &mut edge_map, &mut next_node);
-        let c = add_edge(m12, m01, &mut coords, &mut edge_map, &mut next_node);
-        new_conn.extend_from_slice(&[v1, m12, m01, a, c, b]);
-
-        let a = add_edge(v2, m20, &mut coords, &mut edge_map, &mut next_node);
-        let b = add_edge(v2, m12, &mut coords, &mut edge_map, &mut next_node);
-        let c = add_edge(m20, m12, &mut coords, &mut edge_map, &mut next_node);
-        new_conn.extend_from_slice(&[v2, m20, m12, a, c, b]);
-
-        let a = add_edge(m01, m12, &mut coords, &mut edge_map, &mut next_node);
-        let b = add_edge(m12, m20, &mut coords, &mut edge_map, &mut next_node);
-        let c = add_edge(m20, m01, &mut coords, &mut edge_map, &mut next_node);
-        new_conn.extend_from_slice(&[m01, m12, m20, a, b, c]);
+        let i = e * 3;
+        let (a, b, c) = (tri3_conn[i], tri3_conn[i + 1], tri3_conn[i + 2]);
+        let ab = mid(a, b, &mut coords, &mut edge_map, &mut next_node);
+        let bc = mid(b, c, &mut coords, &mut edge_map, &mut next_node);
+        let ca = mid(c, a, &mut coords, &mut edge_map, &mut next_node);
+        new_conn.extend_from_slice(&[a, b, c, ab, bc, ca]);
     }
 
     Mesh {
         coords, conn: new_conn,
-        elem_tags: vec![0; ne * 4],
+        elem_tags: mesh.elem_tags.clone(),
         elem_type: ElementType::Tri6,
         face_conn: vec![], face_tags: vec![],
         face_type: ElementType::Line2,
