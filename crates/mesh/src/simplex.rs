@@ -1996,19 +1996,29 @@ impl<const D: usize> Mesh<D> {
         // 4. Remap element connectivity
         let new_conn: Vec<NodeId> = self.conn.iter().map(|&n| new_id[n as usize]).collect();
 
-        // 5. Filter boundary faces (remove periodic ones)
+        // 5. Filter boundary faces (remove periodic ones).  Per-face node
+        // counts and types are recorded so a *mixed* (tri + quad) boundary —
+        // a prism extrusion's lateral quads + caps — survives the rebuild:
+        // the flat `Mesh::uniform` tables cannot express it, and slicing the
+        // flattened conn at a uniform stride corrupts `n_faces` /
+        // `bface_nodes` for every consumer downstream (D840-1).
+        let mixed_boundary = self.face_offsets.is_some() || self.face_types.is_some();
         let mut new_face_conn = Vec::new();
         let mut new_face_tags = Vec::new();
+        let mut new_face_lens = Vec::new();
+        let mut new_face_types = Vec::new();
         for f in 0..n_faces as FaceId {
             let tag = self.face_tags[f as usize];
             if periodic_tags.contains(&tag) {
                 continue; // skip periodic boundary faces
             }
             let ns = self.bface_nodes(f);
+            new_face_lens.push(ns.len());
             for &n in ns {
                 new_face_conn.push(new_id[n as usize]);
             }
             new_face_tags.push(tag);
+            new_face_types.push(self.face_type_at(f));
         }
 
         let mut out = Mesh::uniform(
@@ -2020,6 +2030,15 @@ impl<const D: usize> Mesh<D> {
             new_face_tags,
             self.face_type,
         );
+        if mixed_boundary {
+            let mut offs = Vec::with_capacity(new_face_lens.len() + 1);
+            offs.push(0usize);
+            for l in &new_face_lens {
+                offs.push(offs.last().expect("seeded") + l);
+            }
+            out.face_offsets = Some(offs);
+            out.face_types = Some(new_face_types);
+        }
         out.geometry = self.periodic_geometry_snapshot(&remap);
         Ok(out)
     }
@@ -2131,14 +2150,20 @@ impl<const D: usize> Mesh<D> {
             }
         }
         let new_conn: Vec<NodeId> = self.conn.iter().map(|&n| new_id[n as usize]).collect();
+        // Mixed (tri + quad) boundary preservation — see `make_periodic` (D840-1).
+        let mixed_boundary = self.face_offsets.is_some() || self.face_types.is_some();
         let mut new_face_conn = Vec::new();
         let mut new_face_tags = Vec::new();
+        let mut new_face_lens = Vec::new();
+        let mut new_face_types = Vec::new();
         for f in 0..n_faces as FaceId {
             let tag = self.face_tags[f as usize];
             if periodic_tags.contains(&tag) { continue; }
             let ns = self.bface_nodes(f);
+            new_face_lens.push(ns.len());
             for &n in ns { new_face_conn.push(new_id[n as usize]); }
             new_face_tags.push(tag);
+            new_face_types.push(self.face_type_at(f));
         }
         let mut out = Mesh::<D>::uniform(
             new_coords,
@@ -2149,6 +2174,15 @@ impl<const D: usize> Mesh<D> {
             new_face_tags,
             self.face_type,
         );
+        if mixed_boundary {
+            let mut offs = Vec::with_capacity(new_face_lens.len() + 1);
+            offs.push(0usize);
+            for l in &new_face_lens {
+                offs.push(offs.last().expect("seeded") + l);
+            }
+            out.face_offsets = Some(offs);
+            out.face_types = Some(new_face_types);
+        }
         out.geometry = self.periodic_geometry_snapshot(&remap);
         Ok(out)
     }

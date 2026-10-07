@@ -3430,6 +3430,20 @@ fn refine_nonconforming_3d_internal(
     // D816-2: a folded (or SetCurvature(1)) order-1 discontinuous table —
     // transported to the children at the end of this function.
     let l2_geo = super::curved_tet::l2_p1_tet_geometry(mesh);
+    // D840-1: a periodically merged *straight* parent keeps `make_periodic`'s
+    // per-element own-side snapshot (rows addressing the pre-merge node table
+    // — not the fresh element-major layout `l2_p1_tet_geometry` matches).
+    // MFEM's `MakePeriodic` materializes `L2_T1_3D_P1` nodes
+    // (`SetCurvature(order, /*discont=*/true)` before the `v2v` renumbering;
+    // probe `mfem_tetx` (round 123, WSL `~/work/rr123`): x-folded 2×2×2 tet
+    // cube `ND = 48·4 = 192` → refined `ND = 384·4 = 1536`, all 384 children
+    // `det J = +1/64`) whose refinement stays fully discontinuous own-side,
+    // so the snapshot rides the same transport.
+    let p1_snapshot = if l2_geo.is_none() {
+        super::curved_tet::periodic_p1_tet_geometry(mesh)
+    } else {
+        None
+    };
     // MFEM's canonical new-vertex numbering (`oedge + e2v[E]`, see
     // `MfemTetRefineIds`).  D651: applied to *every* fully-refined (uniform)
     // tet mesh — straight-sided ones included.  The historical straight-side
@@ -3533,7 +3547,7 @@ fn refine_nonconforming_3d_internal(
 
             // 4 corner tets (MFEM embedding matrices 0..4).
             fine_parent.extend((0..4u8).map(|k| (e, k)));
-            if geo.is_some() || mfem_ids.is_some() {
+            if geo.is_some() || mfem_ids.is_some() || p1_snapshot.is_some() {
                 // MFEM `UniformRefinement3D_base`: the coarse vertex sits at
                 // the child's *own* reference vertex (slot 0 of child 1..3
                 // holds the child's first edge midpoint), which makes every
@@ -3547,7 +3561,10 @@ fn refine_nonconforming_3d_internal(
                 // Jacobian — D651's second deviation, visible as a different
                 // interior-octahedron split one level down.  Uniform
                 // refinement must therefore emit MFEM's order even for
-                // straight-sided meshes.
+                // straight-sided meshes.  A snapshot-carrying (periodic P1)
+                // parent takes it too: the `fine_parent` embedding codes must
+                // line up with the emitted rows for the own-side transport
+                // below, and MFEM's is the only reference order.
                 new_conn.extend_from_slice(&[n0, m01, m02, m03]); new_tags.push(tag);
                 new_conn.extend_from_slice(&[m01, n1, m12, m13]); new_tags.push(tag);
                 new_conn.extend_from_slice(&[m02, m12, n2, m23]); new_tags.push(tag);
@@ -3566,19 +3583,21 @@ fn refine_nonconforming_3d_internal(
             // Jacobian at the reference-tet center (0.25, 0.25, 0.25) — for a
             // curved mesh that is the nodes-based isoparametric Jacobian, not
             // the straight one spanned by the vertices
-            // (`tet_select_rt_debug`).
-            let rt = match &geo {
-                Some(_) => {
-                    let (j, _, _) =
-                        mesh.element_jacobian(e, &crate::amr::curved_tet::TET_CENTER);
-                    let j: [[f64; 3]; 3] = [
-                        [j[(0, 0)], j[(0, 1)], j[(0, 2)]],
-                        [j[(1, 0)], j[(1, 1)], j[(1, 2)]],
-                        [j[(2, 0)], j[(2, 1)], j[(2, 2)]],
-                    ];
-                    tet_select_rt_from_j(&j)
-                }
-                None => tet_select_rt_debug(mesh, &[n0, n1, n2, n3]),
+            // (`tet_select_rt_debug`).  A periodic-P1 snapshot parent is
+            // nodes-carrying in MFEM's sense too, and its own-side Jacobian
+            // (read through the snapshot) is what MFEM evaluates — the
+            // folded-vertex frame would rank a warped seam element.
+            let rt = if geo.is_some() || p1_snapshot.is_some() {
+                let (j, _, _) =
+                    mesh.element_jacobian(e, &crate::amr::curved_tet::TET_CENTER);
+                let j: [[f64; 3]; 3] = [
+                    [j[(0, 0)], j[(0, 1)], j[(0, 2)]],
+                    [j[(1, 0)], j[(1, 1)], j[(1, 2)]],
+                    [j[(2, 0)], j[(2, 1)], j[(2, 2)]],
+                ];
+                tet_select_rt_from_j(&j)
+            } else {
+                tet_select_rt_debug(mesh, &[n0, n1, n2, n3])
             };
             fine_parent.extend((0..4u8).map(|k| (e, 4 * (rt as u8 + 1) + k)));
             let e = [m01, m02, m03, m12, m13, m23];
@@ -3720,11 +3739,12 @@ fn refine_nonconforming_3d_internal(
         let mac = edge_midpoint_map.get(&edge_key(a, c)).copied();
 
         if let (Some(mab), Some(mbc), Some(mac)) = (mab, mbc, mac) {
-            if geo.is_some() || l2_geo.is_some() {
+            if geo.is_some() || l2_geo.is_some() || p1_snapshot.is_some() {
                 // MFEM `UniformRefinement3D_base` new_boundary: corner 0,
                 // center, corner 1, corner 2 (the center child with MFEM's
                 // rotated node order).  An order-1 discontinuous table is a
-                // `nodes`-carrying mesh in MFEM's sense too (D816-2).
+                // `nodes`-carrying mesh in MFEM's sense too (D816-2), and so
+                // is a periodic-P1 snapshot parent (D840-1).
                 new_face_conn.extend_from_slice(&[a, mab, mac]); new_face_tags.push(tag);
                 new_face_conn.extend_from_slice(&[mbc, mac, mab]); new_face_tags.push(tag);
                 new_face_conn.extend_from_slice(&[mab, b, mbc]); new_face_tags.push(tag);
@@ -3769,6 +3789,19 @@ fn refine_nonconforming_3d_internal(
             new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
             new_mesh.geometry = Some(table);
         }
+    } else if let Some(p1) = p1_snapshot {
+        // D840-1: transport the periodic own-side snapshot — uniform *and*
+        // partial refinement, for any marked-set pattern.  The corner-tet
+        // order gate above keeps the emitted rows aligned with the
+        // `fine_parent` embedding codes for snapshot-carrying parents, so
+        // [`build_refined_l2_p1_tet_geometry`] (parent-layout agnostic: it
+        // reads the parent's own rows through its `conn`) applies verbatim.
+        // MFEM's closing `UpdateNodes` → `SetVerticesFromNodes` rebuilds the
+        // fine `vertices` as the mean over the element references of the
+        // refined own-side values.
+        let table = super::curved_tet::build_refined_l2_p1_tet_geometry(p1, &fine_parent);
+        new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
+        new_mesh.geometry = Some(table);
     } else if geo.is_some() {
         new_mesh.geometry =
             super::curved_tet::build_refined_tet_geometry(mesh, &new_mesh, &fine_parent);
@@ -6810,6 +6843,20 @@ pub fn refine_prism6_uniform(
     // D816-2: a folded (or SetCurvature(1)) order-1 discontinuous table —
     // transported to the children at the end of this function.
     let l2_geo = super::curved_prism::l2_p1_prism_geometry(mesh);
+    // D840-1: a periodically merged *straight* parent keeps `make_periodic`'s
+    // per-element own-side snapshot (rows addressing the pre-merge node table
+    // — not the fresh element-major layout `l2_p1_prism_geometry` matches).
+    // MFEM's `MakePeriodic` materializes `L2_T1_3D_P1` nodes
+    // (`SetCurvature(order, /*discont=*/true)` before the `v2v` renumbering)
+    // whose refinement stays fully discontinuous own-side, so the snapshot
+    // rides the same transport.  Both emission branches record MFEM-aligned
+    // `fine_parent` codes (the historical branch through
+    // `HISTORICAL_CHILD_TO_MFEM`), so the transport needs no order gate.
+    let p1_snapshot = if l2_geo.is_none() {
+        super::curved_prism::periodic_p1_prism_geometry(mesh)
+    } else {
+        None
+    };
     // MFEM's canonical new-vertex numbering for a wedge mesh: a pure-prism
     // refinement creates **no** triangular face centers and **no** body
     // centers, and lays the fine vertices out as
@@ -7159,6 +7206,14 @@ pub fn refine_prism6_uniform(
             new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
             new_mesh.geometry = Some(table);
         }
+    } else if let Some(p1) = p1_snapshot {
+        // D840-1: transport the periodic own-side snapshot — uniform *and*
+        // partial refinement (both emission branches record MFEM-aligned
+        // `fine_parent` codes), then MFEM's closing `UpdateNodes` →
+        // `SetVerticesFromNodes`.
+        let table = super::curved_prism::build_refined_l2_p1_prism_geometry(p1, &fine_parent);
+        new_mesh.coords = super::curved_hex::set_vertices_from_nodes(&new_mesh, &table);
+        new_mesh.geometry = Some(table);
     } else if geo.is_some() {
         new_mesh.geometry =
             super::curved_prism::build_refined_prism_geometry(mesh, &new_mesh, &fine_parent);

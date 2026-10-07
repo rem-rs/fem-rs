@@ -2987,7 +2987,10 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
 /// MFEM's inline branches).  Orders 21-25 are MFEM's shared 126-point rule
 /// (D578); orders above 25 fall back to Grundmann-Möller exactly like
 /// [`tri_rule`] (MFEM's default branch).
-fn tri_rule_mfem_order(order: u8) -> QuadratureRule {
+///
+/// Public since D1274: the surface Tri6 assembly consumes it for the
+/// MFEM-parity per-integrator quadrature rules.
+pub fn tri_rule_mfem_order(order: u8) -> QuadratureRule {
     if order <= 1 {
         QuadratureRule {
             points: vec![vec![1.0 / 3.0, 1.0 / 3.0]],

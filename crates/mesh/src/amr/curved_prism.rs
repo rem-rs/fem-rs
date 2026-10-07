@@ -173,6 +173,41 @@ pub(crate) fn l2_p1_prism_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
     Some(geo)
 }
 
+/// The **periodic snapshot layout** of a straight (order-1) prism mesh:
+/// `Mesh::make_periodic`'s per-element own-side geometry snapshot
+/// (`simplex.rs::periodic_geometry_snapshot` — rows addressing the *pre-merge*
+/// node table, with dof ids shared between same-side neighbours).  MFEM's
+/// `MakePeriodic` materializes exactly this information as discontinuous
+/// `L2_T1_3D_P1` nodes (`SetCurvature(order, /*discont=*/true)` before the
+/// `v2v` renumbering), and refining it keeps the fully discontinuous own-side
+/// layout (D840-1) — so the snapshot rides the same
+/// [`build_refined_l2_p1_prism_geometry`] transport, which reads the parent's
+/// own rows through its `conn` and is layout-agnostic on the parent side.
+///
+/// Recognized **only** on a [periodically merged](curved_hex::is_periodic_merged_3d)
+/// mesh: a continuous order-1 table (rows = the element corners themselves)
+/// has every corner in its row, so the predicate excludes it, and the plain
+/// vertex averaging those meshes use stays bit-for-bit untouched.
+pub(crate) fn periodic_p1_prism_geometry(mesh: &Mesh<3>) -> Option<&GeometryData> {
+    if !super::curved_hex::is_periodic_merged_3d(mesh) {
+        return None;
+    }
+    let geo = mesh.geometry.as_ref()?;
+    if geo.order != 1 || geo.nodes_per_elem != 6 {
+        return None;
+    }
+    if geo.conn.len() != mesh.n_elems() * 6 {
+        return None;
+    }
+    if geo.coords.len() < geo.n_nodes * 3 {
+        return None;
+    }
+    if geo.conn.iter().any(|&d| d as usize >= geo.n_nodes) {
+        return None;
+    }
+    Some(geo)
+}
+
 /// Build the refined mesh's **order-1 discontinuous** [`GeometryData`] from
 /// the parent's `L2_T1_*_P1` prism table (D816-2).
 ///

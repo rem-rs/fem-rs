@@ -2,171 +2,395 @@
 //!
 //! Supports the same operations as [`super::SurfaceAssembler`] but for
 //! 6-node quadratic triangles (P2) on a 2-D manifold in 3-D space.
+//!
+//! D1274: the element kernels are a 1:1 port of MFEM 4.10's evaluation chain
+//! for `H1_FECollection(2)` on `Geometry::TRIANGLE` with an isoparametric
+//! (curved) transformation, so that the assembled surface system is bitwise
+//! identical to MFEM's (required for ex7 stdout BIT):
+//!
+//! * shapes/dshapes come from MFEM's `H1_TriangleElement` product basis
+//!   (`fem/fe/fe_h1.cpp:533/555`): the hierarchical Chebyshev 1-D basis
+//!   (`Poly_1D::CalcBasis` → `CalcChebyshev`, `fem/fe/fe_base.cpp:2391`)
+//!   combined via `T(o,k) = C_i(x_k)·C_j(y_k)·C_k(1-x_k-y_k)` and mapped
+//!   through the LU inverse `Ti` (`LUFactors::Factor/Solve`,
+//!   `linalg/densemat.cpp`) — NOT the closed-form P2 barycentric
+//!   polynomials (last-ulp differences);
+//! * the geometry chain is `IsoparametricTransformation` on the Tri6 rows:
+//!   `J = PointMat·dshape` (`kernels::AddMult` accumulation), `Weight() =
+//!   sqrt(E·G − F·F)` for a 3×2 Jacobian (`DenseMatrix::Weight`,
+//!   `linalg/densemat.cpp:553`), `AdjugateJacobian = CalcAdjugate`
+//!   (`linalg/densemat.cpp:2565`);
+//! * the per-integrator quadrature rules follow MFEM's selection formulas
+//!   (see each integrator); the tables themselves are
+//!   [`fem_element::quadrature::tri_rule_mfem_order`] — the pinned 1:1 port
+//!   of `IntegrationRules::TriangleIntegrationRule` (D578/D603).
 
+use std::sync::OnceLock;
+
+use fem_element::quadrature::tri_rule_mfem_order;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 use super::surface::get_coord3;
-use super::surface::{surface_metric_at, pseudo_inverse, SurfaceTri6BilinearIntegrator, SurfaceTri6LinearIntegrator};
+use super::surface::{SurfaceTri6BilinearIntegrator, SurfaceTri6LinearIntegrator};
 
-// ─── P2 Jacobian and metric helpers ────────────────────────────────────────
+// ─── MFEM 4.10 H1(2)-triangle evaluation machinery ──────────────────────────
 
-/// Evaluate P2 Jacobian at an arbitrary point (xi, eta) on the reference triangle.
-fn p2_jacobian_at(x: &[[f64; 3]; 6], xi: f64, eta: f64) -> [[f64; 3]; 2] {
-    let dxi = [
-        4.0*xi + 4.0*eta - 3.0,    // dphi0/dxi
-        4.0*xi - 1.0,               // dphi1/dxi
-        0.0,                         // dphi2/dxi
-        4.0 - 8.0*xi - 4.0*eta,    // dphi3/dxi
-        4.0*eta,                     // dphi4/dxi
-        -4.0*eta,                    // dphi5/dxi
-    ];
-    let det = [
-        4.0*xi + 4.0*eta - 3.0,    // dphi0/deta
-        0.0,                         // dphi1/deta
-        4.0*eta - 1.0,              // dphi2/deta
-        -4.0*xi,                     // dphi3/deta
-        4.0*xi,                      // dphi4/deta
-        4.0 - 4.0*xi - 8.0*eta,    // dphi5/deta
-    ];
-    let mut j0 = [0.0; 3]; let mut j1 = [0.0; 3];
-    for i in 0..6 {
-        for c in 0..3 { j0[c] += dxi[i] * x[i][c]; j1[c] += det[i] * x[i][c]; }
+/// `Poly_1D::CalcChebyshev(p=2, x, u, d)` (`fem/fe/fe_base.cpp:2391`) — the
+/// hierarchical 1-D basis used by `Poly_1D::CalcBasis` (`fe_base.hpp:1220`,
+/// `CalcChebyshev` branch): `z = 2x−1`, `u0 = 1`, `u1 = z`,
+/// `u_{n+1} = 2z·u_n − u_{n−1}`; derivatives via
+/// `d_{n+1} = (n+1)·(z·d_n/n + 2·u_n)`.
+///
+/// NOTE: `H1_TriangleElement` builds its shape functions from THIS
+/// hierarchical basis (not the GaussLobatto nodal basis — that is only the
+/// dof-point set), so the values feed the T matrix / `CalcBasis` products
+/// below.
+fn calc_chebyshev(x: f64) -> ([f64; 3], [f64; 3]) {
+    let z = 2.0 * x - 1.0;
+    let mut u = [1.0f64, z, 0.0];
+    let mut d = [0.0f64, 2.0, 0.0];
+    // n = 1 (p = 2)
+    u[2] = 2.0 * z * u[1] - u[0];
+    d[2] = 2.0 * (z * d[1] / 1.0 + 2.0 * u[1]);
+    (u, d)
+}
+
+/// The 6 dof points of `H1_TriangleElement(2)` in MFEM's Nodes order
+/// (`fem/fe/fe_h1.cpp:477-508`): vertices, then edge i=1..p-1 of the three
+/// edges (0→1, 1→2, 2→0).  GL2 = {0, 1/2, 1}.
+const TRI2_DOF_PTS: [(f64, f64); 6] =
+    [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)];
+
+/// `H1_TriangleElement(2)`'s dof-basis matrix T (`fem/fe/fe_h1.cpp:513`)
+/// factored exactly like `LUFactors::Factor` without LAPACK
+/// (`linalg/densemat.cpp:3420`): partial pivoting, column-major data.
+fn factor_tri2() -> ([f64; 36], [i32; 6]) {
+    // T(o,k) = sx(i)·sy(j)·sl(2-i-j), (i,j) lex with j outer — column k.
+    let mut t = [0.0f64; 36];
+    for (k, &(dx, dy)) in TRI2_DOF_PTS.iter().enumerate() {
+        let (sx, _) = calc_chebyshev(dx);
+        let (sy, _) = calc_chebyshev(dy);
+        let (sl, _) = calc_chebyshev(1.0 - dx - dy);
+        let mut o = 0;
+        for j in 0..3 {
+            for i in 0..=(2 - j) {
+                t[o + k * 6] = sx[i] * sy[j] * sl[2 - i - j];
+                o += 1;
+            }
+        }
     }
-    [j0, j1]
+    let mut lu = t;
+    let mut ipiv = [0i32; 6];
+    for i in 0..6 {
+        // pivoting
+        let mut piv = i;
+        let mut a = lu[piv + i * 6].abs();
+        for j in i + 1..6 {
+            let b = lu[j + i * 6].abs();
+            if b > a {
+                a = b;
+                piv = j;
+            }
+        }
+        ipiv[i] = (piv + 1) as i32;
+        if piv != i {
+            for j in 0..6 {
+                lu.swap(i + j * 6, piv + j * 6);
+            }
+        }
+        let a_ii_inv = 1.0 / lu[i + i * 6];
+        for j in i + 1..6 {
+            lu[j + i * 6] *= a_ii_inv;
+        }
+        for k in i + 1..6 {
+            let a_ik = lu[i + k * 6];
+            for j in i + 1..6 {
+                lu[j + k * 6] -= a_ik * lu[j + i * 6];
+            }
+        }
+    }
+    (lu, ipiv)
 }
 
-/// Surface Jacobian at centroid – public for use in error computation.
-pub fn surface_jacobian_tri6(x: &[[f64; 3]; 6]) -> ([[f64; 3]; 2], f64, [f64; 3]) {
-    let j = p2_jacobian_at(x, 1.0/3.0, 1.0/3.0);
-    let (_det_g, sqrt_det_g) = surface_metric_at(&j);
-    let nx: f64 = j[0][1]*j[1][2] - j[0][2]*j[1][1];
-    let ny: f64 = j[0][2]*j[1][0] - j[0][0]*j[1][2];
-    let nz: f64 = j[0][0]*j[1][1] - j[0][1]*j[1][0];
-    let n_len: f64 = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-30);
-    (j, sqrt_det_g, [nx/n_len, ny/n_len, nz/n_len])
+/// The factorized `Ti` of the P2 triangle — process-wide constant.
+fn tri2_lu() -> &'static ([f64; 36], [i32; 6]) {
+    static LU: OnceLock<([f64; 36], [i32; 6])> = OnceLock::new();
+    LU.get_or_init(factor_tri2)
 }
 
-// ─── P2 reference basis ───────────────────────────────────────────────────
+/// `LUFactors::LSolve` + `USolve` (`linalg/kernels.hpp:1760/1785`) applied to
+/// the first `ncols` columns of a column-major 6×n block, in place.
+fn lu_solve_in_place(lu: &[f64; 36], ipiv: &[i32; 6], x: &mut [f64], ncols: usize) {
+    for c in 0..ncols {
+        let col = &mut x[c * 6..c * 6 + 6];
+        // X <- P X, X <- L^{-1} X
+        for i in 0..6 {
+            col.swap(i, ipiv[i] as usize - 1);
+        }
+        for j in 0..6 {
+            let xj = col[j];
+            for i in j + 1..6 {
+                col[i] -= lu[i + j * 6] * xj;
+            }
+        }
+        // X <- U^{-1} X
+        for j in (0..6).rev() {
+            col[j] /= lu[j + j * 6];
+            let xj = col[j];
+            for i in 0..j {
+                col[i] -= lu[i + j * 6] * xj;
+            }
+        }
+    }
+}
 
-/// Evaluate all 6 P2 basis functions at (xi, eta).
-pub fn p2_basis_tri6(xi: f64, eta: f64) -> [f64; 6] {
-    let s = 1.0 - xi - eta;
+/// `H1_TriangleElement::CalcShape` (`fem/fe/fe_h1.cpp:533`): product basis
+/// mapped through `Ti.Mult` (LU solve).
+fn h1_tri2_shape(ipx: f64, ipy: f64) -> [f64; 6] {
+    let (sx, _) = calc_chebyshev(ipx);
+    let (sy, _) = calc_chebyshev(ipy);
+    let (sl, _) = calc_chebyshev(1.0 - ipx - ipy);
+    let mut u = [0.0f64; 6];
+    let mut o = 0;
+    for j in 0..3 {
+        for i in 0..=(2 - j) {
+            u[o] = sx[i] * sy[j] * sl[2 - i - j];
+            o += 1;
+        }
+    }
+    let (lu, ipiv) = tri2_lu();
+    lu_solve_in_place(lu, ipiv, &mut u, 1);
+    u
+}
+
+/// `H1_TriangleElement::CalcDShape` (`fem/fe/fe_h1.cpp:555`): 6×2 reference
+/// derivative matrix, column-major (`du(o, c)` at `o + c*6`).
+fn h1_tri2_dshape(ipx: f64, ipy: f64) -> [f64; 12] {
+    let (sx, dsx) = calc_chebyshev(ipx);
+    let (sy, dsy) = calc_chebyshev(ipy);
+    let (sl, dsl) = calc_chebyshev(1.0 - ipx - ipy);
+    let mut du = [0.0f64; 12];
+    let mut o = 0;
+    for j in 0..3 {
+        for i in 0..=(2 - j) {
+            let k = 2 - i - j;
+            du[o] = ((dsx[i] * sl[k]) - (sx[i] * dsl[k])) * sy[j];
+            du[o + 6] = ((dsy[j] * sl[k]) - (sy[j] * dsl[k])) * sx[i];
+            o += 1;
+        }
+    }
+    let (lu, ipiv) = tri2_lu();
+    lu_solve_in_place(lu, ipiv, &mut du, 2);
+    du
+}
+
+/// `IsoparametricTransformation::EvalJacobian`
+/// (`fem/eltrans.cpp:444`): `dFdx = PointMat·dshape` with the
+/// `kernels::AddMult` accumulation (k ascending, `+= val·B`).  `pm` is the
+/// 3×6 point matrix in column-major layout (`pm[i + k*3]` = coordinate i of
+/// node k); the result is a 3×2 Jacobian, column-major.
+fn eval_jacobian(pm: &[f64; 18], dshape: &[f64; 12]) -> [f64; 6] {
+    let mut dfdx = [0.0f64; 6];
+    for j in 0..2 {
+        for k in 0..6 {
+            let val = dshape[k + j * 6];
+            for i in 0..3 {
+                dfdx[i + j * 3] += val * pm[i + k * 3];
+            }
+        }
+    }
+    dfdx
+}
+
+/// `DenseMatrix::Weight()` for a 3×2 Jacobian (`linalg/densemat.cpp:591`):
+/// `sqrt(E·G − F·F)` — this is `Trans.Weight()`, i.e. `sqrt(det(JᵀJ))`.
+fn weight_3x2(d: &[f64; 6]) -> f64 {
+    let e = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    let g = d[3] * d[3] + d[4] * d[4] + d[5] * d[5];
+    let f = d[0] * d[3] + d[1] * d[4] + d[2] * d[5];
+    (e * g - f * f).sqrt()
+}
+
+/// `CalcAdjugate` for a 3×2 matrix (`linalg/densemat.cpp:2606`): the
+/// 2×3 `adj(JᵀJ)·Jᵀ`, column-major — MFEM's `Trans.AdjugateJacobian()`.
+fn calc_adjugate_3x2(d: &[f64; 6]) -> [f64; 6] {
+    let e = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    let g = d[3] * d[3] + d[4] * d[4] + d[5] * d[5];
+    let f = d[0] * d[3] + d[1] * d[4] + d[2] * d[5];
     [
-        2.0 * s * (s - 0.5),
-        2.0 * xi * (xi - 0.5),
-        2.0 * eta * (eta - 0.5),
-        4.0 * xi * s,
-        4.0 * xi * eta,
-        4.0 * eta * s,
+        d[0] * g - d[3] * f,
+        d[3] * e - d[0] * f,
+        d[1] * g - d[4] * f,
+        d[4] * e - d[1] * f,
+        d[2] * g - d[5] * f,
+        d[5] * e - d[2] * f,
     ]
 }
 
-/// Surface gradients of P2 basis at a given point.
-fn p2_surface_gradients_at(pinv: &[[f64; 2]; 3], xi: f64, eta: f64) -> [[f64; 3]; 6] {
-    let dxi = [
-        4.0*xi + 4.0*eta - 3.0, 4.0*xi - 1.0, 0.0,
-        4.0 - 8.0*xi - 4.0*eta, 4.0*eta, -4.0*eta,
-    ];
-    let det = [
-        4.0*xi + 4.0*eta - 3.0, 0.0, 4.0*eta - 1.0,
-        -4.0*xi, 4.0*xi, 4.0 - 4.0*xi - 8.0*eta,
-    ];
-    let mut sg = [[0.0; 3]; 6];
-    for i in 0..6 {
-        for c in 0..3 {
-            sg[i][c] = dxi[i] * pinv[c][0] + det[i] * pinv[c][1];
+/// `Mult(dshape, adjJ, dshapedxt)` via the `kernels::AddMult` accumulation:
+/// 6×2 · 2×3 → 6×3 column-major.
+fn mult_dshape_adj(dshape: &[f64; 12], adj: &[f64; 6]) -> [f64; 18] {
+    let mut dxt = [0.0f64; 18];
+    for j in 0..3 {
+        for k in 0..2 {
+            let val = adj[k + j * 2];
+            for i in 0..6 {
+                dxt[i + j * 6] += val * dshape[i + k * 6];
+            }
         }
     }
-    sg
+    dxt
+}
+
+/// `AddMult_a_AAt` (`linalg/densemat.cpp:3241`): `AAt += a·A·Aᵀ` with the
+/// exact loop/rounding structure (off-diagonal `d·=a` added to both halves,
+/// diagonal `a·d`).
+fn add_mult_a_aat(a: f64, a_mat: &[f64; 18], aat: &mut [f64; 36]) {
+    for i in 0..6 {
+        for j in 0..i {
+            let mut d = 0.0f64;
+            for k in 0..3 {
+                d += a_mat[i + k * 6] * a_mat[j + k * 6];
+            }
+            d *= a;
+            aat[i * 6 + j] += d;
+            aat[j * 6 + i] += d;
+        }
+        let mut d = 0.0f64;
+        for k in 0..3 {
+            d += a_mat[i + k * 6] * a_mat[i + k * 6];
+        }
+        aat[i * 6 + i] += a * d;
+    }
+}
+
+/// `AddMult_a_VVt` (`linalg/densemat.cpp:3379`): `VVt += a·v·vᵀ`.
+fn add_mult_a_vvt(a: f64, v: &[f64; 6], vvt: &mut [f64; 36]) {
+    for i in 0..6 {
+        let avi = a * v[i];
+        for j in 0..i {
+            let avivj = avi * v[j];
+            vvt[i * 6 + j] += avivj;
+            vvt[j * 6 + i] += avivj;
+        }
+        vvt[i * 6 + i] += avi * v[i];
+    }
+}
+
+/// `IsoparametricTransformation::Transform(ip)` (`fem/eltrans.cpp:532`):
+/// `x = PointMat·shape` with the `kernels::Mult` accumulation.
+fn transform_point(pm: &[f64; 18], shape: &[f64; 6]) -> [f64; 3] {
+    let mut out = [0.0f64; 3];
+    for c in 0..3 {
+        out[c] = shape[0] * pm[c];
+    }
+    for k in 1..6 {
+        for c in 0..3 {
+            out[c] += shape[k] * pm[c + k * 3];
+        }
+    }
+    out
+}
+
+/// Element point matrix (column-major 3×6) from the six row coordinates.
+fn point_matrix(elem_nodes: &[[f64; 3]; 6]) -> [f64; 18] {
+    let mut pm = [0.0f64; 18];
+    for (k, node) in elem_nodes.iter().enumerate() {
+        pm[k * 3] = node[0];
+        pm[k * 3 + 1] = node[1];
+        pm[k * 3 + 2] = node[2];
+    }
+    pm
 }
 
 // ─── P2 surface integrators ───────────────────────────────────────────────
 
 /// Surface diffusion (Laplace-Beltrami) bilinear form for Tri6: `∫_Γ ∇_Γ u · ∇_Γ v dS`
+///
+/// D1274: MFEM `DiffusionIntegrator::GetRule` (`fem/bilininteg.cpp:1347`) —
+/// for `FunctionSpace::Pk` the order is `p_trial + p_test − 2` (no
+/// `Trans.OrderW()` term), i.e. **2** for P2 → the 3-point rule
+/// `IntRules.Get(TRIANGLE, 2)`.  The kernel is the non-square (2-D in 3-D)
+/// path of `DiffusionIntegrator::AssembleElementMatrix`
+/// (`fem/bilininteg.cpp:934`): `w = ip.weight / W³` with
+/// `dshapedxt = dshape·AdjugateJacobian` and `elmat += w·dshapedxt·dshapedxtᵀ`.
 pub struct SurfaceTri6DiffusionIntegrator;
 
 impl SurfaceTri6DiffusionIntegrator {
     pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
-        // 3-point Gauss quadrature on reference triangle
-        let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
-        let qwt = [1.0/6.0, 1.0/6.0, 1.0/6.0];
-
-        for q in 0..3 {
-            let (xi, eta) = (qpts[q][0], qpts[q][1]);
-            let j = p2_jacobian_at(elem_nodes, xi, eta);
-            let (det_g, sqrt_det_g) = surface_metric_at(&j);
-            let pinv = pseudo_inverse(&j, &[[j[0][0]*j[0][0]+j[0][1]*j[0][1]+j[0][2]*j[0][2], j[0][0]*j[1][0]+j[0][1]*j[1][1]+j[0][2]*j[1][2]], [j[0][0]*j[1][0]+j[0][1]*j[1][1]+j[0][2]*j[1][2], j[1][0]*j[1][0]+j[1][1]*j[1][1]+j[1][2]*j[1][2]]], det_g);
-            let sg = p2_surface_gradients_at(&pinv, xi, eta);
-
-            let area_factor = sqrt_det_g * qwt[q];
-
-            for i in 0..6 {
-                for j in 0..6 {
-                    let mut dot = 0.0;
-                    for c in 0..3 { dot += sg[i][c] * sg[j][c]; }
-                    k_elem[i * 6 + j] += dot * area_factor;
-                }
-            }
+        let ir = tri_rule_mfem_order(2);
+        let pm = point_matrix(elem_nodes);
+        for q in 0..ir.points.len() {
+            let ipx = ir.points[q][0];
+            let ipy = ir.points[q][1];
+            let dshape = h1_tri2_dshape(ipx, ipy);
+            let dfdx = eval_jacobian(&pm, &dshape);
+            let wt = weight_3x2(&dfdx);
+            let w = ir.weights[q] / (wt * wt * wt);
+            let adj = calc_adjugate_3x2(&dfdx);
+            let dxt = mult_dshape_adj(&dshape, &adj);
+            add_mult_a_aat(w, &dxt, k_elem);
         }
     }
 }
 
 /// Surface mass bilinear form for Tri6: `∫_Γ u v dS`
+///
+/// D1274: MFEM `MassIntegrator::GetRule` (`fem/bilininteg.cpp:1459`) —
+/// `order = p_trial + p_test + Trans.OrderW()` with
+/// `IsoparametricTransformation::OrderW() = (p−1)·dim = 2` for the P2
+/// triangle geometry (`fem/eltrans.cpp:493`), i.e. **6** → the 12-point
+/// rule `IntRules.Get(TRIANGLE, 6)`.  Kernel:
+/// `w = Weight·ip.weight`, `elmat += w·shape·shapeᵀ`
+/// (`AddMult_a_VVt`).
 pub struct SurfaceTri6MassIntegrator;
 
 impl SurfaceTri6MassIntegrator {
     pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
-        let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
-        let qwt = [1.0/6.0, 1.0/6.0, 1.0/6.0];
-
-        for q in 0..3 {
-            let (xi, eta) = (qpts[q][0], qpts[q][1]);
-            let j = p2_jacobian_at(elem_nodes, xi, eta);
-            let (_det_g, sqrt_det_g) = surface_metric_at(&j);
-            let phi = p2_basis_tri6(xi, eta);
-
-            let area_factor = sqrt_det_g * qwt[q];
-
-            for i in 0..6 {
-                for j in 0..6 {
-                    k_elem[i * 6 + j] += phi[i] * phi[j] * area_factor;
-                }
-            }
+        let ir = tri_rule_mfem_order(6);
+        let pm = point_matrix(elem_nodes);
+        for q in 0..ir.points.len() {
+            let ipx = ir.points[q][0];
+            let ipy = ir.points[q][1];
+            let dshape = h1_tri2_dshape(ipx, ipy);
+            let dfdx = eval_jacobian(&pm, &dshape);
+            let w = weight_3x2(&dfdx) * ir.weights[q];
+            let shape = h1_tri2_shape(ipx, ipy);
+            add_mult_a_vvt(w, &shape, k_elem);
         }
     }
 }
 
 /// Surface domain source linear form for Tri6: `∫_Γ f(x) v(x) dS`
+///
+/// D1274: MFEM `DomainLFIntegrator` (default `oa=2, ob=0`,
+/// `fem/lininteg.hpp:116`) selects `IntRules.Get(geom, oa·p + ob)`
+/// (`fem/lininteg.cpp:64`) — order **4** → the 6-point rule.  Kernel:
+/// `val = Weight·f(Transform(ip))`, `elvect += ip.weight·val·shape`
+/// (the `add(v1, c, v2, v)` accumulate).
 pub struct SurfaceTri6DomainSourceIntegrator<'a> {
     pub f: &'a dyn Fn(&[f64; 3]) -> f64,
 }
 
 impl SurfaceTri6DomainSourceIntegrator<'_> {
     pub fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 6], f_elem: &mut [f64; 6]) {
-        let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
-        let qwt = [1.0/6.0, 1.0/6.0, 1.0/6.0];
-
-        for q in 0..3 {
-            let (xi, eta) = (qpts[q][0], qpts[q][1]);
-            let j = p2_jacobian_at(elem_nodes, xi, eta);
-            let (_det_g, sqrt_det_g) = surface_metric_at(&j);
-            let phi = p2_basis_tri6(xi, eta);
-
-            let area_factor = sqrt_det_g * qwt[q];
-
-            // Physical point for source evaluation
-            let mut x_phys = [0.0; 3];
-            for i in 0..6 {
-                for c in 0..3 {
-                    x_phys[c] += phi[i] * elem_nodes[i][c];
-                }
-            }
-            let f_val = (self.f)(&x_phys);
-
-            for i in 0..6 {
-                f_elem[i] += f_val * phi[i] * area_factor;
+        let ir = tri_rule_mfem_order(4);
+        let pm = point_matrix(elem_nodes);
+        for q in 0..ir.points.len() {
+            let ipx = ir.points[q][0];
+            let ipy = ir.points[q][1];
+            let dshape = h1_tri2_dshape(ipx, ipy);
+            let dfdx = eval_jacobian(&pm, &dshape);
+            let wt = weight_3x2(&dfdx);
+            let shape_t = h1_tri2_shape(ipx, ipy);
+            let x_phys = transform_point(&pm, &shape_t);
+            let val = wt * (self.f)(&x_phys);
+            let shape = h1_tri2_shape(ipx, ipy);
+            let c = ir.weights[q] * val;
+            for (i, fe_i) in f_elem.iter_mut().enumerate() {
+                *fe_i += c * shape[i];
             }
         }
     }
