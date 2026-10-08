@@ -240,6 +240,37 @@ fn exp_inline(x: f64, xtail: f64, sign_bias: u64) -> f64 {
     scale.mul_add(tmp, scale)
 }
 
+/// glibc `exp(x)` (double), bit-exact port — the D906 disposition (round-130).
+///
+/// `exp_inline` is the shared core of glibc's `__ieee754_exp` and `pow`
+/// (Szabolcs Nagy's table implementation, GLIBC_2_29 lineage); the body
+/// above already covers the full `exp` contract: the top-12-bit filter
+/// (tiny `|x| < 2^-54 → 1.0+x`, overflow to +inf, underflow to 0, NaN/inf
+/// passthrough), the `z + 0x1.8p52` narrowing reduction
+/// (`TOINT_INTRINSICS = 0`, the x86-64 configuration), and the subnormal
+/// `specialcase` path.  The FMA-contracted polynomial evaluation matches
+/// the variant the glibc x86-64 runtime ifunc-selects on the reference
+/// machine (`FMA_PATH = true`, `f64::mul_add` = exact-rounded FMA), the
+/// same choice already validated bit-for-bit for `pow` (D842-2).
+///
+/// This wrapper exists so MFEM-parity call sites can opt into the
+/// cross-platform deterministic `exp` instead of the platform libm
+/// (D906: Windows CRT `exp` differs from glibc by 1 ulp on ~0.4% of
+/// inputs, which amplified into ex23's single mismatching `final.gf`
+/// value).  Pins: WSL glibc truth dump `tmp/rr130mfem/ref/exp_probe.out`
+/// against this port (branch boundaries + dense/random sweeps).
+#[inline]
+pub fn glibc_exp(x: f64) -> f64 {
+    // NaN must propagate as the quieted input: the shared exp_inline
+    // specialcases |x| >= 1024 to +-inf/+-0, which a NaN would wrongly take
+    // (full-oracle probe: glibc returns the quieted NaN for every NaN-class
+    // probe input, not inf).  Mirrors IEEE 754 exp(NaN) = qNaN.
+    if x.is_nan() {
+        return f64::from_bits(x.to_bits() | 0x0008_0000_0000_0000);
+    }
+    exp_inline(x, 0.0, 0)
+}
+
 /// glibc `pow(x, y)` (double), bit-exact port.
 pub fn glibc_pow(x: f64, y: f64) -> f64 {    let mut sign_bias = 0u64;
     let mut ix = x.to_bits();

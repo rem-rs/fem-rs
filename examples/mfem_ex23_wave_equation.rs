@@ -28,12 +28,12 @@
 
 use std::io::Write;
 use fem_assembly::{
-    Assembler,
+    Assembler, glibc_pow::glibc_exp,
     standard::{DiffusionIntegrator, MassIntegrator},
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d};
 use fem_io::glvis::GlVisSocket;
-use fem_linalg::CsrMatrix;
+use fem_linalg::{CsrMatrix, norml2};
 use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::{solve_pcg_dsmoother, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
@@ -247,35 +247,17 @@ impl<M: MeshTopology + Send + Sync + Clone> WaveOperator<M> {
 
 // ─── Initial conditions ────────────────────────────────────────────────────────
 
-/// MFEM `Vector::Norml2()` (linalg/vector.cpp:968) — the scaled (hypot /
-/// LAPACK-dnrm2-style) norm with the CPU sequential reduce path, exactly as
-/// compiled into the reference `mfem410_ser` (`g++ -O3`): per entry `n=|xᵢ|`,
-/// rescale the running sum around the new max, and return `scale·√sum`.
-/// A plain `sqrt(x0²+x1²)` differs from this by 1-2 ulp on ~1/3 of points,
-/// which the wave dynamics amplify to a visible last-digit flip.
-fn mfem_norml2_2d(x: &[f64]) -> f64 {
-    let mut first = 0.0_f64;
-    let mut second = 0.0_f64;
-    for &xi in x {
-        let n = xi.abs();
-        if n > 0.0 {
-            if second <= n {
-                let arg = second / n;
-                first = first * (arg * arg) + 1.0;
-                second = n;
-            } else {
-                let arg = n / second;
-                first += arg * arg;
-            }
-        }
-    }
-    second * first.sqrt()
-}
+// MFEM `Vector::Norml2()` (linalg/vector.cpp:968) is the scaled (hypot /
+// LAPACK-dnrm2-style) norm with the CPU sequential reduce path; round-130
+// landed it as the shared `fem_linalg::norml2` API (bit-parity pins in
+// vector.rs) and this example now consumes it.  `glibc_exp` replaces the
+// platform `exp` so the initial condition is bit-identical to the glibc
+// reference (D906 closure).
 
 fn initial_solution(x: &[f64]) -> f64 {
     // C++ ex23.cpp:180: `exp(-x.Norml2()*x.Norml2()*30)`.
-    let n2 = mfem_norml2_2d(x);
-    (-(n2 * n2 * 30.0)).exp()
+    let n2 = norml2(x);
+    glibc_exp(-(n2 * n2 * 30.0))
 }
 
 fn initial_rate(_x: &[f64]) -> f64 {

@@ -51,32 +51,6 @@ fn vmax(x: &[f64]) -> f64 {
     m
 }
 
-/// `Vector::Norml2()` (MFEM `linalg/vector.cpp:968`): the scaled
-/// `(scale, sumsq)` norm with MFEM's exact update order
-/// (`first = first·arg² + 1`, `scale = n` on rescale), sequential over the
-/// entries.
-fn vnorm2(x: &[f64]) -> f64 {
-    if x.is_empty() {
-        return 0.0;
-    }
-    let mut first = 0.0_f64;
-    let mut scale = 0.0_f64;
-    for &v in x {
-        let n = v.abs();
-        if n > 0.0 {
-            if scale <= n {
-                let arg = scale / n;
-                first = first * (arg * arg) + 1.0;
-                scale = n;
-            } else {
-                let arg = n / scale;
-                first += arg * arg;
-            }
-        }
-    }
-    scale * first.sqrt()
-}
-
 /// MFEM `NNLSSolver`: solves for a sparse `s ≥ 0` with `G·s` inside the
 /// interval `[rhs_lb, rhs_ub]`.  `mat` is the **column-major** `m × n`
 /// matrix `G` with `n ≥ m` (the solver works on the transpose system, like
@@ -255,7 +229,7 @@ impl NnlsSolver {
             for i in 1..m {
                 rmax = rmax.max(res_glob[i].abs() - rhs_halfgap_glob[i]);
             }
-            l2_res_hist.push(vnorm2(&res_glob));
+            l2_res_hist.push(crate::vector::norml2(&res_glob));
 
             if rmax <= self.const_tol && n_glob >= min_nnz_cap {
                 break; // NNLS target tolerance met (exit_flag 0)

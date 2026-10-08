@@ -261,6 +261,21 @@ impl<T: Scalar> Vector<T> {
         self.dot(self).sqrt()
     }
 
+    /// MFEM `Vector::Norml2()` (upstream `linalg/vector.cpp:968`): the
+    /// LAPACK-dnrm2-style scaled 2-norm, sequential over the entries — the
+    /// exact arithmetic MFEM's CPU reduce path performs.
+    ///
+    /// Unlike [`Vector::norm`] (the plain `sqrt(Σxᵢ²)`), the rescaling keeps
+    /// every squared argument ≤ 1 so overflowing dynamic ranges stay finite,
+    /// and the different summation shape is bit-exact with upstream: the two
+    /// algorithms differ by 1-2 ulp on ~40% of generic inputs, which ODE
+    /// solvers amplify into visible last-digit flips.  Always prefer this
+    /// over [`Vector::norm`] where 1:1 parity with MFEM matters (D906
+    /// follow-up, round-130; pins in this file).
+    pub fn norml2(&self) -> T {
+        norml2(&self.data)
+    }
+
     /// Fill with constant value.
     ///
     /// With the `parallel` feature and `n ≥ 4096`, Rayon parallelises the fill.
@@ -300,6 +315,40 @@ impl<T: Scalar> std::ops::IndexMut<usize> for Vector<T> {
     fn index_mut(&mut self, i: usize) -> &mut T { &mut self.data[i] }
 }
 
+/// MFEM `Vector::Norml2()` (upstream `linalg/vector.cpp:968`): the scaled
+/// 2-norm in the style of LAPACK's `dnrm2` / `std::hypot()`, applied
+/// sequentially over `x` — the exact arithmetic MFEM's CPU reduce path
+/// performs.
+///
+/// A running sum `first` of squared entries rescaled around the running
+/// maximum `second` keeps every squared argument ≤ 1, so the result never
+/// overflows to +inf the way plain `sqrt(Σxᵢ²)` does on wide dynamic
+/// ranges, and the summation shape is **bit-exact with MFEM**: the two
+/// algorithms disagree by 1-2 ulp on ~40% of generic inputs (probe:
+/// 10/24 two-entry and 2/6 hundred-entry random vectors), which ODE
+/// solvers amplify into visible last-digit flips (ex23, round-129).
+pub fn norml2<T: Scalar>(x: &[T]) -> T {
+    if x.is_empty() {
+        return T::zero();
+    }
+    let mut first = T::zero();
+    let mut second = T::zero();
+    for &xi in x {
+        let n = xi.abs();
+        if n > T::zero() {
+            if second <= n {
+                let arg = second / n;
+                first = first * (arg * arg) + T::one();
+                second = n;
+            } else {
+                let arg = n / second;
+                first += arg * arg;
+            }
+        }
+    }
+    second * first.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +374,145 @@ mod tests {
         assert_eq!(v.get_sub_vector(3, 3), &[1.0, 2.0, 3.0]);
         assert_eq!(v[2], 0.0);
         assert_eq!(v[6], 0.0);
+    }
+
+    // ── MFEM `Vector::Norml2` bit-parity pins (round-130, D906 follow-up) ──
+    //
+    // Reference data: `tmp/rr130mfem/ref/norml2_probe.{cpp,out}` — MFEM
+    // 4.10 `Vector::Norml2` (mfem410_ser, g++ -O2, serial CPU reduce) on a
+    // xorshift64* sample, emitted as raw f64 bit patterns.  The plain
+    // `sqrt(Σxᵢ²)` column documents exactly where the algorithms diverge.
+
+    /// `Vector::Norml2` vs naive `sqrt(Σxᵢ²)` (bits) for 24 two-entry
+    /// random vectors: the scaled algorithm wins 10 bit flips.
+    const MFEM_NORML2_V2: [([u64; 2], u64, u64); 24] = [
+        ([0x3fc0975fbde15b00, 0xbfe232a1474ce994], 0x3fe2aa1c6c9c60ea, 0x3fe2aa1c6c9c60e9),
+        ([0x3fec41e89d4a6b40, 0x3fc3df8432a8be50], 0x3fecb0dea42c8fc9, 0x3fecb0dea42c8fc9),
+        ([0x3fe4244c9c5a1ec8, 0x3fd5d9a0c3a831e8], 0x3fe6e9f806b495ef, 0x3fe6e9f806b495ef),
+        ([0x3fc7bcd4b21c3710, 0xbfd77d0939c41a48], 0x3fda511aa17a7301, 0x3fda511aa17a7300),
+        ([0x3fd905762119fc70, 0x3fe723c109dd69c4], 0x3fea4e1e39ebd04c, 0x3fea4e1e39ebd04d),
+        ([0x3fe7bfa715842214, 0xbfead9981fbad0b0], 0x3ff1ec423f0348e8, 0x3ff1ec423f0348e8),
+        ([0xbfef006c86c38ef4, 0x3feb48720b2bcaec], 0x3ff4a60cd4b8ffa6, 0x3ff4a60cd4b8ffa6),
+        ([0xbfd94bbfdf3ab310, 0xbfb58950cd981660], 0x3fd9dccf4dde303c, 0x3fd9dccf4dde303d),
+        ([0xbfe18034ed7e5634, 0x3fad04ea2cf599c0], 0x3fe19833a7c32122, 0x3fe19833a7c32122),
+        ([0x3fed9ac12737202c, 0xbfe893cdf9933a94], 0x3ff33d0bdb52a7c0, 0x3ff33d0bdb52a7c0),
+        ([0xbfc64a80472ce070, 0x3feb7bf3eaf5d768], 0x3fec0b20fe811be4, 0x3fec0b20fe811be4),
+        ([0x3fd633a38e61cd88, 0x3fcbaf2b613ed820], 0x3fda29d0fbd4789d, 0x3fda29d0fbd4789d),
+        ([0x3feade05fe1bab64, 0xbfb331cb9ff1d680], 0x3feaf96513174d35, 0x3feaf96513174d35),
+        ([0xbfd91d69a682ea90, 0xbfc65cb822d69950], 0x3fdb7dc98db61a07, 0x3fdb7dc98db61a07),
+        ([0x3feccc9a813f261c, 0xbfd0042abcd14160], 0x3fede453fd60eec4, 0x3fede453fd60eec5),
+        ([0x3fe48958b131a5ec, 0xbfe42eb1fc30c25c], 0x3feccb307579d47b, 0x3feccb307579d47a),
+        ([0x3fc109cc782d2b70, 0x3fad28dc52e6b480], 0x3fc28843bf9e0ba5, 0x3fc28843bf9e0ba4),
+        ([0xbfe545ac6c901a64, 0xbfbc82b2b2a11560], 0x3fe591918dd5cc12, 0x3fe591918dd5cc13),
+        ([0xbfea209cab82a014, 0xbfeed587652021b0], 0x3ff43522b8249f1f, 0x3ff43522b8249f1e),
+        ([0xbfd32a0267e01428, 0xbfe7c6481120eefc], 0x3fe9a2041c16aba0, 0x3fe9a2041c16ab9f),
+        ([0xbfe96fd7f75191dc, 0xbfe5942036efc408], 0x3ff0ada99dab2c46, 0x3ff0ada99dab2c46),
+        ([0x3feb9a3ffeebe58c, 0x3fe69394e5d6d144], 0x3ff1d469a5c9c85d, 0x3ff1d469a5c9c85d),
+        ([0x3fda806670935bc8, 0xbfe37d5609693844], 0x3fe7914847fdfb18, 0x3fe7914847fdfb18),
+        ([0x3fe4bf78d25d8530, 0xbfd4cbf43f631b90], 0x3fe735332c391c1c, 0x3fe735332c391c1c),
+    ];
+
+    /// `Vector::Norml2` bits for the six 100-entry sample vectors (inputs
+    /// regenerated by [`Xorshift64Star`]; anchor-checked against
+    /// [`MFEM_NORML2_V2`] inputs).
+    const MFEM_NORML2_N100: [u64; 6] = [
+        0x4017adfc8a64513d,
+        0x4018ecaf5653db9a,
+        0x40176cb4eb8ae52d,
+        0x4015350d9cf68a0b,
+        0x4015f01a899078f4,
+        0x4016218d20b78736,
+    ];
+
+    /// The probe's xorshift64* generator (uniforms exact in f64, so the
+    /// Rust regeneration reproduces the C++ probe inputs bit-for-bit).
+    struct Xorshift64Star(u64);
+
+    impl Xorshift64Star {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// Uniform in [-1, 1); every intermediate is exact in f64.
+        fn uniform(&mut self) -> f64 {
+            let m = (self.next() & ((1u64 << 52) - 1)) as f64;
+            (m / 4503599627370496.0) * 2.0 - 1.0
+        }
+    }
+
+    #[test]
+    fn norml2_matches_mfem_two_entry_samples() {
+        for (input, want, plain) in &MFEM_NORML2_V2 {
+            let v = Vector::from_vec(vec![
+                f64::from_bits(input[0]),
+                f64::from_bits(input[1]),
+            ]);
+            assert_eq!(
+                v.norml2().to_bits(),
+                *want,
+                "input bits {:#018x} {:#018x}",
+                input[0],
+                input[1]
+            );
+            // the pins really exercise the difference: the plain formula
+            // differs from MFEM on 10 of these 24 inputs (probe STATS2).
+            let naive = {
+                let x = v.as_slice();
+                (x[0] * x[0] + x[1] * x[1]).sqrt()
+            };
+            assert_eq!(naive.to_bits(), *plain);
+        }
+    }
+
+    #[test]
+    fn norml2_matches_mfem_hundred_entry_samples() {
+        // same seed as the C++ probe; draw the 24 two-entry vectors first
+        // and anchor-check them, then the six 100-entry ones.
+        let mut rng = Xorshift64Star(88172645463325252);
+        for (input, _, _) in &MFEM_NORML2_V2 {
+            assert_eq!(rng.uniform().to_bits(), input[0]);
+            assert_eq!(rng.uniform().to_bits(), input[1]);
+        }
+        for &want in &MFEM_NORML2_N100 {
+            let v: Vector<f64> = Vector::from_vec((0..100).map(|_| rng.uniform()).collect());
+            assert_eq!(v.norml2().to_bits(), want);
+        }
+    }
+
+    #[test]
+    fn norml2_extreme_dynamic_range_stays_finite() {
+        // naive sqrt(Σxᵢ²) overflows to +inf (probe EXT lines); the scaled
+        // algorithm returns the exact finite values MFEM produces.
+        let v = Vector::from_vec(vec![1e300_f64, 1e-300]);
+        assert_eq!(v.norml2().to_bits(), 0x7e37e43c8800759c); // = 1e300
+        assert!((1e300_f64 * 1e300_f64 + 1e-300_f64 * 1e-300_f64)
+            .sqrt()
+            .is_infinite());
+
+        let w = Vector::from_vec(vec![1e200_f64, 1e200]);
+        assert_eq!(w.norml2().to_bits(), 0x697d8f9811335b57); // = √2·1e200
+        assert!((1e200_f64 * 1e200_f64 + 1e200_f64 * 1e200_f64)
+            .sqrt()
+            .is_infinite());
+
+        // 3-4-5 sanity, exact on both sides (probe EXT3).
+        let z = Vector::from_vec(vec![3.0_f64, 4.0]);
+        assert_eq!(z.norml2().to_bits(), 0x4014000000000000); // = 5
+    }
+
+    #[test]
+    fn norml2_empty_is_zero() {
+        assert_eq!(Vector::<f64>::zeros(0).norml2().to_bits(), 0);
+    }
+
+    #[test]
+    fn norml2_generic_f32_smoke() {
+        let v = Vector::<f32>::from_vec(vec![3.0, 4.0]);
+        assert!((v.norml2() - 5.0).abs() < 1e-6);
     }
 }

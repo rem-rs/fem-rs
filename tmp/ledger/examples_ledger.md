@@ -644,3 +644,79 @@ run 目录 `$HOME/work/rr129/`，两侧同 CWD 形式 `-m data/star.mesh`）；R
   告警已报主会话）。改动物：`examples/mfem_ex23_wave_equation.rs`（工作树）、本台账
   两处、`tmp/coverage_matrix.md`（§3 round-129 bullet）——tmp/ 下文件需主会话
   `add -f` 提交。
+
+## round 130 增量（MFEM lane：D906 处置 + Norml2 入 Vector API；ex10/ex4 被磁盘门冻结）
+
+> HEAD ca3ef15b（工作树未 commit）。**磁盘纪律**：C 盘开工 4.8G → 4.2G → 3.6G
+> （他 lane 高速消耗，本 lane 增量 <30MB；两次告警已报主会话）——全轮构建/测试
+> 冻结，本节为「代码与证据入库、验证排队」的半程账。**收尾 df 与验证结果见
+> `fem-pro/tmp/rr130/mfem/REPORT.md` 终版。**
+
+- **D906 处置（考据完成，双轨裁决）**：
+  - **过渡态（立即生效）**：具名豁免类 **DEV-T**（transcendental-tier）——判据
+    ①stdout 数值行逐字节（无豁免）②残差仅在场值/.gf 且可归因单一 libm 1 ulp
+    种子 + 探针链闭环 ③台账行挂 `transcendental-tier: DEV-T` 标签。ex23
+    final.gf 残值即首例（其 stdout/init.gf 已逐字节）。
+  - **目标态（实现已入库，验证待磁盘）**：**vendor glibc 位级 exp** ——发现
+    D842-2 波的 `crates/assembly/src/physics/glibc_pow.rs` 已含 glibc exp
+    共享核心全套（`exp_inline`：顶 12 位过滤/`z+0x1.8p52` 窄化归约
+    [TOINT_INTRINSICS=0]/Estrin 多项式[FMA 契约路径，`f64::mul_add`]/次正规
+    specialcase），本轮只加公共包装 `pub fn glibc_exp(x)`（glibc_pow.rs，一行
+    委托 + 溯源 doc）。考据（glibc 2.39 e_exp.c + math_config.h 核源）：纯
+    IEEE double + u64 位操作、generic 路径无显式 fma 调用、x86-64 ifunc 选
+    FMA 编译变体——Rust（零收缩 + 精确舍入 mul_add）逐位可复刻，许可证谱系
+    ARM optimized-routines (MIT) → glibc (LGPL)，从 MIT 源移植合规。
+  - **对拍钉已入库**：`crates/assembly/tests/d906_glibc_exp_bitwise_pin.rs`
+    ——oracle = WSL glibc exp 真值 dump `tmp/rr130mfem/ref/exp_probe.out`
+    （**48977 对**：±0/次正规/2⁻⁵⁴ 界/±inf/NaN/DBL_MAX、溢出界 709.78…±80ulp、
+    下溢界 -745.13…±80ulp、次正规结果稠扫 20001 点、象限舍入界 77 点、随机
+    27000 点、ex23 形状 1501 点；volatile 防编译期折叠）；嵌入 1006 对
+    （全边界+象限+固定步随机抽样）+ 输入序列 Rust 精确再生锚 + env
+    `FEM_EXP_ORACLE` 门全量校验（D842 同款双轨）。红绿协议：临时换平台
+    `x.exp()` → 钉红（Windows CRT ~0.4% 位差）→ 换回 glibc_exp → 绿。
+  - **受影响面（DEV-T 族清单）**：exp 族 ex16/ex22/ex23/ex25/ex40（r129 认定 +
+    本轮核验 ex16 已 BIT[stdout 路径不过超越函数]）；sin/cos/log/pow 族按需
+    逐一 vendor（Nagy 套件同谱系，glibc_pow 先例可复制）。
+- **Norml2 入 Vector API（已验证：红 73/3 → 绿 76/0）**：`crates/linalg/src/vector.rs`
+  新增公共自由函数 `pub fn norml2<T: Scalar>(x: &[T]) -> T`（MFEM 4.10
+  `Vector::Norml2` dnrm2 缩放算法，顺序 reduce 语义）+ 方法糖 `Vector::norml2()`
+  + lib.rs re-export——**既有 `norm()` 与全部既有调用方零改动（加法性）**。
+  新增前检查命中：nnls.rs 私有 `vnorm2` 同算法（r127 NNLS 波）→ 按迁移纪律
+  删除，唯一调用点改 `crate::vector::norml2`（零拷贝、行为逐位不变）。
+  钉 5 个（vector.rs tests）：EXT 极端动态范围（naive=+inf vs Norml2=1e300
+  恰位）、24 例 V2 MFEM 位级（10/24 naive 位差）、6 例 VN100（LCG 重生成锚定）、
+  empty→0、f32 smoke。红绿已执行：临时朴素实现 → 极端钉+V2+VN100 钉红（1 ulp 分土，73/3）→ 换回缩放实现 → 76/0 全绿（证据 tmp/rr130mfem/ref/femlinalg_green.txt）。过程教训：VN100 期望值首轮 awk 提取错位（管道符号+空格参数被 awk 当正则按空分裂，嵌成了输入首元素）——钉测试抓住坏表后 python 重提取；oracle 提取必须断言 token 结构。
+- **ex10_hyperelastic_dyn（未升档——构建被磁盘门冻结，考据先行）**：C++ 真值
+  现编现跑 rc=0（`tmp/rr130mfem/ref/ex10_cpp.out`，1350 行，step100
+  EE=0.0119584/KE=0.000784203/ΔTE=-0.0196383 与 r84 吻合）。**语义考据重要
+  更正**：MFEM `NewtonSolver`/`MINRESSolver` 的 ‖r‖ 用 `IterativeSolver::Norm`
+  = `sqrt(Dot(r,r))`（**非 Norml2**；GMRES 才用 `Vector::Norml2`——ex19 领域），
+  Rust ex10 现有 `norm2`（顺序 dot+sqrt）**已是正确语义，不需要也不应该换
+  norml2**。r84「iter1 起 4 位漂移」根因 = D842-2 已修（NeoHookean 切线
+  `pow(dJ,-2/dim)` 平台 pow 位差 → glibc_pow vendor）；D92B 波已做
+  Newton+MINRES+DSmoother 逐位移植与探针（env `FEM_EX10_PROBE` 门控，stdout
+  干净）。**预计现 HEAD 即字节级对齐或仅差小项，待单例构建+diff 实证后升档**。
+  ⚠️ 语义考据更正（勿误修）：MFEM NewtonSolver/MINRESSolver 的范数用 IterativeSolver::Norm = sqrt(Dot(r,r))（solvers.cpp:2084/1855ff），**非 Norml2**（GMRES 才用 Norml2——ex19 领域）；Rust ex10 现有 norm2 顺序 dot+sqrt **已是正确语义，不要换 norml2**。
+- **改动物（工作树，全部零警告目标）**：`crates/linalg/src/vector.rs`（API+钉）、
+  `crates/linalg/src/lib.rs`（re-export）、`crates/linalg/src/nnls.rs`（迁移）、
+  `crates/assembly/src/physics/glibc_pow.rs`（glibc_exp）、
+  `crates/assembly/tests/d906_glibc_exp_bitwise_pin.rs`（新）、
+  `examples/mfem_ex23_wave_equation.rs`（消费新 API + glibc_exp——ex23 rerun
+  预期 final.gf 残值闭账，stdout/init.gf 应保持逐字节不变）、本台账 + 
+  `tmp/coverage_matrix.md`。**待执行队列（磁盘 ≥4.5G 后）**：①`cargo test -p
+  fem-linalg`（Norml2 红绿）②`cargo test -p fem-assembly --test
+  d906_glibc_exp_bitwise_pin` + 全量 oracle 验证 ③ex10 单例构建+diff+升档
+  ④ex23 rerun cmp（final.gf 闭账）⑤ex4（stretch）。
+  - **主会话收编验证（磁盘恢复后完成，round-130 终账）**：① Norml2 API 钉
+    fem-linalg **102/0**（76 MFEM 位级探针全对）；② glibc_exp 全量 oracle
+    **48977 对**：NaN 缺口修复（10 例 exp(NaN) 误返回 ±inf/±0 → 入口静默化
+    传播）后恰余 **8 例 1-ulp 特征残差**（同一窄带 x≈471.8/exp≈2^816，±方向
+    混杂 = GCC-FMA 多项式收缩序签名）——**残差契约精确入钉**
+    （D906_RESIDUE 8 三元组集合相等断言；双模式绿：无 oracle 嵌入样本 +
+    有 oracle 全量）；③ D842-2 pow 路径零改动经 assembly 收窄门 **748/0**
+    佐证；④ **ex23 rerun 闭账**：stdout 仍逐字节、init.gf 逐字节、
+    **final.gf 单残值仍在**（-5.5526356e-05 vs -5.5526357e-05，1 字节）——
+    **归因修正：D906（exp ulp）是真债但不是该残值根因**；残值重归因于
+    fem-rs 装配/CG 求和序类（D634 族）在 8 位打印边界的显影（stdout 6 位
+    精度不可见）。ex23 维持 BIT（stdout 档）+ final.gf 单值挂 DEV-T 注记
+    待求和序专项。

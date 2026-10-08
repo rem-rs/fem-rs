@@ -169,6 +169,21 @@
   Norml2 入 Vector API）。ex10 未启动（C 盘 5.5G < 8G 停手纪律）。逐例行与证据：
   `tmp/ledger/examples_ledger.md` round-129 增量节 + `tmp/rr129mfem/`。
 
+- **round 130 增量（MFEM lane：D906 处置 + Norml2 入 Vector API；HEAD ca3ef15b 工作树）**：
+  **D906 双轨裁决落地**——过渡态具名豁免类 **DEV-T**（transcendental-tier：stdout 数值行
+  无豁免逐字节 + 残差仅场值且可归因单一 libm 1 ulp + 台账挂标）；目标态 **vendor glibc
+  位级 exp 已入库**（`glibc_pow.rs` 加 `glibc_exp` 一行委托——D842-2 的 `exp_inline`
+  本就是 glibc exp 共享核心全套）+ 位级钉 `d906_glibc_exp_bitwise_pin.rs`（oracle 48977 对
+  = WSL glibc exp 全分支边界+次正规稠扫+象限舍入界+随机+ex23 形状，嵌入 1006 对 + 输入
+  再生锚 + env 门全量）。**Norml2 入 Vector API 并验证**（`fem_linalg::norml2` + 方法糖 +
+  nnls vnorm2 迁移；钉 = MFEM 位级 24 V2[10 位差] + 6 VN100 + 极端动态范围[naive=+inf vs
+  1e300 恰位]；红 73/3 → **绿 76/0**）。ex23 例已改消费新 API + glibc_exp（rerun 闭账待
+  磁盘窗口）。ex10/ex4 升档被磁盘门冻结（C 盘 4.8G→3.4G，他 lane 消耗，两次告警）——
+  ex10 备妥：C++ 真值 rc=0 快照 + 语义考据更正（Newton/MINRES 用 IterativeSolver::Norm
+  = sqrt(Dot)，非 Norml2，Rust norm2 已正确勿换）+ D842/D92B 移植盘点，预判 HEAD 近对齐，
+  下波单例构建+diff 即可裁断。逐例行与证据：`tmp/ledger/examples_ledger.md` round-130
+  增量节 + `tmp/rr130mfem/` + `tmp/rr130/mfem/REPORT.md`。
+
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
 1. **examples/miniapps 逐个三态台账**——**round-117 已执行并关闭**：一次性批跑（examples 44 串行 +

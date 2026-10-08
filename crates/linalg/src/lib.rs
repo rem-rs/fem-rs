@@ -49,7 +49,7 @@ pub use qr::{
     qr_factor_blocked, solve_upper_triangular,
 };
 pub use sparsity::SparsityPattern;
-pub use vector::Vector;
+pub use vector::{Vector, norml2};
 
 // Re-exports from linlvo for Block Low-Rank compression
 #[cfg(feature = "direct")]
