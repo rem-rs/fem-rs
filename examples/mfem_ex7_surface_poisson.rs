@@ -12,6 +12,9 @@
 //! cargo run --example mfem_ex7_surface_poisson -- -no-vis
 //! # Quads
 //! cargo run --example mfem_ex7_surface_poisson -- -e 1 -snap -no-vis
+//! # D112b read-back: solve on a curved surface mesh loaded from a file
+//! # (already refined + snapped; `MFEM Mesh::Load` semantics applied at read)
+//! cargo run --example mfem_ex7_surface_poisson -- -m sphere_refined.mesh -r 0 -no-vis
 //! ```
 //!
 //! ## Flags
@@ -20,6 +23,7 @@
 //! | `-e/--elem` | 0 | Element type (0=tri, 1=quad) |
 //! | `-r/--refine` | 2 | Uniform refinements |
 //! | `-o/--order` | 2 | FE order |
+//! | `-m/--mesh` | — | D112b: read the surface mesh from a file (skips generation/refine/snap) |
 //! | `-snap/--always-snap` | — | Snap after each refinement |
 //! | `-amr/--refine-locally` | 0 | Not yet implemented |
 //! | `-no-vis` | — | Disable GLVis (no-op) |
@@ -65,11 +69,20 @@ fn main() {
     println!("   --refine-locally {}", args.amr);
     println!("   {}", if args.no_vis { "--no-visualization" } else { "--visualization" });
     println!("   {}", if args.always_snap { "--always-snap" } else { "--snap-at-the-end" });
+    if let Some(path) = &args.mesh {
+        println!("   --mesh {path}");
+    }
     let t0 = std::time::Instant::now();
     let is_quad = args.elem_type == 1;
 
-    // ── 1. Build sphere mesh ─────────────────────────────────────────────────
-    let mut mesh: Mesh<3> = if is_quad {
+    // ── 1. Build sphere mesh (or read one back — D112b) ─────────────────────
+    let mut mesh: Mesh<3> = if let Some(path) = &args.mesh {
+        let mfem = fem_io::mfem::read_mfem_file(path)
+            .unwrap_or_else(|e| panic!("cannot read mesh file {path}: {e}"));
+        mfem.mesh3d
+            .unwrap_or_else(|| panic!("{path} does not describe a surface mesh (expected \
+                                       `dimension 2` with a `VDim: 3` `nodes` section)"))
+    } else if is_quad {
         build_cube_mesh()
     } else {
         build_octahedron_mesh()
@@ -80,7 +93,8 @@ fn main() {
     // start at the *linear* interpolation of the vertices (SetNodalFESpace →
     // ProjectCoefficient of the identity) — chord midpoints, unsnapped.
     let use_tri6 = !is_quad && args.order >= 2;
-    if use_tri6 {
+    let read_back = args.mesh.is_some();
+    if !read_back && use_tri6 {
         mesh = elevate_to_tri6(&mesh);
     }
 
@@ -90,7 +104,12 @@ fn main() {
     // — with the default `always_snap == false` the nodes stay on the parent
     // P2 field through every refinement round and snap once at the end; the
     // refinement interpolates that field (D1273: curved UniformRefinement).
+    // (Skipped entirely on the D112b read-back path: the file mesh is already
+    // the final refined+snapped state.)
     for l in 0..=args.ref_levels {
+        if read_back {
+            break;
+        }
         if l > 0 {
             mesh = if is_quad {
                 refine_uniform_surface_quad4(&mesh)
@@ -106,9 +125,11 @@ fn main() {
     }
 
     // AMR: refine near north pole (MFEM ex7 -amr 1)
-    for _ in 0..args.amr {
-        mesh = refine_at_vertex_surface(&mesh, &[0.0, 0.0, 1.0]);
-        snap_nodes(&mut mesh);
+    if !read_back {
+        for _ in 0..args.amr {
+            mesh = refine_at_vertex_surface(&mesh, &[0.0, 0.0, 1.0]);
+            snap_nodes(&mut mesh);
+        }
     }
 
     // ── 3. Define H1 space ──────────────────────────────────────────────────
@@ -504,6 +525,13 @@ struct Args {
     amr: u8,
     #[allow(dead_code)]
     no_vis: bool,
+    /// D112b read-back: run the same problem on a surface mesh loaded from a
+    /// `.mesh` file (`dimension 2` + `nodes` with `VDim: 3`) instead of the
+    /// generated octahedron/cube sphere.  The file mesh is already the final
+    /// curved state (MFEM `Mesh::Load` semantics — longest-edge rotation and
+    /// nodes-dof renumbering applied by the reader), so the generation,
+    /// refinement and snapping below are skipped.
+    mesh: Option<String>,
 }
 
 impl Args {
@@ -514,6 +542,7 @@ impl Args {
         let mut always_snap = false;
         let mut amr: u8 = 0;
         let mut no_vis = false;
+        let mut mesh: Option<String> = None;
 
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -536,9 +565,12 @@ impl Args {
                 "-no-vis" | "--no-visualization" => {
                     no_vis = true;
                 }
+                "-m" | "--mesh" => {
+                    mesh = it.next();
+                }
                 _ => {}
             }
         }
-        Args { ref_levels, order, elem_type, always_snap, amr, no_vis }
+        Args { ref_levels, order, elem_type, always_snap, amr, no_vis, mesh }
     }
 }

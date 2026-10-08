@@ -44,11 +44,19 @@ const MFEM_TRUE_INTERIOR: &[(&str, u32)] = &[
 /// Files the reader legitimately refuses — same rows as the D812-1 write
 /// ledger's `read_err` status (nc_mesh / nurbs patches).  Counted as *n/a*
 /// here, not 0: no fem-rs boundary list exists to test.
+///
+/// D112b added the two p = 3 curved surfaces (`dimension 2` + `VDim: 3`
+/// `H1_2D_P3`): the surface read rebuilds Tri6/Quad9 rows, a representation
+/// the reader only derives for p ≤ 2, so they are refused loudly (the former
+/// "read" truncated every coordinate triple to two components — a corrupt
+/// mesh, not a readable one).
 const READER_REFUSES: &[&str] = &[
     "amr-hex.mesh",
     "amr-quad.mesh",
     "beam-quad-amr.mesh",
     "fichera-amr.mesh",
+    "klein-bottle.mesh",
+    "mobius-strip.mesh",
     "nc-nurbs3d.mesh",
     "nc3-nurbs.mesh",
     "square-disc-nurbs-patch.mesh",

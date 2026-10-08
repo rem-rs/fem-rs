@@ -81,10 +81,10 @@ inline-segment.mesh	ok	c2b2a5bf542becb8ea6aeed5846d6d9c54c19e7c76e471f56f608bc8c
 inline-tet.mesh	ok	66d8d071d178b480f3f76539d94f449336d889272d45d4b68b9355a70418cc6f	10453	728	0	1	0	-
 inline-tri.mesh	ok	17013d3b21c8ddb48d635f81b20d403270629664a90f0d0d48fc35ca52dccbf9	968	100	0	1	0	-
 inline-wedge.mesh	ok	9f5d212fcdac03cfd4910522614d0c1e76f64a3b78be56d054254fdbe0679840	6425	408	0	1	0	-
-klein-bottle.mesh	ok	09ac4a3d604ac7b2dc035deae0318c32a271cd01fa991408dc5a8a070da4438a	26110	1313	1	3	1	-
+klein-bottle.mesh	read_err		0	0	0	1	0	D112b: a p=3 surface (dim 2 + VDim 3) has no Tri6/Quad9 row representation — the former ok read silently dropped the z component of every dof
 l-shape.mesh	ok	93988d514c2646b402233a369822539e22f885e5c4c31472773f7dd800b16a9c	403	46	0	1	0	-
 llnl-p3.mesh	write_err		0	0	1	3	0	ragged_geo (D627)
-mobius-strip.mesh	ok	48153a9c6a1c5525048145fbf0689d45e1cba66226382a4d1ca3a8529aa96286	4213	233	1	3	1	-
+mobius-strip.mesh	read_err		0	0	0	1	0	D112b: a p=3 surface (dim 2 + VDim 3) has no Tri6/Quad9 row representation — the former ok read silently dropped the z component of every dof
 multidomain-hex.mesh	ok	c34a01a768832ac4ddbe9fbbe106229b656b1b00f39976d80b5c8f805b610480	30575	804	1	2	1	-
 nc-nurbs3d.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
 nc3-nurbs.mesh	read_err		0	0	0	1	0	nurbs_nc_patch
@@ -109,7 +109,7 @@ square-disc-nurbs-patch.mesh	read_err		0	0	0	1	0	nurbs_patch_mesh
 square-disc-nurbs.mesh	ok	cf62bcf07992f8e01a0fbcddf6647f7d8c97a4924f609e872a57973dff626028	511	47	0	1	0	-
 square-disc-p2.mesh	ok	d335676a8d49dc5a1bd165ac044e3d16b35b76ee06013f54797a76d51bcfc62d	8990	591	1	2	1	-
 square-disc-p3.mesh	ok	7eb8099ccbb5142bb4996c4ccbd83aabdd2d5a7b3ac91483dbd588e7a126bf7c	30737	1000	1	3	1	-
-square-disc-surf.mesh	ok	39549c5e485fa881a62b3ec10026c388ded2d713a8f42b0a9e8eb0bf72deda92	9388	591	1	2	1	-
+square-disc-surf.mesh	ok	d74fd3a7062e4a6a0e7fdcb68247086f99cae09d5664cb33c2278dec273df79c	13561	591	0	1	1	-
 square-disc.mesh	ok	5973cf321ddd514eb5d6a0c72a1a0d193df27db41d9ac8d6f0feafdb2dd4aa7d	4346	330	0	1	0	-
 square-mixed.mesh	ok	b429700cb4d0ffe593850ca115417b78e7e551a31457a23fff07fc1d25b3ef50	858	88	0	1	0	-
 square-nurbs-pw.mesh	ok	c7c9ac1c9f26fc4a54330eae6bd2c43b20cb86e45da5af6d445248e29c0946f9	319	36	0	1	0	-
@@ -119,7 +119,7 @@ star-mixed-p2.mesh	write_err		0	0	1	2	0	ragged_geo (D627)
 star-mixed.mesh	ok	2462abacf22e57e392a2d809cdf5f2e5a73dc1096d540efe604ad177b5f4afb7	1358	108	0	1	0	-
 star-q2.mesh	ok	1f65c6a0ca77fe743629b2011e70e278ba6415f90023523b9645d05e7773e89c	2756	174	1	2	1	-
 star-q3.mesh	ok	3f7037d8fde8f931eda095cce4eb9412fa144ffc15ac3245a6d6ad00fc39c958	8345	284	1	3	1	-
-star-surf.mesh	ok	6a85afdc2c8c5a15ebe19415b641f1eccabb3edc6a4af4810b98ffb723d0d75d	2745	174	1	2	1	-
+star-surf.mesh	ok	6c38556d3054c0aded96327fabcfb6f33d76a4b130935d95394449b7be6559d6	3738	174	0	1	1	-
 star.mesh	ok	cdbea7b66456bad0fdffec59d49ba6ddbd00e8c0b6e3311441537eaee78b7add	1268	98	0	1	0	-
 tinyzoo-3d.mesh	ok	3acf820be346faacf41daec3f10c4ef1b6d68323306d1f013861f433a10c40be	559	57	0	1	0	-
 toroid-wedge.mesh	ok	4d00fef9565b18af7f0f22bb1645259b71119869551ec786d37d56fbc183c67d	6863	237	1	3	1	-

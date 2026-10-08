@@ -371,6 +371,13 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     // `VDim` of the `nodes` section (D112b): the component stride.  Defaults to
     // the mesh dimension, which is what a conforming `nodes` section has.
     let mut nodes_vdim: usize = dim;
+    // `Some(sdim)` when the file describes a `dim < sdim` **surface** mesh
+    // (D112b): a `dimension 2` file whose `nodes` section carries `VDim: 3`
+    // (or whose straight `vertices` header declares space dimension 3).  The
+    // mesh is then built as a row-geometry `Mesh<3>` ([`MfemFile::mesh3d`])
+    // instead of the coordinate-truncating `Mesh<2>` this reader used to
+    // produce.
+    let mut surface_sdim: Option<usize> = None;
 
     // The token after <NV> decides straight vs curved (D589,
     // `mesh/mesh_readers.cpp:104-118`): "nodes" → the section is the
@@ -443,17 +450,31 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             }
         }
         // else: non-NURBS mesh with unexpected keyword — ignore, coords stays empty
-    } else if let Ok(_vdim) = next.parse::<usize>() {
+    } else if let Ok(sdim) = next.parse::<usize>() {
         // Straight format: the token after <NV> is the vertex space dimension
         // (MFEM `atoi`s it into spaceDim, mesh_readers.cpp:112) followed by
         // NV coordinate lines.  One vertex per line, first `dim` components
         // (MFEM reads NV*spaceDim tokens instead; the layouts coincide for
         // everything `Mesh::Printer` writes).
+        //
+        // D112b: `dim == 2 && sdim == 3` is a straight **surface** mesh — the
+        // vertex table keeps all three components and the mesh is built as a
+        // `Mesh<3>` (`MFEM Mesh::ReadMFEMMesh` stores spaceDim = 3 and keeps
+        // NV*spaceDim coordinates; the previous reader silently truncated the
+        // third component).
+        if dim == 2 && sdim == 3 {
+            surface_sdim = Some(sdim);
+        }
         coords.reserve(n_vert * dim);
         for _ in 0..n_vert {
             let v = read_f64_line(&mut r)?;
-            if v.len() < dim { return Err(FemError::Mesh("MFEM: invalid vertex line".into())); }
-            coords.extend_from_slice(&v[..dim]);
+            if surface_sdim.is_some() {
+                if v.len() < 3 { return Err(FemError::Mesh("MFEM: invalid vertex line".into())); }
+                coords.extend_from_slice(&v[..3]);
+            } else {
+                if v.len() < dim { return Err(FemError::Mesh("MFEM: invalid vertex line".into())); }
+                coords.extend_from_slice(&v[..dim]);
+            }
         }
     } else if next == "nodes" {
         // Nodes section: FiniteElementSpace header then DOF coefficient values.
@@ -478,15 +499,36 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         let is_l2_nodes = fec_name.starts_with("L2_");
         // `nodes_vdim` is the number of *components* per DOF, `dim` the
         // topological dimension of the mesh.  A conforming `nodes` section has
-        // `VDim == dim`; `VDim > dim` means a mesh with `spaceDim > dim` (a
-        // surface embedded in 3-D, MFEM's `Mesh::SetSpaceDim` case), which the
-        // geometry path here cannot represent — see the warning below (D112b).
-        if nodes_vdim != dim {
+        // `VDim == dim`; `VDim > dim` for a `dimension 2` file means `VDim: 3`
+        // — a surface mesh embedded in 3-D space (MFEM `Mesh::Loader` reads the
+        // section into `Nodes`, sets `spaceDim = Nodes->VectorDim()` and
+        // recovers the vertex table through `SetVerticesFromNodes`,
+        // mesh/mesh.cpp:5291-5301).  D112b builds that mesh as a row-geometry
+        // `Mesh<3>`; the former behavior truncated every coordinate triple to
+        // its first two components.
+        let is_surface = dim == 2 && nodes_vdim == 3;
+        if nodes_vdim != dim && !is_surface {
             eprintln!(
                 "warning (D112b): `nodes` section has VDim={nodes_vdim} but the mesh is {dim}-dimensional; \
-                 a `dim < spaceDim` (surface) mesh is not supported — the geometry is read with only its \
+                 a `dim < spaceDim` mesh is not supported — the geometry is read with only its \
                  first {dim} components and its measure is the {dim}-dimensional one"
             );
+        }
+        if is_surface && is_l2_nodes {
+            // A discontinuous (`L2_T1_2D_P*`) surface `nodes` section stores
+            // per-element geometry rows whose edge dofs are element-private —
+            // there is no shared-dof row lattice to rebuild a `Tri6`/`Quad9`
+            // row mesh from (the surface pipeline's only geometry carrier),
+            // and the `GeometryData` store the planar L2 arm fills is consumed
+            // by the planar assembly, not the surface one.  Refuse loudly
+            // instead of silently reading scrambled geometry.
+            return Err(FemError::Mesh(format!(
+                "read_mfem: a `dimension 2` / `VDim: 3` (surface) mesh with a discontinuous \
+                 `{fec_name}` `nodes` section is not supported (D112b): the per-element rows \
+                 have element-private dofs, so the Tri6/Quad9 row geometry the surface pipeline \
+                 evaluates cannot be reconstructed — write the continuous `H1_2D_P*` container \
+                 (NodesSpace::Continuous) instead"
+            )));
         }
         if !is_l2_nodes {
             // Continuous (H1) geometry: remember the nodal order so the
@@ -498,7 +540,13 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 h1_nodes = Some((fec.order, raw.clone(), nodes_ordering, fec.closed_uniform));
             }
         }
-        if is_l2_nodes
+        if is_surface {
+            // The surface mesh is reconstructed from `h1_nodes` after the
+            // element tables are known (below); `coords` is deliberately left
+            // empty here — the former code path would have filled it with the
+            // first two components of every dof triple.
+            surface_sdim = Some(nodes_vdim);
+        } else if is_l2_nodes
             && n_elem > 0
             && dim == 3
             && nodes_ordering == 1
@@ -815,9 +863,6 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         None
     };
 
-    let flat_elem = elem_conn.into_iter().flatten().collect();
-    let flat_face = face_conn.into_iter().flatten().collect();
-
     let face_type_from_file = if n_bdr > 0 {
         let first = bdr_types[0];
         if !use_mixed_faces { first } else { ElementType::Line2 }
@@ -829,6 +874,40 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         ElementType::Tri3
     };
     let face_types_opt = if use_mixed_faces { Some(bdr_types) } else { None };
+
+    if dim == 2 {
+        // D112b: a `dimension 2` file whose vertex space dimension is 3 (a
+        // `nodes` section with `VDim: 3`, or a straight `vertices N 3` header)
+        // is a **surface** mesh.  MFEM's loader keeps all three components
+        // (`spaceDim = 3`) and recovers the vertex table from the `nodes` dofs
+        // (`SetVerticesFromNodes`); fem-rs's surface pipeline consumes
+        // row-geometry `Mesh<3>`s (the D1272 writer's own output convention),
+        // so the mesh is reconstructed as one instead of the coordinate-
+        // truncating `Mesh<2>` this branch used to build.  (Placed before the
+        // flat-table folds, which consume `elem_conn`/`face_conn`.)
+        if let Some(sdim) = surface_sdim {
+            debug_assert_eq!(sdim, 3, "surface routing is dim 2 → space dim 3");
+            let face_types_vec =
+                face_types_opt.clone().unwrap_or_else(|| {
+                    (0..n_bdr).map(|_| face_type_from_file).collect()
+                });
+            let mesh = build_surface_mesh_file(
+                &elem_types,
+                &elem_conn,
+                &elem_tags,
+                &face_types_vec,
+                &face_conn,
+                &face_tags,
+                &h1_nodes,
+                if coords.is_empty() { None } else { Some(&coords) },
+                n_vert,
+            )?;
+            return Ok(MfemFile { mesh1d: None, mesh2d: None, mesh3d: Some(mesh) });
+        }
+    }
+
+    let flat_elem = elem_conn.into_iter().flatten().collect();
+    let flat_face = face_conn.into_iter().flatten().collect();
 
     if dim == 1 {
         // D813-4: the `dimension 1` branch — a `.mesh` file of `Segment`
@@ -1099,6 +1178,360 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
 /// Convenience: read MFEM file from disk.
 pub fn read_mfem_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemFile> {
     read_mfem(std::fs::File::open(path)?)
+}
+
+// ─── D112b: surface (`dim = 2`, `spaceDim = 3`) file read-back ────────────────
+//
+// MFEM `Mesh::Load` semantics for the surface a `dimension 2` / `VDim: 3` file
+// describes (all cites MFEM 4.10):
+//
+// * the `nodes` section becomes the mesh's `Nodes` grid function and
+//   `spaceDim = Nodes->VectorDim() = 3`; the vertex table is recovered from the
+//   dofs — `SetVerticesFromNodes` copies `GetNodalValues(vert_val, i+1)(j)`
+//   into `vertices[j](i)` (`mesh/mesh.cpp:7246-7256`), and for a *continuous*
+//   nodal space that is the shared dof value bitwise (the D813-4 probe: a
+//   reloaded `H1_1D_P2` mesh's `GetVertex(v)` equals dof `v` to the last
+//   digit);
+// * `Mesh::Load` then runs `Finalize(refine = 1, fix_orientation = true)` —
+//   **`refine` defaults to 1 on the load path** (`mesh/mesh.hpp:823-829`) — so
+//   `Mesh::MarkForRefinement` → `MarkTriMeshForRefinement` rotates every
+//   triangle so its longest edge sits at slots (0, 1)
+//   (`mesh/mesh.cpp:3109-3124`), measuring edge lengths on the
+//   `GetPointMatrix` vertex table (`mesh/mesh.cpp:8455-8470`, 3 rows for a
+//   surface) through `Triangle::MarkEdge` (`mesh/triangle.cpp:53-96`,
+//   `>=` comparisons: the *first* longest edge wins; the rotation is the
+//   cyclic (0,1,2)→(1,2,0) / (0,1,2)→(2,0,1), never a flip);
+// * the dof ids travel with the rotation (`PrepareNodeReorder` /
+//   `DoNodeReorder`, `mesh/mesh.cpp:3766-3818`): the nodes grid function is
+//   renumbered onto the rotated mesh's H1 numbering;
+// * `CheckElementOrientation` fixes `Dim == 2 && spaceDim == 2` meshes only
+//   (`mesh/mesh.cpp:7350`) and the `Dim == 3` branch does not apply — a
+//   surface mesh is **never** orientation-touched on load.
+//
+// fem-rs's surface pipeline consumes row-geometry `Mesh<3>`s (the D1272
+// writer's own convention: `Tri6`/`Quad9` rows *are* the geometry), so the
+// read-back rebuilds those rows from the file's corner rows plus the `nodes`
+// dof table: the slot map is [`mixed_h1_engine`] — the same verified engine
+// the writer runs in [`row_geometry_h1_conn_nodes`], so the reconstruction is
+// its exact inverse.
+fn build_surface_mesh_file(
+    elem_types: &[ElementType],
+    elem_conn: &[Vec<u32>],
+    elem_tags: &[i32],
+    face_types: &[ElementType],
+    face_conn: &[Vec<u32>],
+    face_tags: &[i32],
+    h1_nodes: &Option<(u8, Vec<f64>, usize, bool)>,
+    straight_coords: Option<&[f64]>,
+    n_vert: usize,
+) -> FemResult<Mesh<3>> {
+    let n_elem = elem_conn.len();
+    // The engine's vertex dofs are the *compacted* corner ranks (MFEM's
+    // `RemoveUnusedVertices` numbering, `mesh_readers.cpp:38/130` — the same
+    // compaction the D1272 writer applies).  MFEM-written files never carry a
+    // slack vertex; anything else would silently renumber the file's vertex
+    // table, so refuse instead.
+    let mut corner_ids: Vec<u32> = Vec::with_capacity(n_elem * 3);
+    for row in elem_conn {
+        corner_ids.extend_from_slice(row);
+    }
+    corner_ids.sort_unstable();
+    corner_ids.dedup();
+    let nv = corner_ids.len();
+    if nv != n_vert {
+        return Err(FemError::Mesh(format!(
+            "read_mfem: surface mesh with {n_vert} declared vertices but {nv} referenced corners \
+             — MFEM's loader removes unused vertices at read time (mesh_readers.cpp:38), so this \
+             file's vertex table would be renumbered; not supported (D112b)"
+        )));
+    }
+
+    // The dof table: `values[3d + c]` is component `c` of dof `d` (byVDIM
+    // layout — rebuilt from the section's own ordering below).  For the
+    // straight path the vertex block *is* the table (order 1).
+    let (order, values, _closed_uniform) = if let Some(coords) = straight_coords {
+        (1u8, coords.to_vec(), false)
+    } else {
+        let (p, raw, ordering, legacy) =
+            h1_nodes.as_ref().ok_or_else(|| FemError::Mesh(
+                "read_mfem: surface mesh without a parsable `nodes` collection — the \
+                 row geometry cannot be reconstructed (D112b)".to_string()))?;
+        // D112: a *legacy* closed-uniform collection stores its dofs at the
+        // equispaced nodes.  At p = 2 that lattice coincides with the
+        // GLL `Tri6`/`Quad9` row lattice on the slots the rows carry (vertices
+        // and edge midpoints; the tri/quad have no interior dof at p = 2), so
+        // the rows evaluate faithfully; from p = 3 on the lattices differ and
+        // a row mesh evaluated by the GLL reference element would
+        // misinterpolate — the same family split that refuses legacy 1-D
+        // tables (D816-3).
+        if *legacy && *p >= 3 {
+            return Err(FemError::Mesh(format!(
+                "read_mfem: a p = {p} legacy closed-uniform surface `nodes` section is not \
+                 supported (D112/D816-3): its equispaced dof lattice differs from the \
+                 Gauss-Lobatto Tri6/Quad9 row lattice the surface pipeline evaluates"
+            )));
+        }
+        if raw.len() % 3 != 0 {
+            return Err(FemError::Mesh(format!(
+                "read_mfem: surface `nodes` section has {} values, not a multiple of VDim = 3",
+                raw.len()
+            )));
+        }
+        let ndof = raw.len() / 3;
+        let mut vals = vec![0.0_f64; ndof * 3];
+        match ordering {
+            0 => {
+                // byNODES: [x of all dofs, y of all dofs, z of all dofs].
+                for c in 0..3 {
+                    for d in 0..ndof {
+                        vals[d * 3 + c] = raw[c * ndof + d];
+                    }
+                }
+            }
+            _ => {
+                // byVDIM: [x y z] per dof — already the target layout.
+                vals.copy_from_slice(raw);
+            }
+        }
+        (*p, vals, *legacy)
+    };
+
+    // `SetVerticesFromNodes` (mesh.cpp:7246) fills the vertex table through
+    // `GridFunction::GetNodalValues(Vector &nval, int vdim)`
+    // (fem/gridfunc.cpp:1889): every element adds its vertex value into
+    // `nval(v)` and the per-vertex sums are divided by the reference count —
+    // so the vertex table is the **mean over element references** of the
+    // shared dof value, *not* the dof value itself (adding `x` `k` times and
+    // dividing by `k` is exact only for `k` a power of two; 24 of the ex7
+    // sphere's 66 vertices land 1 ulp off their dof).  Only the *rotation*
+    // below consumes this table (`Mesh::GetPointMatrix`,
+    // mesh.cpp:8455-8470); the element transformations the solve integrates
+    // with read the raw dof values through the nodes grid function.
+    let mut vertex_tab = vec![0.0_f64; nv * 3];
+    let mut overlap = vec![0_usize; nv];
+    for row in elem_conn.iter() {
+        for &v in row.iter() {
+            let r = rank_of(v, &corner_ids);
+            for c in 0..3 {
+                vertex_tab[r * 3 + c] += values[r * 3 + c];
+            }
+            overlap[r] += 1;
+        }
+    }
+    for r in 0..nv {
+        let n = overlap[r] as f64;
+        for c in 0..3 {
+            vertex_tab[r * 3 + c] /= n;
+        }
+    }
+
+    // `Mesh::Finalize(refine = true)` on load: rotate every triangle so its
+    // longest edge sits at slots (0, 1).  The edge lengths come from the
+    // vertex table — the `SetVerticesFromNodes` means above — and
+    // `Triangle::MarkEdge` squares and sums the components in x, y, z order
+    // with `>=` comparisons (`mesh/triangle.cpp:53-77`).  The rotation is
+    // cyclic, so orientation is preserved; quadrilaterals are not marked
+    // (`MarkForRefinement` gates on the simplex bit `meshgen & 1`,
+    // `mesh/mesh.cpp:3110-3111`).
+    let vertex_xyz = |v: usize| -> [f64; 3] {
+        [vertex_tab[v * 3], vertex_tab[v * 3 + 1], vertex_tab[v * 3 + 2]]
+    };
+    let mut rot_conn: Vec<Vec<u32>> = elem_conn.to_vec();
+    for (row, &et) in rot_conn.iter_mut().zip(elem_types.iter()) {
+        if et != ElementType::Tri3 {
+            continue; // `MarkForRefinement` marks simplex *triangles* only
+        }
+        let (x0, y0, z0) = {
+            let p0 = vertex_xyz(rank_of(row[0], &corner_ids));
+            (p0[0], p0[1], p0[2])
+        };
+        let (x1, y1, z1) = {
+            let p1 = vertex_xyz(rank_of(row[1], &corner_ids));
+            (p1[0], p1[1], p1[2])
+        };
+        let (x2, y2, z2) = {
+            let p2 = vertex_xyz(rank_of(row[2], &corner_ids));
+            (p2[0], p2[1], p2[2])
+        };
+        // d[0] = edge (v0,v1)², d[1] = edge (v1,v2)², d[2] = edge (v0,v2)²,
+        // each `dx² + dy²` then `+= dz²` — `Triangle::MarkEdge`'s own order.
+        let d0 = (x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)
+            + (z1 - z0) * (z1 - z0);
+        let d1 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)
+            + (z2 - z1) * (z2 - z1);
+        let d2 = (x2 - x0) * (x2 - x0) + (y2 - y0) * (y2 - y0)
+            + (z2 - z0) * (z2 - z0);
+        let shift = if d0 >= d1 {
+            if d0 >= d2 { 0 } else { 2 }
+        } else if d1 >= d2 {
+            1
+        } else {
+            2
+        };
+        if shift != 0 {
+            let (a, b, c) = (row[0], row[1], row[2]);
+            if shift == 1 {
+                *row = vec![b, c, a];
+            } else {
+                *row = vec![c, a, b];
+            }
+        }
+    }
+
+    // The rows, in the mesh's own row slot order.  Order 1 keeps the file's
+    // corner rows (a `Tri3`/`Quad4` row mesh — the ex7 `-o 1` shape); order ≥ 2
+    // rebuilds the row-geometry rows from the engine's slot map.  The values
+    // travel with the rotation: each dof is pinned to a frame-invariant entity
+    // key (vertex id, or the edge's sorted endpoint pair + position — the D624
+    // keys), so the post-rotation numbering is filled from the file-frame
+    // values, which is `DoNodeReorder`'s transfer (`mesh/mesh.cpp:3093-3102`).
+    let use_rows;
+    let mesh_coords;
+    match order {
+        1 => {
+            use_rows = rot_conn
+                .iter()
+                .map(|row| row.iter().map(|&v| rank_of(v, &corner_ids) as NodeId).collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            mesh_coords = values[..nv * 3].to_vec();
+        }
+        2 => {
+            // File-frame slot map: dof id + entity key per slot.
+            let file_rows: Vec<(ElementType, Vec<NodeId>)> = elem_conn
+                .iter()
+                .map(|row| {
+                    (
+                        elem_types[0],
+                        row.iter().map(|&v| rank_of(v, &corner_ids) as NodeId).collect(),
+                    )
+                })
+                .collect();
+            let file_mesh = MixedMeshRows { rows: file_rows, n_nodes: nv, dim: 2 };
+            let (rows_file, keys_file, _) = mixed_h1_engine(&file_mesh, 2)
+                .map_err(|why| FemError::Mesh(format!(
+                    "read_mfem: cannot map the surface `nodes` section (D112b): {why}")))?;
+            let mut key_val: std::collections::HashMap<MixedSlotKey, [f64; 3]> =
+                std::collections::HashMap::with_capacity(values.len() / 3);
+            for (row, krow) in rows_file.iter().zip(keys_file.iter()) {
+                for (&g, &k) in row.iter().zip(krow.iter()) {
+                    let d = g as usize;
+                    key_val.entry(k).or_insert([values[d * 3], values[d * 3 + 1], values[d * 3 + 2]]);
+                }
+            }
+            // Rotated-frame slot map: the row dof ids the mesh carries.
+            let rot_rows: Vec<(ElementType, Vec<NodeId>)> = rot_conn
+                .iter()
+                .map(|row| {
+                    (
+                        elem_types[0],
+                        row.iter().map(|&v| rank_of(v, &corner_ids) as NodeId).collect(),
+                    )
+                })
+                .collect();
+            let rot_mesh = MixedMeshRows { rows: rot_rows, n_nodes: nv, dim: 2 };
+            let (rows_new, keys_new, n_dofs) = mixed_h1_engine(&rot_mesh, 2)
+                .map_err(|why| FemError::Mesh(format!(
+                    "read_mfem: cannot map the rotated surface mesh (D112b): {why}")))?;
+            if values.len() < n_dofs * 3 {
+                return Err(FemError::Mesh(format!(
+                    "read_mfem: surface `nodes` section carries {} dofs but the mesh topology \
+                     numbers {n_dofs} — the section does not match its elements",
+                    values.len() / 3
+                )));
+            }
+            let mut new_vals = vec![0.0_f64; n_dofs * 3];
+            for (row, krow) in rows_new.iter().zip(keys_new.iter()) {
+                for (&g, &k) in row.iter().zip(krow.iter()) {
+                    let v = *key_val.get(&k).ok_or_else(|| FemError::Mesh(
+                        "read_mfem: surface `nodes` section is missing a dof the rotated mesh \
+                         numbers (D112b)"
+                            .to_string()))?;
+                    let d = g as usize;
+                    new_vals[d * 3..d * 3 + 3].copy_from_slice(&v);
+                }
+            }
+            use_rows = rows_new;
+            mesh_coords = new_vals;
+        }
+        _ => {
+            return Err(FemError::Mesh(format!(
+                "read_mfem: a p = {order} surface `nodes` section has no row representation — \
+                 the surface pipeline evaluates Tri6/Quad9 rows (p = 2) or straight rows \
+                 (p = 1) only (D112b)"
+            )));
+        }
+    }
+
+    // Row element types: the row-geometry cells the rows realize at this order
+    // (the write-side `row_geometry_row` families, inverted).
+    let row_type = |et: ElementType| -> FemResult<ElementType> {
+        match (et, order) {
+            (ElementType::Tri3, 1) => Ok(ElementType::Tri3),
+            (ElementType::Quad4, 1) => Ok(ElementType::Quad4),
+            (ElementType::Tri3, 2) => Ok(ElementType::Tri6),
+            (ElementType::Quad4, 2) => Ok(ElementType::Quad9),
+            (et, p) => Err(FemError::Mesh(format!(
+                "read_mfem: no surface row type for {et:?} cells at p = {p} (D112b)"
+            ))),
+        }
+    };
+    let row_types: Vec<ElementType> = elem_types
+        .iter()
+        .map(|&et| row_type(et))
+        .collect::<FemResult<_>>()?;
+    let uniform_row = row_types.iter().all(|&t| t == row_types[0]);
+    let elem_offsets = if uniform_row {
+        None
+    } else {
+        let mut offs = Vec::with_capacity(n_elem + 1);
+        offs.push(0);
+        for row in &use_rows {
+            offs.push(offs.last().unwrap() + row.len());
+        }
+        Some(offs)
+    };
+    // Boundary rows reference vertex ids — the same numbering space as the row
+    // node ids (vertex dofs = the compacted corner ranks).
+    let flat_face: Vec<NodeId> = face_conn
+        .iter()
+        .flat_map(|row| {
+            row.iter().map(|&v| {
+                debug_assert!((v as usize) < nv, "boundary row references a corner");
+                v
+            })
+        })
+        .collect();
+    // A surface file's boundary rows are SEGMENTs; an empty boundary keeps
+    // the surface boundary type (`Mesh::boundary_type` of the rows).
+    let (uniform_faces, face_type) = if face_types.is_empty() {
+        (true, ElementType::Line2)
+    } else {
+        (face_types.iter().all(|&t| t == face_types[0]), face_types[0])
+    };
+    let n_face = face_conn.len();
+    debug_assert_eq!(face_tags.len(), n_face);
+
+    Ok(Mesh {
+        coords: mesh_coords,
+        conn: use_rows.into_iter().flatten().collect(),
+        elem_tags: elem_tags.to_vec(),
+        elem_type: row_types[0],
+        face_conn: flat_face,
+        face_tags: face_tags.iter().map(|&t| t as fem_mesh::BoundaryTag).collect(),
+        face_type,
+        elem_types: if uniform_row { None } else { Some(row_types) },
+        elem_offsets,
+        face_types: if uniform_faces { None } else { Some(face_types.to_vec()) },
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None,
+        nc_vertex_view: None,
+        vertex_parents: vec![],
+        nc_leaf_states: None,
+        nc_face_ids: None,
+    })
 }
 
 /// D126: self-check the element tables of a mesh that is about to be written.
