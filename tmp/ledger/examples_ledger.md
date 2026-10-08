@@ -34,6 +34,13 @@ C++ 真值一律现编现跑（`$HOME/mfem410_ser`，g++ -O2，run 目录 `$HOME
 两侧同 CWD 形式 `-m data/<mesh>`）；Rust 侧 debug（**未用 release**），CWD =
 `tmp/ledger/rundir`。证据：`fem-rs/tmp/rr127mfem/`（双 stdout 快照 + diff + 命令行）。
 
+**round-129 增量（MFEM lane：RUN 档抽样升 BIT 第六波，HEAD fd35de7b）**：
+串行 BIT 17 → **18**（+ex23，本表体已更新；ex10 未启动——C 盘 5.5G < 8G 停手纪律，
+见 round-129 节）。C++ 真值现编现跑（`$HOME/mfem410_ser`，g++ -std=c++17 -O2，
+run 目录 `$HOME/work/rr129/`，两侧同 CWD 形式 `-m data/star.mesh`）；Rust 侧 debug
+（**未用 release**），CWD = `tmp/ledger/rundir`。证据：`fem-rs/tmp/rr129mfem/`
+（双 stdout 快照 + cmp + 探针链）。
+
 ## 串行（45）
 
 | 名字 | MFEM 对应 | 档位 | 分类 | 证据/日志 | 备注 |
@@ -65,7 +72,7 @@ C++ 真值一律现编现跑（`$HOME/mfem410_ser`，g++ -O2，run 目录 `$HOME
 | mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | **BIT**（r98 双档） | logs/… + ref/ex20.out + `tmp/d98runbit/` | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635。**round-84:** 失配已闭（r62 D635b 六配置逐字节 = C++）；重验 `-o 1 -t 100 -no-vis`：数值行逐字同，豁免 = C++ Options 回声多 2 行（`--no-visualization/--no-gnuplot`，→ D822-2）。**round-98:** 升 **BIT**——`-no-vis` 档 12 行 stdout 逐字节 = C++（回声块早已补齐，r84 豁免过期）；无参默认档两处 1:1 保真修复后（`visualization` 默认 false→true = C++ ex20.cpp:98；删 Rust 独有 `Wrote ex20_phase…` 行——C++ 走 socketstream 无打印）亦逐字节；vis 副产物文件改为落 rundir |
 | mfem_ex21_amr_elasticity | ex21 | 默认 beam-tri | **BIT**（r127） | logs/… + `tmp/rr127mfem/`（ref/ex21_cpp_beamtri.out + ex21_diff_v4.txt=0） | rc=0；历史有机器本地 golden 注记（非 C++ 逐字节）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff）。**round-127:** 升 **BIT**——四处 1:1 保真修复后，`-m data/beam-tri.mesh -no-vis` 132 行 stdout 与 C++ 现编现跑（`$HOME/work/rr127/ex21/ex21_rr127`）**cmp 逐字节全等**（21 个 AMR 周期的 PCG 轨迹+ARF 全同；DOF 序列 36→…→14950 两侧一致）：① Options 块补 3 行（`--no-static-condensation`/`--flux-averaging 0`/`--no-visualization`，PrintOptions 字节对齐）；② PCG 换 legacy 口径 = `rtol 1e-6`（旧 1e-12 实为 1e-24·nom0 判据、每周期打满 2000 it 上限，同 ex14 D795-1 病灶）+ `PrintLevel::FirstAndLast`（MFEM legacy level 3：it0 行带 " ..." + 末行 + ARF）；③ 删 Rust 独有诊断行（`Max err`/`Marked N`/`Wrote …`/`Direct solve`/`SC:`）+ 停机文案对齐 C++（`Reached the maximum number of dofs. Stop.` / `Stopping criterion satisfied. Stop.`）；④ **补上 MFEM 的解延长链路**（旧注记"prolongation 死存储已删"系误删）：C++ `x.Update()` 把上一轮解 prolong 到新网格作 PCG 初值（实证 = 现编探针：PCG 打印的 it0 `(B r,r)` = `(GS(B−A·X), B−A·X)` ≠ `(GS·B, B)`，且 legacy `PCG()` 的 X 不会被清零——initial-guess 模式），P1 延长 = 顶点值复制 + 新中点 `0.5·u_a+0.5·u_b`（MFEM RefinementOperator 行点积口径；中点父边按坐标位模式精确识别，`refine_2d::new_midpoint` 同式）。3-D/Quad 臂维持零初值（无对照档，行为同 r126 前）。C++ 探针（P5/P6）留档 `$HOME/work/rr127/` |
 | mfem_ex22_complex_helmholtz | ex22 | 默认 inline-quad | RUN（r67 D693-695 收口） | logs/… | rc=0（复数系统求解完成）。**round-84:** r67 -p0/-p1 双双逐位收官 + r69 D738 评估器求积阶修复 + r71 D748 评估器族配对化（余项 D704/D748/D765/D767）；重验默认档：误差行 1.422826e-1/1.422741e-1 与 r61 后状态逐字同，GMRES 打印已换 MFEM Pass/Iteration 族 |
-| mfem_ex23_wave_equation | ex23 | 默认 star | RUN | logs/… | rc=0；历史 golden 本地注记。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，checksum 1.889982e4 / du/dt 2.955466e4 逐字同） |
+| mfem_ex23_wave_equation | ex23 | `-m data/star.mesh -no-vis` | **BIT**（r129） | logs/… + `tmp/rr129mfem/`（ref/ex23_cpp_star.out + cmp） | rc=0；历史 golden 本地注记。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，checksum 1.889982e4 / du/dt 2.955466e4 逐字同）。**round-129:** 升 **BIT**——十处 1:1 保真修复后 `-m data/star.mesh -no-vis` 24 行 stdout 与 C++ 现编现跑（`$HOME/work/rr129/ex23/ex23_cpp`，mfem410_ser）**cmp 逐字节全等（0 豁免）**；`ex23-init.gf` 亦**逐字节全等**（新证：投影初值含 ess dof 的 e^-30 级值——C++ 不清零，旧 Rust 违例清零已删）；`ex23-final.gf` 2721/2722 值逐字同，唯一残值 du/dt dof274 末打印位翻转 = 平台 exp() ulp 差（Windows CRT vs glibc，5/1361 初值 1 ulp、exp 参数位级 0 差——探针链闭环，立债）。关键修复：时间循环末步 dt 调整违例（C++ `Step` 永不改 dt）、`solve_pcg_jacobi`→`solve_pcg_dsmoother`（CGSolver+DSmoother DiagScale 逐位移植入口）、**MFEM 4.10 `Vector::Norml2` = dnrm2 风格缩放算法**（vector.cpp:968，非 `sqrt(Σx²)`——plain 版 1/3 dof 差 1-2 ulp，示例内 `mfem_norml2_2d` 逐位镜像）、Options 补 `--ref ` 行/visit 默认 true/GLVis 文案/.gf 双头结构。轨迹锚点入 `#[cfg(test)]`（dofs 1361/steps 50/checksum 区间） |
 | mfem_ex24_discrete_ops | ex24 | `-m data/star.mesh -p 0 -o 1 -no-vis` | **BIT**（r70 D712 四口径） | logs/… + ref/ex24_p0o1.out | **本轮现对拍**：数值行逐字节；豁免 = Rust 的 Options 块少 3 行（--no-static-condensation/--no-partial-assembly/--device）。**round-84:** 现档 BIT——r66 D686 三口径 + r70 D712 四口径全部逐字节 = C++（D721 翻转后 -p1 iter1 1.47776e-22 归零）；重验 -p0 -o1 = 仅 mesh 路径行差 ✓ |
 | mfem_ex25_pml_maxwell | ex25 | 默认 beam-hex | RUN | logs/… | rc=0（复 PML 系统完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff） |
 | mfem_ex26_geom_mg | ex26 | 默认 star；hex 档 `-m inline-hex -gr 0 -or 2` | RUN | logs/mfem_ex26_geom_mg.log、logs/mfem_ex26_hex.log + ref/ex26_hex.out | 默认档 rc=0。hex 档本轮**实况对拍**：274625 未知数同、6 迭代轨迹机器精度级吻合（ARF 0.0435272 vs 0.0435273、iter1 1.55112e-6 vs 1.55209e-6），**非逐字节**（Chebyshev smoother 特征值估计 ulp 级分叉）。round 60 存档对 tmp/d31/ex26_{rs,cpp}.log 数值逐字节，但其原命令不可复原 ⇒ 存档对不作为本轮逐字节证据引用。**round-84:** 重验 OK（默认档 stdout 与 r61 记录 **0 diff**；r72 D754 并行装配逐位化后 5 连跑 sha256 全同口径维持） |
@@ -589,3 +596,51 @@ C++ 真值一律现编现跑（`$HOME/mfem410_ser`，g++ -O2，run 目录 `$HOME
   （fem-rs io，rr125 曾 FAILED 于曲面 nodes 读回）在 HEAD `1a0d88a4` 已绿
   （`cargo test -p fem-io --test d817r82_bdr_true_interior_ledger` 1 passed）——
   即 D112b 修复件，rr124 报告中的 `test_shell_basic_masonry_contact` 与其无关。
+
+## round 129 增量（MFEM lane：RUN→BIT 第六波，HEAD fd35de7b）
+
+> 抽样计划 3 档（ex23/ex10/ex4 stretch）；**完成 1 档（ex23 升 BIT）后 C 盘余量
+> 12G→5.5G 触发 <8G 停手纪律**，ex10 未启动（见下）。C++ 真值现编现跑
+> `$HOME/mfem410_ser`（g++ -std=c++17 -O2，run 目录 `$HOME/work/rr129/`，data symlink
+> 同 CWD 形式）；Rust 侧 debug exe，CWD = `tmp/ledger/rundir`。证据与探针链：
+> `tmp/rr129mfem/`。
+
+- **ex23_wave_equation 升 BIT（十处 1:1 保真修复，全部 examples 域，零核心库改动）**：
+  `-m data/star.mesh -no-vis` 24 行 stdout 与 C++ **cmp 逐字节全等（0 豁免）**；
+  `ex23-init.gf` **逐字节全等**；`ex23-final.gf` 2721/2722 值逐字同（唯一残值见 D906 候选）。
+  修复清单：① Options 回声补 `--ref ` 行（C++ 注册未用的空串选项 ex23.cpp:138，行尾带
+  空格）+ bool 对按值打 + double 换 %g8（`cout.precision(8)`）；② 默认值 `visualization`/
+  `visit` false→true（ex23.cpp:77-78）；③ 删 Rust 独有 stdout（`ess_bdr count` 行 +
+  尾部 stats 8 行块，2D/3D）；④ GLVis 文案对齐；⑤ **时间循环末步 dt 调整违例**
+  （Rust `dt_actual = t_final - t`，C++ `GeneralizedAlpha2::Step` 末尾 `t += dt` 永不
+  改 dt）→ 恒用 dt 后 t 位级同 C++；⑥ **初值 ess 清零违例**（C++ 投影后保留边界 dof 的
+  e^-30 级值喂 `K->FullMult`，Rust 曾清零）→ 删零化（init.gf 因此从 2562/2722 →
+  **1361/1361 全对齐**）；⑦ 求解器入口 `solve_pcg_jacobi`（linlvo 通用 CG：预倒数乘法
+  1 ulp/次 + 通用停机 + 初值残留）→ **`solve_pcg_dsmoother`**（= MFEM `CGSolver::Mult`
+  + DSmoother DiagScale 逐位移植，crates 已有入口，rtol² 判据 + 清零 + 除法 D⁻¹）；
+  ⑧ **`Norml2` 逐位镜像**：MFEM 4.10 `Vector::Norml2`（vector.cpp:968）是 LAPACK
+  dnrm2 风格**缩放算法**（先除后平方累加 + `scale·sqrt(sum)`），非 `sqrt(Σx²)`——
+  plain 版在 ~1/3 dof 上 exp 参数差 1-2 ulp；示例内 `mfem_norml2_2d` 后 **exp 参数
+  0/1361 失配**（此发现对其他示例有普适价值：任何用 `Norml2` 的初值/系数都有同款缺口，
+  核心 Vector API 落地另波）；⑨ .gf 文件双头结构 + %g8 值（C++ 每次 Save 各写头部）；
+  ⑩ 死代码清扫（文件级 allow + 死访问器删除）。
+- **D906（候选号，P2）平台 libm 超越函数位差**：Windows CRT `exp` 与 glibc `exp` 在
+  ~0.4% 输入上差 1 ulp（本例 5/1361 初值；exp **参数**位级 0 差、纯 libm 输出差）。
+  探针因果链：坐标集 1361=1361 → arg 447 差（Norml2）→ 缩放算法后 arg 0 差 → 残
+  5 值差（纯 exp）→ step-1 轨迹 2.6e-14 相对分叉 → z274 差 7e-28 绝对（= 值 3.75e-12
+  翻转 dof 的 1 ulp 经 K 耦合）→ Tdiag274 位级同。**ex23 final.gf 唯一残值（du/dt
+  dof274 末打印位翻转）即此债的下游回声。** 建议：核心库 vendor glibc 位级等价 exp
+  （+ Norml2 缩放算法入 Vector API），另波专项；受益面 = 所有 transcendental 系数/初值
+  示例（ex16/ex22/ex25/ex40 族）。
+- **ex10_hyperelastic_dyn 未启动**：磁盘纪律（C 盘 5.5G < 8G，开工 12G；非本 lane
+  消耗——本 lane 增量构建 <0.5G，`target/` 历轮缓存未动）。先验判断维持 brief 所给：
+  r84 注记「EE/KE/ΔTE 6 位全吻合、Newton ‖r‖ iter1 起第 4 位漂移」，若漂移根因小
+  （判据族）可循 ex21 legacy 口径先例，若 Newton/预条件结构差则如 ex19（rr127）立债。
+  下一波候选顺位不变。
+- **门自查**：ex23 rc=0 + stdout cmp 逐字节 + init.gf cmp 逐字节；`cargo test -p
+  fem-examples --example mfem_ex23_wave_equation` 1 passed（轨迹锚点）；debug 构建
+  0 错误；触碰文件零新警告（fem-examples 剩余 1 条 = 预存链接器 LNK4044 /ffast-math，
+  vendor/linlvo 20 条 = 预存第三方）；df 开工 12G → 停手时 5.5G（外部 lane 消耗，
+  告警已报主会话）。改动物：`examples/mfem_ex23_wave_equation.rs`（工作树）、本台账
+  两处、`tmp/coverage_matrix.md`（§3 round-129 bullet）——tmp/ 下文件需主会话
+  `add -f` 提交。

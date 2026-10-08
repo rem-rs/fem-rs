@@ -158,6 +158,16 @@
   round-127 增量节 + `tmp/rr127mfem/`。顺带：rr125 留档 FAILED `d817r82_bdr_true_interior_matches_the_mfem_probe`
   （io 曲面 p=3 nodes 读回边缘）在 HEAD 已绿。masonry contact flake（pro-physics）5 跑
   全量绿不可复现——登记不关（rr124 报告的测试名经查证不存在于树与历史，红跑日志未留档）。
+- **round 129 增量（MFEM lane：RUN→BIT 第六波，HEAD fd35de7b）**：**ex23 升 BIT**
+  （十处 1:1 保真修复，零核心库改动——时间循环末步 dt 调整违例、初值 ess 清零违例、
+  求解器入口换 `solve_pcg_dsmoother` 逐位移植、**MFEM 4.10 `Vector::Norml2` = dnrm2
+  风格缩放算法**（vector.cpp:968，非 sqrt(Σx²)，plain 版 1/3 dof 差 1-2 ulp）等；
+  24 行 stdout + ex23-init.gf 均 `cmp` 逐字节全等，final.gf 2721/2722）——
+  **串行 examples BIT 17 → 18**。新债 **D906（候选号）平台 libm 超越函数位差**
+  （Windows CRT vs glibc `exp`，~0.4% 输入差 1 ulp，ex23 final.gf 唯一残值的探针闭环
+  根因；受益面 = transcendental 系数/初值示例族 + 建议 vendor glibc 等价 exp 与
+  Norml2 入 Vector API）。ex10 未启动（C 盘 5.5G < 8G 停手纪律）。逐例行与证据：
+  `tmp/ledger/examples_ledger.md` round-129 增量节 + `tmp/rr129mfem/`。
 
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
