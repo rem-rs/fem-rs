@@ -28,6 +28,12 @@
 **round-61 初账快照（历史，仅存档）**：BIT 4 / RUN 63 / RUN\* 3（ex4/ex5/ex20）/ CRASH 12 / DEV 2 / NOREF 2。
 round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的权威三态对照表。
 
+**round-127 增量（MFEM lane：RUN 档抽样升 BIT 第五波，HEAD 1a0d88a4）**：
+串行 BIT 15（r126 快照口径）→ **17**（+ex16 +ex21，两行本表体已更新）。
+C++ 真值一律现编现跑（`$HOME/mfem410_ser`，g++ -O2，run 目录 `$HOME/work/rr127/`，
+两侧同 CWD 形式 `-m data/<mesh>`）；Rust 侧 debug（**未用 release**），CWD =
+`tmp/ledger/rundir`。证据：`fem-rs/tmp/rr127mfem/`（双 stdout 快照 + diff + 命令行）。
+
 ## 串行（45）
 
 | 名字 | MFEM 对应 | 档位 | 分类 | 证据/日志 | 备注 |
@@ -52,12 +58,12 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
 | mfem_ex15_dump_it2_coords | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0 |
 | mfem_ex15_dump_p1 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0，stdout 与 r61-后状态一致（PROW 表） |
 | mfem_ex15_dump_p1_it3 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0 |
-| mfem_ex16_nonlinear_heat | ex16 | 默认 star | RUN | logs/… | rc=0（SDIRK33 时间推进完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，chksum 1.072997e6 逐字同） |
+| mfem_ex16_nonlinear_heat | ex16 | 默认 star | **BIT**（r127） | logs/… + `tmp/rr127mfem/`（ref/ex16_cpp_default.out + cmp） | rc=0（SDIRK33 时间推进完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，chksum 1.072997e6 逐字同）。**round-127:** 升 **BIT**——删 Rust 独有 `=== Comparison Metrics ===` 尾块（C++ stdout 止于 `step 50, t = 0.5`，回归锚点仍留在示例内 `#[cfg(test)]` 钉：dofs 1361/steps 50/norm/chksum 区间）后，`-m data/star.mesh -no-vis` 24 行 stdout 与 C++ 现编现跑（`$HOME/work/rr127/ex16/ex16_rr127`，mfem410_ser）**cmp 逐字节全等**；零代码数值路径改动（时间步进/求解器未动） |
 | mfem_ex17_dg_elasticity | ex17 | 默认 beam-tri | RUN（round-84 漂移注记） | logs/… + `tmp/d84c/`（r84 对拍） | rc=0。**round-84:** 数值漂移 = r76 D805-1（DG 弹性罚项改 MFEM 原式）传导：1063→1269 it、‖u_h‖_L2 227.189938→226.758078、checksum −0.15%（旧值系错误罚项产物，非回归）；**新对拍 C++（NOREF-NEW 登记，ref/ex17_cpp_default.out）**：dofs 24576 逐字同、同 PCG+GS+rtol² 配置下 C++ 767 it vs Rust 1269 it → **D822-1**；另 sol.gf 输出表示差（H1 平均位移 vs C++ DG 节点空间）→ 同债 |
 | mfem_ex18_euler | ex18 | 默认 periodic-square | **RUN**（round-85 起 C++ 对拍 8 位全对齐 → D822-4） | logs/… + `tmp/d84c/`（二分证据）+ `tmp/d85main/`（D822-4 验收） | rc=0。**round-85（D822-4）**：示例默认 order 对齐 C++（ex18.cpp 默认 3，原 Rust 默认 1）+ `dg_hyperbolic.rs` Quad4 臂放开任意阶（原 `assert_eq!(order,1)`）+ 2-D 面规则改 MFEM 公式（`HyperbolicFormIntegrator` 2p+1 阶 ⇒ p+1 个 GL 点，hyperbolic.cpp:224 + intrules.cpp `SegmentIntegrationRule`；原 `(2p+1).min(4)` 在 p=1 给 3 点/MFEM 2 点）。**默认档（= C++ 默认，order 3）：435 步 = C++，`Solution error: 3.930926246114457e-3` = C++ `0.0039309262` 全部 8 位打印数字逐位一致**；`-o 1` 档：184 步 = C++（原 185），`6.168658610565338e-2` = C++ `0.061686586` 8 位全对齐（原 6.168620814596272e-2 仅 6 位——**旧残差真根因 = 面规则点数差，"fp 排序"归因证伪**）。C++ 真值现编现跑 `$HOME/work/d85main/ex18/`（mfem410_ser 源码），快照 `tmp/d85main/cpp_{default,o1}.out`。历史（round-84 D822-3 回归）：默认档曾 step 27 起 NaN，二分钉 `24e00a8d`，修复后 o1 档终值 6.168620814596272e-2（该值含面规则偏差，已被上值取代） |
 | mfem_ex19_hyperelastic_incomp | ex19 | 默认 beam-quad | RUN | logs/… | rc=0（Newton+块 GMRES 收敛）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Newton 3 it 收敛行逐字同） |
 | mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | **BIT**（r98 双档） | logs/… + ref/ex20.out + `tmp/d98runbit/` | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635。**round-84:** 失配已闭（r62 D635b 六配置逐字节 = C++）；重验 `-o 1 -t 100 -no-vis`：数值行逐字同，豁免 = C++ Options 回声多 2 行（`--no-visualization/--no-gnuplot`，→ D822-2）。**round-98:** 升 **BIT**——`-no-vis` 档 12 行 stdout 逐字节 = C++（回声块早已补齐，r84 豁免过期）；无参默认档两处 1:1 保真修复后（`visualization` 默认 false→true = C++ ex20.cpp:98；删 Rust 独有 `Wrote ex20_phase…` 行——C++ 走 socketstream 无打印）亦逐字节；vis 副产物文件改为落 rundir |
-| mfem_ex21_amr_elasticity | ex21 | 默认 beam-tri | RUN | logs/… | rc=0；历史有机器本地 golden 注记（非 C++ 逐字节）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff） |
+| mfem_ex21_amr_elasticity | ex21 | 默认 beam-tri | **BIT**（r127） | logs/… + `tmp/rr127mfem/`（ref/ex21_cpp_beamtri.out + ex21_diff_v4.txt=0） | rc=0；历史有机器本地 golden 注记（非 C++ 逐字节）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff）。**round-127:** 升 **BIT**——四处 1:1 保真修复后，`-m data/beam-tri.mesh -no-vis` 132 行 stdout 与 C++ 现编现跑（`$HOME/work/rr127/ex21/ex21_rr127`）**cmp 逐字节全等**（21 个 AMR 周期的 PCG 轨迹+ARF 全同；DOF 序列 36→…→14950 两侧一致）：① Options 块补 3 行（`--no-static-condensation`/`--flux-averaging 0`/`--no-visualization`，PrintOptions 字节对齐）；② PCG 换 legacy 口径 = `rtol 1e-6`（旧 1e-12 实为 1e-24·nom0 判据、每周期打满 2000 it 上限，同 ex14 D795-1 病灶）+ `PrintLevel::FirstAndLast`（MFEM legacy level 3：it0 行带 " ..." + 末行 + ARF）；③ 删 Rust 独有诊断行（`Max err`/`Marked N`/`Wrote …`/`Direct solve`/`SC:`）+ 停机文案对齐 C++（`Reached the maximum number of dofs. Stop.` / `Stopping criterion satisfied. Stop.`）；④ **补上 MFEM 的解延长链路**（旧注记"prolongation 死存储已删"系误删）：C++ `x.Update()` 把上一轮解 prolong 到新网格作 PCG 初值（实证 = 现编探针：PCG 打印的 it0 `(B r,r)` = `(GS(B−A·X), B−A·X)` ≠ `(GS·B, B)`，且 legacy `PCG()` 的 X 不会被清零——initial-guess 模式），P1 延长 = 顶点值复制 + 新中点 `0.5·u_a+0.5·u_b`（MFEM RefinementOperator 行点积口径；中点父边按坐标位模式精确识别，`refine_2d::new_midpoint` 同式）。3-D/Quad 臂维持零初值（无对照档，行为同 r126 前）。C++ 探针（P5/P6）留档 `$HOME/work/rr127/` |
 | mfem_ex22_complex_helmholtz | ex22 | 默认 inline-quad | RUN（r67 D693-695 收口） | logs/… | rc=0（复数系统求解完成）。**round-84:** r67 -p0/-p1 双双逐位收官 + r69 D738 评估器求积阶修复 + r71 D748 评估器族配对化（余项 D704/D748/D765/D767）；重验默认档：误差行 1.422826e-1/1.422741e-1 与 r61 后状态逐字同，GMRES 打印已换 MFEM Pass/Iteration 族 |
 | mfem_ex23_wave_equation | ex23 | 默认 star | RUN | logs/… | rc=0；历史 golden 本地注记。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，checksum 1.889982e4 / du/dt 2.955466e4 逐字同） |
 | mfem_ex24_discrete_ops | ex24 | `-m data/star.mesh -p 0 -o 1 -no-vis` | **BIT**（r70 D712 四口径） | logs/… + ref/ex24_p0o1.out | **本轮现对拍**：数值行逐字节；豁免 = Rust 的 Options 块少 3 行（--no-static-condensation/--no-partial-assembly/--device）。**round-84:** 现档 BIT——r66 D686 三口径 + r70 D712 四口径全部逐字节 = C++（D721 翻转后 -p1 iter1 1.47776e-22 归零）；重验 -p0 -o1 = 仅 mesh 路径行差 ✓ |
@@ -548,3 +554,38 @@ round-62–83 的迁移路径见下文各增量节与「round 84 增量」节的
   自指稳定性 pin（防漂移哨兵，非 MFEM 真值 pin）——本轮几何修复使其 1 ulp 移动
   （1.63299316185545251 → …274），pin 值更新并留 D101 案（其余 10 pin 未受扰）；
   复跑 6/6 绿；其余 446 靶全绿（5346+1 修后 = 5347/0/40 口径）。
+
+## round 127 增量（MFEM lane：RUN→BIT 第五波，HEAD 1a0d88a4）
+
+> 抽样 3 档（ex19/ex16/ex21），收官 2 BIT + 1 立债。C++ 真值现编现跑
+> `$HOME/mfem410_ser`（g++ -std=c++17 -O2）；Rust 侧 debug；两侧同参数同 CWD 形式。
+> 证据与双 stdout 快照：`tmp/rr127mfem/`；C++ 探针与 run 目录：`$HOME/work/rr127/`。
+
+- **ex16 升 BIT（1 行打印改动，零数值路径改动）**：Rust 独有的
+  `=== Comparison Metrics ===` 尾块（L2norm/chksum 等）为 r61 时代的验证脚手架，
+  C++ stdout 止于 `step 50, t = 0.5`——删除后 24 行 stdout 与 C++ `cmp` 逐字节全等
+  （Options 12 行 + unknowns + 10 个 step 行，`cpp_fmt` 8 位有效数字口径早已对齐）。
+  回归锚点无损：dofs 1361/steps 50/norm/chksum 区间断言仍在示例内 `#[cfg(test)]`。
+- **ex21 升 BIT（四处 1:1 保真修复，见台账行注记）**：核心是补上被误删的解延长链路。
+  旧注记称「prolongation 是死存储已删」——本轮现编探针实证 C++ 语义相反：
+  ① `PCG()` 打印的 it0 `(B r, r)` = `(GS(B−A·X), B−A·X)` ≠ `(GS·B, B)`
+  （X = 延长后的上一轮解，`P6` 探针 `(GS·B, B)` 恒为 5.078125e-05 而 PCG 打印
+  0.00118678）⇒ legacy `PCG()` 跑在 initial-guess 模式，X 不清零；
+  ② `B` 恒等于牵引力装配（`P5` 探针：‖B‖ ≡ 0.0070710678118654762，与 ‖b‖ 逐位同）
+  ⇒ 同性边界（x[ess]=0）下 `EliminateVDofsInRHS` 无反应项注入——本轮曾实现的
+  `B[ess] = −(A·x)` 反应注入被探针证伪后撤销；
+  ③ P1 延长按 MFEM `RefinementOperator` 行点积口径（`0.5·u_a+0.5·u_b`），
+  新中点父边按坐标位模式识别（`refine_2d::new_midpoint` 同式 `0.5*(a+b)`）。
+- **ex19 立债（D905 号段建议：RUN 维持）**：Rust 版 Newton 是自研阻尼线搜索 +
+  右预条件 GMRES（restart 30，监控真残差）；C++ 是 MFEM `NewtonSolver`（无线搜索、
+  纯全步）+ **左预条件** GMRES + `JacobianPreconditioner`（块消元：mass-PCG/GS、
+  stiffness-GMRES/GS、γ=1e-5）。实测分叉：it0 ‖r‖ 一致（2.94392），it1 起路径分叉
+  （Rust 2.02052e-1 vs C++ 1.45342e-1，GMRES 16 it vs 15 it）——探针证明非线搜索之差
+  （强制 α=1 输出一字不变），为线性求解器/预条件结构差。升 BIT 挡在
+  **MFEM GMRESSolver 的逐位移植**（左预条件 + monitor 语义 + D704 族）与示例的
+  Newton/预条件 1:1 重写，属核心求解器专项，建议登记后另波专项处理。
+  证据：`tmp/rr127mfem/ex19_rs_raw.out` vs `ref/ex19_cpp_beamquad.out`。
+- **顺带实证（rr125 线索收口）**：`d817r82_bdr_true_interior_matches_the_mfem_probe`
+  （fem-rs io，rr125 曾 FAILED 于曲面 nodes 读回）在 HEAD `1a0d88a4` 已绿
+  （`cargo test -p fem-io --test d817r82_bdr_true_interior_ledger` 1 passed）——
+  即 D112b 修复件，rr124 报告中的 `test_shell_basic_masonry_contact` 与其无关。

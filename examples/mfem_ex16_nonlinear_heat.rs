@@ -490,30 +490,10 @@ fn main() {
             .expect("failed to write ex16-final.gf");
     }
 
-    // 10. Output comparison metrics (C++ ex16.cpp:269-272 — console output + file I/O).
-    //     Rust adds L² norm and checksum for cross-implementation validation.
-    let sol_norm: f64 = u.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let checksum: f64 = u
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64 + 1.0) * v)
-        .sum();
-
-    println!();
-    println!("=== Comparison Metrics ===");
-    println!("DOFs: {}", fe_size);
-    println!("Steps: 50");
-    println!("Final t: {:.6e}", t);
-    println!("L2norm = {:.6e}", sol_norm);
-    println!("chksum = {:.6e}", checksum);
-    println!("kappa = {:.3}", args.kappa);
-    println!("alpha = {:.3}", args.alpha);
-    println!("order = {}", args.order);
-    println!("ref_levels = {}", args.ref_levels);
-    println!("dt = {:.4e}", dt);
-    println!("t_final = {:.4e}", t_final);
-    println!("=========================");
-    println!("\nDone.");
+    // C++ ex16 has no console output after the step lines (stdout ends at
+    // "step 50, t = 0.5"); the former Rust-only "Comparison Metrics" block was
+    // removed for stdout parity — regression anchors live in the tests below.
+    let _ = (t_final, fe_size);
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

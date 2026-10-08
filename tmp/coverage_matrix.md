@@ -148,6 +148,16 @@
   备）；**D665 关闭**（refine_uniform_3d 消费方方向全部稳定/前进/对上 C++，joule rc=3 = 声明
   裁剪）。multidomain RT cyl 残差随 D667 修复 + `-qp 9` 从 ~870× 降至 −16%（1.1962e-6 vs C++
   1.43051e-6；余量 = D677 submesh 曲率 + D678 阶表，RUN* 维持）。
+- **round 127 增量（MFEM lane：RUN→BIT 第五波）**：**ex16 升 BIT**（1 行打印改动零数值路径，
+  24 行 stdout `cmp` 逐字节）+ **ex21 升 BIT**（四处 1:1 保真修复——核心 = 补回被误删的
+  解延长链路：C++ `x.Update()` prolong 作 PCG initial-guess，P6 探针实证；legacy PCG
+  rtol 1e-6 口径 + Options 块 + 诊断行清理；132 行 `cmp` 逐字节，21 个 AMR 周期 PCG 轨迹
+  全同）——**串行 examples BIT 15 → 17**。ex19 立债（分叉 = Rust 自研 Newton+右预条件
+  GMRES vs MFEM NewtonSolver+左预条件 GMRESSolver+JacobianPreconditioner，it1 起路径分叉，
+  升 BIT 挡在 MFEM GMRES 逐位移植专项）。逐例行与证据：`tmp/ledger/examples_ledger.md`
+  round-127 增量节 + `tmp/rr127mfem/`。顺带：rr125 留档 FAILED `d817r82_bdr_true_interior_matches_the_mfem_probe`
+  （io 曲面 p=3 nodes 读回边缘）在 HEAD 已绿。masonry contact flake（pro-physics）5 跑
+  全量绿不可复现——登记不关（rr124 报告的测试名经查证不存在于树与历史，红跑日志未留档）。
 
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
