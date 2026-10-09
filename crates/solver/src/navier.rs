@@ -189,6 +189,28 @@ pub struct NavierConfig {
     /// Convection treatment ([`ConvectionStabilization::Off`] = the
     /// MFEM-identical default; D1125 for the stabilized variants).
     pub convection_stabilization: ConvectionStabilization,
+    /// D952 Timmermans **rotational pressure correction** (fem-rs extension,
+    /// NOT an MFEM feature — the C++ `NavierSolver` is the classical
+    /// non-rotational scheme).  `false` (the default) keeps every step
+    /// bit-identical to the MFEM path.  When `true`, the step inserts one
+    /// extra Helmholtz pre-solve that realizes the Timmermans, Minev & Van
+    /// De Vosse (1995) sequencing: the PURE VISCOUS split velocity `ũ` (the
+    /// momentum BDF step without the pressure drive) supplies the rotational
+    /// term
+    ///
+    /// ```text
+    ///   p^{n+1} += −ν·Π(∇·ũ^{n+1}) ,
+    /// ```
+    ///
+    /// with `Π` the discretization's pressure-space representation of the
+    /// divergence ([`NavierDiscretization::rotational_divergence_pressure`]);
+    /// the projection solve then consumes the CORRECTED pressure, so the
+    /// term enters the dynamics (a post-step pressure patch alone would be
+    /// dynamics-dead, because the next step's pressure Poisson solve never
+    /// consumes `pn` as state).  Essential pressure DOFs (Dirichlet data)
+    /// are skipped, and on the pure-Neumann path `MeanZero` is re-applied,
+    /// so both pressure gauge conventions stay those of the flag-off steps.
+    pub rotational: bool,
 }
 
 impl Default for NavierConfig {
@@ -204,6 +226,7 @@ impl Default for NavierConfig {
             verbose: true,
             pressure_amg: false,
             convection_stabilization: ConvectionStabilization::Off,
+            rotational: false,
         }
     }
 }
@@ -341,6 +364,26 @@ pub trait NavierDiscretization {
     /// 2-D/3-D choice out of `Step` via `pmesh->Dimension()`).
     fn compute_curl_3d(&self, _u: &[f64]) -> Vec<f64> {
         unimplemented!("ComputeCurl3D requires a 3-D discretization");
+    }
+    /// The pressure-space representation of `∇·u` consumed by the D952
+    /// rotational pressure correction ([`NavierConfig::rotational`]): given
+    /// the end-of-step velocity `u`, return `n_pres()` values `δp` with
+    /// `δp ≈ ∇·u` **in pressure DOF space**.  The discretization owns both
+    /// the divergence convention (which weak-divergence form / matrix) and
+    /// the projection choice (e.g. the L² projection `M_p⁻¹·(D·u)`); the
+    /// kernel only scales by `−ν` and adds the result to the step pressure
+    /// (skipping the essential pressure DOFs, re-applying `MeanZero` on the
+    /// pure-Neumann path).
+    ///
+    /// Never called with [`NavierConfig::rotational`] = `false`; the default
+    /// aborts loudly so a discretization that does not implement the
+    /// rotational-correction representation cannot silently run a no-op
+    /// (the [`Self::assemble_upwind_defect`] contract pattern).
+    fn rotational_divergence_pressure(&self, _u: &[f64]) -> Vec<f64> {
+        panic!(
+            "NavierConfig::rotational requires the discretization to implement \
+             `rotational_divergence_pressure`"
+        );
     }
     /// `un_next_gf.ProjectBdrCoefficient(coeff, attr)` — overwrite the
     /// velocity Dirichlet DOFs of `out` with the data at time `t` (interior
@@ -1002,6 +1045,85 @@ impl<D: NavierDiscretization> NavierSolver<D> {
         }
         self.pn = pn;
 
+        // D952 Timmermans rotational pressure correction (opt-in,
+        // `NavierConfig::rotational`): the classical scheme's pressure comes
+        // from the *extrapolated* velocity's curl-curl alone, which leaves an
+        // O(dt) splitting term in the end-of-step velocity; the rotational
+        // split adds `p^{n+1} += −ν·∇·ũ^{n+1}` (Timmermans, Minev & Van De
+        // Vosse 1995) with ũ^{n+1} the PURE VISCOUS split velocity.  This
+        // branch realizes that sequencing on top of the step above: one extra
+        // Helmholtz solve without the pressure drive gives ũ, its pressure-
+        // space divergence forms the correction, and `pn` is REPLACED by the
+        // corrected `pc` — the projection solve below then consumes exactly
+        // the rotational-corrected pressure (a post-step pressure patch alone
+        // would be dynamics-dead: the next step's Poisson solve never consumes
+        // `pn` as state — measured, round-133 lane 3).  Essential pressure
+        // DOFs keep their Dirichlet data; `MeanZero` is re-applied on the
+        // pure-Neumann path.  The default (`rotational = false`) never
+        // executes this branch — the step stays bit-identical to the MFEM
+        // path.
+        if self.cfg.rotational {
+            // Viscous split: ũ = H⁻¹·(Mv·fext) — the momentum BDF step with
+            // NO pressure drive (the same `h` the projection solve below
+            // uses; essential velocity rows keep their Dirichlet values).
+            let mut resu_visc = vec![0.0_f64; nv];
+            self.mv.spmv(&fext, &mut resu_visc);
+            self.disc.project_velocity_bdr(t_now, &mut self.vel.un_next);
+            let mut b_visc = resu_visc;
+            if !vel_ess.is_empty() {
+                let vals: Vec<f64> = vel_ess.iter().map(|&d| self.vel.un_next[d]).collect();
+                self.disc.eliminate_bc(&mut h, &mut b_visc, &vel_ess, &vals);
+            }
+            {
+                let hd = &self.h_diag;
+                let apply = |x: &[f64], y: &mut [f64]| h.spmv(x, y);
+                let jac = |r: &[f64], z: &mut [f64]| {
+                    for i in 0..r.len() {
+                        z[i] = r[i] / hd[i];
+                    }
+                };
+                let res = solve_cg_mfem(
+                    nv,
+                    apply,
+                    &b_visc,
+                    &mut self.vel.un_next,
+                    Some(jac),
+                    &SliOptions {
+                        rel_tol: self.cfg.rtol_hsolve,
+                        abs_tol: 0.0,
+                        max_iter: 200,
+                        print_level: self.cfg.pl_hsolve,
+                    },
+                    true,
+                    None,
+                );
+                let _ = (res.iterations, res.final_norm); // the viscous pre-solve is not the step's HELM record
+            }
+            // Rotational term: pc = pn − ν·Π(∇·ũ).
+            let div_u = self.disc.rotational_divergence_pressure(&self.vel.un_next);
+            assert_eq!(
+                div_u.len(),
+                npl,
+                "rotational_divergence_pressure must return n_pres values"
+            );
+            let mut pc = self.pn.clone();
+            let mut ess = pres_ess.iter();
+            let mut next_ess = ess.next();
+            for (i, d) in div_u.iter().enumerate() {
+                if next_ess.is_some_and(|e| *e == i) {
+                    next_ess = ess.next();
+                    continue;
+                }
+                pc[i] -= self.kin_vis * d;
+            }
+            if pres_ess.is_empty() {
+                // MeanZero(pc): the pure-Neumann gauge convention of every
+                // completed step (same as after the Poisson solve above).
+                self.disc.mean_zero(&mut pc);
+            }
+            self.pn = pc;
+        }
+
         // Project velocity: resu = -G·pn + Mv·Fext.
         let mut resu = vec![0.0_f64; nv];
         self.g.spmv(&self.pn, &mut resu);
@@ -1275,6 +1397,11 @@ mod tests {
         /// `eliminate_bc` records the essential DOF sets it saw.
         elim_calls: std::cell::RefCell<Vec<Vec<usize>>>,
         cv: std::cell::Cell<f64>,
+        /// `rotational_divergence_pressure` override (the D952 toy channel):
+        /// `None` reproduces the loud default (the disc does not support the
+        /// rotational correction); `Some(v)` returns the hand-set `v` so the
+        /// kernel's `−ν·δp` update is checkable by hand.
+        rot_div: std::cell::RefCell<Option<Vec<f64>>>,
     }
 
     impl ToyDisc {
@@ -1287,6 +1414,7 @@ mod tests {
                 h_calls: std::cell::RefCell::new(Vec::new()),
                 elim_calls: std::cell::RefCell::new(Vec::new()),
                 cv: std::cell::Cell::new(0.0),
+                rot_div: std::cell::RefCell::new(None),
             }
         }
 
@@ -1392,6 +1520,16 @@ mod tests {
         fn compute_cfl(&self, u: &[f64], dt: f64) -> f64 {
             self.cv.set(dt * u.iter().fold(0.0_f64, |m, &v| m.max(v.abs())));
             self.cv.get()
+        }
+        fn rotational_divergence_pressure(&self, _u: &[f64]) -> Vec<f64> {
+            match self.rot_div.borrow().as_ref() {
+                Some(v) => v.clone(),
+                None => panic!(
+                    "ToyDisc: rotational_divergence_pressure override not set — \
+                     the loud-default path (NavierConfig::rotational on a disc \
+                     without the representation) aborts here"
+                ),
+            }
         }
         fn eliminate_bc(
             &self,
@@ -1598,5 +1736,82 @@ mod tests {
         s.step(&mut t, 0.05, 1, false);
         assert_eq!(t, 0.05);
         assert_eq!(s.dthist, [0.05, 0.05, 0.0]);
+    }
+
+    /// D952 rotational-correction wiring (kernel level, hand-checked on the
+    /// toy disc): with `NavierConfig::rotational` the step pressure gains
+    /// exactly `−ν·δp` (the disc's `rotational_divergence_pressure` output),
+    /// essential pressure DOFs keep their Dirichlet value, and the
+    /// pure-Neumann path re-applies `MeanZero` — i.e. the correction rides
+    /// on top of an otherwise identical flag-off step.
+    #[test]
+    fn rotational_correction_updates_pressure_by_minus_nu_div_u() {
+        let nu = 0.37;
+        let div = vec![3.0_f64, -1.0];
+        let run = |rotational: bool, dirichlet: bool| -> Vec<f64> {
+            let disc = ToyDisc::new(2, 2, dirichlet);
+            disc.rot_div.replace(Some(div.clone()));
+            let mut s = NavierSolver::new(
+                disc,
+                nu,
+                NavierConfig { verbose: false, rotational, ..Default::default() },
+            );
+            s.velocity_mut().copy_from_slice(&[0.5, -0.25]);
+            s.setup(0.1);
+            let mut t = 0.0;
+            s.step(&mut t, 0.1, 0, false);
+            s.pressure().to_vec()
+        };
+        // Pure-Neumann rig (vel_ess = [0], no pressure BC): the flag-off
+        // step is mean-zero, and the correction shifts by −ν·(δp − mean δp).
+        let base = run(false, true);
+        let rot = run(true, true);
+        let mean_div = (div[0] + div[1]) / 2.0;
+        for i in 0..2 {
+            let expect = base[i] - nu * (div[i] - mean_div);
+            assert!(
+                (rot[i] - expect).abs() < 1e-12,
+                "pure-Neumann pn[{i}]: {} vs expected {expect}",
+                rot[i]
+            );
+        }
+        // Pressure-Dirichlet rig (pres_ess = [0]): the essential dof keeps
+        // the projected BC value; the free dof takes the raw `−ν·δp` with no
+        // mean shift.
+        let base_d = run(false, false);
+        let rot_d = run(true, false);
+        assert!(
+            (rot_d[0] - base_d[0]).abs() < 1e-12,
+            "essential pressure dof moved: {} vs {}",
+            rot_d[0],
+            base_d[0]
+        );
+        assert!(
+            (rot_d[1] - (base_d[1] - nu * div[1])).abs() < 1e-12,
+            "free pressure dof: {} vs expected {}",
+            rot_d[1],
+            base_d[1] - nu * div[1]
+        );
+    }
+
+    /// The loud default: `NavierConfig::rotational` on a discretization
+    /// without `rotational_divergence_pressure` support must abort, not
+    /// silently run the classical scheme as if the flag were off.
+    #[test]
+    #[should_panic(expected = "rotational_divergence_pressure")]
+    fn rotational_flag_without_disc_support_aborts_loudly() {
+        let disc = ToyDisc::new(2, 2, true); // rot_div stays None
+        let mut s = NavierSolver::new(
+            disc,
+            0.1,
+            NavierConfig {
+                verbose: false,
+                rotational: true,
+                ..Default::default()
+            },
+        );
+        s.setup(0.1);
+        let mut t = 0.0;
+        s.step(&mut t, 0.1, 0, false);
     }
 }
