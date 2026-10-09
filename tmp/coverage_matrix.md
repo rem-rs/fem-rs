@@ -184,6 +184,15 @@
   下波单例构建+diff 即可裁断。逐例行与证据：`tmp/ledger/examples_ledger.md` round-130
   增量节 + `tmp/rr130mfem/` + `tmp/rr130/mfem/REPORT.md`。
 
+- **round 131 增量（MFEM lane：RUN→BIT 第七波，HEAD 4ecd5c34）**：**ex10 升 BIT**
+  ——**零代码改动一次裁决通过**（r130 预判命中）：D92B Newton/MINRES/DSmoother
+  逐位移植 + D842-2 glibc_pow 入库即达；C++ 真值 = rr130 快照复用（本轮 WSL
+  `$HOME/work/ex10close/` 复跑 diff 逐字节 IDENTICAL 防漂移门通过）；1350 行 stdout
+  **cmp 逐字节全等（0 豁免）**、两侧 rc=0，全部 Newton ‖r‖ = C++（r84 iter1 漂移
+  确证 = D842-2 已闭合；诊断行走 stderr）。**串行 examples BIT 18 → 19**。ex4
+  stretch 见 ledger round-131 节。逐例行与证据：`tmp/ledger/examples_ledger.md`
+  round-131 增量节 + `tmp/rr131mfem/` + `tmp/rr131/mfem/REPORT.md`。
+
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
 1. **examples/miniapps 逐个三态台账**——**round-117 已执行并关闭**：一次性批跑（examples 44 串行 +
