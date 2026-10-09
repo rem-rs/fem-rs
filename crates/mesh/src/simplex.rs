@@ -4235,6 +4235,130 @@ pub fn tet_volume(mesh: &Mesh<3>, elem: u32) -> f64 {
     det.abs() / 6.0
 }
 
+// ─── make_cartesian_3d pins (rr132 OF-3D lane) ──────────────────────────────
+//
+// The builder itself predates this round (MFEM MakeCartesian3D parity,
+// verified against the reference `libmfem.a`); these pins cover the
+// identities its downstream incompressible-flow consumer relies on:
+// counts/Euler, cell volumes, per-tag face counts and the outward
+// orientation of the emitted boundary quads (the boundary `CalcOrtho`
+// convention of fem-assembly).
+
+#[cfg(test)]
+mod cartesian_3d_tests {
+    use super::*;
+    use crate::MeshTopology;
+
+    /// Counts + Euler identity `V − E + F − C = 1` (ball decomposition) on a
+    /// non-cubic 2×3×4 grid, and the per-tag face counts of the MFEM 3-D
+    /// attribute convention (1 bottom / 2 front / 3 right / 4 back / 5 left /
+    /// 6 top).
+    #[test]
+    fn cartesian_3d_counts_euler_and_tags() {
+        let (nx, ny, nz) = (2usize, 3usize, 4usize);
+        let m = Mesh::<3>::make_cartesian_3d(
+            nx, ny, nz, ElementType::Hex8, 2.0, 3.0, 4.0, false,
+        );
+        assert_eq!(m.n_nodes(), (nx + 1) * (ny + 1) * (nz + 1));
+        assert_eq!(m.n_elems(), nx * ny * nz);
+        assert_eq!(m.elem_type, ElementType::Hex8);
+        m.check().expect("mesh check");
+
+        let mut m2 = m.clone();
+        m2.build_edge_connectivity();
+        m2.build_face_to_elem();
+        // Every boundary face must have an owner (build_face_to_elem matched
+        // the emitted quads against the hexes' local face tables).
+        let fte = m2.face_to_elem.clone().expect("built");
+        for f in 0..m2.n_faces() as u32 {
+            assert!(
+                fte[f as usize] != ElemId::MAX,
+                "boundary face {f} has no owner"
+            );
+        }
+
+        let v = m2.n_nodes() as i64;
+        let e = m2.n_edges() as i64;
+        // The mesh stores boundary faces only; the interior faces of the
+        // structured grid complete the count.
+        let interior = ((nx - 1) * ny * nz + nx * (ny - 1) * nz + nx * ny * (nz - 1)) as i64;
+        let f = m2.n_faces() as i64 + interior;
+        let c = m2.n_elems() as i64;
+        assert_eq!(v - e + f - c, 1, "Euler (ball): V−E+F−C = 1");
+
+        let mut per_tag: std::collections::BTreeMap<i32, usize> = Default::default();
+        for b in 0..m2.n_faces() as u32 {
+            *per_tag.entry(m2.face_tag(b)).or_default() += 1;
+        }
+        assert_eq!(per_tag[&1], nx * ny); // bottom
+        assert_eq!(per_tag[&2], nx * nz); // front
+        assert_eq!(per_tag[&3], ny * nz); // right
+        assert_eq!(per_tag[&4], nx * nz); // back
+        assert_eq!(per_tag[&5], ny * nz); // left
+        assert_eq!(per_tag[&6], nx * ny); // top
+    }
+
+    /// The straight hexes are affine unit cells: the centre Jacobian
+    /// determinant of every element equals the cell volume and the total
+    /// volume sums to `sx·sy·sz`.
+    #[test]
+    fn cartesian_3d_cell_volumes() {
+        let (nx, ny, nz, sx, sy, sz) = (3usize, 2usize, 4usize, 1.5, 0.8, 2.0);
+        let m = Mesh::<3>::make_cartesian_3d(
+            nx, ny, nz, ElementType::Hex8, sx, sy, sz, false,
+        );
+        let cell = (sx / nx as f64) * (sy / ny as f64) * (sz / nz as f64);
+        let mut vol = 0.0_f64;
+        for e in 0..m.n_elems() as u32 {
+            let (_j, det, _xp) = m.element_jacobian(e, &[0.5, 0.5, 0.5]);
+            assert!((det - cell).abs() < 1e-12, "elem {e}: det {det} vs {cell}");
+            vol += det;
+        }
+        assert!((vol - sx * sy * sz).abs() < 1e-12);
+    }
+
+    /// Boundary orientation: `Σ_f ∫_f n ds` per tag, computed from the emitted
+    /// corner order as the cross product `(p1−p0)×(p3−p0)` of the two
+    /// parameter tangents, must equal the outward area vector of the
+    /// corresponding box side — the convention fem-assembly's boundary-face
+    /// geometry (`CalcOrtho` analogue) reads off the face node order.
+    #[test]
+    fn cartesian_3d_face_normals_outward() {
+        let (nx, ny, nz, sx, sy, sz) = (2usize, 2usize, 2usize, 2.0, 3.0, 5.0);
+        let m = Mesh::<3>::make_cartesian_3d(
+            nx, ny, nz, ElementType::Hex8, sx, sy, sz, false,
+        );
+        let mut acc: std::collections::BTreeMap<i32, [f64; 3]> = Default::default();
+        for b in 0..m.n_faces() as u32 {
+            let ns = m.bface_nodes(b);
+            assert_eq!(ns.len(), 4);
+            let p = |k: usize| {
+                let c = m.coords_of(ns[k]);
+                [c[0], c[1], c[2]]
+            };
+            let (p0, p1, p3) = (p(0), p(1), p(3));
+            let mut nds = [0.0_f64; 3];
+            for i in 0..3 {
+                let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+                nds[i] = (p1[j] - p0[j]) * (p3[k] - p0[k]) - (p1[k] - p0[k]) * (p3[j] - p0[j]);
+            }
+            let a = acc.entry(m.face_tag(b)).or_insert([0.0; 3]);
+            for i in 0..3 {
+                a[i] += nds[i];
+            }
+        }
+        let close = |a: [f64; 3], b: [f64; 3]| {
+            a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12)
+        };
+        assert!(close(acc[&1], [0.0, 0.0, -(sx * sy)]), "bottom {:?}", acc[&1]);
+        assert!(close(acc[&2], [0.0, -(sx * sz), 0.0]), "front {:?}", acc[&2]);
+        assert!(close(acc[&3], [sy * sz, 0.0, 0.0]), "right {:?}", acc[&3]);
+        assert!(close(acc[&4], [0.0, sx * sz, 0.0]), "back {:?}", acc[&4]);
+        assert!(close(acc[&5], [-(sy * sz), 0.0, 0.0]), "left {:?}", acc[&5]);
+        assert!(close(acc[&6], [0.0, 0.0, sx * sy]), "top {:?}", acc[&6]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
