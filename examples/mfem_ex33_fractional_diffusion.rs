@@ -343,12 +343,15 @@ struct Args {
 }
 
 fn parse_args() -> Args {
+    // Defaults = MFEM ex33.cpp:96-101 (order 1, refs 3, alpha 0.5,
+    // visualization true) — round-135 D1258 closure: the old Rust-only
+    // defaults (`-o 2 --alpha 0.33`, vis false) were a 1:1 fidelity deviation.
     let mut a = Args {
         mesh: "data/star.mesh".to_string(),
-        order: 2,
+        order: 1,
         refs: 3,
-        alpha: 0.33,
-        visualization: false,
+        alpha: 0.5,
+        visualization: true,
         verification: false,
     };
     let mut it = std::env::args().skip(1);
