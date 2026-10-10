@@ -29,15 +29,20 @@ fn main() {
     let args = parse_args();
 
     // 1. Load the mesh (MFEM ex0 default: ../data/star.mesh).
-    let mesh = if let Some(ref path) = args.mesh_file {
-        let mfem = fem_io::mfem::read_mfem_file(path).unwrap_or_else(|e| {
-            panic!("Failed to read MFEM mesh '{}': {}", path, e)
+    let mesh_file = args
+        .mesh_file
+        .clone()
+        .unwrap_or_else(|| "data/star.mesh".to_string());
+    // MFEM 4.10 `OptionsParser::ParseCheck` prints the Options block
+    // (optparser.cpp ParseCheck → PrintOptions) before anything else.
+    println!("Options used:");
+    println!("   --mesh {}", mesh_file);
+    println!("   --order {}", args.order);
+    let mesh = {
+        let mfem = fem_io::mfem::read_mfem_file(&mesh_file).unwrap_or_else(|e| {
+            panic!("Failed to read MFEM mesh '{}': {}", mesh_file, e)
         });
         mfem.mesh2d.expect("only 2-D meshes are supported in this example")
-    } else {
-        let mfem = fem_io::mfem::read_mfem_file("data/star.mesh")
-            .expect("failed to read default mesh data/star.mesh");
-        mfem.mesh2d.expect("star.mesh must be a 2-D mesh")
     };
 
     // 2. Uniform refinement (matches MFEM ex0's `mesh.UniformRefinement()`).
@@ -68,8 +73,9 @@ fn main() {
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
     // 7. Solve with PCG + GSSmoother (MFEM ex0: GSSmoother M(A); PCG(A, M, B, X,
-    //    1, 200, 1e-12, 0.0) — print_level=1, max_iter=200, RTOLERANCE=1e-12,
-    //    atol=0).  MFEM's PCG() helper calls SetRelTol(sqrt(RTOLERANCE)), so the
+    //    1, 200, 1e-12, 0.0) — print_level=1 (full iteration history + ARF in
+    //    MFEM 4.10's legacy PCG), max_iter=200, RTOLERANCE=1e-12, atol=0).
+    //    MFEM's PCG() helper calls SetRelTol(sqrt(RTOLERANCE)), so the
     //    CGSolver rel_tol is sqrt(1e-12) = 1e-6 — our SolverConfig::rtol carries
     //    the rel_tol semantics (see commit 0912343), hence 1e-6 here.
     let mut u = vec![0.0_f64; n_dofs];
