@@ -586,11 +586,10 @@ fn main() {
         ti += 1;
         done = t >= args.t_final - 1e-8 * args.dt;
         if done || ti % args.vis_steps == 0 {
-            // MFEM prints `time: t` with the default ostream precision (6
-            // significant digits).
-            let norm = u_vec.iter().map(|&x| x * x).sum::<f64>().sqrt();
-            let sum: f64 = u_vec.iter().sum();
-            println!("time step: {ti}, time: {}, ||u|| = {norm:.6e}, sum = {sum:.6e}", fem_solver::fmt_g(t));
+            // MFEM prints `time step: ti, time: t` with the default ostream
+            // precision (6 significant digits) — no extra diagnostic columns
+            // (round-135: the ‖u‖/sum columns were a Rust-only scaffold).
+            println!("time step: {ti}, time: {}", fem_solver::fmt_g(t));
         }
         // Dump first 10 dofs at final step for cross-checking
         if done {
