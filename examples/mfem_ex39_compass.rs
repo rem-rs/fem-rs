@@ -55,7 +55,12 @@ fn main() {
     println!("   --order {order}");
     println!("   --source-attr-name {}", source_name);
     println!("   --ess-attr-name {}", ess_name);
-    if !visualization { println!("   --no-visualization"); }
+    // MFEM PrintOptions prints exactly one long_name of each bool pair,
+    // selected by value (ex39.cpp registers -vis/-no-vis) — vis defaults true.
+    println!(
+        "   {}",
+        if visualization { "--visualization" } else { "--no-visualization" }
+    );
 
     // 2. Read the mesh from the given GMSH mesh file.
     let msh = read_msh_file(&mesh_file).expect("read mesh");
@@ -237,5 +242,4 @@ fn main() {
     let _ = fem_io::mfem::write_mfem_gf_file("sol.gf", 2, &x, "H1", order as u8, 1, 16);
 
     // 14. (GLVis visualization is not supported; prints nothing.)
-    let _ = visualization;
 }
