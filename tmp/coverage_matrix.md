@@ -259,6 +259,27 @@
   位级算法未回刻（ulp 级不进打印，探针实证）；其余 DG 装配器互零贯通待
   各自示例对齐。证据：`tmp/rr136lane1/` + `fem-pro/tmp/rr136/lane1/`。
 
+- **round 138 增量（Lane 3：RUN→BIT 第九波，基线 138f6596，本地 commit 待主
+  会话验证推送）**：**两案晋级——ex25（24th）/ ex37（25th）升 BIT，全部 cmp
+  逐字节全等 0 豁免**（ex25 9295B sha256 28059a62…、ex37 4765B sha256
+  d2c29c4f…），C++ 真值现编现跑（`$HOME/work/rr138/`，mfem410_ser
+  g++ -std=c++17 -O3；ex25 mesh 用 fem-rs data 副本——与 mfem410_ser 树内件
+  仅 CRLF/LF 行尾差，内容逐字节同）。**D1280 分诊先行**：两例 C++ 源 0 处
+  `PrintInfo`、均不打印 SparseMatrix 统计块，rr136 已闭的 D1280 不构成依赖。
+  修复全在示例侧（零 crate 改动）：ex25 = GMRES 换库件
+  `fem_solver::block_operator::mfem_gmres`（D767 既有忠实移植，print_level 1
+  `   Pass : %2d   Iteration : %3d  ||B r|| = %g` 族 = Lane 6 点名打印差的
+  根，ex25.cpp:498-506 逐项配置 + 块对角 GS|s·GS 闭包）+ 打印族对齐（删
+  `Mode:`/摘要/`‖E‖`/`Wrote…` 四类 Rust 独有行、未知数行去前导空行、误差块
+  `%g` 化 + 尾随空行、Options DOUBLE 值 `fmt_g` 化）——166 it 轨迹逐字节
+  （iter0 0.00925569 → iter166 9.10426e-08）；ex37 = step 表 4 行 `{:.6}` →
+  `fmt_g` + 删 `Final step:`/`Final compliance:` Rust 独有尾块 + 死代码
+  `step` 变量删除——33 步全表逐字节，停机步两侧一致（Step 33）。旧 d89main
+  cpp_ex25 截断快照（止于 iter166）的作废口径由本轮全量 oracle 取代。
+  门：两示例 release 0 错误 0 新警告（存量 = LNK4044 dup + vendor/linlvo）。
+  **串行 examples BIT = 24 件 distinct**。证据：`fem-rs/tmp/rr138lane3/` +
+  `fem-pro/tmp/rr138/lane3/REPORT.md`。
+
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
 1. **examples/miniapps 逐个三态台账**——**round-117 已执行并关闭**：一次性批跑（examples 44 串行 +

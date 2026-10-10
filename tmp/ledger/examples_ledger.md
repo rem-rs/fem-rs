@@ -112,7 +112,7 @@ scatter 贯通待各自示例对齐。
 | mfem_ex33_fractional_diffusion | ex33 | 默认 star（= C++ 默认 `-o 1 -alpha 0.5`） | **BIT**（r91 档 + **r135 默认档**） | logs/… + `tmp/rr135lane6/ex33_{rs,cpp}.out` | rc=0；AAA 模块与 spde 共享（那边有逐位锚点），本示例无逐字节记录。**round-84:** 重验 OK——与 r61 记录仅 1 处末位显示差（iter120 `6.40485e-27`→`6.40484e-27`，噪声级），ARF 0.795112 其余逐字同。**round-135:** **D1258 闭**——默认值对齐 C++ ex33.cpp:96-101（order 1/alpha 0.5/refs 3/vis true，旧 Rust-only `-o 2 --alpha 0.33` 系 1:1 偏差）；`-m data/star.mesh -no-vis` 默认档 2599 字节 cmp 逐字节全等（sha256 9f9ce65f…，0 豁免），oracle 现编现跑 `$HOME/work/rr135/ex33` |
 | mfem_ex34_magnetostatics | ex34 | 默认 fichera-mixed | RUN | logs/… | rc=0（SubMesh 电流密度链路完成） |
 | mfem_ex36_obstacle | ex36 | 默认 disc_p2 `-no-vis` | **BIT**（r135） | logs/… + `tmp/rr135lane6/ex36_{rs,cpp}.out` | rc=0（proximal Galerkin Newton 完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，L2/H1 误差行逐字同）。**round-135:** 升 **BIT**——示例内手写 %g 克隆 `cpp_6`（单数位指数 `e-5`）换库件 `fem_solver::fmt_g`（C++ ostream 两位指数 `e-05`），迁移后删除（死代码零容忍）；`Newton_update_size` 行两侧都由 visualization 门控（ex36.cpp:310 = 1:1，保留）；`-no-vis` 1822 字节 cmp 逐字节全等（sha256 c0942ea7…，0 豁免）；新鲜 C++ 与 d89main 快照逐字节同（死快照疑虑清除） |
-| mfem_ex37_topology_optimization | ex37 | 默认 | RUN | logs/… | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Final step 33 / compliance 0.003875） |
+| mfem_ex37_topology_optimization | ex37 | 默认 | **BIT**（r138） | logs/… + `tmp/rr138lane3/ex37_{cpp,rs}.out` | rc=0。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Final step 33 / compliance 0.003875）。**round-138:** 升 **BIT（serial 25th）**——step 表 4 行 `{:.6}` 定点小数换库件 `fem_solver::fmt_g`（C++ ostream 默认 6 位有效数字 %g）+ 删 Rust 独有 `Final step:`/`Final compliance:` 尾块（C++ 循环外无打印）+ 随之死代码 `step` 变量删除（死代码零容忍）；`-no-vis` 4765 字节 stdout 与 C++ 现编现跑（`$HOME/work/rr138/ex37_cpp`）**cmp 逐字节全等（0 豁免，sha256 d2c29c4f…）**——33 步全表（Step 1 nrg 0.0296232 → Step 33 nrg 9.09975e-06 / compliance 0.00387521）逐字节，停机步两侧一致（Step 33 双判据 nrg<1e-4 ∧ inc 0.00990963<1e-2） |
 | mfem_ex38_implicit_integration | ex38 | 默认 surface2d | RUN | logs/… | rc=0（moment-fitting 求积完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Surface 误差 5.4492670572e-5 逐字同） |
 | mfem_ex39_compass | ex39 | `-m data/compass.msh` | **BIT**（r135） | logs/… + `tmp/rr135lane6/ex39_{rs,cpp}.out` | rc=0（命名属性集链路完成）。**round-135:** 升 **BIT**——bool 选项回声按值打配对 long_name（MFEM PrintOptions 语义；旧版 vis=true 时不打 `--visualization` 行）；371 行 PCG 轨迹 + ARF 0.963046 本就逐字节；16336 字节 cmp 全等（sha256 07885bba…，0 豁免）；**首个新鲜 compass.msh oracle**（d89main 快照 = mesh 缺失 abort，D1259 确认死件），现编现跑 `$HOME/work/rr135/ex39` |
 | mfem_ex40_eikonal | ex40 | 默认 star | RUN | logs/… | rc=0（阻尼拟牛顿完成）。**round-84:** 重验 rc=0；终值 `0.026921483748254076` = r65 D674 真值反转后的 C++ 对齐锚（C++ 0.0269214）✓；Newton 轨迹行 vs r61 记录的差异属 D674 修正预期传导；页脚 Outer 5/Total 6/15520 不变 |
@@ -906,3 +906,52 @@ scatter 贯通待各自示例对齐。
   vendor/linlvo）；`cargo test -p fem-solver --release` 294/0（新增库件纯增量，
   未触碰 CgTrailerGates/fmt_g 既有路径）；构建脚手架未动，工作树遗留脏件
   （pyc/_core.pyd/rundir 场文件）未触碰。
+
+## round 138 增量（Lane 3：RUN→BIT 第九波，基线 138f6596）
+
+> 任务 = Lane 6（rr135）下轮候选点名的 ex25/ex37 晋级。C++ 真值现编现跑
+> （`$HOME/mfem410_ser`，g++ -std=c++17 -O3，工件 `$HOME/work/rr138/`；ex25 侧
+> mesh 用 fem-rs `data/inline-quad.mesh` 副本——与 mfem410_ser 树内件仅行尾
+> CRLF/LF 差、内容 `tr -d '\r'` 后逐字节同）；Rust 侧 release
+> （`CARGO_TARGET_DIR=D:/fem-pro-targets/femrs-rr135` 热靶）。两侧同
+> `-m data/inline-quad.mesh`（ex25）/无参（ex37）+ `-no-vis`，从各自 run 目
+> 录对拍。证据：`fem-rs/tmp/rr138lane3/` + `fem-pro/tmp/rr138/lane3/`。
+
+- **D1280 分诊（先行，Lane 指令第一问）**：ex25/ex37 **均不打印 SparseMatrix
+  统计块**（两例 C++ 源 0 处 `PrintInfo`；打印面 = PrintOptions 回声 + 迭代
+  日志 + 步表）——D1280（rr136 已闭 `75b1cf8d`）对本轮两案**不构成依赖**，
+  晋级路径不受挡。
+- **ex25 升 BIT（serial 24th，求解器栈 + 打印族双修）**：
+  - 求解器换库件 `fem_solver::block_operator::mfem_gmres`（D767 为 ex22 建的
+    MFEM `GMRESSolver::Mult` 忠实移植：preconditioned 残差停机判据 + `w = M·A·vᵢ`
+    Arnoldi 序 + `   Pass : %2d   Iteration : %3d  ||B r|| = %g` 打印族 +
+    `Restarting...` 行）。配置 = ex25.cpp:498-506 逐项（KDim 200 / MaxIter 2000 /
+    RelTol 1e-5 / AbsTol 0 / print_level 1 / iterative_mode true——MFEM
+    `IterativeSolver` 构造 `Solver(0, true)`，operator.hpp:871）；块对角预条件
+    （GS | s·GS，s = −1 HERMITIAN）改经闭包逐半区施加。旧 linlvo GMRES 通道
+    （`solve_gmres_precond` + `BlockDiagPrecondPair`）退役出本示例。
+  - 打印族对齐：删 Rust 独有 `  Mode: ND` / GMRES 单行摘要 / `  ||E|| =` /
+    `  Wrote …` 四类行（含随之死代码 sol_norm）；未知数行去前导空行
+    （C++ 无 `\n` 前缀）；误差块三值 `%g` 化（`fmt_g`）+ C++ 尾随 `"\n\n"`
+    的空行补齐；Options DOUBLE 值（mu/eps/freq）`fmt_g` 化
+    （OptionsParser::WriteValue = `os << real_t` %g 口径）。
+  - 对拍：`-m data/inline-quad.mesh -no-vis` **9295 字节 cmp 逐字节全等
+    （0 豁免，sha256 28059a62…）**——166 it GMRES 全轨迹逐字节
+    （iter0 0.00925569 → iter166 9.10426e-08，`‖B r‖` 族 Lane 6 点名的打印差
+    即此）；prob=4 loadsrc 无误差块、无 summary 行，两侧一致。
+- **ex37 升 BIT（serial 25th，纯打印层）**：step 表 4 行（norm of the reduced
+  gradient / norm of the increment / compliance / volume fraction）
+  `{:.6}` 定点小数换库件 `fem_solver::fmt_g`（C++ ostream 默认 6 位有效数字）；
+  删 Rust 独有 `Final step:`/`Final compliance:` 尾块（C++ 循环外无打印）+
+  随之死代码 `step` 变量删除。对拍：`-no-vis` **4765 字节 cmp 逐字节全等
+  （0 豁免，sha256 d2c29c4f…）**——33 步全表逐字节，停机步两侧一致（Step 33
+  nrg 9.09975e-06 < 1e-4 ∧ increment 0.00990963 < 1e-2）；Options 回声 14 行与
+  未知数 3 行（25090/12545/12288）本轮已逐字，未动。
+- **BIT 计数：22 → 24 件 distinct**（ex25 = 24th、ex37 = 25th；ex17 = 23rd
+  已在 rr136）。
+- **门自查**：两示例 release 构建 0 错误、0 新警告（fem-examples 全部 warning =
+  预存 LNK4044 /ffast-math 链接器 dup + vendor/linlvo 第三方存量，build2.log
+  25 条均为此两类）；**零 crate 改动**（ex25 复用 D767 既有库件
+  `mfem_gmres`/`MfemGmresConfig`、rr135 既有库件 `fmt_g`——「示例是手段、核心库
+  才是目的」，本轮无新核心缺陷暴露）；两例均无 example 级测试；
+  stderr 双侧 0 字节（无 D836 口径豁免项）；工作树历轮遗留脏件未触碰。

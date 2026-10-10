@@ -29,7 +29,7 @@ use fem_assembly::{
 use fem_element::ReferenceElement;
 use fem_linalg::{SolverConfig, PrintLevel};
 use fem_mesh::{Mesh, topology::MeshTopology, element_jacobian_at};
-use fem_solver::solve_pcg_gssmoother;
+use fem_solver::{fmt_g, solve_pcg_gssmoother};
 use fem_space::{
     H1Space, FESpace, L2Basis, L2Space, VectorH1Space,
     constraints::{boundary_dofs, eliminate_dirichlet, expand_from_reduced},
@@ -743,7 +743,6 @@ fn main() {
     // 8. Optimization loop
     let mut rho_filter_dofs = vec![args.vol_frac; n_filter];
     let mut u = vec![0.0_f64; n_state];
-    let mut step = 0usize;
     let mut alpha = args.alpha;
 
     for k in 1..=args.max_it {
@@ -805,19 +804,16 @@ fn main() {
         // h) Compliance = (f,u)
         let compliance: f64 = rhs_state.iter().zip(u.iter()).map(|(f, uu)| f * uu).sum();
 
-        println!("norm of the reduced gradient = {norm_reduced_gradient:.6}");
-        println!("norm of the increment = {norm_increment:.6}");
-        println!("compliance = {compliance:.6}");
-        println!("volume fraction = {:.6}", material_volume / domain_vol);
-
-        step = k;
+        // C++ ex37.cpp:392-397 — `mfem::out << value` with the default stream
+        // precision (6 significant digits, %g); fmt_g is the lib-level %g
+        // formatter (rr135 统一口径), byte-equal to the C++ stream inserts.
+        println!("norm of the reduced gradient = {}", fmt_g(norm_reduced_gradient));
+        println!("norm of the increment = {}", fmt_g(norm_increment));
+        println!("compliance = {}", fmt_g(compliance));
+        println!("volume fraction = {}", fmt_g(material_volume / domain_vol));
 
         if norm_reduced_gradient < args.ntol && norm_increment < args.itol {
             break;
         }
     }
-
-    println!("\nFinal step: {step}");
-    let final_compliance: f64 = rhs_state.iter().zip(u.iter()).map(|(f, uu)| f * uu).sum();
-    println!("Final compliance: {final_compliance:.6}");
 }
