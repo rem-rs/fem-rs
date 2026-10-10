@@ -18,10 +18,14 @@
 //! -o / --order   — polynomial order (default: 1)
 //! -a / --alpha   — DG symmetry parameter (default: -1 = SIP symmetric)
 //! -k / --kappa   — DG penalty (negative ⇒ (order+1)², default: -1)
+//! -vis/-no-vis   — GLVis visualization flag (echo only; default: on)
 
 use fem_assembly::{DgElasticityAssembler, InteriorFaceList};
 use fem_io::mfem::{read_mfem_file, write_mfem_gf_file};
-use fem_solver::{solve_pcg_gssmoother, solve_gmres_gssmoother, PrintLevel, SolverConfig};
+use fem_solver::{
+    fmt_g, print_matrix_info, solve_pcg_gssmoother, solve_gmres_gssmoother, PrintLevel,
+    SolverConfig,
+};
 use fem_space::{fe_space::FESpace, L2Basis, L2Space};
 use fem_mesh::{refine_uniform, element_type::ElementType, topology::MeshTopology};
 
@@ -40,7 +44,15 @@ fn init_displacement(x: &[f64], comp: usize) -> f64 {
 fn main() {
     let args = parse_args();
 
-    println!("=== fem-rs Example 17: DG linear elasticity (SIP) ===");
+    // C++ ex17.cpp:133-136 — kappa default: (order+1)^2 when negative.  The
+    // normalization runs BEFORE PrintOptions (ex17.cpp:137-151), so the echoed
+    // --kappa shows the effective penalty.
+    let kappa = if args.kappa < 0.0 {
+        ((args.order + 1) * (args.order + 1)) as f64
+    } else {
+        args.kappa
+    };
+    let alpha = args.alpha;
 
     // C++ ex17.cpp:139-149 — 2. Read the mesh from the given mesh file.
     let default_mesh = {
@@ -48,6 +60,21 @@ fn main() {
         p.parent().unwrap().parent().unwrap().join("data/beam-tri.mesh").to_string_lossy().to_string()
     };
     let mesh_file = args.mesh_path.as_deref().unwrap_or(&default_mesh);
+
+    // MFEM 4.10 OptionsParser::ParseCheck prints the Options block before
+    // anything else (optparser.cpp ParseCheck → PrintOptions); the bool
+    // visualization pair prints the long_name matching its value.
+    println!("Options used:");
+    println!("   --mesh {}", mesh_file);
+    println!("   --refine {}", args.refine);
+    println!("   --order {}", args.order);
+    println!("   --alpha {}", fmt_g(alpha));
+    println!("   --kappa {}", fmt_g(kappa));
+    println!(
+        "   {}",
+        if args.visualization { "--visualization" } else { "--no-visualization" }
+    );
+
     let mfem = read_mfem_file(mesh_file).expect("failed to read MFEM mesh");
     let mesh = mfem.mesh2d.expect("MFEM mesh must be 2D");
     let dim = 2;
@@ -68,7 +95,6 @@ fn main() {
     } else {
         args.refine as usize
     };
-    println!("  refinements: {}", ref_levels);
     let mesh = if ref_levels > 0 {
         let mut m = mesh;
         for _ in 0..ref_levels {
@@ -84,15 +110,6 @@ fn main() {
     //     C++ uses DG_FECollection(order, dim, BasisType::GaussLobatto) for sparser matrix.
     //     Rust uses L2Space (default basis; Gauss-Lobatto not directly available via this API).
     let order = args.order;
-    println!("  order: {}", order);
-    // C++ ex17.cpp:133-136 — kappa default: (order+1)^2 when negative
-    let kappa = if args.kappa < 0.0 {
-        ((order + 1) * (order + 1)) as f64
-    } else {
-        args.kappa
-    };
-    let alpha = args.alpha;
-    println!("  kappa: {}, alpha: {}", kappa, alpha);
 
     // C++ ex17.cpp:164-171 — 4. DG vector FE space.
     //     C++: DG_FECollection fec(order, dim, BasisType::GaussLobatto) — the
@@ -117,17 +134,14 @@ fn main() {
             mu_elem[e as usize] = 50.0;
         }
     }
-    println!(
-        "  materials: {} elements, λ₁=50/μ₁=50 (attr 1), λ₂=1/μ₂=1 (attr {})",
-        n_elem, max_attr
-    );
-
     // C++ ex17.cpp:203-215 — 8. Assemble RHS (DGElasticityDirichletLFIntegrator)
     //     Rust: hand-coded assemble_dg_elasticity_dirichlet_rhs
     let ifl = InteriorFaceList::build(&mesh);
     let quad_order = (2 * order) as u8;
 
-    println!("Assembling: r.h.s. ...");
+    // C++ streams "Assembling: " (ex17.cpp:181), "r.h.s. ... " (ex17.cpp:219)
+    // and "matrix ... " (ex17.cpp:241) with flushes during assembly, closing
+    // with "done." after FormLinearSystem (ex17.cpp:261) — one stdout line.
     let rhs = assemble_dg_elasticity_dirichlet_rhs(
         &space, dim, kappa, alpha, &lambda_elem, &mu_elem, quad_order, &init_displacement,
     );
@@ -135,7 +149,6 @@ fn main() {
     // C++ ex17.cpp:217-229 — 9. Assemble bilinear form (ElasticityIntegrator + DGElasticityIntegrator)
     //     Rust: DgElasticityAssembler::assemble_sip_elasticity
     let dirichlet_attrs = [1, 2];
-    println!("matrix ...");
     let a_mat = DgElasticityAssembler::assemble_sip_elasticity(
         &space, &ifl, &lambda_elem, &mu_elem,
         kappa, alpha, dim, quad_order, &dirichlet_attrs,
@@ -153,8 +166,10 @@ fn main() {
         atol: 0.0,
         max_iter: 5000,
         verbose: false,
-        // C++ ex17.cpp:255 — PCG(A, M, B, X, 3, 5000, rtol*rtol, 0.0): print level 3.
-        print_level: PrintLevel::Iterations,
+        // C++ ex17.cpp:255 — PCG(A, M, B, X, 3, 5000, rtol*rtol, 0.0): print
+        // level 3 (first_and_last + warnings; no per-iteration history, no
+        // "PCG: Number of iterations" summary line).
+        print_level: PrintLevel::FirstAndLast,
         ..Default::default()
     };
 
@@ -170,6 +185,8 @@ fn main() {
             perm[s * dim + c] = c * n_scalar + s;
         }
     }
+    // a.FormLinearSystem(ess_tdof_list, x, b, A, X, B) — the solve matrix in
+    // MFEM's dof order (ess_tdof_list is empty: no essential BCs in DG).
     let a_nodes = permute_csr(&a_mat, &perm);
     let b_nodes: Vec<f64> = {
         let mut v = vec![0.0_f64; n_total];
@@ -181,45 +198,24 @@ fn main() {
     let mut x_nodes = vec![0.0_f64; n_total];
     let mut x = vec![0.0_f64; n_total];
 
-    let rhs_norm: f64 = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
-    println!("  Initial ‖rhs‖ = {:.4}", rhs_norm);
+    println!("Assembling: r.h.s. ... matrix ... done.");
+
+    // C++ ex17.cpp:264 — A.PrintInfo(cout)
+    print_matrix_info(&a_nodes);
+
     let res = if alpha == -1.0 {
-        println!("  PCG (symmetric, α=-1)");
         solve_pcg_gssmoother(&a_nodes, &b_nodes, &mut x_nodes, &cfg)
     } else {
-        println!("  GMRES (non-symmetric, α={})", alpha);
         solve_gmres_gssmoother(&a_nodes, &b_nodes, &mut x_nodes, 100, &cfg)
     };
-    let solve_result = res.expect("DG elasticity solve failed");
+    res.expect("DG elasticity solve failed");
     for (i, &ni) in perm.iter().enumerate() {
         x[i] = x_nodes[ni];
     }
 
-    println!("  Iterations: {}", solve_result.iterations);
-    println!("  Final residual: {:.3e}", solve_result.final_residual);
-
-    // C++ ex17.cpp:275-288 — 14. Output comparison metrics + files
-    let sol_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let checksum: f64 = x
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64 + 1.0) * v)
-        .sum();
-
-    println!("\n=== Comparison Metrics ===");
-    println!("DOFs: {}", n_total);
-    println!("||u_h||_L2 = {:.6}", sol_norm);
-    println!("checksum = {:.6}", checksum);
-    println!("lambda_1 = 50, mu_1 = 50");
-    println!("lambda_2 = 1, mu_2 = 1");
-    println!("kappa = {}, alpha = {}", kappa, alpha);
-    println!("order = {}, ref_levels = {}", order, ref_levels);
-    println!("=========================");
-
-    // 8. Output displaced mesh and solution (matching MFEM ex17 format)
+    // C++ ex17.cpp:275-288 — 14. Save the displaced mesh and minus the
+    //     solution (silent on stdout; visualization section needs GLVis).
     {
-        println!("\nOutput ...");
-
         let nn = mesh.n_nodes();
         let mut displaced_coords: Vec<f64> = (0..nn)
             .flat_map(|n| mesh.node_coords(n as u32).to_vec())
@@ -288,22 +284,13 @@ fn main() {
             writeln!(f, "").ok();
             writeln!(f, "element_data").ok();
             writeln!(f, "0").ok();
-            println!("  wrote displaced.mesh");
         }
 
         // Write sol.gf in MFEM FiniteElementSpace format (matching ex16)
         {
-            // Split x into x- and y- displacement components (component-major layout)
-            let mut u_x = vec![0.0_f64; n_scalar];
-            let mut u_y = vec![0.0_f64; n_scalar];
-            for i in 0..n_scalar {
-                u_x[i] = x[i * dim];
-                u_y[i] = x[i * dim + 1];
-            }
             // Write vector GF with vdim=2
             write_mfem_gf_file("sol.gf", dim, &x, "DG", args.order, dim, 8)
                 .expect("failed to write sol.gf");
-            println!("  wrote sol.gf (MFEM FiniteElementSpace format)");
         }
     }
 }
@@ -617,6 +604,7 @@ struct Args {
     order: u8,
     alpha: f64,
     kappa: f64,
+    visualization: bool,
 }
 
 fn parse_args() -> Args {
@@ -626,6 +614,8 @@ fn parse_args() -> Args {
         order: 1,
         alpha: -1.0,
         kappa: -1.0,
+        // C++ ex17.cpp:105 — bool visualization = 1;
+        visualization: true,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -643,6 +633,9 @@ fn parse_args() -> Args {
             "-k" | "--kappa" => {
                 a.kappa = it.next().and_then(|v| v.parse().ok()).unwrap_or(-1.0)
             }
+            // C++ ex17.cpp:144-146 — the visualization bool pair.
+            "-vis" | "--visualization" => a.visualization = true,
+            "-no-vis" | "--no-visualization" => a.visualization = false,
             _ => {}
         }
     }

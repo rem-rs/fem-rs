@@ -213,6 +213,23 @@
   `tmp/ledger/examples_ledger.md` round-135 增量节 + `tmp/rr135lane6/` +
   `fem-pro/tmp/rr135/lane6/{PLAN,REPORT}.md`。**串行 examples BIT = 22 件**。
 
+- **round 135 增量（Lane 8：ex17 打印层对齐完成，晋级被新债 D1280 挡住——诚实
+  不硬凑，基线 bdb83932）**：Lane 6 点名的「ex17 差打印对齐工程」全项落地——
+  Options 回声 7 行（PrintOptions 1:1 + `-vis/-no-vis` 解析）、`Assembling:
+  r.h.s. ... matrix ... done.` 单行、新库件 **`fem_solver::print_matrix_info`**
+  （`SparseMatrix::PrintInfo` sparsemat.cpp:3546 1:1，浮点复用 `fmt_g`，
+  fem-solver 294 测试 0 回归）、PCG `PrintLevel::FirstAndLast`（legacy 3）压缩
+  打印 + 删 15 行 Rust 独有诊断及死代码。对拍（新鲜 oracle 884B = r117 参考件
+  路径行外逐字节）：896B vs 884B，PCG 轨迹段逐字节同，**仅统计块 8 行差** =
+  **新债 D1280 装配语义差（未记录的数值本体差异）**：① MFEM
+  `BilinearForm::Assemble(skip_zeros=1)` 互零耦合位永不分配（entries 436736 vs
+  Rust 467456，+30720）；② MFEM 面等参固定 `GeomToLoc1` 组合给 off-face 节点
+  **精确 0**，Rust `face_point_geom` 逆映射给 1e-16 尘值（46352 条 ≤1e-12·Norm，
+  Symmetry 4.44089e-16 vs 0）。修复面 = fem-assembly 面路线 + skip_zeros 贯通，
+  爆炸半径 = 全部 DG BIT 轨迹钉，须专项。ex17 维持 **NUM**，**串行 BIT 仍
+  = 22 件**（第 23 件未发生）。证据：`tmp/rr135lane8/` +
+  `fem-pro/tmp/rr135/lane8/REPORT.md`。
+
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
 1. **examples/miniapps 逐个三态台账**——**round-117 已执行并关闭**：一次性批跑（examples 44 串行 +

@@ -77,7 +77,7 @@ miniapps 102→101 勘误：round-63 台账的 100 文件口径未含 r63 后新
 | mfem_ex15_dynamic_amr | `-m data/star-hilbert.mesh -no-vis` | RO | rc=0 全程 **223 s**（r62 定档 513 s；本轮更快无漂移主张） |
 | mfem_ex15_dump_{A_true,T002,flow,it2_coords,p1,p1_it3} | 无参 ×6 | RO ×6 | 全部 rc=0（D633 修复持续钉住；T002 236 s/2.19M 行） |
 | mfem_ex16_nonlinear_heat | 无参 | **NUM** | vs `d89main/cpp_ex16.out`：step 线 0 diff、checksum 行 rust=0 命中（Rust 末尾多 16 行 Comparison 块 = 打印差） |
-| mfem_ex17_dg_elasticity | 无参 beam-tri | **NUM** | 本轮 C++ oracle 重跑（d84c binary）：**767 it = C++、iter0 303.808 = C++、ARF 0.982095 = C++**（r89 修复维持 ✓）；stdout 不可逐字节（Rust 全轨迹 + 自绘 banner vs C++ SparseMatrix 统计 + 压缩 PCG 打印） |
+| mfem_ex17_dg_elasticity | 无参 beam-tri | **NUM** | 本轮 C++ oracle 重跑（d84c binary）：**767 it = C++、iter0 303.808 = C++、ARF 0.982095 = C++**（r89 修复维持 ✓）；stdout 不可逐字节（Rust 全轨迹 + 自绘 banner vs C++ SparseMatrix 统计 + 压缩 PCG 打印）。**r135 Lane 8：打印层闭合**——Options 回声 + Assembling 单行 + `print_matrix_info` 库件 + PCG FirstAndLast 全落地，896B vs 884B 仅剩统计块 8 行差 = **D1280 装配语义债**（skip_zeros=1 跳零 + 面等参精确零；数值本体差异，诚实条款不硬凑）；证据 `tmp/rr135lane8/` |
 | mfem_ex18_euler | 无参 | **NUM** | `Solution error: 3.930926246117042e-3` = r99 锚（对 C++ 17 位 0.003930926246116611 rel 1.1e-13）；`d822` pin **4/4 绿** |
 | mfem_ex19_hyperelastic_incomp | 默认（= C++ beam-tet，r135 起） | **RO（D1256 已闭 r135）** | r117 rc=0 beam-quad 档 Newton 3 it；**r135 默认 mesh 对齐 C++ ex19.cpp:186（beam-quad→beam-tet）**：rerun Newton0 ‖r‖=2.90593 = C++ 逐字、dim(u)=459/dim(p)=36 同；Newton1 起 GMRES 轨迹分叉维持 rr127 求解器结构债 → 维持非 BIT |
 | mfem_ex20_symplectic | `-no-vis` | **BIT** | vs `cpp_ex20_novis_copy.out` **0 diff**（r98 双档本轮复证，连豁免都不剩） |

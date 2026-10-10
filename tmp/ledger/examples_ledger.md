@@ -74,7 +74,7 @@ CWD = `tmp/ledger/rundir`。证据：`fem-rs/tmp/rr131mfem/`
 | mfem_ex15_dump_p1 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0，stdout 与 r61-后状态一致（PROW 表） |
 | mfem_ex15_dump_p1_it3 | 同上 | 同 | RUN（r62 D633） | logs/… | 同上（D633）。**round-84:** 重验 rc=0 |
 | mfem_ex16_nonlinear_heat | ex16 | 默认 star | **BIT**（r127） | logs/… + `tmp/rr127mfem/`（ref/ex16_cpp_default.out + cmp） | rc=0（SDIRK33 时间推进完成）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，chksum 1.072997e6 逐字同）。**round-127:** 升 **BIT**——删 Rust 独有 `=== Comparison Metrics ===` 尾块（C++ stdout 止于 `step 50, t = 0.5`，回归锚点仍留在示例内 `#[cfg(test)]` 钉：dofs 1361/steps 50/norm/chksum 区间）后，`-m data/star.mesh -no-vis` 24 行 stdout 与 C++ 现编现跑（`$HOME/work/rr127/ex16/ex16_rr127`，mfem410_ser）**cmp 逐字节全等**；零代码数值路径改动（时间步进/求解器未动） |
-| mfem_ex17_dg_elasticity | ex17 | 默认 beam-tri | RUN（round-84 漂移注记） | logs/… + `tmp/d84c/`（r84 对拍） | rc=0。**round-84:** 数值漂移 = r76 D805-1（DG 弹性罚项改 MFEM 原式）传导：1063→1269 it、‖u_h‖_L2 227.189938→226.758078、checksum −0.15%（旧值系错误罚项产物，非回归）；**新对拍 C++（NOREF-NEW 登记，ref/ex17_cpp_default.out）**：dofs 24576 逐字同、同 PCG+GS+rtol² 配置下 C++ 767 it vs Rust 1269 it → **D822-1**；另 sol.gf 输出表示差（H1 平均位移 vs C++ DG 节点空间）→ 同债 |
+| mfem_ex17_dg_elasticity | ex17 | 默认 beam-tri | RUN（round-84 漂移注记；r135 打印层闭合，升 BIT 挡 D1280 装配语义债） | logs/… + `tmp/d84c/`（r84 对拍）+ `tmp/rr135lane8/`（r135 打印对拍） | rc=0。**round-84:** 数值漂移 = r76 D805-1（DG 弹性罚项改 MFEM 原式）传导：1063→1269 it、‖u_h‖_L2 227.189938→226.758078、checksum −0.15%（旧值系错误罚项产物，非回归）；**新对拍 C++（NOREF-NEW 登记，ref/ex17_cpp_default.out）**：dofs 24576 逐字同、同 PCG+GS+rtol² 配置下 C++ 767 it vs Rust 1269 it → **D822-1**；另 sol.gf 输出表示差（H1 平均位移 vs C++ DG 节点空间）→ 同债。**round-135 Lane 8:** 数值链已逐字（767 it/iter0 303.808/ARF 0.982095，r89 修复维持）；打印层对齐完成（Options 回声 + `Assembling: r.h.s. ... matrix ... done.` 单行 + `fem_solver::print_matrix_info` 库件 + PCG FirstAndLast 压缩打印），896B stdout 仅剩 SparseMatrix 统计块 8 行差 = **新债 D1280（装配语义：skip_zeros=1 跳零 + 面等参 GeomToLoc1 精确零）**，升 BIT 挡此债（诚实条款：不硬凑） |
 | mfem_ex18_euler | ex18 | 默认 periodic-square | **RUN**（round-85 起 C++ 对拍 8 位全对齐 → D822-4） | logs/… + `tmp/d84c/`（二分证据）+ `tmp/d85main/`（D822-4 验收） | rc=0。**round-85（D822-4）**：示例默认 order 对齐 C++（ex18.cpp 默认 3，原 Rust 默认 1）+ `dg_hyperbolic.rs` Quad4 臂放开任意阶（原 `assert_eq!(order,1)`）+ 2-D 面规则改 MFEM 公式（`HyperbolicFormIntegrator` 2p+1 阶 ⇒ p+1 个 GL 点，hyperbolic.cpp:224 + intrules.cpp `SegmentIntegrationRule`；原 `(2p+1).min(4)` 在 p=1 给 3 点/MFEM 2 点）。**默认档（= C++ 默认，order 3）：435 步 = C++，`Solution error: 3.930926246114457e-3` = C++ `0.0039309262` 全部 8 位打印数字逐位一致**；`-o 1` 档：184 步 = C++（原 185），`6.168658610565338e-2` = C++ `0.061686586` 8 位全对齐（原 6.168620814596272e-2 仅 6 位——**旧残差真根因 = 面规则点数差，"fp 排序"归因证伪**）。C++ 真值现编现跑 `$HOME/work/d85main/ex18/`（mfem410_ser 源码），快照 `tmp/d85main/cpp_{default,o1}.out`。历史（round-84 D822-3 回归）：默认档曾 step 27 起 NaN，二分钉 `24e00a8d`，修复后 o1 档终值 6.168620814596272e-2（该值含面规则偏差，已被上值取代） |
 | mfem_ex19_hyperelastic_incomp | ex19 | 默认 beam-tet | RUN | logs/… + `tmp/rr135lane6/ex19_{rs_beamtet,cpp}.out` | rc=0（Newton+块 GMRES 收敛）。**round-84:** 重验 OK（stdout 与 r61 记录 0 diff，Newton 3 it 收敛行逐字同）。**round-135:** **D1256 闭**——默认 mesh beam-quad→beam-tet（= C++ ex19.cpp:186）；默认档 rerun Newton0 ‖r‖=2.90593 = C++ 逐字、dim(u)=459/dim(p)=36 同；Newton1 起路径分叉维持 rr127 求解器结构债（右预条件 GMRES vs MFEM 左预条件 GMRESSolver+JacobianPreconditioner），升 BIT 挡在该专项 |
 | mfem_ex20_symplectic | ex20 | 默认 -o1 -t 100 步 | **BIT**（r98 双档） | logs/… + ref/ex20.out + `tmp/d98runbit/` | **失配**：能均值/方差 = `1 / 0` vs C++ `1.00204 / 0.0174915`（能量恒 1 ⇒ 积分器未真正演化）→ D635。**round-84:** 失配已闭（r62 D635b 六配置逐字节 = C++）；重验 `-o 1 -t 100 -no-vis`：数值行逐字同，豁免 = C++ Options 回声多 2 行（`--no-visualization/--no-gnuplot`，→ D822-2）。**round-98:** 升 **BIT**——`-no-vis` 档 12 行 stdout 逐字节 = C++（回声块早已补齐，r84 豁免过期）；无参默认档两处 1:1 保真修复后（`visualization` 默认 false→true = C++ ex20.cpp:98；删 Rust 独有 `Wrote ex20_phase…` 行——C++ 走 socketstream 无打印）亦逐字节；vis 副产物文件改为落 rundir |
@@ -835,3 +835,55 @@ CWD = `tmp/ledger/rundir`。证据：`fem-rs/tmp/rr131mfem/`
   `cargo test --example` ex0 1 passed / ex33+ex41 3 passed / ex36、ex39、ex19
   无 example 级测试；未触碰任何 crate 源码（五案全部示例侧打印/默认值修复，
   「示例是手段、核心库才是目的」本轮无新核心缺陷暴露）。
+
+## round 135 增量（Lane 8：ex17 打印层对齐 + D1280 装配语义债新登记，基线 bdb83932）
+
+> 任务 = ex17 RUN→BIT 晋级（Lane 6 点名「数值已 = C++，差打印对齐工程」）。
+> C++ oracle 现编现跑（`$HOME/mfem410_ser`，`g++ -std=c++17 -O3 -I.`，run 目录
+> `$HOME/work/rr135/lane8/`，两侧同 `-m data/beam-tri.mesh -no-vis`）；新鲜 oracle
+> 884 字节与 r117 参考件 `tmp/r117/cpp_ex17.out`（887B）路径行外逐字节同。
+> Rust release（热 target `D:/fem-pro-targets/femrs-rr135`），CWD =
+> `tmp/ledger/rundir`。证据：`tmp/rr135lane8/{rs_ex17,cpp_ex17,rs_ex17_baseline}.out`。
+
+- **打印层对齐（全部完成，示例侧 + 1 个库件）**：
+  - 补 Options 回声 7 行（MFEM PrintOptions 1:1：3 空格缩进 + 非 bool「long_name 值」、
+    bool 按值打配对 long_name；`--kappa 4` = 归一化后回显，ex17.cpp:137-151 顺序）；
+    补 `-vis/-no-vis` 解析（C++ 默认 visualization=true，ex17.cpp:105）；
+  - 补 `Assembling: r.h.s. ... matrix ... done.` 单行（ex17.cpp:181/219/241/261 的
+    flush 流拼行）；删 Rust 独有 15 行诊断（banner/refinements/order/kappa/materials/
+    ‖rhs‖/PCG-GMRES 标签/Iterations/Final residual/Comparison Metrics 11 行块/
+    Output×3）+ 随之死代码（rhs_norm/sol_norm/checksum/sol.gf 块内从未读的 u_x/u_y）；
+  - 新库件 **`fem_solver::print_matrix_info`** = MFEM `SparseMatrix::PrintInfo`
+    （sparsemat.cpp:3546）1:1 移植（CSR-finalized 分支），浮点全走 `fmt_g` 复用
+    （CountSmallElems/MaxNorm/IsSymmetric 查零语义/CheckFinite/CSR 内存式逐项对齐；
+    Doc 注明 NumNonZeroElems 实为「存储条目总数含结构零」）；fem-solver 294 测试
+    0 回归；
+  - PCG 换 `PrintLevel::FirstAndLast`（= C++ `PCG(..., 3, ...)` legacy level 3：
+    首行 " ..." + 末行 + ARF、无 summary 行）——库件 `CgTrailerGates` 分支既有，
+    零改动即命中。
+- **对拍结果（诚实条款触发，不晋级）**：896 vs 884 字节，**仅 SparseMatrix 统计块
+  8 行差**（Format/Dimensions/Inf-Nan/Norm 600 四行已逐字节；entries 467456 vs
+  436736、per-row 19.0208 vs 17.7708、zeros 56952 vs 72584、Symmetry 4.44089e-16
+  vs 0、small×3、Memory 5.44336 vs 5.0918 MiB）；PCG 轨迹段（`Iteration : 0
+  303.808 ...` / `767` / `2.79289e-10` / ARF `0.982095`）逐字节同。
+- **新债 D1280（ex17 升 BIT 的真挡板，未记录的数值本体差异）**——统计块差异不是
+  打印问题，是装配语义差，两层根因：
+  1. **skip_zeros=1 跳零装配**：MFEM `BilinearForm::Assemble(int skip_zeros=1)`
+     → `SparseMatrix::AddSubMatrix`（sparsemat.cpp:2782）对 `rows==cols` 方块
+     **仅当 a==0 且对称伙伴 subm(j,i)==0 时跳过创建**——互零耦合位永不分配；
+     Rust COO 路线推全量稠密块 → **多 30720 个耦合位**（467456 vs 436736）。
+  2. **面等参路线精确零 vs 尘值**：MFEM 面变换经固定 `GeomToLoc1` 线性组合
+     （系数 0/½/1 精确）→ off-face 节点基函数值**精确 0.0**；Rust
+     `face_point_geom`（D795-1/D799-3 路线）逆映射求参考坐标 → 1e-16 级尘值
+     （46352 个 ≤1e-12·Norm 条目、其中 10112 个 >1e-18·Norm）→ Symmetry 行
+     4.44089e-16 ≠ 0。skip_zeros 挡不住尘值（≠0 不跳），故 (2) 是 (1) 生效的前提。
+  修复面 = fem-assembly 面路线重做 + skip_zeros 语义贯通 DG 装配器；爆炸半径 =
+  全部 DG 示例（ex9/ex14/ex16/ex21/ex23 等 BIT 轨迹钉可能分叉），需专项 +
+  全量 DG 对拍。非半天打印工程，本轮不动（诚实条款：差异清单交付，不硬凑）。
+- **串行 BIT 计数不变 = 22 件**（ex17 维持 RUN/NUM，第 23 件晋级未发生）；
+  D822-1 的「输出表示」残项由本节拆出：打印层已闭、核心余项 = D1280 +
+  sol.gf DG 节点空间表示（文件级，非 stdout BIT 门）。
+- **门自查**：ex17 release 构建 0 错误、0 新警告（存量 = LNK4044 dup +
+  vendor/linlvo）；`cargo test -p fem-solver --release` 294/0（新增库件纯增量，
+  未触碰 CgTrailerGates/fmt_g 既有路径）；构建脚手架未动，工作树遗留脏件
+  （pyc/_core.pyd/rundir 场文件）未触碰。

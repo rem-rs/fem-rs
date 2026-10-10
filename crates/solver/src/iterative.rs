@@ -55,6 +55,75 @@ pub fn fmt_g(x: f64) -> String {
     }
 }
 
+/// MFEM `SparseMatrix::PrintInfo` (`linalg/sparsemat.cpp:3546`) — the matrix
+/// statistics block MFEM examples print after forming the linear system
+/// (e.g. ex17's `A.PrintInfo(cout)`), ported 1:1 for the finalized CSR case.
+///
+/// Counting semantics that matter for byte-parity:
+/// - "entries (total)" is MFEM's `NumNonZeroElems()` = the number of STORED
+///   entries, structural zeros included (allocation-based, despite the name);
+/// - `CountSmallElems(tol)` counts stored entries with `|a_ij| <= tol`, so the
+///   "stored zeros" row is the count at `tol == 0.0` (exact zeros);
+/// - `MaxNorm()` is the max `|a_ij|` over stored entries;
+/// - `IsSymmetric()` is the max `|a_ij - a_ji|` over stored lower-triangle
+///   entries, missing entries reading as 0 (`operator() const` returns a
+///   static zero, sparsemat.cpp:652); non-square returns `infinity()`;
+/// - `CheckFinite()` counts non-finite stored entries;
+/// - the CSR memory figure assumes `sizeof(int) == 4` (MFEM's `I`/`J`) and
+///   `sizeof(real_t) == 8` (double), as on the MFEM 4.10 reference build.
+///
+/// All floats go through [`fmt_g`], matching MFEM's default 6-significant-
+/// digit `ostream` style.  MFEM's `(empty)`/LIL format branches cannot occur
+/// here: `fem_linalg::CsrMatrix` is always a finalized CSR structure.
+pub fn print_matrix_info(a: &FemCsr<f64>) {
+    let height = a.nrows;
+    let width = a.ncols;
+    let nnz = a.values.len();
+    let pz = 100.0 / nnz as f64;
+    let nz = a.values.iter().filter(|&&v| v.abs() <= 0.0).count();
+    let max_norm = a.values.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let mut symm = if height != width { f64::INFINITY } else { 0.0 };
+    if height == width {
+        for i in 1..height {
+            for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+                let j = a.col_idx[k] as usize;
+                if j < i {
+                    // MFEM `(*this)(j, i)`: linear scan of row j, 0.0 if absent.
+                    let a_ji = (a.row_ptr[j]..a.row_ptr[j + 1])
+                        .find(|&k2| a.col_idx[k2] as usize == i)
+                        .map(|k2| a.values[k2])
+                        .unwrap_or(0.0);
+                    symm = symm.max((a.values[k] - a_ji).abs());
+                }
+            }
+        }
+    }
+    let nnf = a.values.iter().filter(|&&v| !v.is_finite()).count();
+    let ns12 = a.values.iter().filter(|&&v| v.abs() <= 1e-12 * max_norm).count();
+    let ns15 = a.values.iter().filter(|&&v| v.abs() <= 1e-15 * max_norm).count();
+    let ns18 = a.values.iter().filter(|&&v| v.abs() <= 1e-18 * max_norm).count();
+    const MIB: f64 = 1024.0 * 1024.0;
+    let csr_mem = (4.0 * (height + 1 + nnz) as f64 + 8.0 * nnz as f64) / MIB;
+
+    println!("SparseMatrix statistics:");
+    println!("  Format                      : CSR");
+    println!("  Dimensions                  : {} x {}", height, width);
+    println!("  Number of entries (total)   : {}", nnz);
+    println!(
+        "  Number of entries (per row) : {}",
+        fmt_g(1.0 * nnz as f64 / height as f64)
+    );
+    println!("  Number of stored zeros      : {}% ({})", fmt_g(nz as f64 * pz), nz);
+    println!("  Number of Inf/Nan entries   : {}% ({})", fmt_g(nnf as f64 * pz), nnf);
+    println!("  Norm, max |a_ij|            : {}", fmt_g(max_norm));
+    println!("  Symmetry, max |a_ij-a_ji|   : {}", fmt_g(symm));
+    println!("  Number of small entries:");
+    println!("    |a_ij| <= 1e-12*Norm      : {}% ({})", fmt_g(ns12 as f64 * pz), ns12);
+    println!("    |a_ij| <= 1e-15*Norm      : {}% ({})", fmt_g(ns15 as f64 * pz), ns15);
+    println!("    |a_ij| <= 1e-18*Norm      : {}% ({})", fmt_g(ns18 as f64 * pz), ns18);
+    println!("  Memory used by CSR          : {} MiB", fmt_g(csr_mem));
+}
+
 /// Trailer gates of MFEM's `CGSolver::Mult` (`linalg/solvers.cpp`), mapped from
 /// the fem-rs print scale onto `IterativeSolver::PrintLevel`'s flags
 /// (`IterativeSolver::FromLegacyPrintLevel`, `linalg/solvers.cpp:119`):
