@@ -297,37 +297,6 @@ fn interpolate_h1_geom(
     v
 }
 
-// ─── C++ `std::cout` default-format printing (precision 6, defaultfloat) ────
-
-fn cpp_6(x: f64) -> String {
-    if x == 0.0 {
-        return "0".to_string();
-    }
-    let e = x.abs().log10().floor() as i32;
-    let s = if e >= -4 && e < 6 {
-        let dec = (5 - e).max(0) as usize;
-        format!("{:.*}", dec, x)
-    } else {
-        let s = format!("{:.5e}", x);
-        let mut it = s.split('e');
-        let mant = it.next().unwrap().to_string();
-        let exp: i32 = it.next().unwrap().parse().unwrap();
-        format!("{}e{:02}", mant, exp)
-    };
-    // C++ defaultfloat strips trailing zeros.
-    if s.contains('.') {
-        let t = s.trim_end_matches('0');
-        let t = t.trim_end_matches('.');
-        if t.is_empty() || t == "-" {
-            s
-        } else {
-            t.to_string()
-        }
-    } else {
-        s
-    }
-}
-
 // ─── Command-line options (same flags as ex36.cpp) ───────────────────────────
 
 struct Args {
@@ -377,8 +346,8 @@ fn main() {
     println!("   --order {}", order);
     println!("   --refs {}", args.refs);
     println!("   --max-it {}", args.max_it);
-    println!("   --tol {}", cpp_6(args.tol));
-    println!("   --step {}", cpp_6(args.alpha));
+    println!("   --tol {}", fem_solver::fmt_g(args.tol));
+    println!("   --step {}", fem_solver::fmt_g(args.alpha));
     println!(
         "   {}",
         if args.visualization {
@@ -552,7 +521,7 @@ fn main() {
             }
 
             if args.visualization {
-                println!("Newton_update_size = {}", cpp_6(newton_size));
+                println!("Newton_update_size = {}", fem_solver::fmt_g(newton_size));
             }
             if newton_size < increment_u {
                 break;
@@ -567,7 +536,7 @@ fn main() {
         increment_u = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 2 * args.order + 3);
 
         println!("Number of Newton iterations = {}", last_j + 1);
-        println!("Increment (|| uₕ - uₕ_prvs||) = {}", cpp_6(increment_u));
+        println!("Increment (|| uₕ - uₕ_prvs||) = {}", fem_solver::fmt_g(increment_u));
 
         u_old.copy_from_slice(&u_new);
         psi_old.copy_from_slice(&psi);
@@ -581,7 +550,7 @@ fn main() {
             &|x: &[f64]| exact_solution_gradient_obstacle(x),
             7,
         );
-        println!("H1-error  (|| u - uₕᵏ||)       = {}", cpp_6(h1_err));
+        println!("H1-error  (|| u - uₕᵏ||)       = {}", fem_solver::fmt_g(h1_err));
     }
 
     println!("\n Outer iterations: {}", outer + 1);
@@ -612,9 +581,9 @@ fn main() {
 
     println!(
         "\n Final L2-error (|| u - uₕ||)          = {}",
-        cpp_6(l2_err)
+        fem_solver::fmt_g(l2_err)
     );
-    println!(" Final H1-error (|| u - uₕ||)          = {}", cpp_6(h1_err));
-    println!(" Final L2-error (|| u - ϕ - exp(ψₕ)||) = {}", cpp_6(l2_alt));
+    println!(" Final H1-error (|| u - uₕ||)          = {}", fem_solver::fmt_g(h1_err));
+    println!(" Final L2-error (|| u - ϕ - exp(ψₕ)||) = {}", fem_solver::fmt_g(l2_alt));
 }
 
