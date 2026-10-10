@@ -438,7 +438,9 @@ struct Args {
 impl Args {
     fn parse() -> Self {
         let mut a = Self {
-            mesh: "data/beam-quad.mesh".into(),
+            // MFEM ex19.cpp:186 default mesh = beam-tet (round-135 D1256 closure:
+            // the old Rust-only beam-quad default was a 1:1 fidelity deviation).
+            mesh: "data/beam-tet.mesh".into(),
             refine: 0,
             order: 2,
             mu: 1.0,
