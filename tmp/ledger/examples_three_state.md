@@ -85,7 +85,7 @@ miniapps 102→101 勘误：round-63 台账的 100 文件口径未含 r63 后新
 | mfem_ex22_complex_helmholtz | 无参 inline-quad | **NUM** | Re/Im 误差行 `1.422826e-1 / 1.422741e-1` = r84 锚逐字 |
 | mfem_ex23_wave_equation | 无参 star | **NUM** | vs `d89main/cpp_ex23.out`：Rust 多 2 行 checksum（1.889987e4 / 2.955010e4，r61 记录 1.889982e4 = 第 6 位噪声级）；其余数值行全同 |
 | mfem_ex24_discrete_ops | `-m data/star.mesh -p 0 -o 1 -no-vis` | **BIT** | vs `ref/ex24_p0o1.out` 2 difflines = mesh 行（四口径 BIT 的本轮复证档） |
-| mfem_ex25_pml_maxwell | 无参 | **NUM** | C++ oracle（d89main）为**截断快照**（止于 iter166）；Rust 终值 ‖E‖=3.529612e-2、求解完成；打印族不同（`‖B r‖` vs `(B r,r)`） |
+| mfem_ex25_pml_maxwell | `-m data/inline-quad.mesh -no-vis`（= C++ 默认 prob=4 loadsrc） | **BIT（r138）** | GMRES 换库件 `mfem_gmres`（D767 MFEM `GMRESSolver::Mult` 忠实移植，print_level 1 Pass/Iteration/`‖B r‖` 打印族）+ 打印族对齐（删 4 类 Rust 独有行/误差块 %g 化/Options DOUBLE `fmt_g` 化）后，9295 字节 vs 新鲜 C++ oracle（`$HOME/work/rr138/ex25_cpp`，现编现跑）**cmp 逐字节全等（0 豁免，sha256 28059a62…）**——166 it 轨迹 iter0 0.00925569 → iter166 9.10426e-08 逐字节；旧 d89main 截断快照（止于 iter166）作废口径由本轮全量 oracle 取代 |
 | mfem_ex26_geom_mg | 无参 star | **NUM** | ARF **0.0273569** = r70 快查锚逐字（机器精度级吻合口径，Chebyshev ulp 分叉族） |
 | mfem_ex27_robin_bc | `-no-vis` | **BIT** | vs `d771/cpp_default.gold` **0 diff**（r73 全逐字节本轮复证）；**r136：`-dg` 模式亦逐字节 = 新鲜 C++ oracle（sha256 cf661567…，104 行 0 豁免）——D779 顺带闭**（D1280 面路线精确零修复传导） |
 | mfem_ex28_sliding_elasticity | 无参 | RO | rc=0；与 r61 记录 **0 diff** |

@@ -27,8 +27,8 @@ use fem_assembly::{
     vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData},
 };
 use fem_io::mfem::{self, write_mfem};
-use fem_linalg::SolverConfig;
-use fem_solver::{GSSmoother, ScaledPrecond, BlockDiagPrecondPair};
+use fem_solver::block_operator::{mfem_gmres, MfemGmresConfig};
+use fem_solver::{fmt_g, DenseVec, GSSmoother, Preconditioner, ScaledPrecond};
 use fem_linalg::fem_to_linlvo_csr;
 use fem_space::{HCurlSpace, constraints::boundary_dofs_hcurl, fe_space::FESpace};
 use fem_mesh::{Mesh, topology::MeshTopology};
@@ -265,8 +265,9 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
 
     let space = HCurlSpace::new(mesh.clone(), args.order as u8);
     let n = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {}", n);
-    println!("  Mode: {}D", dim);
+    // C++ ex25.cpp:293 — the only banner line, no leading blank line and no
+    // "Mode" echo.
+    println!("Number of finite element unknowns: {}", n);
     let qo = (2*args.order + 1) as u8;
 
     // ── Boundary conditions (1:1 with C++ ess_bdr logic) ─────────────────
@@ -526,14 +527,41 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         inner: GSSmoother::from_csr(&prec_la).expect("prec GS smoother"),
         scale: conv.tr_sign(),   // C++: s = (HERMITIAN) ? -1 : +1
     };
-    let block = BlockDiagPrecondPair { pre_re: prec_r, pre_im: prec_i, n };
 
-    let res = fem_solver::solve_gmres_precond(&a_mat, &flat_rhs, &mut x, 200, &block,
-        &SolverConfig { rtol: 1e-5, max_iter: 2000, verbose: false, ..Default::default() });
-    match &res {
-        Ok(r) => println!("  GMRES(+GS) converged in {} iters, final residual = {:.6e}",
-                         r.iterations, r.final_residual),
-        Err(e2) => println!("  GMRES(+GS): {e2}"),
+    // C++ ex25.cpp:498-506 — GMRESSolver with SetPrintLevel(1), SetKDim(200),
+    // SetMaxIter(2000), SetRelTol(1e-5), SetAbsTol(0.0).  `iterative_mode`
+    // defaults true on MFEM IterativeSolvers (operator.hpp:871 via the
+    // IterativeSolver ctor, solvers.cpp:31); the incoming X (all zeros here —
+    // prob 4 has no essential data) is the initial guess.
+    let gmres_cfg = MfemGmresConfig {
+        kdim: 200,
+        max_iter: 2000,
+        rel_tol: 1e-5,
+        abs_tol: 0.0,
+        print_level: 1,
+        iterative_mode: true,
+    };
+    // C++ ex25.cpp:494-496 — BlockDiagonalPreconditioner diag(pc_r, pc_i):
+    // the flat [Re | Im] system applies GS to the first half and s·GS to the
+    // second.  The print_level-1 `   Pass : ...  ||B r|| = ...` history is
+    // emitted by mfem_gmres itself (MFEM solvers.cpp:1230/1294/1352 gates).
+    let pre = |r: &[f64], z: &mut [f64]| {
+        let mut in_re = DenseVec::zeros(n);
+        in_re.as_mut_slice().copy_from_slice(&r[..n]);
+        let mut out_re = DenseVec::zeros(n);
+        prec_r.apply_precond(&in_re, &mut out_re);
+        z[..n].copy_from_slice(out_re.as_slice());
+        let mut in_im = DenseVec::zeros(n);
+        in_im.as_mut_slice().copy_from_slice(&r[n..]);
+        let mut out_im = DenseVec::zeros(n);
+        prec_i.apply_precond(&in_im, &mut out_im);
+        z[n..].copy_from_slice(out_im.as_slice());
+    };
+    match mfem_gmres(&a_mat, &flat_rhs, &mut x, gmres_cfg, Some(&pre)) {
+        Ok(_) => {}
+        // D836-scope: stderr-only diagnostic; the MFEM-faithful stdout history
+        // (iteration lines + non-convergence banner) is printed by mfem_gmres.
+        Err(e) => eprintln!("GMRES: {e}"),
     }
 
     // ── Error computation (1:1 with C++ L2 error via ComputeL2Error) ────
@@ -559,20 +587,20 @@ fn solve_pml<M: MeshTopology + Clone>(mesh: M,
         let norm_re = compute_l2_error_hcurl(&zero, &space, &exact_re, qe, Some(&exclude)).max(1e-30);
         let norm_im = compute_l2_error_hcurl(&zero, &space, &exact_im, qe, Some(&exclude)).max(1e-30);
 
-        println!("\n Relative Error (Re part): || E_h - E || / ||E|| = {:.6e}",
-                 l2err_re / norm_re);
-        println!(" Relative Error (Im part): || E_h - E || / ||E|| = {:.6e}",
-                 l2err_im / norm_im);
-        println!(" Total Error: {:.6e}", (l2err_re*l2err_re + l2err_im*l2err_im).sqrt());
+        // C++ ex25.cpp:538-543 — one cout insert chain: leading blank line,
+        // `%g` (default 6-significant-digit) formatting, and a trailing
+        // "\n\n" (i.e. one empty line after "Total Error").
+        println!("\n Relative Error (Re part): || E_h - E || / ||E|| = {}",
+                 fmt_g(l2err_re / norm_re));
+        println!(" Relative Error (Im part): || E_h - E || / ||E|| = {}",
+                 fmt_g(l2err_im / norm_im));
+        println!(" Total Error: {}", fmt_g((l2err_re*l2err_re + l2err_im*l2err_im).sqrt()));
+        println!();
     }
 
-    // ── Output ──────────────────────────────────────────────────────────
-    let sol_norm: f64 = x.iter().map(|v| v*v).sum::<f64>().sqrt();
-    println!("  ||E|| = {:.6e}\n", sol_norm);
-
+    // ── Output (C++ ex25.cpp:548-558 writes mesh + sol gf files silently) ──
     let _ = fem_io::mfem::write_gf_file("ex25-sol_r.gf", dim, &x[..n], "ND", args.order as u8, dim);
     let _ = fem_io::mfem::write_gf_file("ex25-sol_i.gf", dim, &x[n..], "ND", args.order as u8, dim);
-    println!("  Wrote ex25-sol_r.gf, ex25-sol_i.gf");
 
     // ── GLVis visualization (1:1 with C++ Section 17) ────────────────────
     if visualization {
@@ -740,9 +768,11 @@ fn main() {
     println!("   --order {}", args.order);
     println!("   --problem {}", args.iprob.min(4));
     println!("   --refinements {}", args.ref_levels);
-    println!("   --permeability {}", args.mu);
-    println!("   --permittivity {}", args.eps);
-    println!("   --frequency {}", args.freq);
+    // MFEM OptionsParser::WriteValue (optparser.cpp) prints DOUBLE options via
+    // `os << real_t` = %g default precision → fmt_g.
+    println!("   --permeability {}", fmt_g(args.mu));
+    println!("   --permittivity {}", fmt_g(args.eps));
+    println!("   --frequency {}", fmt_g(args.freq));
     println!("   {}", if args.herm_conv { "--hermitian" } else { "--no-hermitian" });
     println!("   {}", if args.visualization { "--visualization" } else { "--no-visualization" });
     println!("   --no-partial-assembly");
@@ -765,7 +795,6 @@ fn main() {
         solve_pml(mesh.clone(), &args, prob, exact_known, pml, bdr_tags,
             args.herm_conv, args.visualization, &mesh_buf);
         let _ = fem_io::mfem::write_mfem_file("ex25.mesh", &mesh);
-        println!("  Wrote ex25.mesh");
     } else {
         let mut mesh: Mesh<3> = mfem_data.mesh3d.expect("3D");
         for _ in 0..args.ref_levels { mesh = fem_mesh::refine_uniform_3d(&mesh); }
@@ -779,6 +808,5 @@ fn main() {
         solve_pml(mesh.clone(), &args, prob, exact_known, pml, bdr_tags,
             args.herm_conv, args.visualization, &mesh_buf);
         let _ = fem_io::mfem::write_mfem_file_3d("ex25.mesh", &mesh);
-        println!("  Wrote ex25.mesh");
     }
 }
