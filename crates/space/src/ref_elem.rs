@@ -445,9 +445,17 @@ pub fn l2_field_element(
             // order 0 keeps the simplex P0 element (tri rule; the shared
             // P0Tensor here would carry the square rule and double the mass).
             0 => Box::new(P0Tri),
-            // GaussLobatto: the closed DG simplex placement
-            // (corner/equispaced nodal dofs) — same choice the historical
-            // `ref_elem_vol_for_space` GLL arm made via the legacy table.
+            // GaussLobatto: the closed DG simplex placement.  D1280 route (2b):
+            // order 1 uses the `L2_TriangleElement(1, GaussLobatto)` port
+            // (`TriL2GL::new_gauss_lobatto`) — closed GLL points = the three
+            // vertices in the same vertex/dof order as `TriP1`, but its p=1
+            // fast path evaluates the third barycentric as `1-(x+y)`, which
+            // yields exact zeros on the reference hypotenuse where MFEM's
+            // compiled element does (the basis the DG face integrators sample
+            // at Loc1-composed complement-pair points; rr136 probes).  Orders
+            // >= 2 keep the equispaced lattice (identical node set for p=2;
+            // p>=3 GLL warp is a separate, unclaimed delta).
+            o if gll && o == 1 => Box::new(TriL2GL::new_gauss_lobatto(1)),
             o if gll => legacy_equispaced_element(elem_type, o),
             o => Box::new(TriL2GL::new(o as usize)),
         },

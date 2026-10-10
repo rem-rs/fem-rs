@@ -375,11 +375,23 @@ fn assemble_interior_face_stress<S: FESpace>(
     let lam_r = lambda_elem[er as usize];
     let mu_r = mu_elem[er as usize];
 
-    // Accumulate 4 blocks: K_LL, K_LR, K_RL, K_RR
-    let mut kll = vec![0.0_f64; n_l * n_l * dim * dim];
-    let mut klr = vec![0.0_f64; n_l * n_r * dim * dim];
-    let mut krl = vec![0.0_f64; n_r * n_l * dim * dim];
-    let mut krr = vec![0.0_f64; n_r * n_r * dim * dim];
+    // D1280 route 1: accumulate MFEM's pre-finalization pair over ONE combined
+    // (Elem1 ∪ Elem2) dof block — `pre` = the consistency part
+    // <{σ(u)·n}, [v]> (MFEM's `elmat` before the finalization) and
+    // `jmat_c` = the penalty (`jmat`) — because MFEM's closing transform
+    // `elmat := -elmat + α·elmatᵀ + jmat` (bilininteg.cpp) writes the pair
+    // (i,j), (j,i) from the SAME `mij = jmat(i,j)`, which makes the final
+    // elmat bitwise-symmetric *by construction* (with α = -1, `-aji - aij` and
+    // `-aij - aji` are equal by fp addition commutativity).  The four separate
+    // per-block accumulations this replaces folded α into each block, so
+    // transposed positions were computed through different operand orders and
+    // differed by 1 ulp — the residual Symmetry 4.4e-16 in the matrix stats.
+    // Combined index: side L = a·dim+i (a < n_l), side R = n_l·dim + b·dim+j.
+    let nl_d = n_l * dim;
+    let nr_d = n_r * dim;
+    let n_comb = nl_d + nr_d;
+    let mut pre = vec![0.0_f64; n_comb * n_comb];
+    let mut jmat_c = vec![0.0_f64; n_comb * n_comb];
 
     let mut phi_l = vec![0.0_f64; n_l];
     let mut phi_r = vec![0.0_f64; n_r];
@@ -476,118 +488,123 @@ fn assemble_interior_face_stress<S: FESpace>(
             }
         }
 
-        // K_LL[(a,i), (b,j)]:
-        //   term1 = −½·σ_L(φ_b·e_j)·n)_i · φ_L_a    (-{σ(u)·n}·[[v]], left u, left v)
-        //   term2 = −½·α·σ_L(φ_a·e_i)·n)_j · φ_L_b  (-α·{σ(v)·n}·[[u]], left v, left u)
-        //   term3 = (κ/h)·φ_L_a·φ_L_b·δᵢⱼ             (penalty)
-        let stride_ll = n_l * dim;
+        // Consistency (pre) and penalty (jmat_c) parts per block, with the
+        // block signs of MFEM's initial `elmat = <{σ(u)·n}, [v]>` +
+        // `shape2.Neg()` (the jump's -v₂/-u₂ enter through the negated
+        // side-2 shapes; α is NOT folded here — the finalization below owns
+        // it).  The transposed pair of the final K is formed by the
+        // finalization from the SAME two pre entries, which is what keeps it
+        // bitwise-symmetric.
+        //
+        // K_LL (test left a,i; trial left b,j):
+        //   pre    += w_f·(+½·σ_L(φ_b·e_j)·n)_i · φ_L_a
+        //   jmat_c += jmatcoef·φ_L_a·φ_L_b·δᵢⱼ
         for a in 0..n_l {
             for i in 0..dim {
-                let row_off = a * dim + i;
+                let r = a * dim + i;
                 for b in 0..n_l {
                     for j in 0..dim {
-                        let col_off = b * dim + j;
-                        let t1 = -0.5 * snl[b][j][i] * phi_l[a];
-                        let t2 = 0.5 * alpha * snl[a][i][j] * phi_l[b];
-                        let t3 = jmatcoef * phi_l[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
-                        kll[row_off * stride_ll + col_off] += w_f * (t1 + t2) + t3;
+                        let c = b * dim + j;
+                        pre[r * n_comb + c] += w_f * (0.5 * snl[b][j][i] * phi_l[a]);
+                        jmat_c[r * n_comb + c] +=
+                            jmatcoef * phi_l[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
                     }
                 }
             }
         }
 
-        // K_LR[(a,i), (b,j)]: test on left (a,i), trial on right (b,j)
-        //   [[v]] = -φ_R_b·e_j (left test v=0, right v=φ_R_b·e_j, so [[v]]= -φ_R_b·e_j)
-        //   {σ(u)·n}·[[v]]: u on right → only σ_R·n contributes
-        //   {σ(u)·n}·[[v]] = ½·σ_R(φ_b·e_j)·n · (-φ_a·e_i) = -½·σ_R(φ_b·e_j)·n_i · φ_a
-        //   term1 = −(-½·σ_R(φ_b·e_j)·n_i · φ_a) = +½·σ_R(φ_b·e_j)·n_i · φ_a
-        //
-        //   {σ(v)·n}·[[u]]: v on left, u on right
-        //   {σ(v)·n}·[[u]] = ½·σ_L(φ_a·e_i)·n · φ_R_b·e_j = ½·σ_L(φ_a·e_i)·n_j · φ_R_b  hmm...
-        //   Actually, v on left means v_L = φ_a·e_i, v_R = 0
-        //   [[u]]: u on right means u_L = 0, u_R = φ_b·e_j, so [[u]] = -φ_b·e_j
-        //   {σ(v)·n} = ½·σ_L(φ_a·e_i)·n (only left contributes)
-        //   {σ(v)·n}·[[u]] = ½·σ_L(φ_a·e_i)·n · (-φ_R_b·e_j) = -½·σ_L(φ_a·e_i)·n_j · φ_R_b  no...
-        //   {σ(v)·n}·[[u]] = Σ_k (σ(v)·n)_k · [[u]]_k
-        //   [[u]]_k = -φ_R_b·δⱼₖ
-        //   = Σ_k ½·σ_L(φ_a·e_i)·n)_k · (-φ_R_b·δⱼₖ)
-        //   = -½·σ_L(φ_a·e_i)·n)_j · φ_R_b
-        //   term2 = −α·(-½·σ_L(φ_a·e_i)·n)_j · φ_R_b) = +½·α·σ_L(φ_a·e_i)·n)_j · φ_R_b
-        //         = +½·α·snl[a][i][j] · phi_r[b]
-        //
-        //   penalty: [[u]]·[[v]] = (-φ_R_b·e_j)·(φ_a·e_i) = -φ_a·φ_R_b·δᵢⱼ
-        //   term3 = (κ/h)·(-φ_a·φ_R_b·δᵢⱼ) = -(κ/h)·φ_a·φ_R_b·δᵢⱼ
-        // K_LR: test on LEFT (a,i), trial on RIGHT (b,j)
-        //   v_L=φ_a·e_i, v_R=0 → [[v]]=φ_a·e_i
-        //   u_L=0, u_R=φ_b·e_j → [[u]]=-φ_b·e_j
-        //   t1 = -{σ(u)·n}·[[v]] = -½·σ_R(φ_b·e_j)·n·φ_a·e_i = -0.5·snr[b][j][i]·φ_a
-        //   t2 = +α·{σ(v)·n}·[[u]] = +α·½·σ_L(φ_a·e_i)·n·(-φ_b·e_j) = -0.5·α·snl[a][i][j]·φ_b
-        //   t3 = +(κ/h)·[[u]]·[[v]] = +(κ/h)·(-φ_b·e_j)·(φ_a·e_i) = -pen·φ_a·φ_b·δᵢⱼ
-        let stride_lr = n_r * dim;
+        // K_LR (test left a,i; trial right b,j): MFEM (1,2) block — row shape
+        // positive (jump +v₁), trial flux from Elem2:
+        //   pre    += w_f·(+½·σ_R(φ_b·e_j)·n)_i · φ_L_a
+        //   jmat_c += -jmatcoef·φ_L_a·φ_R_b·δᵢⱼ   (negated col shape)
         for a in 0..n_l {
             for i in 0..dim {
-                let row_off = a * dim + i;
+                let r = a * dim + i;
                 for b in 0..n_r {
                     for j in 0..dim {
-                        let col_off = b * dim + j;
-                        let t1 = -0.5 * snr[b][j][i] * phi_l[a];
-                        let t2 = -0.5 * alpha * snl[a][i][j] * phi_r[b];
-                        let t3 = -jmatcoef * phi_l[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
-                        klr[row_off * stride_lr + col_off] += w_f * (t1 + t2) + t3;
+                        let c = nl_d + b * dim + j;
+                        pre[r * n_comb + c] += w_f * (0.5 * snr[b][j][i] * phi_l[a]);
+                        jmat_c[r * n_comb + c] +=
+                            -jmatcoef * phi_l[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
                     }
                 }
             }
         }
 
-        // K_RL[(a,i), (b,j)]: test on right (a,i), trial on left (b,j)
-        // By symmetry of the SIP formulation:
-        //   term1: +½·σ_L(φ_b·e_j)·n)_i · φ_R_a  (from [[v]] = φ_a·e_R on right)
-        //   term2: +½·α·σ_R(φ_a·e_i)·n)_j · φ_L_b
-        //   term3: −(κ/h)·φ_R_a·φ_L_b·δᵢⱼ
-        let stride_rl = n_l * dim;
+        // K_RL (test right a,i; trial left b,j): MFEM (2,1) block — row shape
+        // negated (jump -v₂), trial flux from Elem1:
+        //   pre    += w_f·(-½·σ_L(φ_b·e_j)·n)_i · φ_R_a
+        //   jmat_c += -jmatcoef·φ_R_a·φ_L_b·δᵢⱼ
         for a in 0..n_r {
             for i in 0..dim {
-                let row_off = a * dim + i;
+                let r = a * dim + i;
                 for b in 0..n_l {
                     for j in 0..dim {
-                        let col_off = b * dim + j;
-                        let t1 = 0.5 * snl[b][j][i] * phi_r[a];
-                        let t2 = 0.5 * alpha * snr[a][i][j] * phi_l[b];
-                        let t3 = -jmatcoef * phi_r[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
-                        krl[row_off * stride_rl + col_off] += w_f * (t1 + t2) + t3;
+                        let c = b * dim + j;
+                        pre[(nl_d + r) * n_comb + c] += w_f * (-0.5 * snl[b][j][i] * phi_r[a]);
+                        jmat_c[(nl_d + r) * n_comb + c] +=
+                            -jmatcoef * phi_r[a] * phi_l[b] * if i == j { 1.0 } else { 0.0 };
                     }
                 }
             }
         }
 
-        // K_RR: test on RIGHT (a,i), trial on RIGHT (b,j)
-        //   v_R=φ_a·e_i, v_L=0 → [[v]]=-φ_a·e_i
-        //   u_R=φ_b·e_j, u_L=0 → [[u]]=-φ_b·e_j
-        //   t1 = -{σ(u)·n}·[[v]] = -½·σ_R(φ_b·e_j)·n·(-φ_a·e_i) = +0.5·snr[b][j][i]·φ_a
-        //   t2 = +α·{σ(v)·n}·[[u]] = +α·½·σ_R(φ_a·e_i)·n·(-φ_b·e_j) = -0.5·α·snr[a][i][j]·φ_b
-        //   t3 = +(κ/h)·[[u]]·[[v]] = +(κ/h)·(-φ_b·e_j)·(-φ_a·e_i) = +pen·φ_a·φ_b·δᵢⱼ
-        let stride_rr = n_r * dim;
+        // K_RR (test right a,i; trial right b,j): MFEM (2,2) block — both
+        // shapes negated (elmat: one negation through row_shape; jmat: two
+        // negations cancel):
+        //   pre    += w_f·(-½·σ_R(φ_b·e_j)·n)_i · φ_R_a
+        //   jmat_c += +jmatcoef·φ_R_a·φ_R_b·δᵢⱼ
         for a in 0..n_r {
             for i in 0..dim {
-                let row_off = a * dim + i;
+                let r = a * dim + i;
                 for b in 0..n_r {
                     for j in 0..dim {
-                        let col_off = b * dim + j;
-                        let t1 = 0.5 * snr[b][j][i] * phi_r[a];
-                        let t2 = -0.5 * alpha * snr[a][i][j] * phi_r[b];
-                        let t3 = jmatcoef * phi_r[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
-                        krr[row_off * stride_rr + col_off] += w_f * (t1 + t2) + t3;
+                        let c = b * dim + j;
+                        pre[(nl_d + r) * n_comb + (nl_d + c)] +=
+                            w_f * (-0.5 * snr[b][j][i] * phi_r[a]);
+                        jmat_c[(nl_d + r) * n_comb + (nl_d + c)] +=
+                            jmatcoef * phi_r[a] * phi_r[b] * if i == j { 1.0 } else { 0.0 };
                     }
                 }
             }
         }
     }
 
-    // Scatter blocks into global matrix
-    scatter(coo, &dofs_l, &dofs_l, &kll, dim, n_l, n_l);
-    scatter(coo, &dofs_l, &dofs_r, &klr, dim, n_l, n_r);
-    scatter(coo, &dofs_r, &dofs_l, &krl, dim, n_r, n_l);
-    scatter(coo, &dofs_r, &dofs_r, &krr, dim, n_r, n_r);
+    // MFEM's closing transform, bilininteg.cpp `DGElasticityIntegrator`:
+    //
+    //   for i, for j < i:  mij = jmat(i,j)
+    //                      elmat(i,j) = α·elmat(j,i) - elmat(i,j) + mij
+    //                      elmat(j,i) = α·elmat(i,j) - elmat(j,i) + mij
+    //   elmat(i,i) = (α-1)·elmat(i,i) + jmat(i,i)
+    //
+    // ported verbatim (shared `mij`, symmetric-by-construction result).
+    let mut comb = vec![0.0_f64; n_comb * n_comb];
+    for r in 0..n_comb {
+        for c in 0..r {
+            let arc = pre[r * n_comb + c];
+            let acr = pre[c * n_comb + r];
+            let m = jmat_c[r * n_comb + c];
+            comb[r * n_comb + c] = alpha * acr - arc + m;
+            comb[c * n_comb + r] = alpha * arc - acr + m;
+        }
+        comb[r * n_comb + r] = (alpha - 1.0) * pre[r * n_comb + r] + jmat_c[r * n_comb + r];
+    }
+
+    // D1280 route 1: scatter the finalized combined elmat with MFEM's
+    // `AddSubMatrix(vdofs, vdofs, elmat, skip_zeros=1)` semantics —
+    // mutual-zero positions are never allocated; one-sided zeros are kept.
+    let global = |idx: usize, dofs: &[usize]| -> usize { dofs[idx / dim] * dim + idx % dim };
+    for r in 0..n_comb {
+        let gd_r = if r < nl_d { global(r, &dofs_l) } else { global(r - nl_d, &dofs_r) };
+        for c in 0..n_comb {
+            let val = comb[r * n_comb + c];
+            if val == 0.0 && comb[c * n_comb + r] == 0.0 {
+                continue;
+            }
+            let gd_c = if c < nl_d { global(c, &dofs_l) } else { global(c - nl_d, &dofs_r) };
+            coo.add(gd_r, gd_c, val);
+        }
+    }
 }
 
 // ─── Boundary face: stress-based SIP (weak Dirichlet) ──────────────────────
@@ -638,7 +655,9 @@ fn assemble_boundary_face_stress<S: FESpace>(
     let face_re = ref_elem_face(face_type_of(&face_nodes), order);
     let q_face = face_re.quadrature(quad_order);
 
-    let mut kbd = vec![0.0_f64; n * n * dim * dim];
+    let n_dim = n * dim;
+    let mut pre = vec![0.0_f64; n_dim * n_dim];
+    let mut jmat_c = vec![0.0_f64; n_dim * n_dim];
     let mut phi = vec![0.0_f64; n];
     let mut gref = vec![0.0_f64; n * dim];
     let mut gphys = vec![0.0_f64; n * dim];
@@ -687,52 +706,80 @@ fn assemble_boundary_face_stress<S: FESpace>(
 
         // K_bdr[(a,i),(b,j)] = −σ(φ_b·e_j)·n)_i·φ_a
         //                      −α·σ(φ_a·e_i)·n)_j·φ_b
-        //                      + (κ/h)·φ_a·φ_b·δᵢⱼ
-        let stride = n * dim;
+        //                      + jmatcoef·φ_a·φ_b·δᵢⱼ
+        // D1280 route 1: split into the consistency part `pre` (+{σ(u)·n}, v —
+        // no ½ on the boundary arm, MFEM `w = ip.weight`) and the penalty
+        // `jmat_c`, finalized by the same pairwise transform as the interior
+        // face so the block is bitwise-symmetric by construction.
         for a in 0..n {
             for i in 0..dim {
-                let row_off = a * dim + i;
+                let r = a * dim + i;
                 for b in 0..n {
                     for j in 0..dim {
-                        let col_off = b * dim + j;
-                        let t1 = -sn[b][j][i] * phi[a];
-                        let t2 = alpha * sn[a][i][j] * phi[b];
-                        let t3 = jmatcoef * phi[a] * phi[b] * if i == j { 1.0 } else { 0.0 };
-                        kbd[row_off * stride + col_off] += w_f * (t1 + t2) + t3;
+                        let c = b * dim + j;
+                        pre[r * n_dim + c] += w_f * (sn[b][j][i] * phi[a]);
+                        jmat_c[r * n_dim + c] +=
+                            jmatcoef * phi[a] * phi[b] * if i == j { 1.0 } else { 0.0 };
                     }
                 }
             }
         }
     }
 
-    scatter(coo, &dofs, &dofs, &kbd, dim, n, n);
+    // Same MFEM closing transform as the interior face (shared `mij`,
+    // symmetric-by-construction), then the mutual-zero scatter.
+    let mut comb = vec![0.0_f64; n_dim * n_dim];
+    for r in 0..n_dim {
+        for c in 0..r {
+            let arc = pre[r * n_dim + c];
+            let acr = pre[c * n_dim + r];
+            let m = jmat_c[r * n_dim + c];
+            comb[r * n_dim + c] = alpha * acr - arc + m;
+            comb[c * n_dim + r] = alpha * arc - acr + m;
+        }
+        comb[r * n_dim + r] = (alpha - 1.0) * pre[r * n_dim + r] + jmat_c[r * n_dim + r];
+    }
+
+    scatter_mutual_zero_square(coo, &dofs, &comb, dim, n);
 }
 
-// ─── Scatter helper ────────────────────────────────────────────────────────
+// ─── Scatter helpers (D1280 route 1: MFEM AddSubMatrix skip_zeros) ─────────
 //
-// Block layout: K_block[a*dim+i][b*dim+j] → global[(dofs_ri[a]*dim+i), (dofs_ci[b]*dim+j)]
-// The block is stored flat: [a*dim+i][b*dim+j] at index (a*dim+i)*stride + b*dim+j
+// MFEM assembles each face through a single
+// `mat->AddSubMatrix(vdofs, vdofs, elmat, skip_zeros=1)` over the *combined*
+// (Elem1 ∪ Elem2) vdim dof block (fem/bilinearform.cpp:659), whose per-entry
+// rule (linalg/sparsemat.cpp:2782) is:
+//
+//   skip (i,j)  iff  elmat(i,j) == 0.0  &&  elmat(j,i) == 0.0   (mutual zero)
+//
+// i.e. mutually-zero coupling positions are **never allocated**, while
+// one-sided zeros (elmat(i,j)==0 with a nonzero transpose) ARE allocated and
+// kept by `FormSystemMatrix`'s `Finalize(0)` (bilinearform.cpp:944 — "remove_zeros
+// = 0") as stored zeros.  The previous `scatter` dropped *any* exact zero,
+// which neither allocated MFEM's one-sided stored zeros nor mirrors the
+// mutual-zero non-allocation — the entry-count half of D1280.
 
-fn scatter(
+/// Scatter one square (n·dim)×(n·dim) element block with MFEM's mutual-zero
+/// skip: `(i,j)` is pushed unless `v_ij == 0.0 && v_ji == 0.0`.
+fn scatter_mutual_zero_square(
     coo: &mut CooMatrix<f64>,
-    dofs_row: &[usize],
-    dofs_col: &[usize],
+    dofs: &[usize],
     block: &[f64],
     dim: usize,
-    n_row: usize,
-    n_col: usize,
+    n: usize,
 ) {
-    let stride = n_col * dim;
-    for a in 0..n_row {
+    let stride = n * dim;
+    for a in 0..n {
         for i in 0..dim {
-            let row_base = dofs_row[a] * dim + i;
-            for b in 0..n_col {
+            let r = a * dim + i;
+            for b in 0..n {
                 for j in 0..dim {
-                    let val = block[(a * dim + i) * stride + b * dim + j];
-                    if val != 0.0 {
-                        let col_base = dofs_col[b] * dim + j;
-                        coo.add(row_base, col_base, val);
+                    let c = b * dim + j;
+                    let val = block[r * stride + c];
+                    if val == 0.0 && block[c * stride + r] == 0.0 {
+                        continue;
                     }
+                    coo.add(dofs[r / dim] * dim + r % dim, dofs[c / dim] * dim + c % dim, val);
                 }
             }
         }

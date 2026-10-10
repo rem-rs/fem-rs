@@ -230,6 +230,35 @@
   = 22 件**（第 23 件未发生）。证据：`tmp/rr135lane8/` +
   `fem-pro/tmp/rr135/lane8/REPORT.md`。
 
+- **round 136 增量（Lane 1：D1280 关账，ex17 升 **BIT 23rd**；D779 顺带闭，
+  基线 3495e730，本地 commit 待主会话验证推送）**：Lane 8 登记的两层根因
+  全部源码级复核并修复——**①面等参路线**：`face_point_geom`（2-D）改 MFEM
+  `Loc1`/`Loc2` 点矩阵组合（mesh.cpp:774 `GetLocalSegToTri/QuadTransformation`
+  语义：列 = 参考面角点坐标按 orientation 排布，`eip = locpm·{1-ξ,ξ}` 升序乘加；
+  实证 beam-tri 全部内部面 o1=0/o2=1，反向边的双重取补尘值根除）；
+  **②求值精确零**：`TriL2GL` 闭 GLL p1（`vertex_p1`，节点=三顶点）快路径第三
+  重心坐标 `1-(x+y)` 结合——互补对（x+y==1.0 位级）上精确 0 = MFEM 编译版
+  `L2_TriangleElement(1,*)` 行为（rr136 探针 2928/2928 全精确零；开 GL
+  `new(1)` 不受及——节点为内部点，nodal 基不同，快路径门控在构造处）；
+  **③skip_zeros 贯通**：`DgElasticityIntegrator` 面装配重构为 MFEM
+  `AssembleBlock` 语义的 pre（consistency）/jmat（penalty）分离 + 收尾
+  `elmat := α·elmatᵀ - elmat + jmat`（共享 `mij`，**构造性位级对称**——
+  旧四块独立累加的转置位 1 ulp 差即 Symmetry 4.4e-16 的根因）+
+  `AddSubMatrix(vdofs,vdofs,elmat,skip_zeros=1)` **互零对不分配**、单侧零
+  建持零槽（`FormSystemMatrix` Finalize(0) 保留）语义 scatter。**验收 =
+  ex17 884 字节 stdout 与新鲜 C++ oracle cmp 逐字节全等（sha256 28d5a438…，
+  0 豁免）**：统计 8 行（entries 467456→**436736**、per-row 17.7708、
+  stored zeros 16.6197% (72584)、Symmetry **0**、small ×3 = 72584、
+  Memory 5.0918 MiB）+ PCG 3 行（767 it/303.808/2.79289e-10/ARF 0.982095）
+  全逐字。**门**：fem-assembly 741/0（+integration 全绿）、fem-element 547/0、
+  fem-space 296/0、fem-solver 469/0；**重放零回归**：ex9（新鲜 oracle 0 diff，
+  sha fa8554b9）、ex14（新鲜 oracle 0 diff，sha c44da8a9）、ex27 default/
+  -dbc gold 逐字 + **-dg 模式 104 行 0 diff = D779 顺带闭**（尘值即其根因）、
+  ex41（sha b962e706 = r135 金标）。**串行 examples BIT = 23 件**。
+  遗留 scoping：3-D 面组合（`face_point_geom_3d*`）与 MFEM 编译版一般点
+  位级算法未回刻（ulp 级不进打印，探针实证）；其余 DG 装配器互零贯通待
+  各自示例对齐。证据：`tmp/rr136lane1/` + `fem-pro/tmp/rr136/lane1/`。
+
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
 1. **examples/miniapps 逐个三态台账**——**round-117 已执行并关闭**：一次性批跑（examples 44 串行 +

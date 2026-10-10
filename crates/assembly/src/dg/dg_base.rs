@@ -347,10 +347,47 @@ pub fn face_point_geom<M: MeshTopology + ?Sized>(
 ) -> FacePointGeom {
     let et = mesh.element_type(elem);
     let (le, forward) = find_local_edge(mesh, elem, a, b);
-    // ξ runs a → b (the face's own node order, MFEM `Loc1`'s parameterisation);
-    // the element's own edge runs corner le → corner le+1.
-    let s = if forward { xi } else { 1.0 - xi };
-    let (eip, ds) = ref_edge_map(et, le, s);
+    // D1280 route (2a): the element reference point is MFEM's `Loc1`/`Loc2`
+    // point-matrix composition (`Mesh::GetLocalSegToTriTransformation`,
+    // mesh.cpp:774, and the SegToQuad arm :794).  The point matrix's columns
+    // are the reference element's face-corner coordinates, permuted by the
+    // orientation: the CCW-agreeing side (`forward`, MFEM orientation 0 — the
+    // side whose stored face-node order equals its own CCW edge; rr136 probe:
+    // every interior face has o1=0 on Elem1 and o2=1 on Elem2) has columns
+    // `[V[le], V[le+1]]`, the reversed side has them swapped.  The reference
+    // point is `eip = locpm · {1-ξ, ξ}` with MFEM's ascending product-sum
+    // (`PointMat.Mult`, fem/eltrans.cpp), where `0.0*s` and `1.0*s` are exact:
+    // on the reference hypotenuse this lands on a bit-exact complement pair
+    // (`x + y == 1.0`) and on the axis edges on exact-zero coordinates — the
+    // input the basis's exact-zero structure (route 2b) requires.  The prior
+    // closed-form `ref_edge_map` + `s = 1-ξ` remap composed `1-(1-ξ)` on
+    // reversed edges (1 ulp off `ξ`), dusting the off-face shape values that
+    // MFEM keeps at exact 0.
+    let ref_v: [[f64; 2]; 4] = match et {
+        ElementType::Tri3 => [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
+        ElementType::Quad4 => [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        _ => panic!("face_point_geom: unsupported element type {et:?}"),
+    };
+    let nv = match et {
+        ElementType::Tri3 => 3,
+        ElementType::Quad4 => 4,
+        _ => unreachable!(),
+    };
+    let (c0, c1) = if forward {
+        (ref_v[le], ref_v[(le + 1) % nv])
+    } else {
+        (ref_v[(le + 1) % nv], ref_v[le])
+    };
+    let s0 = 1.0 - xi;
+    let eip = [c0[0] * s0 + c1[0] * xi, c0[1] * s0 + c1[1] * xi];
+    // The composed face tangent d(eip)/dξ runs along the *columns* (c1 - c0);
+    // `nor` keeps the element's own CCW tangent — the same convention the
+    // pre-D1280 code used and the one that makes `nor` point *out of* this
+    // element (MFEM fixes the sign through the face's canonical orientation
+    // bits, independently of how `Loc1` parameterises the face).  Only the
+    // eip composition changes; `nor`'s consumed value (g1's, in both DG
+    // drivers) is bit-identical to before on straight meshes.
+    let (_p, ds) = ref_edge_map(et, le, 0.0);
     let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 2);
     // J_face = J_elem · d(eip)/ds, with `ds` the element's **own** CCW edge
     // tangent — `ref_edge_map`'s derivative is constant in `s`, so it is the

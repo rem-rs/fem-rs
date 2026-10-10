@@ -2187,6 +2187,11 @@ pub struct TriL2GL {
     nodes: Vec<[f64; 2]>,
     lex: Vec<(usize, usize)>, // (i, j) with i + j <= p, MFEM enumeration
     ti: Vec<f64>,             // n×n row-major: φ_k = Σ_o ti[k·n+o]·m_o(x)
+    /// p=1 with the closed-GLL vertex nodes — the only placement whose nodal
+    /// basis is the barycentric triple {1-x-y, x, y} (D1280 route 2b fast
+    /// path).  The open-GL `new(1)` nodes are interior points; its basis is a
+    /// different triple of linear forms and must keep the generic loop.
+    vertex_p1: bool,
 }
 
 /// Open 1-D Gauss-Legendre points on `[0,1]`, ascending (`Poly_1D::OpenPoints`).
@@ -2241,7 +2246,10 @@ impl TriL2GL {
                 ti[k * n + o] = ti_m[(k, o)];
             }
         }
-        Self { order: p, nodes, lex, ti }
+        // Closed-GLL p=1: op = {0, 1} exactly, nodes = the three reference
+        // vertices in lex order (see `eval_basis`'s `vertex_p1` fast path).
+        let vertex_p1 = p == 1 && op[0] == 0.0 && op[1] == 1.0;
+        Self { order: p, nodes, lex, ti, vertex_p1 }
     }
 }
 
@@ -2257,6 +2265,27 @@ impl ReferenceElement for TriL2GL {
     }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
+        if self.vertex_p1 {
+            // D1280 route (2b): p=1 closed-GLL fast path with the third
+            // barycentric in the `1 - (x+y)` association.  For nodes = the
+            // three vertices the nodal basis IS the barycentric one (the
+            // monomial Vandermonde inverts to [[1,-1,-1],[0,1,0],[0,0,1]]),
+            // but the generic loop's `(1-x)-y` association produces 1-ulp dust
+            // on the hypotenuse, where MFEM's compiled `L2_TriangleElement(1,*)`
+            // returns exact 0.0 whenever the reference point satisfies
+            // `x + y == 1.0` bit-exactly (rr136 probes: at every Loc1-composed
+            // face point the off-edge shape is exact zero, 2928/2928 on
+            // beam-tri; the fp-zero structure — not the 1-ulp generic-point
+            // noise — is what `AddSubMatrix(skip_zeros)`'s mutual-zero test and
+            // `PrintInfo`'s statistics see).  Only the closed-GLL arm may take
+            // this path: the open-GL `TriL2GL::new(1)` nodes are interior
+            // points and its nodal basis is a different triple of linear
+            // forms.
+            values[0] = 1.0 - (x + y);
+            values[1] = x;
+            values[2] = y;
+            return;
+        }
         let n = self.nodes.len();
         for k in 0..n {
             let mut acc = 0.0;
