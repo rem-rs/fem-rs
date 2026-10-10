@@ -49,6 +49,11 @@
 //!   [`ConvectionStabilization::DeferredUpwind`] is a fem-rs-only extension
 //!   (D1125): the step's `H` gains `beta·D_up(u_lag)`, the lagged upwind
 //!   defect.  The default `Off` is byte-identical to the C++ path.
+//! * [`NavierConfig::pressure_mode`] =
+//!   [`PressureMode::Incremental`] is a fem-rs-only extension (D952-H2): the
+//!   van Kan / Guermond–Minev–Shen split sequencing (pressure as a state,
+//!   increment Poisson, mass-form projection) replaces the fused TLO step.
+//!   The default `Classical` is byte-identical to the C++ path.
 //!
 //! # The `D`/`G` pairing and its boundary term
 //!
@@ -152,6 +157,51 @@ pub enum ConvectionStabilization {
     },
 }
 
+/// Pressure formulation family of the split step
+/// ([`NavierConfig::pressure_mode`], D952-H2).
+///
+/// [`PressureMode::Classical`] is the MFEM-identical non-incremental scheme:
+/// every step solves the pressure Poisson system for the ABSOLUTE pressure
+/// from scratch (the previous `pn` only warm-starts the CG; the right-hand
+/// side never consumes it as state), which leaves an O(dt) — in the viscous
+/// coupling O(ν·dt) — splitting error in the pressure that regenerates each
+/// step and caps the transient velocity order (measured on the decay rig,
+/// round-132/133: coarse-pair order 1.59; ν-scan 1.59@ν=0.05 → 1.71@ν=0.005).
+///
+/// [`PressureMode::Incremental`] is the incremental pressure re-assembly of
+/// the van Kan / Guermond–Minev–Shen pressure-correction family (J. van Kan,
+/// SIAM J. Sci. Stat. Comput. 7(3), 1986; Guermond, Minev & Shen, SIAM J.
+/// Sci. Comput. 28(2), 2006, §2.2/§3.1): the pressure becomes a STATE — the
+/// step solves the Poisson system for the O(dt) INCREMENT `δp` and
+/// re-assembles `p^{n+1} = p_ext + δp` with `p_ext = ab1·pⁿ + ab2·p^{n−1} +
+/// ab3·p^{n−2}` the EXTk pressure extrapolation (the same coefficients the
+/// velocity extrapolation uses, so BDF1 bootstraps with `p_ext = pⁿ`).  The
+/// increment right-hand side substitutes the pressure-EXTRAPOLATED split
+/// velocity into the classical data functional,
+/// `resp_incr = resp − (bd0/dt)·Gᵀ·H⁻¹·(G·p_ext)`, i.e. the textbook
+/// `-Δp_ext` increment term carried through the dissipative Helmholtz
+/// inverse (a raw constraint-operator term bypassing `H⁻¹` was measured to
+/// blow up ~1.5×/step — round-134 variant scan).  Because the splitting
+/// defect of the mass-matrix surrogate now multiplies the O(dt) increment
+/// instead of the O(1) absolute pressure, the O(ν·dt) term no longer
+/// regenerates per step — this is the lever the round-133 Timmermans patch
+/// (which only reshaped the RHS data) measurably could not supply.
+///
+/// The [`NavierConfig::rotational`] flag stays orthogonal: with both active
+/// the step realizes the rotational-incremental family (`p^{n+1} = p_ext +
+/// δp − ν·Π(∇·ũ)`, GMS 2006 §3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressureMode {
+    /// MFEM-identical classical non-incremental path (the default — every
+    /// step of the default configuration is bit-identical to the pre-D952-H2
+    /// kernel).
+    Classical,
+    /// Incremental pressure re-assembly (pressure as state; see the type
+    /// docs).  Provisional steps are rejected loudly (they overwrite `pn`
+    /// without rotating the history, which would corrupt the state).
+    Incremental,
+}
+
 /// Relative tolerances / iteration caps / print levels of the three solves.
 ///
 /// Mirrors the double-precision `NavierSolver` member defaults of
@@ -189,6 +239,10 @@ pub struct NavierConfig {
     /// Convection treatment ([`ConvectionStabilization::Off`] = the
     /// MFEM-identical default; D1125 for the stabilized variants).
     pub convection_stabilization: ConvectionStabilization,
+    /// D952-H2 pressure formulation family ([`PressureMode`]).  The default
+    /// [`PressureMode::Classical`] keeps every step bit-identical to the
+    /// MFEM path.
+    pub pressure_mode: PressureMode,
     /// D952 Timmermans **rotational pressure correction** (fem-rs extension,
     /// NOT an MFEM feature — the C++ `NavierSolver` is the classical
     /// non-rotational scheme).  `false` (the default) keeps every step
@@ -226,6 +280,7 @@ impl Default for NavierConfig {
             verbose: true,
             pressure_amg: false,
             convection_stabilization: ConvectionStabilization::Off,
+            pressure_mode: PressureMode::Classical,
             rotational: false,
         }
     }
@@ -559,6 +614,13 @@ pub struct NavierSolver<D: NavierDiscretization> {
 
     vel: VelState,
     pn: Vec<f64>,
+    /// Pressure history of [`PressureMode::Incremental`] (D952-H2):
+    /// `pnm1 = pⁿ`, `pnm2 = p^{n−1}` at the time `step` runs (invariant after
+    /// each accepted step: `pn = p^{n+1}`).  The classical path never reads
+    /// them; the shift happens inside the incremental branch BEFORE the solve
+    /// overwrites `pn` (and never on provisional steps — rejected loudly).
+    pnm1: Vec<f64>,
+    pnm2: Vec<f64>,
     /// `curlu_gf` — `∇×Lext` of the last step
     /// ([`NavierDiscretization::curl_curl_and_vorticity`]); empty when the
     /// discretization does not implement the vorticity output.
@@ -613,6 +675,8 @@ impl<D: NavierDiscretization> NavierSolver<D> {
             sp_amg: None,
             vel: VelState::new(nv),
             pn: vec![0.0; np],
+            pnm1: vec![0.0; np],
+            pnm2: vec![0.0; np],
             curlu: Vec::new(),
             cur_step: 0,
             dthist: [0.0; 3],
@@ -840,6 +904,19 @@ impl<D: NavierDiscretization> NavierSolver<D> {
     /// With `provisional = false` the computed step is accepted immediately:
     /// `UpdateTimestepHistory(dt)` is called and `time += dt`.
     pub fn step(&mut self, time: &mut f64, dt: f64, cur_step: i32, provisional: bool) {
+        // D952-H2: a provisional step overwrites `pn` without rotating the
+        // velocity/pressure history (MFEM semantics — `X1` aliases `pn_gf`),
+        // which would leave the incremental pressure state (`pn` consumed as
+        // pⁿ by the next `p_ext`) polluted by the rejected trial.  No caller
+        // in the workspace steps provisionally; the mode demands the contract
+        // loudly rather than corrupting the state silently.
+        if provisional && self.cfg.pressure_mode == PressureMode::Incremental {
+            panic!(
+                "PressureMode::Incremental keeps the pressure as accumulated \
+                 state (p^{{n+1}} = p_ext + δp with the history shifted per \
+                 accepted step); provisional steps are not supported"
+            );
+        }
         let t_step = Instant::now();
         let mut t_sub = Instant::now();
         self.set_time_integration_coefficients(cur_step);
@@ -977,15 +1054,152 @@ impl<D: NavierDiscretization> NavierSolver<D> {
         let mut pn = std::mem::take(&mut self.pn);
         self.disc.project_pressure_bdr(t_now, &mut pn);
         let mut b1 = resp;
+        // D952-H2 incremental re-assembly (`PressureMode::Incremental`): the
+        // pressure becomes a STATE.  The Poisson system is solved for the
+        // O(dt) INCREMENT `δp` and the absolute pressure is re-assembled as
+        // `p^{n+1} = p_ext + δp` with `p_ext` the EXTk pressure
+        // extrapolation (van Kan 1986; Guermond–Minev–Shen 2006 §2.2/§3.1).
+        // The increment RHS substitutes the pressure-EXTRAPOLATED split
+        // velocity into the classical data functional (see the long comment
+        // inside the branch).  The default (`Classical`) never executes this
+        // branch — the step stays bit-identical to the MFEM path.
+        let mut p_ext: Option<Vec<f64>> = None;
+        // The split velocity `u* = H⁻¹·(Mv·fext − G·p_ext)` of the
+        // incremental mode (consumed by the split projection below; `None`
+        // on the classical path).
+        let mut split_vel: Option<Vec<f64>> = None;
+        if self.cfg.pressure_mode == PressureMode::Incremental {
+            // ── D952-H2 split sequencing (van Kan 1986; Guermond–Minev–Shen
+            // 2006 §2.2/§3.1) ──
+            //
+            // The FUSED step (classical) applies the full Helmholtz inverse
+            // to the WHOLE pressure drive: u⁺ = H⁻¹·(Mv·fext − G·p^{n+1}).
+            // The incremental scheme's second-order mechanism lives exactly
+            // where that differs from the split form: the momentum sees only
+            // the extrapolated pressure through the full Helmholtz, and the
+            // increment's gradient is subtracted in MASS form,
+            //
+            //   u* = H⁻¹·(Mv·fext − G·p_ext)
+            //   Sp·δp = (bd0/dt)·(Gᵀ·u* − g_bdr)      [raw increment Poisson;
+            //           ∂_nδp = (bd0/dt)(u*·n − u_D·n) — vanishes on Γ_D]
+            //   p^{n+1} = p_ext + δp
+            //   u⁺ = u* − (dt/bd0)·Mv⁻¹·(G·p^{n+1}) ,  u⁺|_Γ = u_D .
+            //
+            // Reshaping the RHS of the fused absolute solve instead was
+            // MEASURED to be structurally wrong (any kernel surrogate of the
+            // textbook `-Δp_ext` term either cancels the composition — the
+            // consistent `−Sp·p_ext` choice, a no-op — or leaves an O(1)
+            // operator mismatch `(Sp − Q)·p_ext`, Q = GᵀMv⁻¹G, which drove
+            // an oscillating absolute pressure and an energy-growing
+            // trajectory; round-134 variant scan + trajectory diagnostic).
+            //
+            // EXTk pressure extrapolation from the pressure history (the
+            // same coefficients the velocity extrapolation uses).  The k-th
+            // order extrapolation needs k REAL history levels: the kernel
+            // has no pressure initial condition (the classical path never
+            // consumes one), so until the history is mature the
+            // extrapolation stays EXT1 (`p_ext = pⁿ`) — extrapolating with
+            // a fake `p⁰ = 0` kicks the trajectory.
+            let mature = cur_step >= 2;
+            let pe: Vec<f64> = if mature {
+                (0..npl)
+                    .map(|i| {
+                        self.ab1 * pn[i] + self.ab2 * self.pnm1[i] + self.ab3 * self.pnm2[i]
+                    })
+                    .collect()
+            } else {
+                pn.clone()
+            };
+            // History shift BEFORE the solves overwrite `pn`: pnm2 ← p^{n−1},
+            // pnm1 ← pⁿ (the composition below restores `pn = p^{n+1}`).
+            // Provisional steps never reach this point (the loud guard at the
+            // step entry rejects them: they overwrite `pn` without rotating
+            // the history).
+            self.pnm2.copy_from_slice(&self.pnm1);
+            self.pnm1.copy_from_slice(&pn);
+            // Split velocity: one Helmholtz solve with the extrapolated
+            // pressure drive.  This is the step's Helmholtz solve (the fused
+            // main solve below is skipped); it eliminates `h` ONCE with the
+            // projected boundary data.
+            let mut gpe = vec![0.0_f64; nv];
+            self.g.spmv(&pe, &mut gpe);
+            let mut resu_ext = vec![0.0_f64; nv];
+            self.mv.spmv(&fext, &mut resu_ext);
+            for i in 0..nv {
+                resu_ext[i] -= gpe[i];
+            }
+            self.disc.project_velocity_bdr(t_now, &mut self.vel.un_next);
+            let mut b2ext = resu_ext;
+            if !vel_ess.is_empty() {
+                let vals: Vec<f64> = vel_ess.iter().map(|&d| self.vel.un_next[d]).collect();
+                self.disc.eliminate_bc(&mut h, &mut b2ext, &vel_ess, &vals);
+            }
+            let mut us = self.vel.un_next.clone();
+            {
+                let hd = &self.h_diag;
+                let apply = |x: &[f64], y: &mut [f64]| h.spmv(x, y);
+                let jac = |r: &[f64], z: &mut [f64]| {
+                    for i in 0..r.len() {
+                        z[i] = r[i] / hd[i];
+                    }
+                };
+                let t_solve = Instant::now();
+                let res = solve_cg_mfem(
+                    nv,
+                    apply,
+                    &b2ext,
+                    &mut us,
+                    Some(jac),
+                    &SliOptions {
+                        rel_tol: self.cfg.rtol_hsolve,
+                        abs_tol: 0.0,
+                        max_iter: 200,
+                        print_level: self.cfg.pl_hsolve,
+                    },
+                    true,
+                    None,
+                );
+                self.rt_hsolve = t_solve.elapsed().as_secs_f64();
+                self.iter_hsolve = res.iterations;
+                self.res_hsolve = res.final_norm;
+            }
+            // Raw increment Poisson: the classical data pattern
+            // (`Gᵀ·(data) − (bd0/dt)·g_bdr`) fed with the split velocity's
+            // acceleration `(bd0/dt)·u*`.  `Gᵀ·w` rides the exact identity
+            // `Gᵀ = B − D` (`assemble_ftext_bdr(w) = B·w`).  `g_bdr` is the
+            // boundary functional assembled above for `resp`.
+            b1 = vec![0.0_f64; npl];
+            let ftb = self.disc.assemble_ftext_bdr(&us);
+            let mut dus = vec![0.0_f64; npl];
+            self.d.spmv(&us, &mut dus);
+            for i in 0..npl {
+                b1[i] = (self.bd0 / dt) * (ftb[i] - dus[i] - g_bdr[i]);
+            }
+            if pres_ess.is_empty() {
+                // Keep the RHS in the range of the pure-Neumann `Sp`.
+                orthogonalize(&mut b1);
+            }
+            split_vel = Some(us);
+            p_ext = Some(pe);
+        }
         if !pres_ess.is_empty() {
-            let vals: Vec<f64> = pres_ess.iter().map(|&d| pn[d]).collect();
+            let vals: Vec<f64> = match &p_ext {
+                // Incremental: the increment's essential data is
+                // `p_D(t^{n+1}) − p_ext|_Γ` — the Dirichlet data enters
+                // through the composition `pn = p_ext + δp` below.
+                Some(pe) => pres_ess.iter().map(|&d| pn[d] - pe[d]).collect(),
+                None => pres_ess.iter().map(|&d| pn[d]).collect(),
+            };
             self.disc
                 .eliminate_bc(&mut self.sp, &mut b1, &pres_ess, &vals);
         }
 
-        // SpInv->Mult(B1, X1): `iterative_mode = true`; with no pressure
-        // Dirichlet BCs the preconditioner is `OrthoSolver(GSSmoother)`,
-        // otherwise the bare smoother.
+        // SpInv->Mult(B1, X1): with no pressure Dirichlet BCs the
+        // preconditioner is `OrthoSolver(GSSmoother)`, otherwise the bare
+        // smoother.  Classical solves for the absolute pressure (warm start
+        // from `pⁿ`, `iterative_mode = true`); Incremental solves for the
+        // increment (zero initial guess — the classical warm start would
+        // seed the O(dt) increment with an O(p) value).
         {
             let sp = &self.sp;
             let amg = self.sp_amg.as_ref();
@@ -1019,21 +1233,55 @@ impl<D: NavierDiscretization> NavierSolver<D> {
                 }
             };
             let t_solve = Instant::now();
-            let res = solve_cg_mfem(
-                npl,
-                apply,
-                &b1,
-                &mut pn,
-                Some(prec),
-                &SliOptions {
-                    rel_tol: self.cfg.rtol_spsolve,
-                    abs_tol: 0.0,
-                    max_iter: 200,
-                    print_level: self.cfg.pl_spsolve,
-                },
-                true,
-                None,
-            );
+            let res = match &p_ext {
+                None => solve_cg_mfem(
+                    npl,
+                    apply,
+                    &b1,
+                    &mut pn,
+                    Some(prec),
+                    &SliOptions {
+                        rel_tol: self.cfg.rtol_spsolve,
+                        abs_tol: 0.0,
+                        max_iter: 200,
+                        print_level: self.cfg.pl_spsolve,
+                    },
+                    true,
+                    None,
+                ),
+                Some(pe) => {
+                    let mut pinc = vec![0.0_f64; npl];
+                    let res = solve_cg_mfem(
+                        npl,
+                        apply,
+                        &b1,
+                        &mut pinc,
+                        Some(prec),
+                        &SliOptions {
+                            rel_tol: self.cfg.rtol_spsolve,
+                            abs_tol: 0.0,
+                            max_iter: 200,
+                            print_level: self.cfg.pl_spsolve,
+                        },
+                        false,
+                        None,
+                    );
+                    // Re-assemble the absolute pressure `p^{n+1} = p_ext +
+                    // δp`; essential DOFs keep the projected Dirichlet data
+                    // (`pn` holds it — the increment's own essential entries
+                    // carry `p_D − p_ext` and must not be added on top).
+                    let mut ess = pres_ess.iter();
+                    let mut next_ess = ess.next();
+                    for i in 0..npl {
+                        if next_ess.is_some_and(|e| *e == i) {
+                            next_ess = ess.next();
+                            continue;
+                        }
+                        pn[i] = pe[i] + pinc[i];
+                    }
+                    res
+                }
+            };
             self.rt_spsolve = t_solve.elapsed().as_secs_f64();
             self.iter_spsolve = res.iterations;
             self.res_spsolve = res.final_norm;
@@ -1124,60 +1372,108 @@ impl<D: NavierDiscretization> NavierSolver<D> {
             self.pn = pc;
         }
 
-        // Project velocity: resu = -G·pn + Mv·Fext.
-        let mut resu = vec![0.0_f64; nv];
-        self.g.spmv(&self.pn, &mut resu);
-        for v in resu.iter_mut() {
-            *v = -*v;
-        }
-        {
-            let mut mv_fext = vec![0.0_f64; nv];
-            self.mv.spmv(&fext, &mut mv_fext);
-            for i in 0..nv {
-                resu[i] += mv_fext[i];
+        if let Some(us) = split_vel {
+            // ── D952-H2 split projection: u⁺ = u* − (dt/bd0)·Mv⁻¹·(G·p^{n+1})
+            // (the increment's gradient rides the MASS matrix — the fused
+            // Helmholtz projection below is exactly what the incremental
+            // scheme must NOT do).  Essential dofs keep the Dirichlet data
+            // (u* already carries it).
+            let mut gp = vec![0.0_f64; nv];
+            self.g.spmv(&self.pn, &mut gp);
+            let mut w = vec![0.0_f64; nv];
+            {
+                let mv = &self.mv;
+                let diag = &self.mv_diag;
+                let apply = |x: &[f64], y: &mut [f64]| mv.spmv(x, y);
+                let jac = |r: &[f64], z: &mut [f64]| {
+                    for i in 0..r.len() {
+                        z[i] = r[i] / diag[i];
+                    }
+                };
+                let res = solve_cg_mfem(
+                    nv,
+                    apply,
+                    &gp,
+                    &mut w,
+                    Some(jac),
+                    &SliOptions {
+                        rel_tol: self.cfg.rtol_mvsolve,
+                        abs_tol: 0.0,
+                        max_iter: 200,
+                        print_level: self.cfg.pl_mvsolve,
+                    },
+                    false,
+                    None,
+                );
+                let _ = (res.iterations, res.final_norm); // the split projection is not the step's MV record
             }
-        }
-
-        // un_next_gf.ProjectBdrCoefficient(vel_dbcs).
-        self.disc.project_velocity_bdr(t_now, &mut self.vel.un_next);
-
-        // H_form->FormLinearSystem(vel_ess_tdof, un_next_gf, resu_gf, …):
-        // `X2` aliases `un_next_gf` and the RHS is the eliminated `resu_gf`.
-        let mut b2 = resu;
-        if !vel_ess.is_empty() {
-            let vals: Vec<f64> = vel_ess.iter().map(|&d| self.vel.un_next[d]).collect();
-            self.disc.eliminate_bc(&mut h, &mut b2, &vel_ess, &vals);
-        }
-
-        // HInv->Mult(B2, X2) — `iterative_mode = true` (initial guess
-        // `un_next_gf`) with the Setup-time Jacobi preconditioner.
-        {
-            let hd = &self.h_diag;
-            let apply = |x: &[f64], y: &mut [f64]| h.spmv(x, y);
-            let jac = |r: &[f64], z: &mut [f64]| {
-                for i in 0..r.len() {
-                    z[i] = r[i] / hd[i];
+            let scale = dt / self.bd0;
+            self.vel.un_next.copy_from_slice(&us);
+            let mut ess = vel_ess.iter();
+            let mut next_ess = ess.next();
+            for i in 0..nv {
+                if next_ess.is_some_and(|e| *e == i) {
+                    next_ess = ess.next();
+                    continue;
                 }
-            };
-            let t_solve = Instant::now();
-            let res = solve_cg_mfem(
-                nv,
-                apply,
-                &b2,
-                &mut self.vel.un_next,
-                Some(jac),
-                &SliOptions {
-                    rel_tol: self.cfg.rtol_hsolve,
-                    abs_tol: 0.0,
-                    max_iter: 200,
-                    print_level: self.cfg.pl_hsolve,
-                },
-                true,
-                None,
-            );
-            self.rt_hsolve = t_solve.elapsed().as_secs_f64();
-            self.iter_hsolve = res.iterations;
-            self.res_hsolve = res.final_norm;
+                self.vel.un_next[i] -= scale * w[i];
+            }
+        } else {
+            // Project velocity: resu = -G·pn + Mv·Fext.
+            let mut resu = vec![0.0_f64; nv];
+            self.g.spmv(&self.pn, &mut resu);
+            for v in resu.iter_mut() {
+                *v = -*v;
+            }
+            {
+                let mut mv_fext = vec![0.0_f64; nv];
+                self.mv.spmv(&fext, &mut mv_fext);
+                for i in 0..nv {
+                    resu[i] += mv_fext[i];
+                }
+            }
+
+            // un_next_gf.ProjectBdrCoefficient(vel_dbcs).
+            self.disc.project_velocity_bdr(t_now, &mut self.vel.un_next);
+
+            // H_form->FormLinearSystem(vel_ess_tdof, un_next_gf, resu_gf, …):
+            // `X2` aliases `un_next_gf` and the RHS is the eliminated `resu_gf`.
+            let mut b2 = resu;
+            if !vel_ess.is_empty() {
+                let vals: Vec<f64> = vel_ess.iter().map(|&d| self.vel.un_next[d]).collect();
+                self.disc.eliminate_bc(&mut h, &mut b2, &vel_ess, &vals);
+            }
+
+            // HInv->Mult(B2, X2) — `iterative_mode = true` (initial guess
+            // `un_next_gf`) with the Setup-time Jacobi preconditioner.
+            {
+                let hd = &self.h_diag;
+                let apply = |x: &[f64], y: &mut [f64]| h.spmv(x, y);
+                let jac = |r: &[f64], z: &mut [f64]| {
+                    for i in 0..r.len() {
+                        z[i] = r[i] / hd[i];
+                    }
+                };
+                let t_solve = Instant::now();
+                let res = solve_cg_mfem(
+                    nv,
+                    apply,
+                    &b2,
+                    &mut self.vel.un_next,
+                    Some(jac),
+                    &SliOptions {
+                        rel_tol: self.cfg.rtol_hsolve,
+                        abs_tol: 0.0,
+                        max_iter: 200,
+                        print_level: self.cfg.pl_hsolve,
+                    },
+                    true,
+                    None,
+                );
+                self.rt_hsolve = t_solve.elapsed().as_secs_f64();
+                self.iter_hsolve = res.iterations;
+                self.res_hsolve = res.final_norm;
+            }
         }
 
         if !provisional {
@@ -1813,5 +2109,132 @@ mod tests {
         s.setup(0.1);
         let mut t = 0.0;
         s.step(&mut t, 0.1, 0, false);
+    }
+
+    /// D952-H2 split-sequencing wiring (kernel level, hand-checked on the
+    /// toy disc): one accepted step of `PressureMode::Incremental` on
+    /// `ToyDisc(2, 2, dirichlet=false)` (ν = 1, dt = 0.05, u₀ = (0.5, −0.25),
+    /// BDF1 bootstrap, so `p_ext = pⁿ` with the essential dof already at its
+    /// projected data `p_ext = (p_D, 0) = (2.05, 0)`) must produce, by hand
+    /// expansion of every stage the step runs,
+    ///
+    /// ```text
+    ///   fext = Mv⁻¹(−N(u⁰) + f) + BDF/dt  = (9.9, −4.9125)
+    ///   u*   = H⁻¹·(Mv·fext − G·p_ext)    = (5917, −4037)/13440
+    ///          (b2ext = (71/4, −95/8); H diag 41, off 1, det 1680)
+    ///   b1   = (bd0/dt)·(Gᵀu* − g_bdr) = (0, −31171/2688)
+    ///          (Gᵀ = B − D; essential data p_D − p_ext|_Γ = 0)
+    ///   p⁺   = (p_D, p_ext[1] + δp[1])    = (2.05, −11.5963541667)
+    ///   u⁺   = u* − (dt/bd0)·Mv⁻¹·(G·p⁺)  = (0.6789118304, −0.0617116815)
+    /// ```
+    ///
+    /// Every stage of the split sequencing (extrapolated-pressure Helmholtz
+    /// drive, raw increment Poisson, mass-form projection, essential-dof
+    /// composition) is pinned — a wiring loss or sign flip in any of them
+    /// moves these numbers and the pin goes red.
+    #[test]
+    fn incremental_mode_split_step_hand_checked() {
+        let disc = ToyDisc::new(2, 2, false); // vel_ess = [], pres_ess = [0]
+        let mut s = NavierSolver::new(
+            disc,
+            1.0,
+            NavierConfig {
+                verbose: false,
+                pressure_mode: PressureMode::Incremental,
+                rtol_mvsolve: 1.0e-12,
+                rtol_spsolve: 1.0e-12,
+                rtol_hsolve: 1.0e-12,
+                ..Default::default()
+            },
+        );
+        s.velocity_mut().copy_from_slice(&[0.5, -0.25]);
+        s.setup(0.05);
+        let mut t = 0.0;
+        s.step(&mut t, 0.05, 0, false);
+        assert_eq!(t, 0.05);
+        let p = s.pressure();
+        let u = s.velocity();
+        let want_p = [2.05_f64, -31171.0 / 2688.0];
+        let want_u = [0.6789118303571429, -33177.0 / 537600.0];
+        for k in 0..2 {
+            assert!(
+                (p[k] - want_p[k]).abs() < 1e-9,
+                "pressure[{}] = {} vs hand-computed {}",
+                k,
+                p[k],
+                want_p[k]
+            );
+            assert!(
+                (u[k] - want_u[k]).abs() < 1e-9,
+                "velocity[{}] = {} vs hand-computed {}",
+                k,
+                u[k],
+                want_u[k]
+            );
+        }
+    }
+
+    /// The incremental composition keeps the pressure-Dirichlet convention:
+    /// the essential dof holds the projected BC data bit-exactly (the
+    /// increment's own essential entries carry `p_D − p_ext` and are NOT
+    /// added on top), the free dof is the composed `p_ext + δp` and differs
+    /// from the classical free dof (mode-active discriminator).
+    #[test]
+    fn incremental_mode_pressure_dirichlet_composes_bc_and_increment() {
+        let run = |mode: PressureMode| -> Vec<f64> {
+            let disc = ToyDisc::new(2, 2, false); // pres_ess = [0]
+            let mut s = NavierSolver::new(
+                disc,
+                1.0,
+                NavierConfig {
+                    verbose: false,
+                    pressure_mode: mode,
+                    rtol_spsolve: 1.0e-12,
+                    ..Default::default()
+                },
+            );
+            s.velocity_mut().copy_from_slice(&[0.5, -0.25]);
+            s.setup(0.05);
+            let mut t = 0.0;
+            s.step(&mut t, 0.05, 0, false);
+            s.step(&mut t, 0.05, 1, false);
+            s.pressure().to_vec()
+        };
+        let base = run(PressureMode::Classical);
+        let incr = run(PressureMode::Incremental);
+        // t after two accepted steps = 0.1; the essential dof holds 2.0 + 0.1.
+        assert!(
+            (incr[0] - (2.0 + 0.1)).abs() < 1e-12,
+            "essential pressure dof moved off the BC data: {}",
+            incr[0]
+        );
+        assert!(
+            (incr[1] - base[1]).abs() > 1e-6,
+            "incremental free dof {} identical to classical {} — mode is a no-op",
+            incr[1],
+            base[1]
+        );
+    }
+
+    /// The loud contract: `PressureMode::Incremental` keeps the pressure as
+    /// accumulated state, and a provisional step (which overwrites `pn`
+    /// without rotating the history — MFEM `X1` aliasing semantics) would
+    /// corrupt the state on a retry.  It must abort, not silently pollute.
+    #[test]
+    #[should_panic(expected = "provisional steps are not supported")]
+    fn incremental_mode_rejects_provisional_steps() {
+        let disc = ToyDisc::new(2, 2, true);
+        let mut s = NavierSolver::new(
+            disc,
+            0.1,
+            NavierConfig {
+                verbose: false,
+                pressure_mode: PressureMode::Incremental,
+                ..Default::default()
+            },
+        );
+        s.setup(0.1);
+        let mut t = 0.0;
+        s.step(&mut t, 0.1, 0, true);
     }
 }
