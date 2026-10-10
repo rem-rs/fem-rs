@@ -61,7 +61,7 @@ miniapps 102→101 勘误：round-63 台账的 100 文件口径未含 r63 后新
 
 | 例子 | 档位（本轮） | 三态 | 本轮证据（HEAD `e4a819c5`） |
 |---|---|---|---|
-| mfem_ex0_mesh_intro | 无参 | RO | rc=0；stdout 与 r61 记录 **0 diff**（ARF 0.140201） |
+| mfem_ex0_mesh_intro | `-m data/star.mesh` | **BIT（r135）** | rc=0；r61 后 stdout 无漂移；**r135 补 3 行 Options 回声后**（MFEM 4.10 ParseCheck 会打 PrintOptions）`-m data/star.mesh` 491 字节 vs fresh oracle（`$HOME/work/rr135/ex0`）**cmp 逐字节全等**（0 豁免，sha256 9690d8e2…） |
 | mfem_ex1_poisson | `-m data/star.mesh -no-vis` | **BIT** | vs `ref/ex1.out` 2 difflines = mesh 路径行（豁免类） |
 | mfem_ex2_elasticity | `-m data/beam-tri.mesh -no-vis` | **BIT** | vs `ref/ex2.out` 2 difflines = mesh 路径行 |
 | mfem_ex3_maxwell_cavity | 无参 beam-tet | **BIT** | vs `ref/ex3.out` 2 difflines = mesh 行（built-in vs 文件路径） |
@@ -79,7 +79,7 @@ miniapps 102→101 勘误：round-63 台账的 100 文件口径未含 r63 后新
 | mfem_ex16_nonlinear_heat | 无参 | **NUM** | vs `d89main/cpp_ex16.out`：step 线 0 diff、checksum 行 rust=0 命中（Rust 末尾多 16 行 Comparison 块 = 打印差） |
 | mfem_ex17_dg_elasticity | 无参 beam-tri | **NUM** | 本轮 C++ oracle 重跑（d84c binary）：**767 it = C++、iter0 303.808 = C++、ARF 0.982095 = C++**（r89 修复维持 ✓）；stdout 不可逐字节（Rust 全轨迹 + 自绘 banner vs C++ SparseMatrix 统计 + 压缩 PCG 打印） |
 | mfem_ex18_euler | 无参 | **NUM** | `Solution error: 3.930926246117042e-3` = r99 锚（对 C++ 17 位 0.003930926246116611 rel 1.1e-13）；`d822` pin **4/4 绿** |
-| mfem_ex19_hyperelastic_incomp | 无参 beam-quad | **RO ⚠ D1256** | rc=0 Newton 3 it 收敛；`-m data/beam-tet.mesh -no-vis`（= C++ 默认档）对照现 oracle：Newton0 ‖r‖=2.90593 = C++、Newton1 起轨迹分叉（GMRES 31it/1.45e-12 vs 21it/1.29e-13）；**Rust 默认 mesh = beam-quad ≠ C++ ex19.cpp:186 beam-tet** → 新债 **D1256**（默认档 1:1 偏差） |
+| mfem_ex19_hyperelastic_incomp | 默认（= C++ beam-tet，r135 起） | **RO（D1256 已闭 r135）** | r117 rc=0 beam-quad 档 Newton 3 it；**r135 默认 mesh 对齐 C++ ex19.cpp:186（beam-quad→beam-tet）**：rerun Newton0 ‖r‖=2.90593 = C++ 逐字、dim(u)=459/dim(p)=36 同；Newton1 起 GMRES 轨迹分叉维持 rr127 求解器结构债 → 维持非 BIT |
 | mfem_ex20_symplectic | `-no-vis` | **BIT** | vs `cpp_ex20_novis_copy.out` **0 diff**（r98 双档本轮复证，连豁免都不剩） |
 | mfem_ex21_amr_elasticity | 无参 beam-tri | **NUM** | vs `d89main/cpp_ex21.out`：dofs/误差行全同；C++ 打每 AMR 轮全 PCG 史、Rust 压缩（打印差 42 行） |
 | mfem_ex22_complex_helmholtz | 无参 inline-quad | **NUM** | Re/Im 误差行 `1.422826e-1 / 1.422741e-1` = r84 锚逐字 |
@@ -93,20 +93,30 @@ miniapps 102→101 勘误：round-63 台账的 100 文件口径未含 r63 后新
 | mfem_ex30_aniso_amr | 无参 | RO | rc=0；与 r61 记录仅 1 行 `Total time`（wall-clock 豁免类） |
 | mfem_ex31_anisotropic_maxwell | `-m data/inline-quad.mesh -r 2 -o 1 -no-vis` | **BIT** | vs `ref/ex31.out` 2 difflines = mesh 行（1-D 三档/o2-3 解锁 = r104/r106 pins 叙述，本轮未逐一重跑） |
 | mfem_ex31_dump | `-m data/inline-quad.mesh -r 2 -o 1` | RO | rc=0（dump harness，落盘 rust_*.txt） |
-| mfem_ex33_fractional_diffusion | `-m data/star.mesh -o 1 --refs 3 --alpha 0.5 -no-vis` | **BIT** | vs `d89c/cpp_ex33_fresh.out` 2 difflines = mesh 行（r91 档复证 ✓）。**⚠ 默认档偏差**：Rust 默认 `-o 2 --alpha 0.33` ≠ C++ ex33.cpp:99/101 默认 `-o 1 -alpha 0.5` → 新债 **D1258** |
+| mfem_ex33_fractional_diffusion | `-m data/star.mesh -no-vis`（= r135 起的默认档） | **BIT（r91 档 + r135 默认档，D1258 已闭）** | r117 vs `d89c/cpp_ex33_fresh.out` 2 difflines = mesh 行 ✓。**r135 默认值对齐 C++ ex33.cpp:96-101**（order 1/refs 3/alpha 0.5/vis true；旧 Rust-only `-o 2 --alpha 0.33` = 1:1 偏差已除）后，默认档 2599 字节 vs fresh oracle（`$HOME/work/rr135/ex33`）**cmp 逐字节全等**（0 豁免，sha256 9f9ce65f…） |
 | mfem_ex34_magnetostatics | 无参 fichera-mixed | RO | rc=0、ARF 0.905223；r70「leg1 与 C++ 逐位」无 committed 快照可复证（证据在历史 tmp） |
-| mfem_ex36_obstacle | 无参 disc_p2 | **NUM** | vs `d89main/cpp_ex36.out`：12 条 error/bounds 行 **0 diff** |
+| mfem_ex36_obstacle | `-no-vis` | **BIT（r135）** | r117 vs d89main：12 条 error/bounds 行 0 diff、全 stdout 残 23 行（= 4 类打印差）。**r135 修复**（手写 %g 克隆 `cpp_6` 单数位指数 → 库件 `fmt_g`；`Newton_update_size` 行两侧同由 vis 门控，跑 `-no-vis` 即对齐）后 1822 字节 vs fresh oracle **cmp 逐字节全等**（0 豁免，sha256 c0942ea7…；新鲜 C++ 与 d89main 快照逐字节同） |
 | mfem_ex37_topology_optimization | 无参 | **NUM** | Final step 33 / compliance 0.003875 = r84 锚逐字；step 表 vs d89main oracle 有打印差（261 行，数值趋势同） |
 | mfem_ex38_implicit_integration | 无参 surface2d | **NUM** | Surface 误差 `5.4492670572e-5` = r61 锚逐字（d89main cpp_ex38 为死 oracle：构建缺 LAPACK/ALGOIM，本轮留注） |
-| mfem_ex39_compass | 无参 compass.msh | RO | rc=0；与 r61 记录 **0 diff**（d89main cpp_ex39 为死 oracle：缺 compass.msh abort） |
+| mfem_ex39_compass | `-m data/compass.msh` | **BIT（r135）** | r117 rc=0 与 r61 记录 0 diff。**r135 首次真对拍**（d89main oracle 系 compass abort 死件，D1259 确认）：bool 回声补 `--visualization` 行后 16336 字节 vs fresh oracle（`$HOME/work/rr135/ex39`）**cmp 逐字节全等**（371 行 PCG 轨迹 + ARF 0.963046，0 豁免，sha256 07885bba…） |
 | mfem_ex40_eikonal | 无参 star | **NUM** | 终值 `0.026921483748678143`（二连跑确定性 ✓）vs r84 锚 `…83748254076` 差 3.5e-13 相对（13 位以下漂移，C++ 6 位锚 0.0269214 不变） |
-| mfem_ex41_imex | 无参 periodic-square | **NUM** | vs `d89main/cpp_ex41.out`：step/time 网格全同；Rust 每行多 `‖u‖/sum` 诊断列（打印差 40 行） |
+| mfem_ex41_imex | `-m data/periodic-square.mesh -no-vis` | **BIT（r135）** | r117 vs `d89main/cpp_ex41.out`：step/time 网格全同、残差仅 Rust 独有 `‖u‖/sum` 诊断列。**r135 删诊断列**（C++ 只打 `time step: ti, time: t`，ex41.cpp:518）后 849 字节 vs fresh oracle（`$HOME/work/rr135/ex41`）**cmp 逐字节全等**（0 豁免，sha256 b962e706…） |
 
-小计：**BIT 14**（ex1/ex2/ex3/ex5/ex6/ex9/ex10/ex14/ex20/ex24/ex27/ex29/ex31/ex33）、
-**NUM 15**（ex4/ex8/ex16/ex17/ex18/ex21/ex22/ex23/ex25/ex26/ex36/ex37/ex38/ex40/ex41）、
-**RO 14**（ex0/ex7[D1255]/ex15dyn/6×dump/ex28/ex30/ex31_dump/ex34/ex39）、**DEV 0 / CRASH 0**、
+小计（r117 快照原值，**r135 后现状见括注**）：BIT 14（…含 ex10——**r131 计数链对 ex10 双计，
+r135 勘误后 r117 真值仍为 14 件 distinct**；**r135 后 = 22 件**：+ex0/ex36/ex39/ex41、
+ex33 默认档升格）、
+**NUM 15**（…ex36/ex41 已迁出 → r135 后 NUM 13）、
+**RO 14**（ex0/ex7[已闭]/…/ex39 已迁出 → r135 后 RO 11）、**DEV 0 / CRASH 0**、
 **UNREG 1**（ex4_darcy_simple）。44 实跑 rc=0 率 100%（ex9 首跑 panic 系批跑先于 `../data`
 junction 建立，建链后复跑 rc=0 并 BIT）。
+
+> **round-135 五债重审批注**：D1255 **已闭**（rr123 ex7 stdout BIT，2026-10-07）；
+> D1256 **已闭**（r135 ex19 默认 mesh → beam-tet，Newton0 = C++ 2.90593 逐字）；
+> D1257 **仍开**（无 committed oracle，miniapps/并行域排单）；D1258 **已闭**（r135 ex33
+> 默认值对齐，默认档即 BIT 档）；D1259 **已处置**（cpp_ex38/cpp_ex39/cpp_ex25 三件加
+> `SUPERSEDED-DEAD-ORACLE` 头 + ex17 替代物指认 `tmp/r117/cpp_ex17.out`；
+> **cpp_ex36 从死件名单除名**——r135 实证 d89main 快照 = 新鲜跑逐字节同）。
+> 详见 examples_ledger.md round-135 增量节。
 
 ## §3 examples 并行（40，Windows native launcher，无参默认档）
 

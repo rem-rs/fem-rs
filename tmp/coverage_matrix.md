@@ -192,6 +192,26 @@
   确证 = D842-2 已闭合；诊断行走 stderr）。**串行 examples BIT 18 → 19**。ex4
   stretch 见 ledger round-131 节。逐例行与证据：`tmp/ledger/examples_ledger.md`
   round-131 增量节 + `tmp/rr131mfem/` + `tmp/rr131/mfem/REPORT.md`。
+  ⚠️ **round-135 勘误**：本条「18 → 19（+ex10）」对 ex10 双计（ex10 在 r117 三态
+  14 件 BIT 清单里已在）——r131 后真值 = **18 件 distinct**，见下条。
+
+- **round 135 增量（Lane 6：RUN→BIT 第八波 + r117 五债重审收口，基线 a1d7bb5a）**：
+  **四案晋级 + 一案默认档升格 + 两债关闭**——**ex0（19th）/ex36（20th）/ex39（21st/
+  ex41（22nd）升 BIT，ex33 默认档升格（D1258 闭）**，全部 cmp 逐字节全等 0 豁免
+  （ex0 491B/ex36 1822B/ex39 16336B/ex41 849B/ex33 2599B，sha256 在案
+  `tmp/rr135lane6/`）；C++ 真值全部现编现跑 `$HOME/work/rr135/`（mfem410_ser
+  g++ -std=c++17 -O3），Rust 侧 release 全量 examples 构建 22m11s exit 0。修复全在
+  示例侧（零 crate 改动）：ex0 补 Options 回声（**考据新发现：MFEM 4.10
+  `OptionsParser::ParseCheck` = Parse + PrintOptions**）；ex36 手写 %g 克隆
+  `cpp_6`（单数位指数）→ 库件 `fmt_g` + 克隆删除；ex39 bool 回声按值打配对
+  long_name；ex41 删 Rust 独有 `‖u‖/sum` 诊断列。**D1256 闭**（ex19 默认 mesh
+  beam-quad→beam-tet = C++ ex19.cpp:186；rerun Newton0 2.90593 = C++ 逐字，
+  维持 RUN 挡 rr127 求解器专项）。**五债总账**：D1255 已闭（rr123 ex7 BIT）、
+  D1256 已闭、D1257 仍开（无 oracle 可仲裁，miniapps/并行域）、D1258 已闭、
+  D1259 已处置（三死快照加 SUPERSEDED 头 + ex17 替代物指认；cpp_ex36 除名——
+  d89main 快照实证新鲜跑逐字节同）。逐例行与证据：
+  `tmp/ledger/examples_ledger.md` round-135 增量节 + `tmp/rr135lane6/` +
+  `fem-pro/tmp/rr135/lane6/{PLAN,REPORT}.md`。**串行 examples BIT = 22 件**。
 
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
@@ -199,9 +219,18 @@
    40 并行 + miniapps 92 实体，HEAD `e4a819c5`，windows release + gate pins 亲跑全绿
    [d106 toys/joule 5/5、tesla d957 2/2、ex18 d822 4/4]）三态定性，**唯一现行口径 =
    `tmp/ledger/examples_three_state.md`**（serial BIT 14 / NUM 15 / RO 14；miniapps BIT 18 文件 /
-   NUM 31 / RO 31 / DEV 8 / RUN-LONG 4；未注册+模块 9 [examples 侧 1] 登记在案）。新债 **D1255 ex7 数值回归**
-   （L2 err 9.4e-3→1.09e-1，现编 C++ oracle 仲裁，窗口 r84..r116）、D1256 ex19 默认 mesh 1:1 偏差、
-   D1257 shifted/pex5 自锚漂移账、D1258 ex33 默认档偏差、D1259 死 oracle 快照卫生；
+   NUM 31 / RO 31 / DEV 8 / RUN-LONG 4；未注册+模块 9 [examples 侧 1] 登记在案）。
+   **r117 五债重审 + 处置（round-135 Lane 6 收口）**：**D1255 ex7 数值回归已闭**
+   （rr122 D1273 + rr123 D1274 合龙，ex7 stdout 1056 字节 BIT、L2 0.00543013 = C++ 真值，
+   2026-10-07）、**D1256 ex19 默认 mesh 已闭**（r135 beam-quad→beam-tet 对齐 ex19.cpp:186，
+   Newton0 = C++ 2.90593 逐字；维持 RUN 挡 rr127 求解器专项）、**D1258 ex33 默认档已闭**
+   （r135 默认值对齐 ex33.cpp:96-101，默认档即 BIT 档）、**D1259 死 oracle 卫生已处置**
+   （cpp_ex38/cpp_ex39/cpp_ex25 三件加 SUPERSEDED-DEAD-ORACLE 头 + ex17 替代物 =
+   `tmp/r117/cpp_ex17.out`；cpp_ex36 除名——r135 实证 d89main 快照 = 新鲜跑逐字节同）、
+   **D1257 shifted/pex5 自锚漂移仍开**（无 committed oracle 可仲裁，属 miniapps/并行域，
+   排单 = 现编 C++ oracle 补锚）；**serial BIT 14 → 22**（r123 ex7 + r127 ex16/ex21 +
+   r129 ex23 + r131 ex10[勘误：r131 计数链对 ex10 双计，r135 起以 distinct 计] +
+   r135 ex0/ex36/ex39/ex41 + ex33 默认档升格）。
 2. 简化 collection 逐个盘点（LinearFE/QuadraticFE/Const3D/RT0_2D/RT1_2D/RT2_2D/ND1_3D/
    RefinedLinear/LinearNonConf 等——fem-rs 是否都有对应、是否有 pin）——**round 72 已执行**
    （`tmp/collections_inventory.md`；§1.5 的 `?` 已改写为 LAT，剩 3 条子项各带 recipe：
@@ -230,7 +259,8 @@
 
 | 优先 | 项 | 状态 |
 |---|---|---|
-| **P0（round-133 已交付，可微线场统一主攻 + OF 线 gate/D952）** | **统一框架三场全上可微面（ScalarTransportIftAdapter 先例复制到 3 字段，pro-diff→pro-physics 单向依赖不变）**：① `heat_ift.rs` **HeatIftAdapter 单核双构造**（new_heat/new_diffusion——两宿主 assemble 到积分器级逐位同构，零重复轮子）+ RhsChannels 三通道（raw_rhs/source_fn/coupling_rhs），K(κ)=κ·A 严格线性冻结，Route::HeatIft/DiffusionIft 落 registry；6 钉：正向 vs 生产 registry 6.6e-14、FD-重解 2.6e-9（门从截断/舍入平衡 h*~1e-4 推导）、seeded 2.0e-9、红绿腐蚀 9.2e-1 检出（registry 解为唯一裁判——FD 对此类错免疫）、非齐次精确 3.9e-14、双模型路由。② `elastic_ift.rs` **ElasticIftAdapter**：生产 ElasticField::assemble 冻结 K(1,0)/K(0,1)（平面应变对 (λ,μ) 线性 ⇒ 精确不作差）、E 固定单参数制、局部两参数内核（IftSparseSystem 不泛化——与 SUPG c_sym 读取绑死，决策在案）；**并轨主钉 = 包络定理：平衡点 IFT dΠ/dν == 能量路径 tape 梯度 7.6e-15 机器精度**；7 钉含双缺陷红绿（符号翻转→整通道反号、丢反应通道→偏移 5.5×，healthy 过 FD 5.2e-10）+ 单轴拉伸 patch 3.5e-15；关键发现：能量目标在平衡点伴随退化（λ_f≈0）⇒ 缺陷钉必须走 probe 通道。③ **§9.4 FlowVelocityTransfer 库级收口**：pro-diff `flow_velocity_transfer.rs`（归宿 = 唯一同时依赖 pro-physics[Coupling] 与 pro-fluid[FlowDisc] 的 crate，推理入模块文档），pro-physics dev-dep 环（工作区首个，Cargo.toml 注释在案），fluid_slice 本地 struct **删除迁移**改吃库版，3 钉原位全绿。④ **OF 线**：gate 激活评审包 `docs/cfd-gate-activation-review-2026-10.md`（8 案实测数字+容差依据+激活提案+复跑命令，零 gate_active 翻转待用户签准；taylor-green 最佳翻活候选=能量 1.37e-3 对 5% 带 36× 余量；poiseuille-couette 6.0e-4 距提案 1e-10 六量级需数值修订评审；armaly/2d3 端到端数字待补跑不评审）；**D952 Timmermans 旋转修正落地**（fem-rs `NavierConfig.rotational` 默认 false 关路径逐位不变 + `NavierDiscretization::rotational_divergence_pressure` 响亮默认 trait + QuadDisc L² 投影 M_p⁻¹(D·ũ) OnceLock 惰性缓存[旗标关永不付费] + gauge 双约定钉 MeanZero −4.2e-18）；**round-132「抬起过 1.6 需 D952」假设被实测翻案（诚实记录）**：修正动力学存活但本 rig 阶梯底不抬起（关 1.83/1.59 vs 开 1.77/1.53、步后补丁逐位不动=压力非状态量动力学死、two-pass 1.54/1.79；ν 扫描 0.05→0.005 阶 1.59→1.71 证地板=黏性 O(dt) 分裂项；Timmermans 收益结构在增量式压力组装——真修复 = 增量重组装设计轮，**遗留 H2**）。**门（主会话合并树亲验）**：pro-diff --tests 全绿（15 文件含两 lane 新钉共存）+ pro-physics --tests（fluid_slice 3/3+equivalence 22/22）+ pro-fluid lib 180/0/4ig + fem-solver 267/0（navier.rs D952 合并树复验）。**遗留**：(E,ν) 双参数面待能量路径 E 通道、3D 宿主参数化、D952 增量重组装设计轮（H2）、gate 签准后回写执行清单、armaly/2d3 端到端数字补跑。 细节：`tmp/rr133/lane{1,2,3}/REPORT.md`。| **round-133 交付（全绿）** |
+| **P0（round-134 已交付，可微线双件 + D952-H2 设计轮）** | **可微线双件（fem-pro `3b6e0dc`，pro-diff 18 测试目标全绿）**：① **(E,ν) 双参数面**——ElasticityEnergyOp tape 契约 n+2 输入（E 通道 + 解析 lame 四偏导 d/dE,d/dν），旧 E=1-only 出口移完即删（LAME_E 退役），双参数包络钉 @ (2.5,0.35)：dΠ/dE **1.4e-16** / dΠ/dν **8.9e-16** 机器精度；② **3D 宿主参数化**——heat_ift/elastic_ift 构造函数泛型 `<M: MeshTopology + Clone>`（结构体保持非泛型：冻结态纯 CSR，构造后维度即弃），零 2D/3D 平行实现、IftSparseSystem 零签名改动；3D 立方体 Laplace **2.85e-12** + 单轴拉伸 patch **8.0e-14**（红绿勘误入钉：2D 平面应变常数直推被 3D 钉抓，红值 4.286e-3 逐位吻合诊断后修 3D 单轴代数 −ν）。**D952-H2 增量重组装设计轮（fem-rs `0ae6c87d`）**：`NavierConfig.pressure_mode` 旗标（默认 Classical 逐位不变实证）+ 忠实 van Kan/Guermond–Minev–Shen split 测序（压力进状态、EXTk 门控防假 p⁰、质量型投影）+ 3 内核钉（精确有理数逐位验证）；**诚实负结果（三层）**：fused RHS 代理六变体全扫证伪（一致选择 = 逐位 no-op，其余 O(1) 算子失配）；忠实 split 在本核不稳——raw 增量 Poisson 左端 vs 质量型投影在一致质量下非精确离散伴随 → O(1) 散度残差经显式对流反馈（decay rig + 纯周期 torus 双发散，窗口 ~27-29 dt 无关；阶梯 Classical 1.591/1.832、Rotational 1.531/1.771 逐位复现、Incremental 发散）；自洽修复 = **D·Mv⁻¹G 嵌套 Krylov Poisson 左端（遗留 H2′）**——旗标/钉/文档就位作回归网。门：fem-solver **270/0** + pro-fluid lib **181/0/4ig**（--test-threads=1）+ pro-diff 合并树门见 HANDOVER。细节：`tmp/rr134/lane{1,2,3}/REPORT.md` + `tmp/rr134/lane3/DESIGN.md`。| **round-134 交付（全绿）** |
+| **P0（round-133 已交付，可微线场统一主攻 + OF 线 gate/D952）** | **统一框架三场全上可微面（ScalarTransportIftAdapter 先例复制到 3 字段，pro-diff→pro-physics 单向依赖不变）**：① `heat_ift.rs` **HeatIftAdapter 单核双构造**（new_heat/new_diffusion——两宿主 assemble 到积分器级逐位同构，零重复轮子）+ RhsChannels 三通道（raw_rhs/source_fn/coupling_rhs），K(κ)=κ·A 严格线性冻结，Route::HeatIft/DiffusionIft 落 registry；6 钉：正向 vs 生产 registry 6.6e-14、FD-重解 2.6e-9（门从截断/舍入平衡 h*~1e-4 推导）、seeded 2.0e-9、红绿腐蚀 9.2e-1 检出（registry 解为唯一裁判——FD 对此类错免疫）、非齐次精确 3.9e-14、双模型路由。② `elastic_ift.rs` **ElasticIftAdapter**：生产 ElasticField::assemble 冻结 K(1,0)/K(0,1)（平面应变对 (λ,μ) 线性 ⇒ 精确不作差）、E 固定单参数制、局部两参数内核（IftSparseSystem 不泛化——与 SUPG c_sym 读取绑死，决策在案）；**并轨主钉 = 包络定理：平衡点 IFT dΠ/dν == 能量路径 tape 梯度 7.6e-15 机器精度**；7 钉含双缺陷红绿（符号翻转→整通道反号、丢反应通道→偏移 5.5×，healthy 过 FD 5.2e-10）+ 单轴拉伸 patch 3.5e-15；关键发现：能量目标在平衡点伴随退化（λ_f≈0）⇒ 缺陷钉必须走 probe 通道。③ **§9.4 FlowVelocityTransfer 库级收口**：pro-diff `flow_velocity_transfer.rs`（归宿 = 唯一同时依赖 pro-physics[Coupling] 与 pro-fluid[FlowDisc] 的 crate，推理入模块文档），pro-physics dev-dep 环（工作区首个，Cargo.toml 注释在案），fluid_slice 本地 struct **删除迁移**改吃库版，3 钉原位全绿。④ **OF 线**：gate 激活评审包 `docs/cfd-gate-activation-review-2026-10.md`（8 案实测数字+容差依据+激活提案+复跑命令；**用户签准 2026-10-10 当轮回写**：taylor-green/kovasznay/cavity[re100 限定判定] 三案 `gate_active → true` + runner numeric gating 分支[kov/tg 新写、cavity gate_in_scope 白名单]同批落地，非验收级运行按决策完整性诚实 Fail——受影响钉 kov 7/tg 9/cavity 23/bench_smoke 2 全绿；st2d1 口径裁决签准不翻活；poiseuille-couette **口径 (a) 追加签准**（couette/combined 1e-10 + poiseuille Open 带 5e-3, 翻活另批）；taylor-green 最佳翻活候选=能量 1.37e-3 对 5% 带 36× 余量；poiseuille-couette 6.0e-4 距提案 1e-10 六量级需数值修订评审；armaly/2d3 端到端数字待补跑不评审）；**D952 Timmermans 旋转修正落地**（fem-rs `NavierConfig.rotational` 默认 false 关路径逐位不变 + `NavierDiscretization::rotational_divergence_pressure` 响亮默认 trait + QuadDisc L² 投影 M_p⁻¹(D·ũ) OnceLock 惰性缓存[旗标关永不付费] + gauge 双约定钉 MeanZero −4.2e-18）；**round-132「抬起过 1.6 需 D952」假设被实测翻案（诚实记录）**：修正动力学存活但本 rig 阶梯底不抬起（关 1.83/1.59 vs 开 1.77/1.53、步后补丁逐位不动=压力非状态量动力学死、two-pass 1.54/1.79；ν 扫描 0.05→0.005 阶 1.59→1.71 证地板=黏性 O(dt) 分裂项；Timmermans 收益结构在增量式压力组装——真修复 = 增量重组装设计轮，**遗留 H2**）。**门（主会话合并树亲验）**：pro-diff --tests 全绿（15 文件含两 lane 新钉共存）+ pro-physics --tests（fluid_slice 3/3+equivalence 22/22）+ pro-fluid lib 180/0/4ig + fem-solver 267/0（navier.rs D952 合并树复验）。**遗留**：(E,ν) 双参数面待能量路径 E 通道、3D 宿主参数化、D952 增量重组装设计轮（H2）、gate 签准后回写执行清单、armaly/2d3 端到端数字补跑。 细节：`tmp/rr133/lane{1,2,3}/REPORT.md`。| **round-133 交付（全绿）** |
 | **P0（用户指令 2026-10-01，round-102 起）** | **验收标准改版：功能完全 + 结果一致（工程容差级）即可，不再追求逐位 BIT。** 原话："我只要功能完全，结果一致即可，我不追求每一个数值都一模一样"。⇒ ① "冲 BIT" 从头号候选除名，**D864（ex8 末位轨迹分叉专项）按此降级关闭**：ex8 两侧 29 it / ARF 0.609081 vs 0.608926 / DPG 范数 0.0183277 打印同 = 结果一致达标；其 S0 行序假设经带位置判据实跑**否证**（非零 44031/44031 逐位、行序 5281/5281 全同，证据 `$HOME/work/d102/` + `tmp/d102/` 探针）＝误诊关闭；副产物探针（外层 PCG 标量/向量逐迭代 dump + A 算子三段分解：t0/t1/y1 逐位、**y0=B0ᵀ·t1 首格即差**，3186/5281 格 worst 5.6e-13）留档 `fem-pro tmp/d102/*.cpp` + `$HOME/work/d102/`，仅供将来有人自愿续查，**不排单**。② 今后优先级 = 功能覆盖缺口 + 工程容差级结果一致性。③ BIT/逐位只作"顺手可达"时的验收档（回归钉维持既有锚不回退），不再为末位 ulp 专开轮次 | **政策生效（round-102）** |
 | **P0（round-102 功能普查修正，2026-10-01）** | **两条假缺口摘除**：① **BDM 非 parity 缺口**——MFEM 4.10 参考树（`$HOME/mfem410_ser`，makefile `MFEM_VERSION=41000`）全树 **0 命中** BDM/Brezzi（唯一命中 = ParaView .vtu 巧合子串），`fe_coll.hpp` collection 全清单无 BDM_FECollection ⇒ fem-rs 的 `brezzi_douglas_marini/`（Tri/Quad/Tet/Hex BDMk + `HDivSpace::new_bdm`）是**超集扩展件**，D587"访问器 panic"重定性为扩展件文档债（BDM dof 是矩泛函非 nodal，`dof_nodal_coords` 的 assert 是诚实语义守卫，与 MFEM 无对可言）；② **ND tri k≥2 非缺口**——`crates/element/src/nedelec/tri_ndk.rs` 已是 MFEM `ND_TriangleElement(p)` 全阶 1:1（文档头钉证），矩阵 §1.2 tri 行"MACH（1 阶逐位）"只是**验证深度**注记，§4 的"ND tri k≥2?"开放项就此关闭 |
 | **P0（round-102 功能排单 = 用户指令「先完全补全 MFEM 缺失功能面」的执行清单）** | **真缺口全清单（vs MFEM 4.10，逐项带消费方）**：**A. DEV miniapps 功能块**（用户可见度最大，逐个 exit(3) 条目 = 能力缺口）：lorentz（VisIt DC 输出——fem-rs 已有 data_collection.rs，可望小改闭）、tesla（电磁 miniapp 整体）、mandel/mondrian/lissajous（AMR shaping 交互环）、meshing 残件（extrude 1-D/曲面 nodes 写出、polar-nc NC writer、mesh 读取器分支）、pconvection_diffusion（带系数 DPG 积分器）、joule `-vp/-nbcs/AMR(-maxit>1)`、spde×5 + hdiv_linear_solver（NOREF×6）、tmop-check-metric/magnitude 的 id zoo（= tmop lane 在飞）；**B. collections 补全**：RefinedLinearFECollection（1D/2D/3D broken-P1 refined 元素，MFEM 唯一源码消费方 = fe_coll.cpp 自身，fem-rs 0 命中）、LinearNonConf3DFECollection（hex 旋转双线性，无 MFEM 示例消费方）、**ND_R1D/RT_R1D/ND_R2D/RT_R2D(+Trace) collection 级 wiring（真实消费方 = MFEM ex31/ex31p/ex32p**；fem-rs ex31 现以专用限制空间路径复现 ND_R2D 语义、`-o>1` 档 exit(3)——通用化 = 空间层嵌入 collection）；**C. prolongation 缺口**：H1 pyramid（D536b locator 空缺）、L2 高阶 hex/prism/pyr prolongation；**D. tmop 26 metric id + 1-D 重心式 D579**（A 部分在飞 round-102 agent）；**E. 离散算子残链** D618/D619/D620（hex divergence/H1 hex slot/Hex20 曲边 EM）；**F. 并行残链** D807-1/D807-2。优先序建议：A（lorentz 等小件先清）→ B（_R2D 有示例消费方先做）→ C → E → F | **排单就绪（round-102）** |
