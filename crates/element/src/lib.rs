@@ -81,7 +81,7 @@ pub use crouzeix_raviart::{
 pub use lagrange::{
     fuentes_pyramid_n_dofs, h1_fuentes_pyramid_nodes, h1_pyramid_element, l2_fuentes_pyramid_n_dofs,
     ref_elem, vec_ref_elem, ElemType, H1FuentesPyramidPk, H1PyramidPk, H1TriPk, HexL2GL, HexQ1,
-    HexQ2, HexQ3, HexQk, L2FuentesPyramidPk, LagrangeHex,
+    HexQ2, HexQ3, HexQk, HexTrilinear, L2FuentesPyramidPk, LagrangeHex,
     LagrangePrism, LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron,
     LagrangeTriangle, PrismPk, PyramidBasisType, PyramidPk, QuadL2GL, QuadP1, QuadP2, QuadP3,
     QuadP4, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadQk, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, SegPk,

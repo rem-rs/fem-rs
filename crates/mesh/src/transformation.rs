@@ -710,11 +710,26 @@ pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     // [`curved_geometry`]).
     let curved_other = curved_geometry(mesh, elem, et);
     let p1_re;
+    let hex_tri;
     let layer: Option<[NodeId; 5]>;
     let raw: &[NodeId];
     let (re, nodes): (&dyn ReferenceElement, &[NodeId]) = match (&curved, &curved_other) {
         (Some(pg), _) => (pg.re.as_ref(), pg.nodes.as_slice()),
         (None, Some((geo_re, geo_nodes))) => (geo_re.as_ref(), geo_nodes.as_slice()),
+        // rr139 (D1280 residual, 3-D arm): a straight hexahedron's geometry map
+        // is MFEM's `TriLinear3DFiniteElement` (the direct-form trilinear
+        // vertex basis, `fe_fixed_order.cpp:1597`), NOT the barycentric
+        // `H1_HexahedronElement` evaluation `HexQk(1)` mirrors for the field
+        // basis — the two differ by ≤1 ulp at general points and MFEM's
+        // `Elem->Transform`/`Weight()`/`Jacobian()` consume the direct form
+        // (probe: `$HOME/work/rr139/face3d_hex.txt`, 33/52 of 328 face lines
+        // dusted before this switch).
+        (None, None) if matches!(et, ElementType::Hex8) => {
+            hex_tri = Box::new(fem_element::lagrange::HexTrilinear);
+            raw = raw_geometry_nodes(mesh, elem, hex_tri.n_dofs());
+            layer = None;
+            (hex_tri.as_ref(), layer.as_ref().map_or(raw, |t| &t[..]))
+        }
         (None, None) => {
             p1_re = et.ref_elem(1);
             // Per-element geometry only when it is a P1-sized table (geometrically

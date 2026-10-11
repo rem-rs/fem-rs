@@ -130,23 +130,28 @@ impl InteriorFaceList {
 }
 
 /// Returns the local node index sets of the `faces_per_elem` faces of an element.
+///
+/// The 2-D arms are the crate's own CCW edge tables (the closed serial
+/// examples pin them); the 3-D arms are MFEM's canonical face rings
+/// (rr139, D1280 residual 3-D arm): MFEM stores every face as `Elem1`'s
+/// `FaceVert[lf]` ring (`Mesh::AddTriangleFaceElement`, orientation 0), so the
+/// first-seen element's ring *is* the face's canonical parameterisation and
+/// the interior-face `face_nodes` order matches it — see
+/// [`crate::dg::dg_base::mfem_tet_face_vert`]/[`crate::dg::dg_base::mfem_hex_face_vert`].
 fn local_faces(npe: usize, dim: usize) -> Vec<Vec<usize>> {
     match (npe, dim) {
         (3, 2) => vec![vec![0,1], vec![1,2], vec![0,2]], // triangle edges
         (4, 2) => vec![vec![0,1], vec![1,2], vec![2,3], vec![3,0]], // quad edges
-        (4, 3) => vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]], // tet faces
-        // D814-1: the six quad faces of a Hex8 — the same vertex sets the
-        // `build_face_elem_map` `(8,3)` arm (dg_base.rs, D805-4) lists.  The
-        // interior-face pairing only depends on the sorted vertex *sets*, so
-        // the ring orientation here is irrelevant.
-        (8, 3) => vec![
-            vec![0, 1, 2, 3],
-            vec![4, 5, 6, 7],
-            vec![0, 1, 5, 4],
-            vec![3, 2, 6, 7],
-            vec![0, 3, 7, 4],
-            vec![1, 2, 6, 5],
-        ],
+        (4, 3) => crate::dg::dg_base::mfem_tet_face_vert()
+            .iter()
+            .map(|f| f.to_vec())
+            .collect(),
+        // D814-1: the interior-face pairing only depends on the sorted vertex
+        // *sets*; the ring order is MFEM's canonical one (rr139).
+        (8, 3) => crate::dg::dg_base::mfem_hex_face_vert()
+            .iter()
+            .map(|f| f.to_vec())
+            .collect(),
         _ => panic!("local_faces: unsupported (npe={npe}, dim={dim})"),
     }
 }

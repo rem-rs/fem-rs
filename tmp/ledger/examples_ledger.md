@@ -68,6 +68,54 @@ cmp + 探针）+ `fem-pro/tmp/rr136/lane1/`（REPORT/DESIGN/门日志）。
 rr136 探针实证）；其余 DG 装配器（dg.rs/dg_advection/dg_hyperbolic）的互零
 scatter 贯通待各自示例对齐。
 
+**round-139 增量（MFEM lane：D1280 残余双件，本地 commit 待主会话推送，HEAD 基线 76cb5050）**：
+rr136 遗留两项关账，**示例档位零变化**（本轮回合为库位级对齐，无 BIT 晋级；
+计数以 coverage_matrix 为准）。
+**① 3-D 面组合位级对齐（rr136 遗留 1，闭）**：`face_point_geom_3d`（tet 三角面）/
+`face_point_geom_3d_quad`（hex 四边形面）改 MFEM Loc 语义——eip = 规范角点
+ref 坐标点矩阵 × 面 P1 形状（`kernels::Mult` 逐列升序累加；`TriangleFE`
+`(1-ξ₁)-ξ₂` 形 / `BiLinear2DFiniteElement` 四形状），nor（直网格）= 面自身
+仿射/双线性映射（`Mesh::GetFaceTransformation` 直网格臂：物理角点坐标 ×
+面 P1 `CalcDShape`，`kernels::AddMult` 升序累加）的 `CalcOrtho` 叉积，**删除**
+pre-rr139 的第四顶点/off-face 符号修正机（MFEM 规范环本就外向：探针实证
+`Elem1Inf = 64·lf` 于 beam-tet 全部 130 面）；配套：`interior_faces.rs` +
+`build_face_elem_map` 的 (4,3)/(8,3) 臂换 MFEM `FaceVert` 规范环表
+（tet lf1/lf3 反向环 + hex 半数环序修正）、`canonical_face_nodes` 新库件 +
+`dg.rs` 边界面驱动 3-D 臂改用（文件序 68/68 ≠ 规范序，beam-hex 含反向环）、
+**`fem_element::HexTrilinear`** 新库件（MFEM `TriLinear3DFiniteElement`
+直接式几何元——直网格 hex 的 `element_jacobian_at` 从 `HexQk(1)` 重心式切到
+直接式，根除 52/33 行 1-ulp 尘；tet 侧直接式本就逐位同）。
+**验证 = 新钉 `rr139_face3d_mfem_bit`（fem-assembly integration）**：beam-tet
+全部 130 面 × 8 探针点 × 7 字段（eip1/nor/w1/xp1/eip2/w2/xp2）**1040/1040 行**
+与 C++ 探针（`$HOME/work/rr139/probe_face3d.cpp`，mfem410_ser g++ -O2，
+`GetFaceElementTransformations(31)` 真值）**逐字节全等**；beam-hex 41 面
+**328/328 行逐字节全等**（HexTrilinear 前_hex w1 52/xp1 33 行 1-ulp 尘，
+切换后 0）。钉资产：`crates/assembly/tests/data/rr139_beam_{tet,hex}_mesh.txt`
++ `rr139_face3d_golden_{tet,hex}.txt`（探针 QP 全量）。
+**② 其余 DG 装配器互零 scatter（rr136 遗留 3，闭-以实证裁决）**：盘点 =
+dg.rs/dg_advection 无条件 combined 块加、dg_hyperbolic/dg_trace 的 `if w != 0`
+为**求积权重项级守卫**（非 skip_zeros 位点）、dg_imex 的 `skip_zeros=0` 为
+BlockILU 模式在案有意偏差（不动）。**裁决 = 不改代码**：ex14 档（p1 tri，
+非零面质量）下 MFEM 互零谓词空真——**结构性 oracle 探针对拍 C++ = Rust =
+unknowns 80 / stored 1280 / zeros 0 / nnz 1280**（`$HOME/work/rr139/
+probe_dg14_stats.cpp` vs `assemble_dg` 同构统计，现编现跑 star.mesh）——
+无条件 scatter ≡ MFEM `AddSubMatrix(skip_zeros=1)` 在全部门控档；互零谓词
+仅在面质量含互零对的档（GL 节点基×同构规则的高阶 quad 面等）才可观察，
+登记为条件债（随引入该档的示例对齐轮贯通）。
+门：fem-assembly **1384/0**（+3 新钉）、fem-element **547/0**、fem-mesh
+**339/0**+integration 全绿、fem-space **687/0**、fem-solver lib **273/0**；
+触碰文件零新增警告（存量 = LNK4044 + vendor/linlvo 族 + 既有测试族）。
+重放零回归：ex17（884B 逐字 = rr136 BIT 快照）、ex14、ex27 default/`-dbc 2.5`/
+`-dg`（三档逐字 = rr136 快照）、ex41（逐字）、ex9（新鲜 C++ oracle 0 diff，
+现编 `$HOME/work/rr139/ex9_cpp`）、ex18（默认档 vs 现编 `ex18_cpp`：8 位打印
+全对齐 `0.0039309262`；Rust 16 位尾差 `…7042e-3` 经 **stash A/B 实证为本轮
+之前既存**（pre-change 树逐位同值），非本轮传导）。
+证据：`fem-pro/tmp/rr139/lane2/`（REPORT/DESIGN/探针/门日志/重放快照）+
+WSL `$HOME/work/rr139/`（C++ 探针与 oracle dump）。遗留（精确 scoping）：
+棱柱/金字塔直网格几何元直接式核查、Hex20/27 直网格 TriLinear 对齐、jit 3-D
+求逆算法位级（均无消费方/无观察债）；2-D `local_faces` (4,2) 第 3 行
+（MFEM `{3,0}` vs crate `[0,3]`）留 ex18 BIT 化轮次。
+
 ## 串行（45）
 
 | 名字 | MFEM 对应 | 档位 | 分类 | 证据/日志 | 备注 |

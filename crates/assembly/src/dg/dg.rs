@@ -36,8 +36,8 @@ use fem_mesh::transformation::element_jacobian_at;
 use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
-    build_face_elem_map, face_point_geom, face_point_geom_3d_face, face_type_of, ref_elem_face,
-    FaceGeom, xform_grads,
+    build_face_elem_map, canonical_face_nodes, face_point_geom, face_point_geom_3d_face,
+    face_type_of, ref_elem_face, FaceGeom, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 #[cfg(feature = "parallel")]
@@ -590,7 +590,18 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
     quad_order: u8,
 ) {
     let dim = mesh.dim() as usize;
-    let face_nodes = mesh.face_nodes(face);
+    let stored_nodes = mesh.face_nodes(face);
+    // rr139 (D1280 residual, 3-D arm): MFEM's face parameterisation lives on
+    // the owning element's canonical `FaceVert` ring (`Mesh::GenerateFaces` →
+    // `Add*FaceElement`), not on the `.mesh` file's boundary row that
+    // `face_nodes` mirrors — canonicalise the 3-D rings so the `ξ` quadrature
+    // pairing matches MFEM's on boundary faces too (2-D is pinned by the
+    // closed serial examples and stays on the stored order).
+    let face_nodes: Vec<u32> = if dim == 3 {
+        canonical_face_nodes(mesh, elem, stored_nodes)
+    } else {
+        stored_nodes.to_vec()
+    };
 
     let et = mesh.element_type(elem);
     let re = fem_space::ref_elem::field_element_for_space(space, et, order);

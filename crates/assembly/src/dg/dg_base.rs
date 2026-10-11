@@ -513,23 +513,32 @@ const HEX_REF_V: [[f64; 3]; 8] = [
 /// `FaceElementTransformations` geometry at the reference-face coordinate
 /// `ξ ∈ [0,1]²` of the **triangular** face whose nodes are `(a, b, c)`.
 ///
-/// The face is parameterised from node `a`: `ξ₁` runs `a → b` and `ξ₂` runs
-/// `a → c` (the reference triangle `(0,0),(1,0),(0,1)` of MFEM's
-/// `Geometry::TRIANGLE`), and the element reference point is obtained by the
-/// **reference composition** `Loc1` — never by inverting the physical map.  The
-/// composed face Jacobian is `J_face = J_elem(eip)·[d(eip)/dξ₁ | d(eip)/dξ₂]`
-/// and MFEM's `CalcOrtho` in 3-D returns the **cross product of its two
-/// columns** (`densemat.cpp:2760`, `n = c₀ × c₁`).
+/// rr139 (D1280 residual, 3-D arm): both composed quantities reproduce MFEM's
+/// bit arithmetic on the mesh's own face-node order `(a, b, c)`:
 ///
-/// Orientation: MFEM's `FaceInfo` orientation bits order the face's vertices so
-/// that `c₀ × c₁` points *out of* `Elem1`.  The same is achieved here at the
-/// reference level: the sign of `nor` is flipped whenever `c₀ × c₁` would point
-/// *into* the element (tested against the element's fourth vertex in the
-/// reference tetrahedron, which is exact and mesh-independent), while the
-/// `ξ ↦ eip` parameterisation stays the face's own `(a, b, c)` order — the same
-/// point both neighbours are composed at, exactly as `Loc1`/`Loc2` receive the
-/// same `ip`.  On a straight tetrahedron this reproduces the affine face
-/// geometry bit for bit; on a curved one it follows the isoparametric map.
+/// * **`eip` = MFEM `Loc1`/`Loc2`** (`Mesh::GetLocalTriToTetTransformation`,
+///   `mesh/mesh.cpp:814`): the point matrix's column `j` is the reference-tet
+///   coordinate of the *canonical face corner* `j` — orientation 0 on `Elem1`
+///   by construction (`Mesh::AddTriangleFaceElement` stores the face as
+///   `Elem1`'s `tet_t::FaceVert[lf]` ring, `Elem1Inf = 64·lf`), and the
+///   oriented permutation on `Elem2` is exactly "the element-local index of
+///   canonical corner `j`", which is what [`MeshTopology::element_nodes`] +
+///   the lookup here produce.  The value is the `TriangleFE` P1 shape row
+///   `{(1-ξ₁)-ξ₂, ξ₁, ξ₂}` (`fe/fe_fixed_order.cpp:80`) contracted with
+///   `kernels::Mult`'s ascending column accumulation (`linalg/kernels.hpp:160`).
+/// * **`nor` = MFEM `CalcOrtho(Trans.Jacobian())`** where `Trans.Jacobian()`
+///   is the **face's own** affine map (straight mesh:
+///   `Mesh::GetFaceTransformation` builds `PointMat` from the canonical face
+///   vertices' physical coordinates, `mesh/mesh.cpp:539`; mask 31 always
+///   includes `HAVE_FACE`) — *not* a chain rule through the element.  Its
+///   columns come from `Linear2DFiniteElement::CalcDShape`
+///   (`[[-1,-1],[1,0],[0,1]]`) via `kernels::AddMult`'s ascending dof
+///   accumulation, i.e. exactly `p_b - p_a` and `p_c - p_a`, and `CalcOrtho`
+///   (`linalg/densemat.cpp:2760`) takes their cross product.  MFEM's canonical
+///   rings point *out of* `Elem1` in the reference domain, so — with the
+///   callers passing the canonical order (interior: the `InteriorFaceList`
+///   left element; boundary: [`canonical_face_nodes`]) — no sign correction is
+///   applied anywhere.
 ///
 /// Only tetrahedral (triangular-face) elements are supported: the 3-D DG paths
 /// take their face measure from the `Tri3` reference element and the face list
@@ -560,53 +569,82 @@ pub fn face_point_geom_3d<M: MeshTopology + ?Sized>(
     };
     let (ia, ib, ic) = (idx_of(a), idx_of(b), idx_of(c));
     let (ra, rb, rc) = (TET_REF_V[ia], TET_REF_V[ib], TET_REF_V[ic]);
-    // The element's fourth reference vertex: the one index not in {a, b, c}.
-    let id = (0..4).find(|&k| k != ia && k != ib && k != ic).unwrap();
-    let rd = TET_REF_V[id];
-    // Reference-face normal c₀ × c₁ with the face's own (a, b, c) order; the
-    // sign is corrected below when it points into the element.
-    let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
-    let t2 = [rc[0] - ra[0], rc[1] - ra[1], rc[2] - ra[2]];
-    let nref = [
-        t1[1] * t2[2] - t1[2] * t2[1],
-        t1[2] * t2[0] - t1[0] * t2[2],
-        t1[0] * t2[1] - t1[1] * t2[0],
-    ];
-    let to_4th = [rd[0] - ra[0], rd[1] - ra[1], rd[2] - ra[2]];
-    let outward = nref[0] * to_4th[0] + nref[1] * to_4th[1] + nref[2] * to_4th[2] < 0.0;
     let (x1, x2) = (xi[0], xi[1]);
-    let eip = [
-        ra[0] + x1 * (rb[0] - ra[0]) + x2 * (rc[0] - ra[0]),
-        ra[1] + x1 * (rb[1] - ra[1]) + x2 * (rc[1] - ra[1]),
-        ra[2] + x1 * (rb[2] - ra[2]) + x2 * (rc[2] - ra[2]),
-    ];
+    // Loc1/Loc2: `TriangleFE` P1 shapes (`shape(0) = 1. - ip.x - ip.y`, left
+    // associative) contracted with the point matrix, `kernels::Mult`'s
+    // ascending column accumulation (`y = x0·c0; y += x1·c1; y += x2·c2`).
+    let sh = [(1.0 - x1) - x2, x1, x2];
+    let cols = [ra, rb, rc];
+    let mut eip = [0.0_f64; 3];
+    for i in 0..3 {
+        let mut s = sh[0] * cols[0][i];
+        s += sh[1] * cols[1][i];
+        s += sh[2] * cols[2][i];
+        eip[i] = s;
+    }
     let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 3);
-    // Composed face Jacobian columns: J_elem · d(eip)/dξ_k, in the face's own
-    // (a, b, c) parameterisation — the same ξ both neighbours are composed at.
-    let mut col = [[0.0_f64; 3]; 2];
-    for k in 0..2 {
-        let tan = if k == 0 {
-            [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]]
-        } else {
-            [rc[0] - ra[0], rc[1] - ra[1], rc[2] - ra[2]]
-        };
-        for i in 0..3 {
-            col[k][i] = jac[(i, 0)] * tan[0] + jac[(i, 1)] * tan[1] + jac[(i, 2)] * tan[2];
+    // `nor`: on a **straight** cell this is MFEM `CalcOrtho(Trans.Jacobian())`
+    // with `Trans.Jacobian()` the face's own affine map in the canonical
+    // `(a, b, c)` order — `dFdx = PointMat·dshape` via `kernels::AddMult`'s
+    // ascending dof accumulation starting at `0.0` — then the `CalcOrtho`
+    // cross product.  No sign correction: the canonical ring already points
+    // out of `Elem1` (rr139 probe: `Elem1Inf = 64·lf` on all 130 faces of
+    // `data/beam-tet.mesh`).  On a **curved** cell MFEM's
+    // `Mesh::GetFaceTransformation` composes the face map through `Elem1`'s
+    // isoparametric geometry (the `Nodes != NULL` branch) — the chain rule the
+    // D810-1 curved oracle pins
+    // (`wg::tests::d810_1_divergence_identity_holds_on_curved_cells`), with
+    // the reference-level outward sign test against the element's fourth
+    // vertex.
+    let nor = if mesh.geom_order() > 1 {
+        let id = (0..4).find(|&k| k != ia && k != ib && k != ic).unwrap();
+        let rd = TET_REF_V[id];
+        let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
+        let t2 = [rc[0] - ra[0], rc[1] - ra[1], rc[2] - ra[2]];
+        let nref = [
+            t1[1] * t2[2] - t1[2] * t2[1],
+            t1[2] * t2[0] - t1[0] * t2[2],
+            t1[0] * t2[1] - t1[1] * t2[0],
+        ];
+        let to_4th = [rd[0] - ra[0], rd[1] - ra[1], rd[2] - ra[2]];
+        let outward = nref[0] * to_4th[0] + nref[1] * to_4th[1] + nref[2] * to_4th[2] < 0.0;
+        let mut col = [[0.0_f64; 3]; 2];
+        for k in 0..2 {
+            let tan = if k == 0 { t1 } else { t2 };
+            for i in 0..3 {
+                col[k][i] = jac[(i, 0)] * tan[0] + jac[(i, 1)] * tan[1] + jac[(i, 2)] * tan[2];
+            }
         }
-    }
-    // CalcOrtho (3-D): the cross product of the two Jacobian columns, with its
-    // sign chosen so that `nor` points *out of* this element — MFEM's `FaceInfo`
-    // orientation bits do the same at the reference level, independently of the
-    // face's parameterisation.
-    let (c0, c1) = (col[0], col[1]);
-    let mut nor = [
-        c0[1] * c1[2] - c0[2] * c1[1],
-        c0[2] * c1[0] - c0[0] * c1[2],
-        c0[0] * c1[1] - c0[1] * c1[0],
-    ];
-    if !outward {
-        nor = [-nor[0], -nor[1], -nor[2]];
-    }
+        let (c0, c1) = (col[0], col[1]);
+        let mut n = [
+            c0[1] * c1[2] - c0[2] * c1[1],
+            c0[2] * c1[0] - c0[0] * c1[2],
+            c0[0] * c1[1] - c0[1] * c1[0],
+        ];
+        if !outward {
+            n = [-n[0], -n[1], -n[2]];
+        }
+        n
+    } else {
+        let pv = [mesh.node_coords(a), mesh.node_coords(b), mesh.node_coords(c)];
+        let dsh = [[-1.0_f64, -1.0_f64], [1.0, 0.0], [0.0, 1.0]];
+        let mut col = [[0.0_f64; 3]; 2];
+        for i in 0..3 {
+            for k in 0..2 {
+                let mut s = 0.0_f64;
+                for j in 0..3 {
+                    s += dsh[j][k] * pv[j][i];
+                }
+                col[k][i] = s;
+            }
+        }
+        let (c0, c1) = (col[0], col[1]);
+        [
+            c0[1] * c1[2] - c0[2] * c1[1],
+            c0[2] * c1[0] - c0[0] * c1[2],
+            c0[0] * c1[1] - c0[1] * c1[0],
+        ]
+    };
     let det_j = jac.determinant();
     // Degeneracy guard (magnitude test only, D696 batch 4 precedent).
     let jit = jac
@@ -623,54 +661,35 @@ pub fn face_point_geom_3d<M: MeshTopology + ?Sized>(
 /// **quadrilateral** face of a hexahedron, at the reference-face coordinate
 /// `ξ ∈ [0,1]²` (MFEM's `Geometry::SQUARE` parameterisation).
 ///
-/// Same contract as the triangular arm — the face is parameterised from node
-/// `a`, the element reference point comes from the **reference composition**,
-/// and the composed face Jacobian is `J_face = J_elem(eip)·[∂eip/∂ξ₁ | ∂eip/∂ξ₂]`
-/// with MFEM's 3-D `CalcOrtho` cross product (`densemat.cpp:2760`) — but the
-/// face map is the quad's own **bilinear** one.  With the face cycle
-/// `(a, b, c, d)` *positively oriented* as seen from outside the element, the
-/// reference square's corners `(0,0), (1,0), (1,1), (0,1)` are `(a, b, c, d)`,
-/// so
+/// rr139 (D1280 residual, 3-D arm — the same alignment as the triangular
+/// arm): the composed quantities reproduce MFEM's bit arithmetic on the
+/// mesh's own face-node ring `(a, b, c, d)`:
 ///
-/// ```text
-/// eip(ξ₁, ξ₂) = ra + ξ₁(rb − ra) + ξ₂(rd − ra) + ξ₁ξ₂(rc − rd − rb + ra)
-/// ∂eip/∂ξ₁    = (rb − ra) + ξ₂(rc − rd − rb + ra)
-/// ∂eip/∂ξ₂    = (rd − ra) + ξ₁(rc − rd − rb + ra)
-/// ```
+/// * **`eip` = MFEM `Loc1`/`Loc2`** (`Mesh::GetLocalQuadToHexTransformation`,
+///   `mesh/mesh.cpp:889`): point-matrix column `j` = the reference-hex
+///   coordinate of canonical corner `j` (`AddQuadFaceElement` stores the face
+///   as `Elem1`'s `hex_t::FaceVert[lf]` ring with orientation 0; the
+///   oriented `Elem2` permutation is again "the element-local index of
+///   canonical corner `j`"), contracted with the `BiLinear2DFiniteElement`
+///   P1 shapes `(1-ξ₁)(1-ξ₂), ξ₁(1-ξ₂), ξ₁ξ₂, (1-ξ₁)ξ₂`
+///   (`fe/fe_fixed_order.cpp:115`) under `kernels::Mult`'s ascending column
+///   accumulation.
+/// * **`nor` = MFEM `CalcOrtho(Trans.Jacobian())`** — the face's own
+///   *bilinear* map (straight mesh: `Mesh::GetFaceTransformation`'s
+///   `PointMat` of the canonical corners' physical coordinates against
+///   `BiLinear2DFiniteElement::CalcDShape` `[[-1+ξ₂, -1+ξ₁], [1-ξ₂, -ξ₁],
+///   [ξ₂, ξ₁], [-ξ₂, 1-ξ₁]]`), NOT a chain rule through the element.  The
+///   cross product of the two accumulated columns is taken with the
+///   `CalcOrtho` formula (`linalg/densemat.cpp:2760`).  MFEM's canonical
+///   hex rings point out of `Elem1`, so — with the callers passing the
+///   canonical order (interior: the `InteriorFaceList` left element;
+///   boundary: [`canonical_face_nodes`]) — no sign correction is applied.
+///   (The pre-rr139 "swap the last two corners / flip against an off-face
+///   vertex" machinery papered over non-canonical caller orders; D814-1's
+///   parameterisation contract is now expressed by the tables themselves.)
 ///
-/// which is the `Geometry::SQUARE` `H1_QuadrilateralElement(1)` map the
-/// reference face of a hex uses (`Loc1`/`Loc2` for a hex face).  Note the
-/// `(1,1)` corner is the cycle's **third** vertex `c`, not `d`: taking `c` as
-/// the `ξ₂` direction is the transpose convention and is wrong on every face
-/// whose cycle is not symmetric (measured against MFEM: `eip` and `nor` off by
-/// 1.8 relative on `beam-hex`'s `z+` faces before this was fixed).  The
-/// bilinear term matters too: on a *warped* hex face the two tangents vary
-/// across the face, so both the measure `|c₀ × c₁|` and the physical point
-/// differ from the affine (corner-only) interpolation — the defect class
-/// D783/D808-4 closed for the element kernels.
-///
-/// Orientation is resolved at the **reference level**, and it has to be:
-/// MFEM's face integration point `ξ` lives in the *canonical* local face's
-/// reference square, and a mesh may store the face's four vertices in either
-/// winding (`data/beam-hex.mesh` stores its `z−` faces as reversed cycles and
-/// its `z+` faces as forward ones).  D814-1: MFEM's `Loc1`/`Loc2`
-/// (`GetLocalQuadToHexTransformation`, mesh.cpp:889, with the
-/// `quad_t::Orient`-permuted point matrix) interpolate the *canonical* face
-/// corners at the face `ξ` on **both** neighbours — so both land on the same
-/// physical point — and the only element-dependent quantity is the *sign* of
-/// the composed normal.  The same is done here: the parameterisation always
-/// uses the stored corner roles (origin, `ξ₁` direction, `(0,1)` corner),
-/// and when `(rb−ra) × (rd−ra)` points *into* the element (tested against a
-/// reference vertex off the face: exact and mesh-independent, like the
-/// tetrahedron's fourth vertex) only `nor`'s **sign** is flipped.  The
-/// pre-D814 version swapped the last two corners instead, which changed the
-/// parameterisation — silently bending the face map on any ring whose stored
-/// normal pointed inward (an interior face seen from its second element, in
-/// particular; MFEM-written boundary sections never trigger it, which is why
-/// D805-4's boundary-only fixture could not see it).
-///
-/// Both neighbours must call this with the same `(a, b, c, d)` — the mesh's own
-/// face-node order — exactly as the triangular arm requires.
+/// Both neighbours must call this with the same `(a, b, c, d)` — the mesh's
+/// own face-node ring — exactly as the triangular arm requires.
 // MFEM: FaceElementTransformations::Jacobian + CalcOrtho + Elem1->Weight()
 pub fn face_point_geom_3d_quad<M: MeshTopology + ?Sized>(
     mesh: &M,
@@ -693,71 +712,101 @@ pub fn face_point_geom_3d_quad<M: MeshTopology + ?Sized>(
     };
     let (ia, ib, ic0, id0) = (idx_of(a), idx_of(b), idx_of(c), idx_of(d));
     let (ra, rb, rc0, rd0) = (HEX_REF_V[ia], HEX_REF_V[ib], HEX_REF_V[ic0], HEX_REF_V[id0]);
-    // A reference vertex off the face: the outward test's witness (exact and
-    // mesh-independent at the reference level, like the tet's fourth vertex).
-    let ie = (0..8)
-        .find(|&k| k != ia && k != ib && k != ic0 && k != id0)
-        .unwrap_or_else(|| {
-            panic!("face_point_geom_3d_quad: element {elem} has no vertex off the face")
-        });
-    let re = HEX_REF_V[ie];
-    // The reference-level normal of the composed map, used only to decide the
-    // SIGN of `nor` below (never the parameterisation).
-    let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
-    let t2 = [rd0[0] - ra[0], rd0[1] - ra[1], rd0[2] - ra[2]];
-    let nref = [
-        t1[1] * t2[2] - t1[2] * t2[1],
-        t1[2] * t2[0] - t1[0] * t2[2],
-        t1[0] * t2[1] - t1[1] * t2[0],
-    ];
-    let to_off = [re[0] - ra[0], re[1] - ra[1], re[2] - ra[2]];
-    let inward = nref[0] * to_off[0] + nref[1] * to_off[1] + nref[2] * to_off[2] > 0.0;
-    // D814-1: the composition is ALWAYS the canonical ring's own roles — MFEM
-    // builds `Loc1`/`Loc2` (`GetLocalQuadToHexTransformation`, mesh.cpp:889)
-    // as the reference bilinear quad evaluated on the point matrix whose
-    // column j is the local face vertex carrying canonical corner j
-    // (`FaceVert[lf][Orient[o][j]]`), i.e. both neighbours interpolate the
-    // canonical corners `(a,b,c,d)` at the same `ξ` and land on the same
-    // physical point.  The pre-D814 swap of the last two corners changed the
-    // parameterisation instead of the sign — it silently bent the face map
-    // whenever the stored ring's normal pointed into the element (never the
-    // case on MFEM-written boundary sections, which is why D805-4's
-    // boundary-only fixture could not see it).
     let (x1, x2) = (xi[0], xi[1]);
-    // Bilinear face map and its two tangents.
-    let mut eip = [0.0_f64; 3];
-    let mut tan = [[0.0_f64; 3]; 2];
-    for i in 0..3 {
-        let gx = rb[i] - ra[i];
-        let gy = rd0[i] - ra[i];
-        let bl = rc0[i] - rd0[i] - rb[i] + ra[i];
-        eip[i] = ra[i] + x1 * gx + x2 * gy + x1 * x2 * bl;
-        tan[0][i] = gx + x2 * bl;
-        tan[1][i] = gy + x1 * bl;
-    }
-    // Push the reference tangents through the element map at `eip`; `c₀ × c₁`
-    // is `CalcOrtho(Trans.Jacobian())` up to the outward sign, applied below.
-    let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 3);
-    let mut col = [[0.0_f64; 3]; 2];
-    for k in 0..2 {
-        for i in 0..3 {
-            col[k][i] = jac[(i, 0)] * tan[k][0] + jac[(i, 1)] * tan[k][1] + jac[(i, 2)] * tan[k][2];
-        }
-    }
-    let (c0, c1) = (col[0], col[1]);
-    let mut nor = [
-        c0[1] * c1[2] - c0[2] * c1[1],
-        c0[2] * c1[0] - c0[0] * c1[2],
-        c0[0] * c1[1] - c0[1] * c1[0],
+    // Loc1/Loc2: `BiLinear2DFiniteElement` P1 shapes, `kernels::Mult`'s
+    // ascending column accumulation over the four canonical corners.
+    let sh = [
+        (1.0 - x1) * (1.0 - x2),
+        x1 * (1.0 - x2),
+        x1 * x2,
+        (1.0 - x1) * x2,
     ];
-    // Sign-only orientation correction: `nor` must point out of the element
-    // (MFEM's canonical rings are outward-oriented; a face stored the other
-    // way round just flips the sign — the parameterisation is untouched).
-    if inward {
-        for v in &mut nor {
-            *v = -*v;
-        }
+    let cols = [ra, rb, rc0, rd0];
+    let mut eip = [0.0_f64; 3];
+    for i in 0..3 {
+        let mut s = sh[0] * cols[0][i];
+        s += sh[1] * cols[1][i];
+        s += sh[2] * cols[2][i];
+        s += sh[3] * cols[3][i];
+        eip[i] = s;
     }
+    let (jac, xp) = element_jacobian_at(mesh, elem, &eip, 3);
+    // `nor`: straight cell — MFEM `CalcOrtho(Trans.Jacobian())` of the face's
+    // own *bilinear* map in the canonical `(a, b, c, d)` order (`dFdx =
+    // PointMat·dshape`, `BiLinear2DFiniteElement::CalcDShape`, ascending dof
+    // accumulation from `0.0`); MFEM's canonical hex rings point out of
+    // `Elem1`, so no sign correction.  Curved cell — the chain rule through
+    // the element's order-`g` map (the `Nodes != NULL` branch of
+    // `Mesh::GetFaceTransformation`; D715/D810-1), with the reference-level
+    // outward sign test against a vertex off the face.  (The pre-rr139
+    // "swap the last two corners / flip the sign" machinery is superseded:
+    // the parameterisation contract is now carried by the canonical tables —
+    // `mfem_hex_face_vert` + `canonical_face_nodes`.)
+    let nor = if mesh.geom_order() > 1 {
+        let ie = (0..8)
+            .find(|&k| k != ia && k != ib && k != ic0 && k != id0)
+            .unwrap_or_else(|| {
+                panic!("face_point_geom_3d_quad: element {elem} has no vertex off the face")
+            });
+        let re = HEX_REF_V[ie];
+        let t1 = [rb[0] - ra[0], rb[1] - ra[1], rb[2] - ra[2]];
+        let t2 = [rd0[0] - ra[0], rd0[1] - ra[1], rd0[2] - ra[2]];
+        let nref = [
+            t1[1] * t2[2] - t1[2] * t2[1],
+            t1[2] * t2[0] - t1[0] * t2[2],
+            t1[0] * t2[1] - t1[1] * t2[0],
+        ];
+        let to_off = [re[0] - ra[0], re[1] - ra[1], re[2] - ra[2]];
+        let inward = nref[0] * to_off[0] + nref[1] * to_off[1] + nref[2] * to_off[2] > 0.0;
+        let mut col = [[0.0_f64; 3]; 2];
+        for k in 0..2 {
+            let tan = if k == 0 { t1 } else { t2 };
+            for i in 0..3 {
+                col[k][i] = jac[(i, 0)] * tan[0] + jac[(i, 1)] * tan[1] + jac[(i, 2)] * tan[2];
+            }
+        }
+        let (c0, c1) = (col[0], col[1]);
+        let mut n = [
+            c0[1] * c1[2] - c0[2] * c1[1],
+            c0[2] * c1[0] - c0[0] * c1[2],
+            c0[0] * c1[1] - c0[1] * c1[0],
+        ];
+        if inward {
+            for v in &mut n {
+                *v = -*v;
+            }
+        }
+        n
+    } else {
+        let pv = [
+            mesh.node_coords(a),
+            mesh.node_coords(b),
+            mesh.node_coords(c),
+            mesh.node_coords(d),
+        ];
+        let dsh = [
+            [-1.0 + x2, -1.0 + x1],
+            [1.0 - x2, -x1],
+            [x2, x1],
+            [-x2, 1.0 - x1],
+        ];
+        let mut col = [[0.0_f64; 3]; 2];
+        for i in 0..3 {
+            for k in 0..2 {
+                let mut s = 0.0_f64;
+                for j in 0..4 {
+                    s += dsh[j][k] * pv[j][i];
+                }
+                col[k][i] = s;
+            }
+        }
+        let (c0, c1) = (col[0], col[1]);
+        [
+            c0[1] * c1[2] - c0[2] * c1[1],
+            c0[2] * c1[0] - c0[0] * c1[2],
+            c0[0] * c1[1] - c0[1] * c1[0],
+        ]
+    };
     let det_j = jac.determinant();
     let jit = jac
         .try_inverse()
@@ -853,6 +902,65 @@ pub fn phys_to_ref(
 // Mesh helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// MFEM `Geometry::Constants<Geometry::TETRAHEDRON>::FaceVert`
+/// (`fem/geom.cpp:987`): the four local faces of a reference tetrahedron as
+/// vertex-index rings, in MFEM's canonical outward winding.  rr139 (D1280
+/// residual, 3-D arm): the DG face parameterisation follows these rings
+/// verbatim — MFEM stores every face as `Elem1`'s `FaceVert[lf]` ring
+/// (`Mesh::AddTriangleFaceElement`, `mesh/mesh.cpp:8716`, `Elem1Inf = 64·lf`),
+/// so the ring order *is* the face's canonical order and the `ξ` quadrature
+/// pairing of the DG face assemblers is defined on it.
+pub fn mfem_tet_face_vert() -> &'static [&'static [usize]; 4] {
+    &[&[1, 2, 3], &[0, 3, 2], &[0, 1, 3], &[0, 2, 1]]
+}
+
+/// MFEM `Geometry::Constants<Geometry::CUBE>::FaceVert` (`fem/geom.cpp:1032`):
+/// the six quadrilateral faces of a reference hexahedron as vertex-index
+/// rings, in MFEM's canonical outward winding (rr139, same contract as
+/// [`mfem_tet_face_vert`]).  Note this is *not* the crate's `HEX_VERT_SIDES`
+/// order (`z−, z+, y−, y+, x−, x+`): the face *indexing* differs (MFEM face
+/// 1 is `y−`) and half the rings are wound the other way — only the ring
+/// ORDER matters here (the pairing keys on the vertex set).
+pub fn mfem_hex_face_vert() -> &'static [&'static [usize]; 6] {
+    &[&[3, 2, 1, 0], &[0, 1, 5, 4], &[1, 2, 6, 5], &[2, 3, 7, 6], &[3, 0, 4, 7], &[4, 5, 6, 7]]
+}
+
+/// The face-node ring of `elem`'s local face whose vertex set is `face_nodes`,
+/// listed in MFEM's canonical order (the element's own
+/// [`mfem_tet_face_vert`]/[`mfem_hex_face_vert`] ring).
+///
+/// Boundary callers need this: MFEM's canonical face order comes from the
+/// owning element's `FaceVert` ring (`Mesh::GenerateFaces` →
+/// `AddTriangleFaceElement`/`AddQuadFaceElement`), *not* from the `.mesh`
+/// file's boundary row — which fem-rs's `face_nodes` mirrors verbatim and
+/// which can differ from the canonical ring by a rotation *or a reversal*
+/// (all 68 boundary rows of `data/beam-tet.mesh` are rotated;
+/// `data/beam-hex.mesh` carries reversed rings).  Cell types without a
+/// canonical table keep the mesh's own order.
+// MFEM: Mesh::GenerateFaces + AddTriangleFaceElement/AddQuadFaceElement
+pub fn canonical_face_nodes<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: u32,
+    face_nodes: &[u32],
+) -> Vec<u32> {
+    let en = mesh.element_nodes(elem);
+    let local: &[&[usize]] = match (en.len(), mesh.dim() as usize) {
+        (4, 3) => mfem_tet_face_vert(),
+        (8, 3) => mfem_hex_face_vert(),
+        _ => return face_nodes.to_vec(),
+    };
+    let mut want = face_nodes.to_vec();
+    want.sort_unstable();
+    for lf in local {
+        let mut key: Vec<u32> = lf.iter().map(|&k| en[k]).collect();
+        key.sort_unstable();
+        if key == want {
+            return lf.iter().map(|&k| en[k]).collect();
+        }
+    }
+    panic!("canonical_face_nodes: element {elem} has no local face with nodes {face_nodes:?}")
+}
+
 /// Build a map from face ID → owning element (one element per face).
 ///
 /// The strategy: for each volume element, iterate its local faces (vertex
@@ -870,27 +978,8 @@ pub fn build_face_elem_map<M: MeshTopology>(
         match (npe, dim) {
             (3, 2) => vec![vec![0, 1], vec![1, 2], vec![0, 2]],
             (4, 2) => vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![0, 3]],
-            (4, 3) => vec![
-                vec![1, 2, 3],
-                vec![0, 2, 3],
-                vec![0, 1, 3],
-                vec![0, 1, 2],
-            ],
-            // D805-4: the six quadrilateral faces of a `Hex8`, in the crate's
-            // `HEX_VERT_SIDES` order (`z−`, `z+`, `y−`, `y+`, `x−`, `x+` — the
-            // same sets `crates/mesh/src/mesh_characteristics.rs::element_faces`
-            // and `fem_space::HEX_QUAD_FACES` list).  Only the *set* matters
-            // here (the key is sorted below); the parameterisation of a face at
-            // assembly time comes from the mesh's own face-node order, which
-            // both neighbours share.
-            (8, 3) => vec![
-                vec![0, 1, 2, 3],
-                vec![4, 5, 6, 7],
-                vec![0, 1, 5, 4],
-                vec![3, 2, 6, 7],
-                vec![0, 3, 7, 4],
-                vec![1, 2, 6, 5],
-            ],
+            (4, 3) => mfem_tet_face_vert().iter().map(|f| f.to_vec()).collect(),
+            (8, 3) => mfem_hex_face_vert().iter().map(|f| f.to_vec()).collect(),
             _ => vec![],
         }
     };

@@ -54,15 +54,23 @@ fn csr_checksum(k: &CsrMatrix<f64>) -> u64 {
 
 // Captured from the pre-change kernel (HEAD efab4acf, D1080 state) and
 // verified identical after the D1102 hoist (the same run printed both).
+// rr139 re-capture of the four `p10` rows whose bit pattern legitimately
+// moved with the 3-D face-combination MFEM alignment (`face_point_geom_3d*`
+// Loc1/Loc2 point-matrix composition + canonical `FaceVert` rings + the
+// face-own-Jacobian `nor`): the new bit pattern is the MFEM bit pattern —
+// every field of every probed face point is byte-identical to the C++ oracle
+// (`$HOME/work/rr139/{face3d_tet,face3d_hex}.txt`, 1040 + 328 QP lines).
+// The `p0` (penalty-free) rows and both 2-D rows are untouched, as expected:
+// the change only reaches the matrix through the penalty-carrying face terms.
 const CHECKSUMS: &[(&str, u64)] = &[
     ("tri3 o1 q3 p0", 0xff45c0a0973d9e16),
     ("tri3 o1 q3 p10", 0x20c913a4d3fdacdb),
     ("tet2 o1 q3 p0", 0xd4abd7dd66d0eeb1),
-    ("tet2 o1 q3 p10", 0xe087ebdbb0003d1d),
+    ("tet2 o1 q3 p10", 0xcde49c2bac193d2d),
     ("tet1 o2 q4 p0", 0x5f00cefb1a2a9cf0),
-    ("tet1 o2 q4 p10", 0xd3336ce8640171b7),
+    ("tet1 o2 q4 p10", 0xd048aefe2ea0227c),
     ("tet1 o3 q5 p0", 0xcf5d0b1722b440a0),
-    ("tet1 o3 q5 p10", 0x25168a9294d49214),
+    ("tet1 o3 q5 p10", 0xc67edcd1dd6e7c77),
 ];
 
 #[test]

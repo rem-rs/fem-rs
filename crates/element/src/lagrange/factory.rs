@@ -2973,6 +2973,93 @@ impl ReferenceElement for HexQk {
     }
 }
 
+/// MFEM `TriLinear3DFiniteElement` — the **geometry** transformation FE of
+/// `Geometry::CUBE` (`Mesh::GetTransformationFEforElementType` →
+/// `&HexahedronFE`, `fem/fe_coll.cpp:1593`; `fem/eltrans.cpp:427` feeds it to
+/// every straight-hex `IsoparametricTransformation`).
+///
+/// rr139 (D1280 residual, 3-D arm): its vertex shapes are the *direct*
+/// products `ox·oy·oz` with `ox = 1.-x` (`fe/fe_fixed_order.cpp:1597`), which
+/// for p = 1 agree algebraically — but not bitwise — with the barycentric
+/// `Poly_1D::Basis::Eval` evaluation [`HexQk`] mirrors for the H1 *field*
+/// element.  MFEM's element transforms consume the direct form, so the
+/// straight-hex geometry map (`fem_mesh::transformation::element_jacobian_at`)
+/// must too: on `data/beam-hex.mesh` the barycentric path dusted
+/// `Elem->Transform`/`Elem->Weight()` at 1 ulp on 33/52 of the 328 probed
+/// face points against the C++ probe (`$HOME/work/rr139/face3d_hex.txt`).
+///
+/// The DOF order is MFEM `TriLinear3DFiniteElement::Nodes` (the reference
+/// cube's vertex ring: bottom `z=0` ring CCW `(0,0)→(1,0)→(1,1)→(0,1)`, then
+/// the top ring) — the same layout as the crate's `Hex8` vertex table.
+pub struct HexTrilinear;
+
+/// `(ix, iy, iz)` of reference-hex vertex `k`, MFEM
+/// `TriLinear3DFiniteElement::Nodes` / `Geometry::Constants<CUBE>::Vertices`.
+const HEX_TRI_CORNER: [[usize; 3]; 8] = [
+    [0, 0, 0],
+    [1, 0, 0],
+    [1, 1, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+    [1, 0, 1],
+    [1, 1, 1],
+    [0, 1, 1],
+];
+
+impl ReferenceElement for HexTrilinear {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        8
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        // `shape(0) = ox*oy*oz; shape(1) = x*oy*oz; ...` — left-associative
+        // direct products (fe_fixed_order.cpp:1597-1611).
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let (ox, oy, oz) = (1.0 - x, 1.0 - y, 1.0 - z);
+        for (k, c) in HEX_TRI_CORNER.iter().enumerate() {
+            let sx = if c[0] == 1 { x } else { ox };
+            let sy = if c[1] == 1 { y } else { oy };
+            let sz = if c[2] == 1 { z } else { oz };
+            values[k] = sx * sy * sz;
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        // `CalcDShape` direct formulas (fe_fixed_order.cpp:1613-1652), layout
+        // `grads[k*3 + j] = dshape(k, j)`.
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let (ox, oy, oz) = (1.0 - x, 1.0 - y, 1.0 - z);
+        let rows: [[f64; 3]; 8] = [
+            [-(oy * oz), -(ox * oz), -(ox * oy)],
+            [oy * oz, -(x * oz), -(x * oy)],
+            [y * oz, x * oz, -(x * y)],
+            [-(y * oz), ox * oz, -(ox * y)],
+            [-(oy * z), -(ox * z), ox * oy],
+            [oy * z, -(x * z), x * oy],
+            [y * z, x * z, x * y],
+            [-(y * z), ox * z, ox * y],
+        ];
+        for (k, r) in rows.iter().enumerate() {
+            grads[k * 3] = r[0];
+            grads[k * 3 + 1] = r[1];
+            grads[k * 3 + 2] = r[2];
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        hex_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        HEX_TRI_CORNER
+            .iter()
+            .map(|c| c.iter().map(|&v| v as f64).collect())
+            .collect()
+    }
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 /// Element type identifier for the factory function.
