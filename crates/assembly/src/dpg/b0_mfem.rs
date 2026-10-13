@@ -176,5 +176,15 @@ where
     }
 
     row_ptr[n_test] = pos;
+    // The vectors were sized for the dense worst case (n_test · n_trial), but
+    // only the kept entries were written.  Truncate so `nnz()` (==
+    // `values.len()`) and every downstream consumer — `CsrMatrix::transpose`
+    // (whose counting sort sizes the transposed rows from `nnz()`), spmv row
+    // segments, serialization — see the exact stored structure instead of a
+    // ~108M-entry zero tail on this mesh.  The tail also shifted the fused
+    // spmv chunk alignment of transposed rows, which was the rr149 lane-1 ex8
+    // fork (MFEM sums each row strictly sequentially).
+    col_idx.truncate(pos);
+    values.truncate(pos);
     return CsrMatrix { nrows: n_test, ncols: n_trial, row_ptr, col_idx, values };
 }

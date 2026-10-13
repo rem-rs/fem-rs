@@ -198,16 +198,20 @@ fn main() {
     let shat_ref = &shat;
     let ess_pc = ess_usize.clone();
     let precond = move |r: &[f64], z: &mut [f64]| {
-        // Block 0: S0^{-1} via CG with zero initial guess
+        // Block 0: S0^{-1} via CG with zero initial guess.
+        // spmv_sequential: MFEM applies matS0/matShat through
+        // SparseMatrix::Mult (strict per-product accumulation); the fused
+        // default spmv associates differently on rows of ≥8 entries and
+        // feeds ~ulp noise into every inner CG (rr149 lane-1 ex8 fork).
         fem_solver::solve_cg_mfem(
-            s0, |x: &[f64], y: &mut [f64]| s0_ref.spmv(x, y), &r[..s0], &mut z[..s0],
+            s0, |x: &[f64], y: &mut [f64]| s0_ref.spmv_sequential(x, y), &r[..s0], &mut z[..s0],
             None::<fn(&[f64], &mut [f64])>, &inner_opts, false,
             None::<&mut dyn FnMut(i32, f64, bool)>,
         );
         // Block 1: Shat^{-1} via CG with zero initial guess
         if s1 > 0 {
             fem_solver::solve_cg_mfem(
-                s1, |x: &[f64], y: &mut [f64]| shat_ref.spmv(x, y), &r[s0..], &mut z[s0..],
+                s1, |x: &[f64], y: &mut [f64]| shat_ref.spmv_sequential(x, y), &r[s0..], &mut z[s0..],
                 None::<fn(&[f64], &mut [f64])>, &inner_opts, false,
                 None::<&mut dyn FnMut(i32, f64, bool)>,
             );
@@ -302,6 +306,245 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// rr149 lane-1 probe (temporary, `#[ignore]`): replicate main() and dump
+    /// the same call-indexed vectors the C++ probe `ex8_probe.cpp` writes, for
+    /// bit-level forking of the PCG trajectory.  Requires `EX8_DUMP_DIR`;
+    /// run with `cargo test --example mfem_ex8_dpg_2x2 -- --ignored`.
+    ///
+    /// Index conventions (mirroring the C++ dump): Rust `Op_*`/`t0_*`/`t1_*`
+    /// carry the extra `apply(x=0)` of `solve_pcg_operator_precond` at index 0
+    /// (C++ starts at `r = b`), so Rust call j corresponds to C++ call j-1;
+    /// `Pc_*`/`S0inv_*`/`Shatinv_*` indices agree 1:1 on both sides.
+    #[test]
+    #[ignore = "rr149 probe: needs EX8_DUMP_DIR; run explicitly"]
+    fn probe_dump_vectors() {
+        fn write_vec(dir: &str, name: &str, v: &[f64]) {
+            use std::fmt::Write as _;
+            let mut s = String::with_capacity(v.len() * 26);
+            for &x in v {
+                let _ = writeln!(s, "{x:.17e}");
+            }
+            std::fs::write(format!("{dir}/{name}.txt"), s).unwrap();
+        }
+        fn write_csr(dir: &str, name: &str, m: &fem_linalg::CsrMatrix<f64>) {
+            use std::fmt::Write as _;
+            let mut s = String::new();
+            let _ = writeln!(s, "{} {} {}", m.nrows, m.ncols, m.values.len());
+            for &v in &m.row_ptr {
+                let _ = write!(s, "{v} ");
+            }
+            s.push('\n');
+            for &v in &m.col_idx {
+                let _ = write!(s, "{v} ");
+            }
+            s.push('\n');
+            for &v in &m.values {
+                let _ = writeln!(s, "{v:.17e}");
+            }
+            std::fs::write(format!("{dir}/{name}.csr"), s).unwrap();
+        }
+        let dir = std::env::var("EX8_DUMP_DIR").expect("EX8_DUMP_DIR");
+        let dir_pc = dir.clone();
+
+        // ── identical to main() up to the solve ──
+        let mfem = read_mfem_file("../data/star.mesh").expect("read ../data/star.mesh");
+        let mesh0: Mesh<2> = mfem.mesh2d.expect("2D mesh");
+        let dim = 2;
+        let target_elems = 10000usize;
+        let rl = {
+            let ne = mesh0.n_elems() as f64;
+            (target_elems as f64 / ne).ln().max(0.0) / (2.0_f64).ln() / dim as f64
+        } as usize;
+        let mesh = {
+            let mut m = mesh0;
+            for _ in 0..rl {
+                m = refine_uniform(&m);
+            }
+            m
+        };
+        let t_order = 1u8;
+        let tr_order = 0u8;
+        let te = if dim == 2 && (t_order % 2 == 0 || t_order > 1) { t_order + 1 } else { t_order };
+
+        let x0 = H1Space::new(mesh.clone(), t_order);
+        let test = L2Space::new(mesh.clone(), te);
+        let trace = DpgTraceSpace::new(mesh.clone(), tr_order);
+        let s0s = x0.n_dofs();
+        let s1s = trace.n_dofs();
+        let st = test.n_dofs();
+
+        let qo = 3;
+        let f_test = Assembler::assemble_linear(&test, &[&DomainSourceIntegrator::new(|_| 1.0)], qo);
+        let ess_tags: Vec<i32> = mesh.unique_boundary_tags();
+        let dm = x0.dof_manager();
+        let ess_dofs: Vec<u32> =
+            boundary_dofs(&mesh as &dyn fem_mesh::topology::MeshTopology, dm, &ess_tags);
+        let ess_usize: Vec<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
+
+        let zero_b0_cols = |b0: &mut fem_linalg::CsrMatrix<f64>| {
+            for &d in &ess_dofs {
+                let c = d as usize;
+                for row in 0..b0.nrows {
+                    for p in b0.row_ptr[row]..b0.row_ptr[row + 1] {
+                        if b0.col_idx[p] as usize == c {
+                            b0.values[p] = 0.0;
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut b0 = assemble_b0_mfem(&x0, &test, qo);
+        zero_b0_cols(&mut b0);
+        let qf = (te as u8 * 2).max(2);
+        let bhat = assemble_bhat(&test, &trace, qf);
+        let sinv = SinvBuilder::build(&test, qo);
+        let mut s0_mat = Assembler::assemble_bilinear(&x0, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
+        let mut zr = vec![0.0; s0s];
+        apply_dirichlet_diag_one(&mut s0_mat, &mut zr, &ess_dofs, &vec![0.0; ess_dofs.len()]);
+
+        let mut sf = vec![0.0; st];
+        sinv.apply(&f_test, &mut sf);
+        let ntot = s0s + s1s;
+        let mut rhs = vec![0.0; ntot];
+        for i in 0..s0s {
+            let mut v = 0.0;
+            for row in 0..b0.nrows {
+                for p in b0.row_ptr[row]..b0.row_ptr[row + 1] {
+                    if b0.col_idx[p] as usize == i {
+                        v += b0.values[p] * sf[row];
+                        break;
+                    }
+                }
+            }
+            rhs[i] = v;
+        }
+        for i in 0..st {
+            let v = sf[i];
+            if v.abs() < 1e-30 {
+                continue;
+            }
+            for p in bhat.row_ptr[i]..bhat.row_ptr[i + 1] {
+                rhs[s0s + bhat.col_idx[p] as usize] += bhat.values[p] * v;
+            }
+        }
+        for &d in &ess_dofs {
+            rhs[d as usize] = 0.0;
+        }
+        let shat = build_shat(&bhat, &sinv, s1s);
+
+        // ── statics dump ──
+        write_vec(&dir, "F", &f_test);
+        write_vec(&dir, "SinvF", &sf);
+        write_vec(&dir, "b", &rhs);
+        write_csr(&dir, "matB0", &b0);
+        write_csr(&dir, "matBhat", &bhat);
+        write_csr(&dir, "matSinv", &fem_assembly::dpg::assemble_sinv_sparse(&sinv));
+        write_csr(&dir, "matS0", &s0_mat);
+        write_csr(&dir, "Shat", &shat);
+
+        // second (deterministic) copies for stage replication inside the
+        // apply wrapper — the originals were moved into the operator.
+        let mut b0d = assemble_b0_mfem(&x0, &test, qo);
+        zero_b0_cols(&mut b0d);
+        let bhatd = assemble_bhat(&test, &trace, qf);
+        let sinvd = SinvBuilder::build(&test, qo);
+
+        let op = DpgNormalOperator::new(b0, bhat, sinv, ess_usize.clone());
+        let n_tot = op.n_total();
+        assert_eq!(n_tot, ntot);
+
+        let call_n: std::rc::Rc<std::cell::RefCell<usize>> =
+            std::rc::Rc::new(std::cell::RefCell::new(0));
+        let call_n_c = call_n.clone();
+        let apply_dump = |x: &[f64], y: &mut [f64]| {
+            op.apply(x, y);
+            let k = *call_n_c.borrow();
+            if k < 16 {
+                write_vec(&dir, &format!("Op_in_{k:03}"), x);
+                write_vec(&dir, &format!("Op_out_{k:03}"), y);
+                // stage replication (same ops as DpgNormalOperator::apply)
+                let mut t0 = vec![0.0; st];
+                b0d.spmv_sequential(&x[..s0s], &mut t0);
+                let mut tt = vec![0.0; st];
+                bhatd.spmv_sequential(&x[s0s..], &mut tt);
+                for i in 0..st {
+                    t0[i] += tt[i];
+                }
+                let mut t1 = vec![0.0; st];
+                sinvd.apply(&t0, &mut t1);
+                write_vec(&dir, &format!("t0_{k:03}"), &t0);
+                write_vec(&dir, &format!("t1_{k:03}"), &t1);
+            }
+            *call_n_c.borrow_mut() += 1;
+        };
+
+        let inner_opts = fem_solver::SliOptions {
+            rel_tol: 1e-3,
+            abs_tol: 0.0,
+            max_iter: 200,
+            print_level: -1,
+        };
+        let s0_ref = &s0_mat;
+        let shat_ref = &shat;
+        let ess_pc = ess_usize.clone();
+        let pc_n: std::rc::Rc<std::cell::RefCell<usize>> =
+            std::rc::Rc::new(std::cell::RefCell::new(0));
+        let pc_n_c = pc_n.clone();
+        let precond = move |r: &[f64], z: &mut [f64]| {
+            let k = *pc_n_c.borrow();
+            if k < 16 {
+                write_vec(&dir_pc, &format!("Pc_in_{k:03}"), r);
+            }
+            fem_solver::solve_cg_mfem(
+                s0s, |x: &[f64], y: &mut [f64]| s0_ref.spmv_sequential(x, y), &r[..s0s], &mut z[..s0s],
+                None::<fn(&[f64], &mut [f64])>, &inner_opts, false,
+                None::<&mut dyn FnMut(i32, f64, bool)>,
+            );
+            if k < 16 {
+                write_vec(&dir_pc, &format!("S0inv_out_{k:03}"), &z[..s0s]);
+            }
+            if s1s > 0 {
+                fem_solver::solve_cg_mfem(
+                    s1s, |x: &[f64], y: &mut [f64]| shat_ref.spmv_sequential(x, y), &r[s0s..], &mut z[s0s..],
+                    None::<fn(&[f64], &mut [f64])>, &inner_opts, false,
+                    None::<&mut dyn FnMut(i32, f64, bool)>,
+                );
+            }
+            if k < 16 {
+                write_vec(&dir_pc, &format!("Shatinv_out_{k:03}"), &z[s0s..]);
+            }
+            for &d in &ess_pc {
+                if d < s0s {
+                    z[d] = 0.0;
+                }
+            }
+            if k < 16 {
+                write_vec(&dir_pc, &format!("Pc_out_{k:03}"), z);
+            }
+            *pc_n_c.borrow_mut() += 1;
+        };
+
+        let mut x = vec![0.0; n_tot];
+        let cfg = SolverConfig {
+            rtol: 1e-6,
+            atol: 0.0,
+            max_iter: 200,
+            verbose: false,
+            print_level: PrintLevel::Iterations,
+            ..Default::default()
+        };
+        let result =
+            fem_solver::solve_pcg_operator_precond(ntot, apply_dump, &rhs, &mut x, precond, &cfg);
+        let _ = result;
+
+        let dres = op.compute_residual(&f_test, &x);
+        write_vec(&dir, "dpg_norm", &[dres]);
+        let mut calls = String::new();
+        calls.push_str(&format!("Op {} Pc {}\n", call_n.borrow(), pc_n.borrow()));
+        std::fs::write(format!("{dir}/calls.txt"), calls).unwrap();
+    }
 
     /// rr148 lane-1 referee: S0 entry sequence vs MFEM 4.10 on the base
     /// `star.mesh` (probe `s0_dump.cpp`, 31 dofs, 81 nnz).  Pins three things

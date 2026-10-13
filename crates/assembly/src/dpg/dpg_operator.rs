@@ -132,15 +132,21 @@ impl<M: MeshTopology> DpgNormalOperator<M> {
     ///
     /// `x` is the concatenated vector `[x_trial; x_trace]`.
     /// `y` is the concatenated vector `[y_trial; y_trace]`.
+    ///
+    /// Every product goes through [`CsrMatrix::spmv_sequential`]: MFEM applies
+    /// these blocks via `SparseMatrix::Mult/MultTranspose`, whose strict
+    /// per-product accumulation the fused default `spmv` does not reproduce
+    /// on rows of ≥ 8 stored entries (the ex8 outer PCG forked at iteration
+    /// 10 on `B0ᵀ` rows of 20 entries — rr149 lane 1).
     pub fn apply(&self, x: &[f64], y: &mut [f64]) {
         y.fill(0.0);
 
         // 1. t0 = B * x = B0 * x_trial + Bhat * x_trace
         let mut t0 = vec![0.0; self.n_test];
-        self.b0.spmv(&x[..self.n_trial], &mut t0);
+        self.b0.spmv_sequential(&x[..self.n_trial], &mut t0);
         if self.n_trace > 0 {
             let mut tt = vec![0.0; self.n_test];
-            self.bhat.spmv(&x[self.n_trial..], &mut tt);
+            self.bhat.spmv_sequential(&x[self.n_trial..], &mut tt);
             for i in 0..self.n_test {
                 t0[i] += tt[i];
             }
@@ -152,11 +158,11 @@ impl<M: MeshTopology> DpgNormalOperator<M> {
 
         // 3. y = B^T * t1
         // y_trial = B0^T * t1
-        self.b0_t.spmv(&t1, &mut y[..self.n_trial]);
+        self.b0_t.spmv_sequential(&t1, &mut y[..self.n_trial]);
 
         if self.n_trace > 0 {
             // y_trace = Bhat^T * t1
-            self.bhat_t.spmv(&t1, &mut y[self.n_trial..]);
+            self.bhat_t.spmv_sequential(&t1, &mut y[self.n_trial..]);
         }
 
         // 4. Zero Dirichlet DOFs
@@ -185,11 +191,11 @@ impl<M: MeshTopology> DpgNormalOperator<M> {
         let mut r = vec![0.0; n_test];
 
         // r = B0 * x_trial
-        self.b0.spmv(&x[..self.n_trial], &mut r);
+        self.b0.spmv_sequential(&x[..self.n_trial], &mut r);
         // r += Bhat * x_trace
         if self.n_trace > 0 {
             let mut bt = vec![0.0; n_test];
-            self.bhat.spmv(&x[self.n_trial..], &mut bt);
+            self.bhat.spmv_sequential(&x[self.n_trial..], &mut bt);
             for i in 0..n_test {
                 r[i] += bt[i];
             }

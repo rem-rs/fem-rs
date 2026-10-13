@@ -987,6 +987,32 @@ pub fn csr_spmm_parallel(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f6
 }
 
 impl CsrMatrix<f64> {
+    /// `y = A x` with MFEM `SparseMatrix::Mult`'s **exact sequential
+    /// accumulation**: per row, `sum += a_ij · x_j` one product per add, in
+    /// stored order, no fused chunking.
+    ///
+    /// The default [`CsrMatrix::spmv`] fuses each row dot in 8-product
+    /// sub-expressions; their association differs from MFEM's strict loop by
+    /// ~1 ulp whenever a row holds ≥ 8 stored entries, and zero-padded row
+    /// segments (over-allocated sources fed through `transpose`) shift the
+    /// chunk boundaries again.  Both are invisible to tolerance-driven
+    /// consumers but break bit-for-bit MFEM ports — the ex8 DPG outer PCG
+    /// forked at iteration 10 exactly there (rr149 lane 1: `B0ᵀ·t1` rows of
+    /// 20 entries).  Matched-iteration / BIT-parity paths call this variant.
+    pub fn spmv_sequential(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.ncols);
+        assert_eq!(y.len(), self.nrows);
+        for row in 0..self.nrows {
+            let start = self.row_ptr[row];
+            let end = self.row_ptr[row + 1];
+            let mut s = 0.0_f64;
+            for k in start..end {
+                s += self.values[k] * x[self.col_idx[k] as usize];
+            }
+            y[row] = s;
+        }
+    }
+
     pub(super) fn spmv_serial_f64(&self, x: &[f64], y: &mut [f64]) {
         let nrows = y.len();
         let mut row = 0;
@@ -1096,6 +1122,79 @@ mod tests {
         let a = small_matrix();
         let d = a.diagonal();
         assert_eq!(d, vec![2.0, 2.0, 2.0]);
+    }
+
+    /// rr149 lane-1 referee: `spmv_sequential` reproduces MFEM's strict
+    /// per-product accumulation where the default fused `spmv` associates
+    /// differently.  The row is the real `B0ᵀ` column 0 of the ex8 star mesh
+    /// at the first PCG call (probe `ex8_probe.cpp`, mfem 4.10): 20 real
+    /// entries — plus, critically, the 4-entry zero pad that
+    /// `assemble_b0_mfem`'s dense worst-case allocation used to leave behind
+    /// `nnz() == values.len()`: the pad pushed the real tail terms into one
+    /// fused chunk, and MFEM's `SparseMatrix::MultTranspose` output
+    /// `-0.0008591516515169401` (dump `BRt_out_001[0]`, %.17g) diverged to
+    /// `…5169956` — the whole ex8 PCG fork.
+    #[test]
+    fn spmv_sequential_matches_mfem_on_padded_long_row() {
+        let entries: [(f64, f64); 20] = [
+            (1.1549361100893858, 0.7399731599672632),
+            (-0.5257319000321793, 0.7401098760671244),
+            (-0.5257299305012912, 0.7401097998173506),
+            (-0.1034742795559151, 0.7402465159270777),
+            (1.1549340988338790, 0.7399724604324553),
+            (-0.5257301778314274, 0.7401090627314136),
+            (-0.5257328313586064, 0.7401089052808580),
+            (-0.10347108964384516, 0.7402455075682315),
+            (1.1549365657221440, 0.7399985734225959),
+            (-0.5257307057776680, 0.7401350222899850),
+            (-0.5257307057776680, 0.7401349803106511),
+            (-0.10347515416680794, 0.7402714291780405),
+            (1.1549340721983086, 0.7399696942906804),
+            (-0.5257327700939869, 0.7401060847130201),
+            (-0.5257301379687636, 0.7401062188101685),
+            (-0.10347116413555793, 0.7402426092093505),
+            (1.1549361100893858, 0.7399805312890761),
+            (-0.5257299305012911, 0.7401171022996242),
+            (-0.5257319000321792, 0.7401172438770487),
+            (-0.1034742795559153, 0.7402538148974626),
+        ];
+        let n = entries.len();
+        let pad = 4;
+        // Row layout as the (pre-fix) transpose produced it: the 20 real
+        // entries in ascending source-row order, then zero-valued entries
+        // aliasing column 0 (the unscattered allocation tail).
+        let total = n + pad;
+        let a = CsrMatrix {
+            nrows: 1,
+            ncols: total,
+            row_ptr: vec![0, total],
+            col_idx: (0..total as u32).collect(),
+            values: entries
+                .iter()
+                .map(|e| e.0)
+                .chain(std::iter::repeat(0.0).take(pad))
+                .collect(),
+        };
+        let mut x = vec![0.0f64; total];
+        for (k, e) in entries.iter().enumerate() {
+            x[k] = e.1;
+        }
+        x[n] = entries[0].1; // pad entries read column 0 like the real tail did
+
+        let mut y = vec![0.0f64; 1];
+        a.spmv_sequential(&x, &mut y);
+        assert_eq!(y[0], -0.0008591516515169401, "MFEM sequential accumulation");
+
+        // Document the deviation this referee exists for (rr149 probe value
+        // `-8.59151651516995574e-4`): the fused path folds the real tail
+        // terms together with the pad into one sub-expression.
+        let mut y_fused = vec![0.0f64; 1];
+        a.spmv(&x, &mut y_fused);
+        assert_ne!(
+            y_fused[0], y[0],
+            "fused spmv now matches sequential on the padded referee row; \
+             re-check whether the DPG BIT paths still need spmv_sequential"
+        );
     }
 
     #[test]

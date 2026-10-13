@@ -20,5 +20,5 @@ pub use dpg_maxwell::*;
 pub use dpg_elasticity::*;
 pub use sinv::SinvBuilder;
 pub use trace_jump::assemble_bhat;
-pub use dpg_operator::{DpgNormalOperator, build_shat, compute_dpg_residual};
+pub use dpg_operator::{DpgNormalOperator, build_shat, compute_dpg_residual, assemble_sinv_sparse};
 pub use b0_mfem::assemble_b0_mfem;
