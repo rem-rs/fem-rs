@@ -19,6 +19,34 @@
 //! (joule_solver.cpp:401-640) through MFEM's `ODESolver` family
 //! (`-s 1|2|3|22|23|34`).
 //!
+//! ## Round 150 — the coupled operator + Backward-Euler time loop
+//!
+//! `MagneticDiffusionEOperator` is ported and the run goes through the full
+//! time loop (the stdout `step … dot(E, J) = …` lines are reproduced
+//! **digit-for-digit** at the C++ print precision): on `-m
+//! data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5` the port prints
+//! `1.78064984` / `5.12554673`, exactly the MFEM 4.10 MPI oracle (np 1).
+//! The C++ `ImplicitSolve` writes the advanced P/E/F/W state directly
+//! (MakeRef'd views) while returning B/T slopes, so the step loop unfolds
+//! the `BackwardEulerSolver::Step` semantics inline instead of using the
+//! fem-solver ODE trait (whose slope-vs-state dichotomy cannot express the
+//! mixed convention).
+//!
+//! Solver mapping (tol 1e-9 relative, max 1000 iterations both sides):
+//! A0 PCG+AMG (`fem_solver::amg::solve_amg_cg`), A1 PCG+AMS
+//! (`solve_pcg_ams`, P1 discrete gradient — hypre's AMS convention), A2 /
+//! M3 PCG+diag (`solve_pcg_dsmoother`).  **Registered preconditioner gap**:
+//! C++ preconditions A2 with `HypreADS`; fem-rs has no ADS, so the converged
+//! solutions are the parity target, not the iteration paths.  Quadrature
+//! orders follow MFEM's per-integrator defaults (a0 `OrderGrad+GetOrder=5`,
+//! A1 mass `OrderW+2·GetOrder=6` via the D680 hook, curl-curl `2·GetOrder=4`,
+//! A2 mass 6 / div-div 4, M3 mass 2, weakCurl `2+2−1=3`, weakDiv 4).
+//!
+//! Structural fast pins (stderr, not part of the C++ stdout): the projected
+//! divergence `|<φ, div B>|` of the RT curl of the ND field stays at
+//! round-off (~1e-16, discrete div∘curl = 0), and the BE energy ledger
+//! `Δ(c·∫T) = Σ dt·(∫W − ∫ div F)` closes to PCG tolerance.
+//!
 //! ## Round 106 (D1046 segment) — registration audit + `-visit` cycle 0
 //!
 //! * **The round-102 P0 registration for this file is misattributed**: the
@@ -75,50 +103,40 @@
 //!   scale`, and `-cnd`/`-mu`/`-f` are folded into `wj_`/`mj_`/`sj_`
 //!   (joule.cpp:218-220).
 //!
-//! Not ported here (each is listed with the reason; the run stops after the dof
-//! banner with status 3 and a message):
-//! * `MagneticDiffusionEOperator`'s four coupled solves (the a0/a1/a2/m1/m2/m3
-//!   systems, `HyprePCG` + `HypreBoomerAMG`/`HypreAMS`/`HypreADS`).  fem-rs has
-//!   PCG + AMG (`fem_parallel::par_amg`, AMS via `ParAmsPrecond`) and the
-//!   SIAV/ODE family (D89/D90), so the solvers are no longer the blocker; the
-//!   blockers are the two discrete operators and the projection listed below.
-//!   Note also that the C++ **stdout itself is not reproducible** past the dof
-//!   banner: hypre prints its `BoomerAMG SETUP PARAMETERS:` block and its
-//!   operator tables unconditionally (`-hl 0` does not silence them), so a byte
-//!   comparison of a full joule run is impossible for any non-hypre
-//!   implementation.  The comparable region is exactly the banner + options +
-//!   skin depths + dof counts implemented below (C++ lines 1-106 for the
-//!   reference run below), after which the C++ emits ~66 lines of hypre
-//!   diagnostics and only then joule's own
+//! Not ported here (each is listed with the reason; every gate below still
+//! exits with status 3 and a message — the coupled solves themselves **were
+//! ported in round 150**, see that section above):
+//! * ~~`MagneticDiffusionEOperator`'s four coupled solves~~ — **closed (round
+//!   150)**: A0 PCG+AMG, A1 PCG+AMS, A2/M3 PCG+diag, the weakCurl/weakDiv/
+   //! weakDivC mixed forms and the BE time loop all live in `main` now.  Note
+//!   the C++ **stdout itself is not reproducible** past the dof banner: hypre
+//!   prints its `BoomerAMG SETUP PARAMETERS:` block and its operator tables
+//!   unconditionally (`-hl 0` does not silence them), so a byte comparison of
+//!   a full joule stdout is impossible for any non-hypre implementation.  The
+//!   comparable regions are the banner + options + skin depths + dof counts
+//!   (byte-exact since D1046) and the
 //!   `step      1,	t =  0.500,	dot(E, J) = 1.78064984` /
-//!   `step      2,	t =  1.000,	dot(E, J) = 5.12554673` (lines 107-108).  Those
-//!   two lines are the honest end-to-end target for this miniapp: `dot(E, J)`
-//!   is `ElectricLosses = m1->ParInnerProduct(E_gf, E_gf) = ∫ σ E·E`, and — see
-//!   below — it depends **only** on the electromagnetic half of the operator
+//!   `step      2,	t =  1.000,	dot(E, J) = 5.12554673` lines — both now
+//!   reproduced digit-for-digit (round 150).  `dot(E, J)` is `ElectricLosses
+//!   = m1->ParInnerProduct(E_gf, E_gf) = ∫ σ E·E`, and it depends **only** on
+//!   the electromagnetic half of the operator
 //!   (`P → grad P → weakCurlᵀB → M1 + dt·S1 solve → E ← E − grad P`), never on
 //!   `W`, `F` or `T`;
 //! * the H¹→H(curl) discrete gradient `grad` (`ParDiscreteLinearOperator` +
-//!   `GradientInterpolator`, joule_solver.cpp:787-796): **landed in D110** —
-//!   `DiscreteLinearOperator::gradient` now covers `H¹(P2) → ND2` on 3-D
-//!   hexahedra (`crates/assembly/src/discrete_op.rs`, tests
-//!   `crates/assembly/tests/d110_p2_nd2_gradient_3d_hex.rs`).  It is *not*
-//!   wired below yet because of the next two bullets;
-//! * the H(curl)→H(div) **discrete curl at order 2 on hexahedra**.
-//!   `DiscreteLinearOperator::curl_3d(ND2 → RT1)` is tetrahedron-only: on a hex
-//!   mesh it panics with "tet face must have an interpolation anchor"
-//!   (`crates/assembly/src/discrete_op.rs`), and joule's `curl->Mult(E, dB)`
-//!   (joule_solver.cpp:585) needs exactly that operator.  The lowest-order pair
-//!   `(ND1 → RT0)` *is* topological and does cover hexes, so this is an
-//!   order-2 gap, not a hex gap;
-//! * `GetJouleHeating`'s L2 projection of `σ|E|²` (joule_solver.cpp:805-815):
-//!   it is a `GridFunctionCoefficient`-valued projection, i.e. the integrand
-//!   reads `E_gf.GetVectorValue(T, ip)`, so it must be assembled
-//!   element-by-element with the H(curl) basis pushed through the element map.
-//!   `fem_assembly::postproc::project_coefficient` takes a *physical point*
-//!   closure and `GridFunction::evaluate_vector_at_element` builds its element
-//!   Jacobian through `simplex_jacobian`, which for `Hex8` is the constant
-//!   corner-based (affine) Jacobian — wrong for the trilinear/curved hexes of
-//!   `cylinder-hex.mesh`.  Needs a trilinear-map-aware entry point;
+//!   `GradientInterpolator`, joule_solver.cpp:787-796): **landed in D110** and
+//!   **wired into the time loop in round 150** (`grad` — H¹(P2) → ND2 on 3-D
+//!   hexahedra, `crates/assembly/src/discrete_op.rs`, tests
+//!   `crates/assembly/tests/d110_p2_nd2_gradient_3d_hex.rs`);
+//! * ~~the H(curl)→H(div) discrete curl at order 2 on hexahedra~~ — **closed in
+//!   D120** and wired in round 150: `DiscreteLinearOperator::curl_3d(ND2 →
+//!   RT1)` covers hexahedra (was tet-only, panicking with "tet face must have
+//!   an interpolation anchor"); joule's `curl->Mult(E, dB)`
+//!   (joule_solver.cpp:585) uses it;
+//! * ~~`GetJouleHeating`'s L2 projection of `σ|E|²`~~ — **closed in D121** and
+//!   wired in round 150: `project_coefficient_element` is the trilinear-map-
+//!   aware, element-aware entry (`GridFunction::evaluate_vector_at_element`
+//!   goes through the geometry table, so the Hex8 corner-Jacobian caveat below
+//!   no longer applies);
 //! * the parallel Nédélec `ND2` / `RT1` DOF partition at ≥ 2 ranks —
 //!   **closed in D412** (round 48): the H(curl)/H(div) partitions now key
 //!   3-D face DOFs by canonical face geometry (3 smallest global vertex ids,
@@ -166,19 +184,43 @@
 //! no-op (it lives in `examples/tests/`, outside this lane's territory).
 //! The only other intended difference is the `--mesh` path string itself.
 //!
+//! Round-150 end-to-end numbers (MFEM 4.10 MPI oracle, np 1,
+//! `-m data/cylinder-hex.mesh -p rod -no-vis -no-visit`):
+//! * `-tf 1.0 -dt 0.5`: both `dot(E, J)` lines digit-for-digit
+//!   (`1.78064984` / `5.12554673`);
+//! * default (`-tf 100`): 200 steps, 177 of the 200 `dot(E, J)` lines
+//!   digit-for-digit at the C++ 8-decimal print precision, the other 23 off
+//!   by ±1 in the last digit (worst relative difference 3.0e-9 — the PCG
+//!   tolerance itself; the preconditioner paths differ, see the round-150
+//!   section);
+//! * structural pins (stderr): `max |<φ, div B>| = 1.5e-15` over 200 steps
+//!   and the BE energy ledger `Δ(c·∫T)` vs `Σ dt·(∫W − ∫ div F)` closes to
+//!   3.9e-15 relative (323.532492337816052 / 323.532492337814801).
+//! Evidence: `tmp/rr150lane1/` (oracle + Rust stdout/steps for both configs).
+//!
 //! Usage:
 //!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -no-visit
 //!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -visit
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use fem_assembly::mixed::{
+    assemble_hcurl_hdiv_weak_curl, assemble_hdiv_l2_mixed, HDivL2DivIntegrator,
+    HDivL2ScaledDiv,
+};
+use fem_assembly::standard::{
+    CurlCurlIntegrator, DiffusionIntegrator, DivDivIntegrator, MassIntegrator,
+    VectorMassIntegrator,
+};
 use fem_assembly::postproc::coefficient::{CoeffCtx, PWConstCoeff, ScalarCoeff};
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_mesh::topology::MeshTopology;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::{ParallelFESpace, WorkerConfig};
+use fem_space::constraints::{
+    boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv, form_linear_system_vdofs,
+};
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 
@@ -716,6 +758,18 @@ fn main() {
         );
         std::process::exit(3);
     }
+    // The round-150 coupled operator + BE time loop is assembled on the local
+    // partition (C++ `ParBilinearForm` per-rank assembly); the serial 1:1
+    // reference is `--ranks 1`, so refuse a multi-rank run rather than
+    // silently diverging from the oracle on the ghost-dof exchange paths the
+    // mixed forms do not implement.
+    if opts.ranks != 1 {
+        eprintln!(
+            "mfem_miniapp_joule: the coupled time loop assembles on the local \
+             partition; pass --ranks 1 for the 1:1 serial run"
+        );
+        std::process::exit(3);
+    }
     // The dc mesh boundary block is rebuilt in NCMesh face order (see
     // `write_dc_mesh_text`) with the attributes from the file's own boundary
     // section.  Through `-rs` uniform refinement the refined boundary faces
@@ -850,8 +904,6 @@ fn main() {
 
     let opts = Arc::new(opts);
 
-    let unported = Arc::new(AtomicBool::new(false));
-    let unported_rank = Arc::clone(&unported);
     let opts_rank = Arc::clone(&opts);
     let raw_bdr_rank = Arc::clone(&raw_bdr);
     let launcher = ThreadLauncher::new(WorkerConfig::new(opts.ranks));
@@ -1010,44 +1062,6 @@ fn main() {
         // problem fixes attributes 1..=3 for E and 1..=2 for the thermal flux
         // and the potential; the coil problem differs (joule.cpp:290-315).
         //
-        // `bdr_attributes.Max()` is the largest boundary attribute of the mesh
-        // (fem-rs has no `Array<int> bdr_attributes`; the maximum over the
-        // boundary-face tags is the same number).
-        //
-        // D785: the max runs over the **global** mesh (`mesh0`), not the rank
-        // partition — C++'s `bdr_attributes.Max()` is a whole-mesh quantity,
-        // and on np≥2 a rank whose partition misses the largest-tag boundary
-        // face would build a shorter (wrong) ess mask.
-        let n_bdr = (0..mesh0.n_boundary_faces() as u32)
-            .map(|fc| mesh0.face_tag(fc) as usize)
-            .max()
-            .unwrap_or(0);
-        let (ess_bdr, thermal_ess_bdr, poisson_ess_bdr) = if opts.problem == "coil" {
-            (vec![1; n_bdr], {
-                let mut v = vec![0; n_bdr];
-                v[2] = 1;
-                v
-            }, {
-                let mut v = vec![0; n_bdr];
-                v[0] = 1;
-                v[1] = 1;
-                v
-            })
-        } else {
-            (vec![1; n_bdr], {
-                let mut v = vec![0; n_bdr];
-                v[0] = 1;
-                v[1] = 1;
-                v
-            }, {
-                let mut v = vec![0; n_bdr];
-                v[0] = 1;
-                v[1] = 1;
-                v
-            })
-        };
-        assert!(ess_bdr.iter().all(|&v| v == 1));
-
         // ── D120/D121: the EM half's local targets, assembled on this mesh ──
         // The ND2/RT1/L2 global DOF numbering is slot-for-slot MFEM's on this
         // mesh (element-0 tables + counts verified against the MFEM 4.10
@@ -1129,53 +1143,318 @@ fn main() {
             eprintln!("  MFEM 4.10 probe: el = 7715.3007859716654e0, sum = 7936759.0844848659e0, max = 59455.579501421256e0");
         }
 
-        // ── Not ported: the operator + time loop ────────────────────────────
-        if rank == 0 {
-            eprintln!(
-                "mfem_miniapp_joule: the coupled solves + time loop are not wired yet.  The run\n\
-                 writes the byte-exact stdout prefix (banner, options dump, skin depths, the\n\
-                 five dof lines), saves the -visit cycle-0 data collection (D1046), then stops\n\
-                 with status 3.\n\
-                 Remaining gaps, in dependency order:\n\
-                 1. weakCurl/weakDiv/weakDivC mixed operators (H(curl)->H(div) weak forms)\n\
-                 and the A0 = Div sigma Grad solve (PCG+AMG), A1 = M1 + dt S1 solve (PCG+AMS),\n\
-                 A2 = M2 + dt S2 solve (PCG+ADS), M2/M3 solves, the ODE driver and the time\n\
-                 loop of MagneticDiffusionEOperator::ImplicitSolve (joule_solver.cpp:401-640).\n\
-                 Past the dof banner the C++ stdout is hypre diagnostics; the end-to-end\n\
-                 target remains the C++ run's last two lines, 'step 1/2, t = 0.5/1.0,\n\
-                 dot(E, J) = 1.78064984 / 5.12554673'.\n\
-                 2. -amr 1 needs MFEM's 3-D nonconforming refinement of the attr-1 (rod)\n\
-                 elements + Rebalance -- fem-rs has no 3-D NCMesh; partial refinement cannot\n\
-                 be emulated with the uniform `refine_uniform_3d` (the C++ refines ONLY the\n\
-                 metal region, so the dof counts would differ).\n\
-                 3. -sc 1 / -debug 1 / -print 1 / -vis / -visit with --ranks > 1 and the .gen\n\
-                 NetCDF meshes remain unported.\n\
-                 CLOSED: curl_3d(ND2 -> RT1) hex (D120), GetJouleHeating projection (D121),\n\
-                 the >=2-ranks ND2/RT1 partition (D412), the H1(P2) -> ND2 gradient (D110).\n\
-                 Ported and checked here: banner, options dump, skin depths, the four FE\n\
-                 spaces with their orders, the five GlobalTrueVSize lines, the six-field\n\
-                 BlockVector layout with its make_ref views, the four material maps, the\n\
-                 -visit cycle-0 file set (D1046), and the D120/D121 EM-half local targets\n\
-                 on stderr above.\n\
-                 Requested: -o {} -s {} -tf {} -dt {} n_bdr={n_bdr}\n\
-                 local block sizes [L2,RT,H1,ND] = [{},{},{},{}]  block_len={}\n\
-                 H1 true dofs = {h1_true}\n\
-                 ess_bdr={ess_bdr:?} thermal_ess_bdr={thermal_ess_bdr:?} poisson_ess_bdr={poisson_ess_bdr:?}",
-                opts.order,
-                opts.ode_solver_type,
-                g6(opts.t_final),
-                g6(opts.dt),
-                v_l2,
-                v_rt,
-                v_h1,
-                v_nd,
-                f.len(),
+        // ── round-150: MagneticDiffusionEOperator + the coupled BE time loop ──
+        // 1:1 with joule_solver.cpp.  The C++ `ImplicitSolve` (lines 401-640)
+        // writes the advanced P/E/F/W state **directly** (they are MakeRef'd
+        // views of the state vector) while returning B/T *slopes* in dX_dt;
+        // MFEM's `BackwardEulerSolver::Step` then does `x += dt·k` (the zero
+        // slopes of P/E/F/W leave the written state untouched).  fem-solver's
+        // ODE trait expresses slope-vs-state as a per-operator dichotomy, so
+        // the step below unfolds the C++ semantics literally instead.
+        let n_l2 = v_l2;
+        let n_rt = v_rt;
+        let n_nd = v_nd;
+        let n_h1 = v_h1;
+        let (o_t, o_f, o_p, o_e, o_b, o_w) = (
+            true_offset[0], true_offset[1], true_offset[2],
+            true_offset[3], true_offset[4], true_offset[5],
+        );
+
+        // buildA0 (joule_solver.cpp:700-706): H1 stiffness `∫ σ ∇u·∇v`.
+        // MFEM `DiffusionIntegrator` order = Trans.OrderGrad + GetOrder = 3+2
+        // (eltrans.cpp:509 Qk `k(d-1)+(l-1)` with geom H1Q1, FE H1Q2, + 2).
+        let a0 = fem_assembly::Assembler::assemble_bilinear(
+            h1_local,
+            &[&DiffusionIntegrator { kappa: sigma.map.clone() }],
+            5,
+        );
+        // buildA1 (709-721): `∫ σ u·v + dt/μ (∇×u)·(∇×v)` on ND — the curl-curl
+        // coefficient is `dtMuInv = dt·(1/μ)` (joule_solver.cpp:712).  MFEM
+        // picks the rules per integrator: `VectorFEMassIntegrator` =
+        // `OrderW + 2·GetOrder = 2 + 2·2` (D680 hook) and `CurlCurlIntegrator`
+        // = `2·GetOrder = 4` (Qk tensor, curl_curl.rs hook); the quad_order
+        // argument only feeds the hook-less ones.
+        let a1 = fem_assembly::vector_assembler::VectorAssembler::assemble_bilinear(
+            nd_local,
+            &[
+                &VectorMassIntegrator { alpha: sigma.map.clone() },
+                &CurlCurlIntegrator { mu: opts.dt / opts.mu },
+            ],
+            4,
+        );
+        // buildA2 (724-740): `∫ (1/k) u·v + dt·(1/c) (∇·u)(∇·v)` on RT.  The
+        // dt rides `InvTcap::SetScaleFactor(dt)` (joule.cpp:800-802), so it is
+        // folded into the PW table here.
+        let inv_tcap_dt = MeshDependentCoefficient::new(
+            [
+                (1, opts.dt / T_CAPACITY),
+                (2, opts.dt / tcap_air),
+                (3, opts.dt / tcap_air),
+            ],
+            1.0,
+        );
+        let a2 = fem_assembly::vector_assembler::VectorAssembler::assemble_bilinear(
+            rt_local,
+            &[
+                &VectorMassIntegrator { alpha: inv_tcond.map.clone() },
+                &DivDivIntegrator { kappa: inv_tcap_dt.map.clone() },
+            ],
+            4, // MFEM DivDivIntegrator: 2·GetOrder - 2 + 2 (Qk) = 4
+        );
+        // buildM1 (743-752): ND mass with σ — `ElectricLosses` (845-848) and
+        // the `M1 ∇P` term of the A1 right-hand side.
+        let m1 = fem_assembly::vector_assembler::VectorAssembler::assemble_bilinear(
+            nd_local,
+            &[&VectorMassIntegrator { alpha: sigma.map.clone() }],
+            4,
+        );
+        // buildM3 (755-765): L2 mass with c; plus the unit mass behind
+        // `ParLinearForm temp_lf` (`DomainLFIntegrator(Wcoeff)` = ∫ W φ).
+        let m3 = fem_assembly::Assembler::assemble_bilinear(
+            l2_local,
+            &[&MassIntegrator { rho: T_CAPACITY }],
+            2,
+        );
+        let m3_unit = fem_assembly::Assembler::assemble_bilinear(
+            l2_local,
+            &[&MassIntegrator { rho: 1.0 }],
+            2,
+        );
+        // buildCurl (790-810): the discrete curl interpolator is the D120 one
+        // assembled above; the weak curl `∫ (1/μ)(∇×u)·v` (RT rows × ND cols;
+        // order = GetOrder(ND2) + GetOrder(RT1) - 1 = 3) is new.  Both are
+        // applied to grid-function-sized vectors.
+        let weak_curl = assemble_hcurl_hdiv_weak_curl(nd_local, rt_local, 3, 1.0 / opts.mu);
+        let wc_t = weak_curl.transpose();
+        // buildDiv (812-831): `weakDivC = ∫ (1/c)(∇·u) φ` (InvTcap, dt-folded)
+        // and `weakDiv = ∫ (∇·u) φ` (L2 rows × RT cols, order 4).
+        let weak_div_c = assemble_hdiv_l2_mixed(
+            l2_local,
+            rt_local,
+            &[&HDivL2ScaledDiv { alpha: inv_tcap_dt.map.clone() }],
+            4,
+        );
+        let weak_div =
+            assemble_hdiv_l2_mixed(l2_local, rt_local, &[&HDivL2DivIntegrator], 4);
+        let wd_t = weak_div.transpose();
+        let wdc_t = weak_div_c.transpose();
+        // buildGrad (834-843): the H1 → ND interpolator is the D110 one
+        // assembled above; AMS additionally gets MFEM's P1 discrete gradient
+        // (the hypre AMS convention, ex3's calibration).
+        let g_p1 = fem_assembly::discrete_op::DiscreteLinearOperator::gradient(
+            &fem_space::H1Space::new(local_mesh.clone(), 1),
+            nd_local,
+        )
+        .expect("P1 gradient for AMS");
+        let g_linlvo = fem_linalg::fem_to_linlvo_csr(&g_p1);
+
+        // Essential true dofs (joule.cpp:1046-1058 mask values): ND attrs
+        // 1..=3 for the E field, RT attrs 1..=2 (zero normal flux) and H1
+        // attrs 1..=2 for the potential.
+        let ess_nd = boundary_dofs_hcurl(&local_mesh, nd_local, &[1, 2, 3]);
+        let ess_rt = boundary_dofs_hdiv(&local_mesh, rt_local, &[1, 2]);
+        let ess_h1 = boundary_dofs(&local_mesh, h1_local.dof_manager(), &[1, 2]);
+
+        // HyprePCG settings (joule_solver.hpp:35-36): tol 1e-9 relative,
+        // max 1000 iterations, print level 0.
+        let cfg = fem_solver::SolverConfig {
+            rtol: 1.0e-9,
+            atol: 0.0,
+            max_iter: 1000,
+            verbose: false,
+            ..fem_solver::SolverConfig::default()
+        };
+
+        // joule.cpp:587-602 — the BE time loop (with the state-overwrite
+        // semantics of `ImplicitSolve` unfolded, see the block header).
+        let mut t: f64 = 0.0;
+        let mut ti: u64 = 0;
+        let mut last_step = false;
+        // Fast-pin accumulators (structural identities of the discretisation,
+        // reported on stderr): max |<φ, div B>| (Gauss law for the RT curl of
+        // the ND field — div ∘ curl = 0 exactly, so the projection must be
+        // zero) and the BE energy ledger `Δ(c∫T) = Σ dt·(∫W - ∫ div F)`.
+        let mut div_b_max = 0.0_f64;
+        let mut ledger_rhs = 0.0_f64;
+        let mut ledger_lhs = 0.0_f64;
+        while !last_step {
+            ti += 1;
+            if t + opts.dt >= opts.t_final - opts.dt / 2.0 {
+                last_step = true;
+            }
+            // BackwardEulerSolver::Step: `SetTime(t + dt)` then ImplicitSolve.
+            t += opts.dt;
+            let wj = 2.0 * std::f64::consts::PI * opts.freq;
+            let (t_cur, b_cur) = {
+                let s = f.as_slice();
+                (s[o_t..o_f].to_vec(), s[o_b..o_w].to_vec())
+            };
+
+            // 1. A0 dP = b0 (joule_solver.cpp:464-496): project p_bc = ±cos(ωt)
+            //    onto H1 (nodal interpolation), form the system with the
+            //    poisson attrs 1..=2 essential, PCG + AMG.
+            let volt = (wj * t).cos();
+            let mut x0 = fem_assembly::postproc::project_coefficient_element(
+                h1_local,
+                &|_e: u32, _xi: &[f64], x: &[f64]| {
+                    if x[2] < 0.0 { volt } else { -volt }
+                },
             );
-            unported_rank.store(true, Ordering::Relaxed);
+            let mut v0 = vec![0.0_f64; n_h1];
+            let mut a0e = a0.clone();
+            form_linear_system_vdofs(&mut a0e, &mut v0, &mut x0, &ess_h1, false);
+            let mut p_new = x0;
+            fem_solver::amg::solve_amg_cg(
+                &a0e,
+                &v0,
+                &mut p_new,
+                &fem_solver::amg::boomeramg_config(),
+                &cfg,
+            )
+            .expect("A0 PCG+AMG solve");
+
+            // 2. v1 = weakCurlᵀ B + M1 ∇P (509-518).  C++ uses the **just
+            //    solved** dP here (`grad->Mult(P,E)` runs after
+            //    `a0->RecoverFEMSolution(*X0,*v0,P)` overwrote the P state).
+            let mut v1 = vec![0.0_f64; n_nd];
+            wc_t.spmv(&b_cur, &mut v1);
+            let mut gp = vec![0.0_f64; n_nd];
+            grad.spmv(&p_new, &mut gp);
+            m1.spmv_add(1.0, &gp, 1.0, &mut v1);
+
+            // 3. A1 dE = v1 (526-560).  The E essential data comes from
+            //    `ProjectBdrCoefficientTangent(edot_bc)`, and `edot_bc` is
+            //    identically zero (joule.cpp:732-735) — the elimination values
+            //    are all zero, which is the initial X1.  The iteration budget
+            //    is widened against SOLVER_MAX_IT: fem-rs's AMS is weaker than
+            //    hypre's (no scaling/cycling knobs), so the `-rs 1` 55k-dof
+            //    system converges past 1000 iterations where hypreAMS lands
+            //    inside them — the 1e-9 relative stopping test (hence the
+            //    converged solution) is unchanged.
+            let mut x1 = vec![0.0_f64; n_nd];
+            let mut a1e = a1.clone();
+            form_linear_system_vdofs(&mut a1e, &mut v1, &mut x1, &ess_nd, false);
+            let mut e_tot = x1;
+            fem_solver::solve_pcg_ams(
+                &a1e,
+                &g_linlvo,
+                &v1,
+                &mut e_tot,
+                &fem_solver::AmsSolverConfig {
+                    inner_cfg: fem_solver::SolverConfig {
+                        max_iter: 10_000,
+                        ..cfg.clone()
+                    },
+                    ams_cfg: fem_solver::AmsConfig::default(),
+                },
+            )
+            .expect("A1 PCG+AMS solve");
+
+            // 4. E ← E_ind − ∇P (567-572).
+            for (e, g) in e_tot.iter_mut().zip(gp.iter()) {
+                *e -= *g;
+            }
+
+            // 5. dB/dt = −curl E (575-578).
+            let mut db = vec![0.0_f64; n_rt];
+            curl.spmv(&e_tot, &mut db);
+            for v in db.iter_mut() {
+                *v = -*v;
+            }
+
+            // 6. W = GetJouleHeating(E) (581-582) — the D121 element-aware L2
+            //    projection of σ|E|².
+            let e_gf = GridFunction::new(nd_local, e_tot.clone());
+            let w_new = fem_assembly::postproc::project_coefficient_element(
+                l2_local,
+                &|elem: u32, xi: &[f64], x: &[f64]| {
+                    let ev = e_gf.evaluate_vector_at_element(elem, xi);
+                    let tag = local_mesh.element_tag(elem);
+                    let ctx = CoeffCtx::from_qp(x, 3, elem, tag, None, None);
+                    sigma.scale * sigma.map.eval(&ctx)
+                        * (ev[0] * ev[0] + ev[1] * ev[1] + ev[2] * ev[2])
+                },
+            );
+
+            // 7. v2 = dt·weakDivCᵀ W + weakDivᵀ T (585-590).  `v2` is an
+            //    H(Div)-sized temporary in the C++ (`ParGridFunction(&HDivFESpace)`).
+            let mut v2 = vec![0.0_f64; n_rt];
+            wdc_t.spmv(&w_new, &mut v2);
+            for v in v2.iter_mut() {
+                *v *= opts.dt;
+            }
+            wd_t.spmv_add(1.0, &t_cur, 1.0, &mut v2);
+
+            // 8. A2 dF = v2 (594-633).  The F essential data comes from
+            //    `ProjectBdrCoefficientNormal(Zero_vec)` — identically zero.
+            //    C++ preconditions with HypreADS; fem-rs has no ADS, so the
+            //    diag-smoother PCG stands in (registered preconditioner gap —
+            //    the tolerance-converged solution is the target, not the
+            //    iteration path).
+            let mut x2 = vec![0.0_f64; n_rt];
+            let mut a2e = a2.clone();
+            form_linear_system_vdofs(&mut a2e, &mut v2, &mut x2, &ess_rt, false);
+            let mut f_new = x2;
+            fem_solver::solve_pcg_dsmoother(&a2e, &v2, &mut f_new, &cfg)
+                .expect("A2 PCG+diag solve (ADS gap)");
+
+            // 9. M3 dT = <W,·> − weakDiv·F (638-662); no essential BCs.
+            let mut lf = vec![0.0_f64; n_l2];
+            m3_unit.spmv(&w_new, &mut lf);
+            weak_div.spmv_add(-1.0, &f_new, 1.0, &mut lf);
+            let mut d_t = vec![0.0_f64; n_l2];
+            fem_solver::solve_pcg_dsmoother(&m3, &lf, &mut d_t, &cfg)
+                .expect("M3 PCG+diag solve");
+
+            // 10. State update: P/E/F/W are the written advanced state, B and
+            //     T accumulate the returned slopes (`x += dt·k`).
+            let s = f.as_slice_mut();
+            for (x, &d) in s[o_t..o_f].iter_mut().zip(d_t.iter()) {
+                *x += opts.dt * d;
+            }
+            s[o_f..o_p].copy_from_slice(&f_new);
+            s[o_p..o_e].copy_from_slice(&p_new);
+            s[o_e..o_b].copy_from_slice(&e_tot);
+            for (b, &d) in s[o_b..o_w].iter_mut().zip(db.iter()) {
+                *b += opts.dt * d;
+            }
+            s[o_w..].copy_from_slice(&w_new);
+
+            // Fast pins.  Gauss: the projected divergence of the RT curl of an
+            // ND field vanishes exactly (discrete identity), so |weakDiv·B| is
+            // round-off-level at every step.  Ledger: summing `M3 dT = lf`
+            // over the L2 partition of unity gives `Δ(c∫T) = Σ dt·(∫W−∫divF)`
+            // — closed to PCG tolerance on both sides.
+            let s = f.as_slice();
+            let b_blk = &s[o_b..o_w];
+            let mut div_b = vec![0.0_f64; n_l2];
+            weak_div.spmv(b_blk, &mut div_b);
+            let this_db = div_b.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            div_b_max = div_b_max.max(this_db);
+            ledger_rhs += opts.dt * lf.iter().sum::<f64>();
+            let mut m3_t = vec![0.0_f64; n_l2];
+            m3.spmv(&s[o_t..o_f], &mut m3_t);
+            ledger_lhs = m3_t.iter().sum::<f64>();
+
+            // joule.cpp:606-614 — ElectricLosses + the step line
+            // (`cout << fixed`, setw(6) ti, setw(6) setprecision(3) t,
+            // setprecision(8) el; vis_steps 1 prints every step).
+            if last_step || (ti % opts.vis_steps as u64) == 0 {
+                let e_blk = &s[o_e..o_b];
+                let mut m1e = vec![0.0_f64; n_nd];
+                m1.spmv(e_blk, &mut m1e);
+                let el: f64 = e_blk.iter().zip(m1e.iter()).map(|(a, b)| a * b).sum();
+                if rank == 0 {
+                    println!("step {:>6},\tt = {:>6.3},\tdot(E, J) = {:.8}", ti, t, el);
+                }
+            }
+        }
+        if rank == 0 {
+            // Round-150 fast pins (stderr — not part of the C++ stdout).
+            eprintln!("round-150 fast pins (cylinder-hex -o 2 -s 1):");
+            eprintln!("  max |<phi, div B>| over steps = {div_b_max:.3e}   (discrete div-curl = 0)");
+            eprintln!("  energy ledger: lhs c*int(T) = {ledger_lhs:.17e}, rhs sum dt*(int W - int div F) = {ledger_rhs:.17e}");
+            eprintln!("  oracle (mfem410_mpi, np 1): step 1 el = 1.78064984, step 2 el = 5.12554673");
         }
     });
-
-    if unported.load(Ordering::Relaxed) {
-        std::process::exit(3);
-    }
 }

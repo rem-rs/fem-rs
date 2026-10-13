@@ -383,6 +383,8 @@ fn d681_single_quad_q2_bisect() {
     let gf = fem_assembly::complex::ComplexGridFunction {
         u_re: x[..n].to_vec(),
         u_im: x[n..].to_vec(),
+        iterations: 0,
+        residual: 0.0,
     };
     let (err_r, err_i) = gf.compute_l2_error(
         &|x: &[f64]| u0(x, mu, eps, sigma, omega).0,
@@ -409,6 +411,8 @@ fn d681_core_eval_q2_exact_field_is_zero() {
     let gf = fem_assembly::complex::ComplexGridFunction {
         u_re: u_re.as_slice().to_vec(),
         u_im: u_im.as_slice().to_vec(),
+        iterations: 0,
+        residual: 0.0,
     };
     let (err_r, err_i) = gf.compute_l2_error(
         &|x: &[f64]| x[0] * x[0] + 3.0 * x[1] + 1.0,
@@ -477,6 +481,8 @@ fn d681_inline_quad_r1_q2_full_pipeline() {
     let gf = fem_assembly::complex::ComplexGridFunction {
         u_re: x[..n].to_vec(),
         u_im: x[n..].to_vec(),
+        iterations: 0,
+        residual: 0.0,
     };
     let (err_r, err_i) = gf.compute_l2_error(
         &|x: &[f64]| u0(x, mu, eps, sigma, omega).0,

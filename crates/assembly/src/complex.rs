@@ -605,6 +605,10 @@ pub struct ComplexGridFunction {
     pub u_re: Vec<f64>,
     /// Imaginary DOF coefficients.
     pub u_im: Vec<f64>,
+    /// GMRES iterations reported by the producing solver (0 = not reported).
+    pub iterations: usize,
+    /// Final residual reported by the producing solver (0.0 = not reported).
+    pub residual: f64,
 }
 
 impl ComplexGridFunction {
@@ -614,6 +618,8 @@ impl ComplexGridFunction {
         ComplexGridFunction {
             u_re: flat[..n].to_vec(),
             u_im: flat[n..].to_vec(),
+            iterations: 0,
+            residual: 0.0,
         }
     }
 
@@ -885,11 +891,11 @@ impl NativeComplexSystem {
     ) -> Result<ComplexGridFunction, String> {
         let mut x_re = vec![0.0_f64; self.n_dofs];
         let mut x_im = vec![0.0_f64; self.n_dofs];
-        solve_gmres_complex(
+        let (iterations, residual) = solve_gmres_complex(
             &self.mat, b_re, b_im, &mut x_re, &mut x_im,
             tol, max_iter, restart, true,
         )?;
-        Ok(ComplexGridFunction { u_re: x_re, u_im: x_im })
+        Ok(ComplexGridFunction { u_re: x_re, u_im: x_im, iterations, residual })
     }
 
     /// Solve with initial guess (in-place update).
@@ -1492,6 +1498,8 @@ mod tests {
         let gf = ComplexGridFunction {
             u_re: vec![3.0, 0.0],
             u_im: vec![4.0, 1.0],
+            iterations: 0,
+            residual: 0.0,
         };
         let amp = gf.amplitude();
         assert!((amp[0] - 5.0).abs() < 1e-12);
@@ -1534,6 +1542,8 @@ mod tests {
         let gf = ComplexGridFunction {
             u_re: dofs_re.into_vec(),
             u_im: dofs_im.into_vec(),
+            iterations: 0,
+            residual: 0.0,
         };
 
         let l2_err = gf.compute_lp_error(2.0, &exact_re, &exact_im, 3, &space);
@@ -1554,6 +1564,8 @@ mod tests {
         let gf = ComplexGridFunction {
             u_re: dofs_re.into_vec(),
             u_im: dofs_im.into_vec(),
+            iterations: 0,
+            residual: 0.0,
         };
 
         let max_err = gf.compute_max_error(&exact_re, &exact_im, 3, &space);
@@ -1574,6 +1586,8 @@ mod tests {
         let gf = ComplexGridFunction {
             u_re: dofs_re.into_vec(),
             u_im: dofs_im.into_vec(),
+            iterations: 0,
+            residual: 0.0,
         };
 
         let l2_err = gf.compute_lp_error(2.0, &exact_re, &exact_im, 3, &space);
