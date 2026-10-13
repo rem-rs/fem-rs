@@ -329,14 +329,17 @@ fn d106_joule_stdout_and_visit_dc_byteparity() {
             "-no-visit",
         ],
     );
-    // Round-150 registered preconditioner gap: fem-rs's AMS is weaker than
-    // hypre's on the refined 55k-dof ND2 system — the A1 PCG stalls at
-    // residual 1.3e-9 (vs the 1e-9 stop test) after 10k iterations and the
-    // port asserts (exit 101), whereas the oracle converges inside its 1000.
-    // The default mesh (-rs 0) converges inside budget both sides and is the
-    // parity target; this pin keeps the stall observable.
-    assert_eq!(code, 101, "-rs 1: expected fem-rs AMS budget stall (1.3e-9)");
-    let _ = out;
+    // Round 151: the round-150 registered AMS stall is CLOSED.  The A1
+    // preconditioner now is the MFEM `HypreAMS` structure (three-space
+    // block-Pi cycle on the `id_ND` interpolation blocks + the P2 discrete
+    // gradient + the hypre-aligned `MakeSolver` AMG parameters; A1 converges
+    // in 18 iterations vs the oracle's 13), so the run completes and both
+    // step lines are digit-for-digit the MFEM 4.10 oracle values on the
+    // refined mesh (`-rs 1 -tf 1.0 -dt 0.5`, np 1, re-verified this round
+    // with `-hl 2`: `step 1 = 1.77319358`, `step 2 = 5.12682792`; the
+    // round-150 run exited 101 with the A1 residual parked at 1.3e-9).
+    assert_eq!(code, 0, "round-151: the -rs 1 AMS stall is closed");
+    assert_md5("joule -rs 1 stdout (unfiltered)", &out, "d6337928ca9a84c8ef336307be20b7d7");
 
     // -visit cycle-0 dc (default mesh)
     let (out, code) = run(

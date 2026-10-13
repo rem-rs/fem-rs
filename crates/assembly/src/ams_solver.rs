@@ -62,6 +62,7 @@ pub fn solve_hcurl_ams<M: MeshTopology + Clone + 'static>(
         let ams_cfg = AmsSolverConfig {
             inner_cfg: cfg.clone(),
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut u = vec![0.0_f64; n_dofs];
         let res = solve_pcg_ams(mat, &g_linlvo, rhs, &mut u, &ams_cfg)
@@ -94,6 +95,7 @@ pub fn solve_hcurl_ams<M: MeshTopology + Clone + 'static>(
         let ams_cfg = AmsSolverConfig {
             inner_cfg: cfg.clone(),
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut x_red = vec![0.0_f64; n_sys];
         let res = solve_pcg_ams(&sys_mat, &g_linlvo, &sys_rhs, &mut x_red, &ams_cfg)

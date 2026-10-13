@@ -25,6 +25,7 @@ fn ams_solver_cfg() -> AmsSolverConfig {
             ..SolverConfig::default()
         },
         ams_cfg: linlvo::precond::AmsConfig::hpc_default(),
+        pi: None,
     }
 }
 

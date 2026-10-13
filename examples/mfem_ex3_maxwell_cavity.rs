@@ -327,6 +327,7 @@ fn solve_report_2d(
         let r = solve_pcg_ams(mat, &ftl(&g), b, x, &AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true, ..SolverConfig::default() },
             ams_cfg: AmsConfig::default(),
+            pi: None,
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }
@@ -518,6 +519,7 @@ fn solve_report(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args, ma
         let r = solve_pcg_ams(mat, &ftl(&g), b, x, &AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true, ..SolverConfig::default() },
             ams_cfg: AmsConfig::default(),
+            pi: None,
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }

@@ -82,6 +82,13 @@ pub fn solve_precond_kind<T: linlvoScalar>(
 pub struct AmsSolverConfig {
     pub inner_cfg: SolverConfig,
     pub ams_cfg: AmsConfig,
+    /// Face (curl) auxiliary-space interpolation blocks `Pi = [Pix, Piy, Piz]`
+    /// (each `n_edges × n_nodes`), the analogue of MFEM's
+    /// `HypreAMS::MakeGradientAndInterpolation` handing `id_ND` component
+    /// blocks to `HYPRE_AMSSetInterpolations` (`None` = two-space AMS, the
+    /// historical `AmsPrecond::new` behaviour).  Real-valued `f64` blocks;
+    /// converted internally to the solve scalar type.
+    pub pi: Option<Vec<linlvoCsr<f64>>>,
 }
 
 /// Solve an H(curl) system using PCG with AMS preconditioner.
@@ -106,8 +113,27 @@ pub fn solve_pcg_ams<T: linlvoScalar>(
     let la = fem_to_linlvo_csr(a);
     let mut lx: Vec<T> = x.to_vec();
 
-    let ams = AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
-        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    // `pi` is stored real-valued; lift to the scalar type for `with_pi`.
+    let pi_lifted: Option<Vec<linlvoCsr<T>>> = cfg.pi.as_ref().map(|blocks| {
+        blocks
+            .iter()
+            .map(|m| {
+                linlvoCsr::from_raw(
+                    m.nrows(),
+                    m.ncols(),
+                    m.row_ptr().to_vec(),
+                    m.col_idx().to_vec(),
+                    m.values().iter().map(|&v| <T as linlvoScalar>::from_f64(v)).collect(),
+                )
+            })
+            .collect()
+    });
+    let ams = match &pi_lifted {
+        Some(pi) => AmsPrecond::<T>::with_pi(&la, g, pi, cfg.ams_cfg.clone())
+            .map_err(|e| SolverError::Linlvo(e.to_string()))?,
+        None => AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
+            .map_err(|e| SolverError::Linlvo(e.to_string()))?,
+    };
 
     // linger's CG converges on the preconditioned ENERGY `(B r, r)/(B r₀, r₀)`,
     // which can dip below rtol (even via `|·|` across an energy zero) while

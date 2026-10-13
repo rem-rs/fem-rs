@@ -51,7 +51,9 @@
 #![allow(clippy::needless_range_loop)]
 
 pub use linlvo::core::preconditioner::Preconditioner;
-pub use linlvo::precond::{AdsConfig, AmsConfig, AmsPrecond, AuxSpaceSolver};
+pub use linlvo::precond::{
+    AdsConfig, AmsConfig, AmsCycle, AmsEdgeSmoother, AmsPrecond, AuxSpaceSolver,
+};
 pub use linlvo::DenseVec;
 /// Re-export of linlvo's [`Preconditioner`] trait.
 ///
@@ -1190,6 +1192,7 @@ mod ams_ads_tests {
                 ..SolverConfig::default()
             },
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut x = vec![0.0_f64; a_r.nrows];
         let res = solve_pcg_ams(&a_r, &g_linlvo, &rhs_r, &mut x, &cfg).expect("PCG+AMS returned error");
@@ -1253,6 +1256,7 @@ mod ams_ads_tests {
                 ..SolverConfig::default()
             },
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut x = vec![0.0_f64; ndofs];
         let res = solve_gmres_ams(&a, &g_linlvo, &rhs, &mut x, 30, &cfg)
@@ -1304,6 +1308,7 @@ mod ams_ads_tests {
                 ..SolverConfig::default()
             },
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut x = vec![0.0_f64; a_r.nrows];
         let res = solve_pcg_ams(&a_r, &g_linlvo, &rhs_r, &mut x, &cfg).unwrap();
@@ -1362,6 +1367,7 @@ mod ams_ads_tests {
                 ..SolverConfig::default()
             },
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut x = vec![0.0_f64; ndofs];
         let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg).unwrap();
@@ -1589,6 +1595,7 @@ mod ams_ads_tests {
                 ..SolverConfig::default()
             },
             ams_cfg: Default::default(),
+            pi: None,
         };
         let mut x = vec![0.0_f64; ndofs];
         let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg)

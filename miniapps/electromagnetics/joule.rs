@@ -198,6 +198,32 @@
 //!   3.9e-15 relative (323.532492337816052 / 323.532492337814801).
 //! Evidence: `tmp/rr150lane1/` (oracle + Rust stdout/steps for both configs).
 //!
+//! ## Round 151 — the `-rs 1` A1 stall is closed (AMS aligned to HypreAMS)
+//!
+//! The round-150 registered gap (A1 PCG+AMS stalls at residual 1.3e-9 on the
+//! refined 55k-dof ND2 system while the hypre-AMS oracle converges inside its
+//! 1000 iterations) was a **preconditioner structure** gap, not a budget one:
+//! the oracle's `new HypreAMS(*A1, prec_fespace)` runs MFEM's
+//! `MakeGradientAndInterpolation` (linalg/hypre.cpp), which at `-o 2` (ND2,
+//! `p = 2 > 1`) hands hypre
+//!
+//! 1. the **P2 discrete gradient** `G: H¹(P2) → ND2` (the round-150 port used
+//!    the P1 gradient — right for ND1, weaker here), and
+//! 2. the **face (curl) auxiliary space** `Pi = [Pix, Piy, Piz]` — the
+//!    `id_ND` `IdentityInterpolator` blocks split by domain vdim — so hypre
+//!    runs the full three-space `cycle_type = 13` block multiplicative cycle,
+//!    while the round-150 AMS was two-space (nodal arm only).
+//!
+//! With `ams_pi_blocks` (`D615`, values cross-checked against the MFEM
+//! `Project_ND` element matrix dump), `AmsSolverConfig::pi`, the
+//! hypre-aligned `MakeSolver` AMG parameters forced on the `with_pi` path
+//! (HMIS + 1 aggressive level, θ = 0.25, extended-i/PMax 4, SGS-style relax,
+//! relaxation coarsest level — MFEM hard-codes these for B_G and B_Pi alike),
+//! the l1-scaled SGS edge smoother and `singularity_regularization = 0` (no
+//! shift, hypre-faithful), the A1 solve converges inside the C++ budget and
+//! the 10k-iteration widening of the round-150 port is removed — the A1
+//! configuration is 1:1 again.
+//!
 //! Usage:
 //!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -no-visit
 //!   cargo run --release --example miniapp_joule -- -m data/cylinder-hex.mesh -p rod -tf 1.0 -dt 0.5 -no-vis -visit
@@ -1239,14 +1265,27 @@ fn main() {
         let wd_t = weak_div.transpose();
         let wdc_t = weak_div_c.transpose();
         // buildGrad (834-843): the H1 → ND interpolator is the D110 one
-        // assembled above; AMS additionally gets MFEM's P1 discrete gradient
-        // (the hypre AMS convention, ex3's calibration).
-        let g_p1 = fem_assembly::discrete_op::DiscreteLinearOperator::gradient(
-            &fem_space::H1Space::new(local_mesh.clone(), 1),
+        // assembled above; AMS gets MFEM's discrete gradient and face
+        // (curl) interpolation blocks — round-151: both at the MFEM
+        // `MakeGradientAndInterpolation` orders (G: H¹(P2) → ND2, p = ND
+        // order; Pi: the `id_ND` IdentityInterpolator blocks), the -rs 1
+        // stall fix, see the header round-151 section.
+        let h1_p2 = fem_space::H1Space::new(local_mesh.clone(), 2);
+        let g_ams = fem_assembly::discrete_op::DiscreteLinearOperator::gradient(
+            &h1_p2,
             nd_local,
         )
-        .expect("P1 gradient for AMS");
-        let g_linlvo = fem_linalg::fem_to_linlvo_csr(&g_p1);
+        .expect("P2 gradient for AMS");
+        let g_linlvo = fem_linalg::fem_to_linlvo_csr(&g_ams);
+        let pi_linlvo: Vec<linlvo::sparse::CsrMatrix<f64>> =
+            fem_assembly::discrete_op::DiscreteLinearOperator::ams_pi_blocks(
+                &h1_p2,
+                nd_local,
+            )
+            .expect("AMS Pi blocks")
+            .iter()
+            .map(fem_linalg::fem_to_linlvo_csr)
+            .collect();
 
         // Essential true dofs (joule.cpp:1046-1058 mask values): ND attrs
         // 1..=3 for the E field, RT attrs 1..=2 (zero normal flux) and H1
@@ -1325,30 +1364,46 @@ fn main() {
             // 3. A1 dE = v1 (526-560).  The E essential data comes from
             //    `ProjectBdrCoefficientTangent(edot_bc)`, and `edot_bc` is
             //    identically zero (joule.cpp:732-735) — the elimination values
-            //    are all zero, which is the initial X1.  The iteration budget
-            //    is widened against SOLVER_MAX_IT: fem-rs's AMS is weaker than
-            //    hypre's (no scaling/cycling knobs), so the `-rs 1` 55k-dof
-            //    system converges past 1000 iterations where hypreAMS lands
-            //    inside them — the 1e-9 relative stopping test (hence the
-            //    converged solution) is unchanged.
+            //    are all zero, which is the initial X1.  Round-151: the AMS
+            //    side is now the MFEM `HypreAMS` structure (three-space
+            //    block-Pi cycle + P2 discrete gradient + hypre-aligned AMG
+            //    parameters) and converges inside the C++ SOLVER_MAX_IT
+            //    budget — the -rs 1 10k-iteration budget widening is gone.
             let mut x1 = vec![0.0_f64; n_nd];
             let mut a1e = a1.clone();
             form_linear_system_vdofs(&mut a1e, &mut v1, &mut x1, &ess_nd, false);
             let mut e_tot = x1;
-            fem_solver::solve_pcg_ams(
+            let a1_res = fem_solver::solve_pcg_ams(
                 &a1e,
                 &g_linlvo,
                 &v1,
                 &mut e_tot,
                 &fem_solver::AmsSolverConfig {
-                    inner_cfg: fem_solver::SolverConfig {
-                        max_iter: 10_000,
-                        ..cfg.clone()
+                    inner_cfg: cfg.clone(),
+                    ams_cfg: fem_solver::AmsConfig {
+                        // MFEM `HypreAMS::MakeSolver`: `rlx_type = 2` —
+                        // hypre's l1-scaled symmetric Gauss-Seidel on the
+                        // edge space (ams.c relax types 1-4 divide by the
+                        // row l1 norms) — and no ε·I shift on the nodal
+                        // operator (the relaxation-based AMG coarsest
+                        // level handles the gradient near-nullspace, which
+                        // the `with_pi` path of `AmsPrecond` forces).
+                        edge_smoother:
+                            fem_solver::AmsEdgeSmoother::L1ScaledSymmetricGaussSeidel,
+                        singularity_regularization: 0.0,
+                        ..fem_solver::AmsConfig::default()
                     },
-                    ams_cfg: fem_solver::AmsConfig::default(),
+                    pi: Some(pi_linlvo.clone()),
                 },
             )
             .expect("A1 PCG+AMS solve");
+            // oracle diagnostic parity: the `-hl 2` oracle prints
+            // "PCG Iterations = 13 / Final PCG Relative Residual Norm" per A1
+            // solve (hypre AMS converged in 13 iterations on -rs 1).
+            eprintln!(
+                "A1 PCG+AMS: {} iters, ||r||/||b|| = {:.5e}",
+                a1_res.iterations, a1_res.final_residual
+            );
 
             // 4. E ← E_ind − ∇P (567-572).
             for (e, g) in e_tot.iter_mut().zip(gp.iter()) {

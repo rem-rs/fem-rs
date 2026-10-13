@@ -75,6 +75,7 @@ fn singular_cfg() -> AmsSolverConfig {
             singular_problem: true,
             ..AmsConfig::default()
         },
+        pi: None,
     }
 }
 

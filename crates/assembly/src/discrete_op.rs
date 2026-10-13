@@ -612,6 +612,123 @@ impl DiscreteLinearOperator {
         Ok(coo.into_csr())
     }
 
+    /// D615: the AMS face (curl) auxiliary-space interpolation blocks
+    /// `Pi = [Pix, Piy, Piz]` for an ND2 hex space — the MFEM
+    /// `HypreAMS::MakeGradientAndInterpolation` `p > 1` path
+    /// (linalg/hypre.cpp: `id_ND = DiscreteLinearOperator(H1_P2^3 (byVDIM),
+    /// ND2)` + `IdentityInterpolator`, then `GetParBlocks` splits the domain
+    /// vdim components into the three matrices handed to
+    /// `HYPRE_AMSSetInterpolations`).
+    ///
+    /// `ND_HexahedronElement::Project(fe, Trans, I)` runs
+    /// `Project_ND(tk, dof2tk, fe, Trans, I)`: the element block is
+    /// `I(k, d·n_fe + j) = φ_j^{fe}(ξ_k) · τ_k[d]` — the domain FE's shape
+    /// evaluated at the ND DOF interpolation nodes, contracted with that
+    /// DOF's reference tangent, with one output column block per vector
+    /// component (verified against the MFEM 4.10 `IdentityInterpolator(1)`
+    /// element matrix on a 1-hex mesh: 54 × 81).  Splitting the assembled
+    /// `id_ND` by domain vdim gives the three blocks
+    ///
+    /// ```text
+    ///   Pi_d[nd_s, j] = sign_s · φ_j^{P2}(ξ_s) · τ_s[d]
+    /// ```
+    ///
+    /// with the HCurl `element_signs` orientation on the rows, exactly like
+    /// [`Self::gradient`].  The blocks differ per component (block nnz
+    /// 100/96/92 on a 2×1×1 hex MFEM reference) because `τ_s[d]` is zero on
+    /// the DOFs whose tangent misses component d.
+    ///
+    /// # Errors
+    /// Returns [`DiscreteOpError`] unless the mesh is 3-D hexahedral and the
+    /// spaces are the P2→ND2 pair (`HexND2(54)` × `HexQ2(27)`).
+    pub fn ams_pi_blocks<M: MeshTopology>(
+        h1_space: &H1Space<M>,
+        hcurl_space: &HCurlSpace<M>,
+    ) -> Result<Vec<CsrMatrix<f64>>, DiscreteOpError> {
+        let mesh = h1_space.mesh();
+        const N_P2_LOCAL: usize = 27;
+
+        match mesh.element_type(0) {
+            ElementType::Hex8 | ElementType::Hex20 => {}
+            other => {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "ams_pi_blocks (P2→ND2)",
+                    cell: element_type_name(other),
+                })
+            }
+        }
+
+        let nd = HexNDk::new(2);
+        let coords = nd.dof_coords();
+        let tangents = nd.dof_tangents();
+        let n_slots = coords.len();
+        if n_slots != nd.n_dofs() {
+            return Err(DiscreteOpError::UnsupportedCellType {
+                op: "ams_pi_blocks (P2→ND2)",
+                cell: "HexNDk::dof_coords length mismatch",
+            });
+        }
+
+        // Reference point-value/tangent block: pix_ref[d][s, j] =
+        // φ_j^{P2}(ξ_s) · τ_s[d]  (the τ contraction is the ND hex DOF
+        // functional σ_s(Φ) = Φ(ξ_s)·τ_s restricted to the component field
+        // Φ = φ_j e_d).
+        let p2 = HexQ2;
+        let mut pix_ref = vec![vec![0.0_f64; n_slots * N_P2_LOCAL]; 3];
+        {
+            let mut shapes = vec![0.0_f64; N_P2_LOCAL];
+            for (s, (xi, tau)) in coords.iter().zip(tangents.iter()).enumerate() {
+                p2.eval_basis(&[xi[0], xi[1], xi[2]], &mut shapes);
+                for j in 0..N_P2_LOCAL {
+                    // MFEM's NodalFiniteElement::Project truncates sub-1e-12
+                    // shape values before the tangent contraction.
+                    let v = if shapes[j].abs() < 1e-12 { 0.0 } else { shapes[j] };
+                    for d in 0..3 {
+                        pix_ref[d][s * N_P2_LOCAL + j] = v * tau[d];
+                    }
+                }
+            }
+        }
+
+        let n_nd = hcurl_space.n_dofs();
+        let n_p2 = h1_space.n_dofs();
+        let mut coos = [
+            CooMatrix::<f64>::new(n_nd, n_p2),
+            CooMatrix::<f64>::new(n_nd, n_p2),
+            CooMatrix::<f64>::new(n_nd, n_p2),
+        ];
+        let mut visited = HashSet::with_capacity(n_nd);
+
+        for e in mesh.elem_iter() {
+            let h1_dofs = h1_space.element_dofs(e);
+            let nd_dofs = hcurl_space.element_dofs(e);
+            let nd_signs = hcurl_space.element_signs(e);
+            if nd_dofs.len() != n_slots || h1_dofs.len() != N_P2_LOCAL {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "ams_pi_blocks (P2→ND2)",
+                    cell: "element DOF count is not HexND2(54) × HexQ2(27)",
+                });
+            }
+            for (s_local, &g_nd) in nd_dofs.iter().enumerate() {
+                if !visited.insert(g_nd as usize) {
+                    continue;
+                }
+                let sign = nd_signs[s_local];
+                for (j_local, &global_p2) in h1_dofs.iter().enumerate() {
+                    for (d, coo) in coos.iter_mut().enumerate() {
+                        let val = sign * pix_ref[d][s_local * N_P2_LOCAL + j_local];
+                        if val != 0.0 {
+                            coo.add(g_nd as usize, global_p2 as usize, val);
+                        }
+                    }
+                }
+            }
+        }
+
+        let [c0, c1, c2] = coos;
+        Ok(vec![c0.into_csr(), c1.into_csr(), c2.into_csr()])
+    }
+
     /// Build the discrete curl matrix C: H(curl) -> L2 (2D).
     ///
     /// ## Order 1 — ND1 -> P0 (integral DOFs)
