@@ -274,3 +274,9 @@ pub use misc_integrators::{
     mfem_weak_grad_dot_quad_order_rt_hex, mfem_weak_curl_cross_quad_order_nd_hex,
 };
 pub use vector_convection_nlf::VectorConvectionNLFIntegrator;
+
+/// Vibro-acoustic interface coupling matrix (round-148 lane 3, audit
+/// priority 6): `C[(c,s),a] = ρ_f ∫_Γ (n̂·e_c) N_s N_a dΓ`, exact on 2-D
+/// P1 `Line2` interface faces.
+pub mod acoustic_coupling;
+pub use acoustic_coupling::{assemble_acoustic_coupling, assemble_acoustic_coupling_spaces};

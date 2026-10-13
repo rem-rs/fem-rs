@@ -136,6 +136,10 @@ fn main() {
     let sinv = SinvBuilder::build(&test, qo);
 
     // ── 8. S0 (trial stiffness with BC) ───────────────────────────────────────
+    // NOTE (rr148 lane 1): `CooMatrix::into_csr` Phase B already reproduces
+    // MFEM's linked-list head-insertion row order (reverse chronological
+    // first-insertion, linalg/coo.rs) — the former plan to reverse S0 rows in
+    // place here would have UN-done that and is not wanted.
     let mut s0_mat = Assembler::assemble_bilinear(&x0, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
     let mut zr = vec![0.0; s0];
     apply_dirichlet_diag_one(&mut s0_mat, &mut zr, &ess_dofs, &vec![0.0; ess_dofs.len()]);
@@ -290,5 +294,80 @@ impl Args {
             }
         }
         Args { mesh, order }
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// rr148 lane-1 referee: S0 entry sequence vs MFEM 4.10 on the base
+    /// `star.mesh` (probe `s0_dump.cpp`, 31 dofs, 81 nnz).  Pins three things
+    /// at once: the dof count, the linked-list head-insertion **row order**
+    /// (row 0's columns are reverse chronological, diag last), and the
+    /// quadrature-rule values bitwise (DiffusionIntegrator on P1 triangles =
+    /// MFEM `GetRule` order `p+p−2 = 0`).
+    #[test]
+    fn s0_row_order_and_values_match_mfem() {
+        // Test CWD = fem-rs/examples (the fem-examples package root).
+        let mfem = read_mfem_file("../data/star.mesh").expect("read ../data/star.mesh");
+        let mesh: Mesh<2> = mfem.mesh2d.expect("2D mesh");
+        let x0 = H1Space::new(mesh.clone(), 1);
+        let mut s0m = Assembler::assemble_bilinear(
+            &x0,
+            &[&DiffusionIntegrator { kappa: 1.0 }],
+            3,
+        );
+        let ess_tags: Vec<i32> = mesh.unique_boundary_tags();
+        let dm = x0.dof_manager();
+        let ess_dofs: Vec<u32> =
+            boundary_dofs(&mesh as &dyn fem_mesh::topology::MeshTopology, dm, &ess_tags);
+        let mut zr = vec![0.0; x0.n_dofs()];
+        apply_dirichlet_diag_one(&mut s0m, &mut zr, &ess_dofs, &vec![0.0; ess_dofs.len()]);
+
+        assert_eq!(s0m.nrows, 31, "H1 P1 star.mesh dof count");
+
+        // MFEM row 0: interior shared-dof row in head-insertion order.
+        let expect_cols = [30u32, 23, 29, 20, 28, 17, 27, 14, 26, 11, 0];
+        let expect_vals = [
+            -0.18802775884888923_f64,
+            -0.35048619909502843,
+            -0.18802740304800394,
+            -0.3504874554482878,
+            -0.18802860402207716,
+            -0.35048782397324751,
+            -0.18802691233549229,
+            -0.3504863699157405,
+            -0.18802775884888923,
+            -0.35048849152014838,
+            2.6925747770558046,
+        ];
+        let (s, e) = (s0m.row_ptr[0], s0m.row_ptr[1]);
+        assert_eq!(e - s, expect_cols.len(), "row 0 entry count");
+        for (k, idx) in (s..e).enumerate() {
+            assert_eq!(s0m.col_idx[idx], expect_cols[k], "row 0 col[{k}] order");
+            assert_eq!(s0m.values[idx], expect_vals[k], "row 0 val[{k}]");
+        }
+
+        // Boundary rows: MFEM's eliminated matrix keeps a single DIAG_ONE
+        // entry per row (structurally removed); the Rust elimination keeps
+        // the full sparsity with explicit zeros — numerically identical for
+        // spmv.  Assert the zeroed diag-one semantics.
+        for r in 1..6usize {
+            let (s, e) = (s0m.row_ptr[r], s0m.row_ptr[r + 1]);
+            let mut saw_diag = false;
+            for k in s..e {
+                let c = s0m.col_idx[k] as usize;
+                if c == r {
+                    assert_eq!(s0m.values[k], 1.0, "row {r} diag");
+                    saw_diag = true;
+                } else {
+                    assert_eq!(s0m.values[k], 0.0, "row {r} off-diag eliminated");
+                }
+            }
+            assert!(saw_diag, "row {r} missing diag-one");
+        }
     }
 }

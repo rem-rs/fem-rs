@@ -27,6 +27,57 @@ use nalgebra::DMatrix;
 use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix};
 use fem_mesh::{geometry_jacobian, xform_grads, topology::MeshTopology};
 
+/// MFEM `DenseMatrix::Det` closed form (densemat.cpp, row-0 cofactor chain).
+/// ulp-path parity with C++ is a hard requirement of the ex19 BIT run —
+/// `nalgebra`'s determinant follows a different elimination order and leaves
+/// 6th-digit dust in the printed GMRES tails.
+fn mfem_det(F: &DMatrix<f64>) -> f64 {
+    match F.nrows() {
+        1 => F[(0, 0)],
+        2 => F[(0, 0)] * F[(1, 1)] - F[(0, 1)] * F[(1, 0)],
+        3 => {
+            F[(0, 0)] * (F[(1, 1)] * F[(2, 2)] - F[(1, 2)] * F[(2, 1)])
+                - F[(0, 1)] * (F[(1, 0)] * F[(2, 2)] - F[(1, 2)] * F[(2, 0)])
+                + F[(0, 2)] * (F[(1, 0)] * F[(2, 1)] - F[(1, 1)] * F[(2, 0)])
+        }
+        // The form is declared for dim ≤ 3 (matching MFEM's own
+        // CalcInverseTranspose domain); larger dims never reach here.
+        _ => unreachable!("MixedHyperelasticityForm supports dim 1..=3"),
+    }
+}
+
+/// MFEM `CalcInverseTranspose` (linalg/densemat.cpp:2721) verbatim —
+/// one `1/det` division, then per-cofactor products in the C++ order.
+fn mfem_inverse_transpose(F: &DMatrix<f64>) -> DMatrix<f64> {
+    let dim = F.nrows();
+    let mut inva = DMatrix::<f64>::zeros(dim, dim);
+    let t = 1.0 / mfem_det(F);
+    match dim {
+        1 => inva[(0, 0)] = 1.0 / F[(0, 0)],
+        2 => {
+            inva[(0, 0)] = F[(1, 1)] * t;
+            inva[(1, 0)] = -F[(0, 1)] * t;
+            inva[(0, 1)] = -F[(1, 0)] * t;
+            inva[(1, 1)] = F[(0, 0)] * t;
+        }
+        3 => {
+            inva[(0, 0)] = (F[(1, 1)] * F[(2, 2)] - F[(1, 2)] * F[(2, 1)]) * t;
+            inva[(1, 0)] = (F[(0, 2)] * F[(2, 1)] - F[(0, 1)] * F[(2, 2)]) * t;
+            inva[(2, 0)] = (F[(0, 1)] * F[(1, 2)] - F[(0, 2)] * F[(1, 1)]) * t;
+
+            inva[(0, 1)] = (F[(1, 2)] * F[(2, 0)] - F[(1, 0)] * F[(2, 2)]) * t;
+            inva[(1, 1)] = (F[(0, 0)] * F[(2, 2)] - F[(0, 2)] * F[(2, 0)]) * t;
+            inva[(2, 1)] = (F[(0, 2)] * F[(1, 0)] - F[(0, 0)] * F[(1, 2)]) * t;
+
+            inva[(0, 2)] = (F[(1, 0)] * F[(2, 1)] - F[(1, 1)] * F[(2, 0)]) * t;
+            inva[(1, 2)] = (F[(0, 1)] * F[(2, 0)] - F[(0, 0)] * F[(2, 1)]) * t;
+            inva[(2, 2)] = (F[(0, 0)] * F[(1, 1)] - F[(0, 1)] * F[(1, 0)]) * t;
+        }
+        _ => unreachable!("MixedHyperelasticityForm supports dim 1..=3"),
+    }
+    inva
+}
+
 /// Mixed u/p incompressible neo-Hookean form (MFEM: RubberOperator).
 ///
 /// Pre-computes element DOF tables on construction.
@@ -142,19 +193,22 @@ impl MixedHyperelasticityForm {
                         }
                     }
                 }
-                let dJ = F.determinant();
-                let iF = F.clone().try_inverse()
-                    .unwrap_or_else(|| DMatrix::<f64>::identity(self.dim, self.dim));
-                let FT = iF.transpose();
+                let dJ = mfem_det(&F);
+                let FT = mfem_inverse_transpose(&F);
 
                 let mut pres = 0.0;
                 for k in 0..n_dp { pres += pe[k] * phi_p[k]; }
 
-                // First Piola-Kirchhoff stress: P = μ·F - p·F^{-T}
+                // Momentum integrand, MFEM IncompressibleNeoHookeanIntegrator::
+                // AssembleElementVector (nonlininteg.cpp:608-616):
+                // P = dJ·(μ·F − p·F⁻ᵀ), then × w. The dJ belongs to the form —
+                // dropping it agrees with C++ only at u=0 (dJ=1) and diverges on
+                // every loaded Newton step (rr148: ex19 residual/Jacobian pair
+                // was internally consistent but solved a different equation).
                 let mut P = DMatrix::<f64>::zeros(self.dim, self.dim);
                 for i in 0..self.dim {
                     for j in 0..self.dim {
-                        P[(i, j)] = self.mu * F[(i, j)] - pres * FT[(i, j)];
+                        P[(i, j)] = self.mu * dJ * F[(i, j)] - pres * dJ * FT[(i, j)];
                     }
                 }
 
@@ -243,56 +297,70 @@ impl MixedHyperelasticityForm {
                         }
                     }
                 }
-                let dJ = F.determinant();
-                let iF = F.try_inverse()
-                    .unwrap_or_else(|| DMatrix::<f64>::identity(self.dim, self.dim));
-                let FT = iF.transpose();
+                let dJ = mfem_det(&F);
+                let FT = mfem_inverse_transpose(&F);
 
                 let mut pres = 0.0;
                 for k in 0..n_dp { pres += pe[k] * phi_p[k]; }
 
-                // K_uu: C_{iIjJ} = μ·δ_{ij}·δ_{IJ} + p·F^{-T}_{jI}·F^{-T}_{iJ}
+                // K_uu: MFEM IncompressibleNeoHookeanIntegrator::AssembleElementGrad
+                // (nonlininteg.cpp:646-704) — three terms per qp, all ×dJ·w,
+                // nested n-outer/l-inner exactly as C++ for fp-order parity:
+                //   T1  dJ·(μF − pF⁻ᵀ)(i,l)·F⁻ᵀ(j,n)·DS_a(l)·DS_b(n)·w
+                //   T2  dJ·μ·DS_a(l)·DS_b(n)·w                  (i==j && n==l)
+                //   T3  dJ·p·F⁻ᵀ(i,n)·F⁻ᵀ(j,l)·DS_a(l)·DS_b(n)·w
+                // (T1 was missing entirely and T2/T3 lacked dJ — the rr127
+                // "solver structure debt" root cause, adjudicated rr148.)
                 for a in 0..n_du {
                     for i in 0..self.dim {
                         let row = a * self.dim + i;
                         for b in 0..n_du {
                             for j in 0..self.dim {
                                 let col = b * self.dim + j;
-
                                 let mut v = 0.0;
-                                if i == j {
+                                for n in 0..self.dim {
                                     for l in 0..self.dim {
-                                        v += self.mu * gp_u[a * self.dim + l] * gp_u[b * self.dim + l];
+                                        v += dJ
+                                            * (self.mu * F[(i, l)] - pres * FT[(i, l)])
+                                            * FT[(j, n)]
+                                            * gp_u[a * self.dim + l]
+                                            * gp_u[b * self.dim + n]
+                                            * w;
+                                        if i == j && n == l {
+                                            v += dJ
+                                                * self.mu
+                                                * gp_u[a * self.dim + l]
+                                                * gp_u[b * self.dim + n]
+                                                * w;
+                                        }
+                                        v += dJ
+                                            * pres
+                                            * FT[(i, n)]
+                                            * FT[(j, l)]
+                                            * gp_u[a * self.dim + l]
+                                            * gp_u[b * self.dim + n]
+                                            * w;
                                     }
                                 }
-                                let ftn: f64 = (0..self.dim).map(|l| FT[(i, l)] * gp_u[b * self.dim + l]).sum();
-                                let ftl: f64 = (0..self.dim).map(|l| FT[(j, l)] * gp_u[a * self.dim + l]).sum();
-                                v += pres * ftn * ftl;
-
-                                kuu[row * n_vd + col] += v * w;
+                                kuu[row * n_vd + col] += v;
                             }
                         }
                     }
                 }
 
-                // K_up: -∫ ψ_m · F^{-T}_{iJ} · ∂φ_a/∂X_J
-                for a in 0..n_du {
-                    for i in 0..self.dim {
-                        let row = a * self.dim + i;
-                        let ft_gp: f64 = (0..self.dim).map(|l| FT[(i, l)] * gp_u[a * self.dim + l]).sum();
-                        for m in 0..n_dp {
-                            kup[row * n_dp + m] -= w * ft_gp * phi_p[m];
-                        }
-                    }
-                }
-
-                // K_pu: ∫ J · F^{-T}_{jJ} · ∂φ_b/∂X_J · ψ_m
+                // K_up / K_pu: MFEM coupling blocks (nonlininteg.cpp:708-722) —
+                // one per-l accumulated quantity X = dJ·F⁻ᵀ(j,l)·DS_b(l)·φ_m·w,
+                // added to (1,0) and subtracted into (0,1). (The old K_up dropped
+                // the dJ factor while K_pu had it.)
                 for m in 0..n_dp {
                     for b in 0..n_du {
                         for j in 0..self.dim {
                             let col = b * self.dim + j;
-                            let ft_gp: f64 = (0..self.dim).map(|l| FT[(j, l)] * gp_u[b * self.dim + l]).sum();
-                            kpu[m * n_vd + col] += w * dJ * ft_gp * phi_p[m];
+                            for l in 0..self.dim {
+                                let x = dJ * FT[(j, l)] * gp_u[b * self.dim + l] * phi_p[m] * w;
+                                kpu[m * n_vd + col] += x;
+                                kup[col * n_dp + m] -= x;
+                            }
                         }
                     }
                 }
@@ -345,104 +413,27 @@ impl MixedHyperelasticityForm {
         (block_sizes, bm)
     }
 
-    /// Return the flattened CSR matrix (for use with `NonlinearForm` trait).
+    /// Return the flattened CSR Jacobian (Dirichlet row-zeroed).
+    ///
+    /// Thin wrapper over [`Self::jacobian_blocks`] — the previous private
+    /// re-assembly had drifted (missing T1/dJ plus node-dof scatter indices)
+    /// and carried zero consumers; deleted in rr148 per the zero-dead-code
+    /// discipline.
     pub fn jacobian_flat(&self, u: &[f64], p: &[f64]) -> CsrMatrix<f64> {
+        let (_, bm) = self.jacobian_blocks(u, p);
         let nt = self.nu + self.np;
         let mut coo = CooMatrix::<f64>::new(nt, nt);
-        let ne = self.elem_dofs_u.len();
-
-        for e in 0..ne {
-            let et = self.mesh.element_type(e as u32);
-            let ru_ref = et.ref_elem(self.order);
-            let rp_ref = et.ref_elem(self.p_order);
-            let n_du = ru_ref.n_dofs();
-            let n_dp = rp_ref.n_dofs();
-            let n_vd = n_du * self.dim;
-
-            let eu = &self.elem_dofs_u[e];
-            let ep = &self.elem_dofs_p[e];
-
-            let mut ue = vec![0.0_f64; n_vd];
-            for (k, &g) in eu.iter().enumerate() { ue[k] = u[g]; }
-            let mut pe = vec![0.0_f64; n_dp];
-            for (k, &g) in ep.iter().enumerate() { pe[k] = p[g]; }
-
-            let q = ru_ref.quadrature(self.quad_order);
-            let mut phi_u = vec![0.0_f64; n_du];
-            let mut gr_u = vec![0.0_f64; n_du * self.dim];
-            let mut gp_u = vec![0.0_f64; n_du * self.dim];
-            let mut phi_p = vec![0.0_f64; n_dp];
-
-            for (qi, xi) in q.points.iter().enumerate() {
-                ru_ref.eval_basis(xi, &mut phi_u);
-                ru_ref.eval_grad_basis(xi, &mut gr_u);
-                rp_ref.eval_basis(xi, &mut phi_p);
-
-                let (det_j, ji) = geometry_jacobian(&*self.mesh, e as u32, xi, self.dim);
-                xform_grads(&ji, &gr_u, &mut gp_u, n_du, self.dim);
-                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
-                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
-                // valid meshes.
-                let w = q.weights[qi] * det_j;
-
-                let mut F = DMatrix::<f64>::identity(self.dim, self.dim);
-                for k in 0..n_du {
-                    for i in 0..self.dim {
-                        for j in 0..self.dim {
-                            F[(i, j)] += ue[k * self.dim + i] * gp_u[k * self.dim + j];
-                        }
-                    }
-                }
-                let dJ = F.determinant();
-                let iF = F.try_inverse()
-                    .unwrap_or_else(|| DMatrix::<f64>::identity(self.dim, self.dim));
-                let FT = iF.transpose();
-
-                let mut pres = 0.0;
-                for k in 0..n_dp { pres += pe[k] * phi_p[k]; }
-
-                // K_uu
-                for a in 0..n_du {
-                    for i in 0..self.dim {
-                        for b in 0..n_du {
-                            for j in 0..self.dim {
-                                let mut v = 0.0;
-                                if i == j {
-                                    for l in 0..self.dim {
-                                        v += self.mu * gp_u[a * self.dim + l] * gp_u[b * self.dim + l];
-                                    }
-                                }
-                                let ftn: f64 = (0..self.dim).map(|l| FT[(i, l)] * gp_u[b * self.dim + l]).sum();
-                                let ftl: f64 = (0..self.dim).map(|l| FT[(j, l)] * gp_u[a * self.dim + l]).sum();
-                                v += pres * ftn * ftl;
-                                coo.add(eu[a], eu[b], v * w);
-                            }
-                        }
-                    }
-                }
-
-                // K_up
-                for a in 0..n_du {
-                    for i in 0..self.dim {
-                        let ft_gp: f64 = (0..self.dim).map(|l| FT[(i, l)] * gp_u[a * self.dim + l]).sum();
-                        for m in 0..n_dp {
-                            coo.add(eu[a], self.nu + ep[m], -w * ft_gp * phi_p[m]);
-                        }
-                    }
-                }
-
-                // K_pu
-                for m in 0..n_dp {
-                    for b in 0..n_du {
-                        for j in 0..self.dim {
-                            let ft_gp: f64 = (0..self.dim).map(|l| FT[(j, l)] * gp_u[b * self.dim + l]).sum();
-                            coo.add(self.nu + ep[m], eu[b], w * dJ * ft_gp * phi_p[m]);
-                        }
+        let offsets = [0usize, self.nu];
+        for (bi, &row_off) in offsets.iter().enumerate() {
+            for (bj, &col_off) in offsets.iter().enumerate() {
+                let Some(blk) = bm.get(bi, bj) else { continue };
+                for r in 0..blk.nrows {
+                    for p in blk.row_ptr[r]..blk.row_ptr[r + 1] {
+                        coo.add(row_off + r, col_off + blk.col_idx[p] as usize, blk.values[p]);
                     }
                 }
             }
         }
-
         let mut flat = coo.into_csr();
         let mut diag_scratch = vec![0.0_f64; nt];
         for &(dof, _) in &self.dirichlet {

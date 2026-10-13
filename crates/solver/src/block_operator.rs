@@ -753,8 +753,116 @@ fn apply_plane_rotation(dx: &mut f64, dy: &mut f64, cs: f64, sn: f64) {
     *dx = temp;
 }
 
+/// MFEM `Operator::Mult` view used by [`mfem_gmres`] / [`mfem_gmres_monitored`].
+///
+/// The faithful GMRES port must be able to run against the *operator* MFEM
+/// hands its solvers — which for ex19 is a `BlockOperator`, not a flat CSR.
+/// The two are not bit-equivalent: MFEM's `BlockOperator::Mult`
+/// (`linalg/blockoperator.cpp`) accumulates **per block**
+/// (`tmp = A_ij x_j; y_i += coef·tmp`), so row i's value is
+/// `(A_i0 x_0) + (A_i1 x_1)` — each block product fully summed before the
+/// next is added.  A flat merged CSR instead produces one continuous
+/// accumulation over the row's whole storage, which rounds differently.
+pub trait MfemOperator {
+    /// Number of rows (`Operator::height`).
+    fn nrows(&self) -> usize;
+    /// Number of columns (`Operator::width`).
+    fn width(&self) -> usize;
+    /// `y = A x` (`Operator::Mult`).
+    fn mult(&self, x: &[f64], y: &mut [f64]);
+}
+
+/// `y = A x` in row storage order — MFEM `SparseMatrix::Mult`.
+impl MfemOperator for CsrMatrix<f64> {
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+    fn width(&self) -> usize {
+        self.ncols
+    }
+    fn mult(&self, x: &[f64], y: &mut [f64]) {
+        spmv_ordered(self, x, y);
+    }
+}
+
+/// MFEM `BlockOperator` — block-wise operator with per-block accumulation.
+///
+/// `mult` mirrors `BlockOperator::Mult`: zero `y`, then for each row block
+/// `tmp = A_ij x_j` (a full `SparseMatrix::Mult` product) and
+/// `y_i += coef·tmp` with `coef == 1` (MFEM's `Vector::Add` scales then adds;
+/// `1.0*t == t` bitwise).  Missing blocks are skipped like MFEM's
+/// `op(i,j) == NULL` branch.
+pub struct MfemBlockOperator<'a> {
+    a: &'a BlockMatrix,
+}
+
+impl<'a> MfemBlockOperator<'a> {
+    /// Borrow a [`BlockMatrix`] as an MFEM `BlockOperator` view.
+    pub fn new(a: &'a BlockMatrix) -> Self {
+        Self { a }
+    }
+}
+
+impl MfemOperator for MfemBlockOperator<'_> {
+    fn nrows(&self) -> usize {
+        self.a.total_rows()
+    }
+    fn width(&self) -> usize {
+        self.a.total_cols()
+    }
+    fn mult(&self, x: &[f64], y: &mut [f64]) {
+        y.fill(0.0);
+        let mut row_off = 0usize;
+        for bi in 0..self.a.n_row_blocks() {
+            let rs = self.a.row_sizes[bi];
+            // MFEM `tmp.SetSize(row_offsets[iRow+1] - row_offsets[iRow])` —
+            // the product buffer is sized by the ROW block (MFEM keeps it in
+            // a `mutable Vector` member; here it is allocated per call,
+            // which cannot change the arithmetic).
+            let mut tmp = vec![0.0_f64; rs];
+            let mut col_off = 0usize;
+            for bj in 0..self.a.n_col_blocks() {
+                let cs = self.a.col_sizes[bj];
+                if let Some(b) = self.a.get(bi, bj) {
+                    let xj = &x[col_off..col_off + cs];
+                    spmv_ordered(b, xj, &mut tmp);
+                    let yi = &mut y[row_off..row_off + rs];
+                    for k in 0..rs {
+                        yi[k] += tmp[k];
+                    }
+                }
+                col_off += cs;
+            }
+            row_off += rs;
+        }
+    }
+}
+
+/// MFEM `IterativeSolverMonitor` — the residual-monitor subset.
+///
+/// MFEM solvers call `Monitor(it, norm, r, x, final)` at fixed hook points
+/// (`linalg/solvers.cpp:196-206`): `Reset()` when `it == 0 && !final`, then
+/// `MonitorResidual`, then the convergence query `HasConverged()`.  Solution
+/// monitors (`MonitorSolution`, `RequiresUpdate`/`x_monitor`) are not
+/// modelled — the consumers of this hook (ex19's `GeneralResidualMonitor`)
+/// only read the norm.
+pub trait IterativeSolverMonitor {
+    /// MFEM `MonitorResidual(it, norm, r, final)`.  The residual vector `r`
+    /// is not passed: residual monitors consume the scalar norm only.
+    fn monitor_residual(&mut self, it: usize, norm: f64, final_: bool);
+    /// MFEM `HasConverged()` — when true, the iteration stops at the current
+    /// hook and the solver reports convergence with the current norm.
+    fn has_converged(&self) -> bool {
+        false
+    }
+    /// MFEM `Reset()` — called when the iteration counter restarts
+    /// (`it == 0 && !final`).
+    fn reset(&mut self) {}
+}
+
 /// MFEM `GMRESSolver::Mult` — **the faithful port** (`linalg/solvers.cpp`,
-/// 4.10), added for D767 beside [`right_preconditioned_gmres`].
+/// 4.10), added for D767 beside [`right_preconditioned_gmres`], against a
+/// flat CSR operator, no monitor.
 ///
 /// The two differ in three observable ways:
 ///
@@ -786,12 +894,43 @@ pub fn mfem_gmres<P>(
 where
     P: Fn(&[f64], &mut [f64]),
 {
+    mfem_gmres_run(a, b, x, cfg, precond, None)
+}
+
+/// [`mfem_gmres`] with an [`IterativeSolverMonitor`] attached — MFEM
+/// `IterativeSolver::SetMonitor`.  The monitor is invoked at MFEM's exact
+/// hook points: the opening residual (`it == 0`, before the convergence
+/// check), every in-loop residual estimate, and one final call with
+/// `final = true` at MFEM's `finish:` label.
+pub fn mfem_gmres_monitored<O: MfemOperator, P: Fn(&[f64], &mut [f64]), M: IterativeSolverMonitor>(
+    op: &O,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: MfemGmresConfig,
+    precond: Option<&P>,
+    monitor: &mut M,
+) -> Result<SolveResult, SolverError> {
+    mfem_gmres_run(op, b, x, cfg, precond, Some(monitor as &mut dyn IterativeSolverMonitor))
+}
+
+fn mfem_gmres_run<O: MfemOperator, P: Fn(&[f64], &mut [f64])>(
+    a: &O,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: MfemGmresConfig,
+    precond: Option<&P>,
+    mut monitor: Option<&mut dyn IterativeSolverMonitor>,
+) -> Result<SolveResult, SolverError> {
     use crate::iterative::fmt_g;
 
-    let n = a.nrows;
+    let n = a.nrows();
     if b.len() != n || x.len() != n {
-        return Err(SolverError::DimensionMismatch { rows: n, cols: a.ncols, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch { rows: n, cols: a.width(), rhs: b.len() });
     }
+    // `mfem_gmres` (above) documents how this port differs from
+    // [`right_preconditioned_gmres`]: stopping rule, Arnoldi order, console
+    // output.  `Err` is reserved for bad inputs and MFEM's
+    // `MFEM_VERIFY(IsFinite ...)` aborts.
     if cfg.kdim == 0 {
         return Err(SolverError::Linlvo("GMRES: SetKDim(0) has no residual space".to_string()));
     }
@@ -803,7 +942,7 @@ where
 
     // MFEM: `if (iterative_mode) oper->Mult(x, r); else x = 0.0;`
     if cfg.iterative_mode {
-        spmv_ordered(a, x, &mut r);
+        a.mult(x, &mut r);
     } else {
         x.fill(0.0);
     }
@@ -829,9 +968,19 @@ where
     let mut beta = norm2(&r);
     let mut final_norm = (cfg.rel_tol * beta).max(cfg.abs_tol);
 
+    // MFEM `Monitor(0, beta, r, x)`: Reset at `it == 0 && !final`, residual
+    // hook, then the monitor's convergence vote — checked BEFORE the solver's
+    // own `beta <= final_norm`.
+    let mut monitor_stop = false;
+    if let Some(m) = monitor.as_deref_mut() {
+        m.reset();
+        m.monitor_residual(0, beta, false);
+        monitor_stop = m.has_converged();
+    }
+
     let mut final_iter;
     let mut converged;
-    if beta <= final_norm {
+    if monitor_stop || beta <= final_norm {
         // `goto finish` from MFEM's opening check.
         final_norm = beta;
         final_iter = 0;
@@ -849,6 +998,9 @@ where
         }
         if print.warnings && !converged {
             println!("GMRES: No convergence!");
+        }
+        if let Some(m) = monitor.as_deref_mut() {
+            m.monitor_residual(final_iter, final_norm, true);
         }
         return Ok(SolveResult { converged, iterations: final_iter, final_residual: final_norm });
     }
@@ -885,7 +1037,7 @@ where
         let mut i = 0usize;
         while i < m && j <= cfg.max_iter {
             // w = M A vᵢ  (MFEM: oper->Mult first, then prec->Mult)
-            spmv_ordered(a, &v[i], &mut r);
+            a.mult(&v[i], &mut r);
             match precond {
                 Some(p) => p(&r, &mut w),
                 None => w.copy_from_slice(&r),
@@ -940,7 +1092,17 @@ where
             if !resid.is_finite() {
                 return Err(SolverError::Linlvo(format!("GMRES: resid = {resid}")));
             }
-            if resid <= final_norm {
+            // MFEM `Monitor(j, resid, r, x_monitor)`: in-loop residual hook
+            // with the monitor's convergence vote checked first.  The
+            // `x_monitor`/`RequiresUpdate` machinery is skipped (solution
+            // monitors unsupported — see [`IterativeSolverMonitor`]).
+            let monitor_stop = if let Some(m) = monitor.as_deref_mut() {
+                m.monitor_residual(j, resid, false);
+                m.has_converged()
+            } else {
+                false
+            };
+            if monitor_stop || resid <= final_norm {
                 gmres_update(x, i, &h, &s, &v);
                 final_norm = resid;
                 final_iter = j;
@@ -964,7 +1126,7 @@ where
 
         gmres_update(x, i - 1, &h, &s, &v);
 
-        spmv_ordered(a, x, &mut r);
+        a.mult(x, &mut r);
         match precond {
             Some(p) => {
                 subtract(b, &r, &mut w);
@@ -1005,6 +1167,11 @@ where
         println!("GMRES: No convergence!");
     }
 
+    // MFEM's `finish:` label tail — one final monitor call.
+    if let Some(m) = monitor.as_deref_mut() {
+        m.monitor_residual(final_iter, final_norm, true);
+    }
+
     Ok(SolveResult { converged, iterations: final_iter, final_residual: final_norm })
 }
 
@@ -1040,6 +1207,126 @@ fn block_matrix_to_csr(a: &BlockMatrix) -> CsrMatrix<f64> {
 mod tests {
     use super::*;
     use fem_linalg::CooMatrix;
+
+    /// Recording MFEM `GeneralResidualMonitor` stand-in for the hook tests.
+    struct RecordingMonitor {
+        calls: Vec<(usize, f64, bool)>,
+        stop_after_residuals: usize,
+    }
+
+    impl RecordingMonitor {
+        fn new() -> Self {
+            Self { calls: Vec::new(), stop_after_residuals: usize::MAX }
+        }
+
+        fn stopping(after: usize) -> Self {
+            Self { calls: Vec::new(), stop_after_residuals: after }
+        }
+    }
+
+    impl IterativeSolverMonitor for RecordingMonitor {
+        fn monitor_residual(&mut self, it: usize, norm: f64, final_: bool) {
+            self.calls.push((it, norm, final_));
+        }
+        fn has_converged(&self) -> bool {
+            self.calls.iter().filter(|(_, _, f)| !f).count() >= self.stop_after_residuals
+        }
+    }
+
+    fn diag_system() -> (CsrMatrix<f64>, Vec<f64>) {
+        // Diagonal system: GMRES in exact arithmetic needs one iteration per
+        // distinct |b_i|/|a_i| ratio; a 3x3 with distinct ratios takes 3.
+        let mut coo = CooMatrix::<f64>::new(3, 3);
+        for (i, d) in [(0usize, 1.0f64), (1, 2.0), (2, 4.0)] {
+            coo.add(i, i, d);
+        }
+        let a = coo.into_csr();
+        let b = vec![3.0, 5.0, 7.0];
+        (a, b)
+    }
+
+    /// MFEM hook layout: one opening `(0, β, false)` call, one in-loop call
+    /// per iteration, one `final = true` call at `finish` — and the final
+    /// call's norm is the returned `final_residual`.
+    #[test]
+    fn monitor_hook_sequence_matches_mfem() {
+        let (a, b) = diag_system();
+        let cfg = MfemGmresConfig { kdim: 50, max_iter: 100, rel_tol: 1e-12, abs_tol: 0.0, print_level: -1, iterative_mode: false };
+        let mut mon = RecordingMonitor::new();
+        let mut x = vec![0.0; 3];
+        let res = mfem_gmres_monitored(&a, &b, &mut x, cfg, Option::<&fn(&[f64], &mut [f64])>::None, &mut mon)
+            .expect("gmres");
+
+        let beta = (83.0f64).sqrt(); // ‖b − A·0‖ = ‖b‖ = √(3²+5²+7²), exact ints
+        assert_eq!(mon.calls.first(), Some(&(0usize, beta, false)), "opening hook");
+        let last = *mon.calls.last().expect("calls");
+        assert!(last.2, "closing call must be final");
+        assert_eq!(last.0, res.iterations, "final it == reported iterations");
+        assert_eq!(last.1, res.final_residual, "final norm == reported residual");
+        // In-loop hooks exist for every intermediate iteration (the converging
+        // iteration included — MFEM checks the monitor before its own test).
+        assert_eq!(mon.calls.len(), (res.iterations as usize) + 2);
+        assert!(res.converged);
+    }
+
+    /// A monitor voting `HasConverged()` at the opening hook stops GMRES at
+    /// iteration 0 with `final_norm = β` (MFEM's `goto finish` path).
+    #[test]
+    fn monitor_has_converged_stops_at_iteration_zero() {
+        let (a, b) = diag_system();
+        let cfg = MfemGmresConfig { kdim: 50, max_iter: 100, rel_tol: 1e-12, abs_tol: 0.0, print_level: -1, iterative_mode: false };
+        let mut mon = RecordingMonitor::stopping(1); // vote true at the first hook
+        let mut x = vec![0.0; 3];
+        let res = mfem_gmres_monitored(&a, &b, &mut x, cfg, Option::<&fn(&[f64], &mut [f64])>::None, &mut mon)
+            .expect("gmres");
+        assert!(res.converged);
+        assert_eq!(res.iterations, 0);
+        assert_eq!(res.final_residual, (83.0f64).sqrt());
+        assert_eq!(mon.calls.len(), 2, "opening (final=false) + finish (final=true)");
+        assert_eq!(mon.calls[0], (0, res.final_residual, false));
+        assert_eq!(mon.calls[1], (0, res.final_residual, true));
+    }
+
+    /// `MfemBlockOperator::mult` reproduces MFEM's **two-stage** block
+    /// accumulation (`tmp = A_ij x_j; y_i += tmp`), which rounds differently
+    /// from a flat merged CSR single pass over the row.
+    #[test]
+    fn block_operator_mult_is_two_stage_per_block() {
+        // Row 0: block (0,0) contributes [1, 2^60] (cols 0..1); block (0,1)
+        // contributes [-2^60] (col 2).  Two-stage: (1 + 2^60) + (−2^60) = 0,
+        // while the merged single pass over the (head-insertion-reversed) row
+        // sums −2^60 + 2^60 + 1 = 1.
+        let mut bm = BlockMatrix::new_square(vec![2, 1]);
+        let mut c00 = CooMatrix::<f64>::new(2, 2);
+        c00.add(0, 0, 1.0);
+        c00.add(0, 1, 1152921504606846976.0);
+        c00.add(1, 1, 1.0);
+        bm.set(0, 0, c00.into_csr());
+        let mut c01 = CooMatrix::<f64>::new(2, 1);
+        c01.add(0, 0, -1152921504606846976.0);
+        bm.set(0, 1, c01.into_csr());
+
+        let op = MfemBlockOperator::new(&bm);
+        let x = vec![1.0, 1.0, 1.0];
+        let mut y = vec![0.0; 3];
+        op.mult(&x, &mut y);
+        assert_eq!(y[0], 0.0, "two-stage: (1+2^60) + (-2^60)");
+        assert_eq!(y[1], 1.0);
+        assert_eq!(y[2], 0.0);
+    }
+
+    /// `MfemOperator` on `CsrMatrix` is the row-storage-order `SparseMatrix::Mult`.
+    #[test]
+    fn mfem_operator_csr_is_storage_order_spmv() {
+        let (a, b) = diag_system();
+        let mut y = vec![0.0; 3];
+        a.mult(&b, &mut y);
+        let mut y_ref = vec![0.0; 3];
+        spmv_ordered(&a, &b, &mut y_ref);
+        assert_eq!(y, y_ref);
+        assert_eq!(a.nrows(), 3);
+        assert_eq!(a.width(), 3);
+    }
 
     #[test]
     fn block_op_matrix_basic() {
