@@ -71,6 +71,28 @@ pub fn solve_precond_kind<T: linlvoScalar>(
     }
 }
 
+/// Lift real-valued (`f64`) interpolation blocks to the solve scalar type.
+///
+/// The auxiliary-space interpolation blocks (`Pi`) are assembled as `f64`
+/// matrices by the assembly layer; the Krylov solve runs in `T`.
+fn lift_blocks<T: linlvoScalar>(blocks: &[linlvoCsr<f64>]) -> Vec<linlvoCsr<T>> {
+    blocks
+        .iter()
+        .map(|m| {
+            linlvoCsr::from_raw(
+                m.nrows(),
+                m.ncols(),
+                m.row_ptr().to_vec(),
+                m.col_idx().to_vec(),
+                m.values()
+                    .iter()
+                    .map(|&v| <T as linlvoScalar>::from_f64(v))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 // ─── Auxiliary-space Maxwell Solver (AMS) ──────────────────────────────────
 
 /// Configuration for AMS (Auxiliary-space Maxwell Solver) preconditioner.
@@ -114,20 +136,7 @@ pub fn solve_pcg_ams<T: linlvoScalar>(
     let mut lx: Vec<T> = x.to_vec();
 
     // `pi` is stored real-valued; lift to the scalar type for `with_pi`.
-    let pi_lifted: Option<Vec<linlvoCsr<T>>> = cfg.pi.as_ref().map(|blocks| {
-        blocks
-            .iter()
-            .map(|m| {
-                linlvoCsr::from_raw(
-                    m.nrows(),
-                    m.ncols(),
-                    m.row_ptr().to_vec(),
-                    m.col_idx().to_vec(),
-                    m.values().iter().map(|&v| <T as linlvoScalar>::from_f64(v)).collect(),
-                )
-            })
-            .collect()
-    });
+    let pi_lifted: Option<Vec<linlvoCsr<T>>> = cfg.pi.as_ref().map(|blocks| lift_blocks(blocks));
     let ams = match &pi_lifted {
         Some(pi) => AmsPrecond::<T>::with_pi(&la, g, pi, cfg.ams_cfg.clone())
             .map_err(|e| SolverError::Linlvo(e.to_string()))?,
@@ -373,6 +382,167 @@ pub fn solve_gmres_ads<T: linlvoScalar>(
 
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
+}
+
+// ─── hypre ADS (five-level multiplicative subspace cycle) ───────────────────
+
+/// Configuration for the hypre-faithful ADS preconditioner
+/// ([`linlvo::precond::AdsHyprePrecond`], the MFEM `HypreADS` structure) —
+/// distinct from the additive three-term [`AdsSolverConfig`].
+#[derive(Debug, Clone, Default)]
+pub struct AdsHypreSolverConfig {
+    pub inner_cfg: SolverConfig,
+    pub ads_cfg: linlvo::precond::AdsHypreConfig,
+    /// The three edge (`ND`) interpolation blocks `Pi_nd` (`n_edges × n_nodes`)
+    /// for the inner AMS (`B_C`), real-valued like [`AmsSolverConfig::pi`].
+    pub pi_nd: Vec<linlvoCsr<f64>>,
+    /// The three face (`RT`) interpolation blocks `Pi_rt` (`n_faces × n_nodes`).
+    pub pi_rt: Vec<linlvoCsr<f64>>,
+}
+
+/// A reusable PCG + hypre-ADS solver, the fem-rs analogue of MFEM's
+/// `HyprePCG` + `HypreADS` pair: the (expensive) preconditioner setup is done
+/// **once** in [`Self::new`] and reused for every [`Self::solve`], exactly
+/// like MFEM's `if (ads_a2 == NULL) { ads_a2 = new HypreADS(*A2, ...); }`
+/// (joule_solver.cpp:580-590).
+///
+/// The operator must not change between setup and solve (the usual
+/// preconditioner contract).
+pub struct AdsHypreSolver<T: linlvoScalar> {
+    la: linlvoCsr<T>,
+    ads: linlvo::precond::AdsHyprePrecond<T>,
+    inner_cfg: SolverConfig,
+}
+
+impl<T: linlvoScalar> AdsHypreSolver<T> {
+    /// Set up the hypre-ADS preconditioner for `a`.
+    ///
+    /// `c`/`g` are linlvo matrices (see [`fem_linalg::fem_to_linlvo_csr`]);
+    /// the interpolation blocks are real-valued `f64` and lifted to `T`.
+    pub fn new(
+        a: &FemCsr<T>,
+        c: &linlvoCsr<T>,
+        g: &linlvoCsr<T>,
+        cfg: &AdsHypreSolverConfig,
+    ) -> Result<Self, SolverError> {
+        let la = fem_to_linlvo_csr(a);
+        let pi_nd = lift_blocks::<T>(&cfg.pi_nd);
+        let pi_rt = lift_blocks::<T>(&cfg.pi_rt);
+        let ads = linlvo::precond::AdsHyprePrecond::<T>::new(
+            &la,
+            c,
+            g,
+            &pi_rt,
+            &pi_nd,
+            cfg.ads_cfg.clone(),
+        )
+        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+        Ok(AdsHypreSolver {
+            la,
+            ads,
+            inner_cfg: cfg.inner_cfg.clone(),
+        })
+    }
+
+    /// Setup diagnostics of the hypre-ADS preconditioner.
+    pub fn profile(&self) -> &linlvo::precond::AdsHypreProfile {
+        self.ads.profile()
+    }
+
+    /// Solve `A x = b` with PCG + the hypre-ADS preconditioner.
+    ///
+    /// Same true-residual restart driver as [`solve_pcg_ads`] (see there): the
+    /// preconditioned energy criterion can report convergence well before the
+    /// true residual meets the tolerance.
+    pub fn solve(&self, b: &[T], x: &mut [T]) -> Result<SolveResult, SolverError> {
+        let la = &self.la;
+        if b.len() != la.nrows() || x.len() != la.nrows() {
+            return Err(SolverError::Linlvo(
+                "AdsHypreSolver::solve: b/x length does not match the operator".into(),
+            ));
+        }
+        let b_norm = b.iter().fold(T::zero(), |s, &v| s + v * v).sqrt();
+        let tol = <T as linlvoScalar>::from_f64(self.inner_cfg.rtol);
+        let atol = <T as linlvoScalar>::from_f64(self.inner_cfg.atol.max(0.0));
+
+        let mut lx: Vec<T> = x.to_vec();
+        let mut total_iters = 0usize;
+        let mut final_residual = f64::INFINITY;
+        let mut converged = false;
+
+        for _restart in 0..8 {
+            let mut ax = vec![T::zero(); la.nrows()];
+            la.spmv(&lx, &mut ax);
+            let mut r = vec![T::zero(); la.nrows()];
+            for i in 0..la.nrows() {
+                r[i] = b[i] - ax[i];
+            }
+
+            let r_norm = r.iter().fold(T::zero(), |s, &v| s + v * v).sqrt();
+
+            final_residual = num_traits::ToPrimitive::to_f64(&(r_norm / b_norm))
+                .unwrap_or(f64::INFINITY);
+            if r_norm <= tol * b_norm + atol {
+                converged = true;
+                break;
+            }
+            if total_iters >= self.inner_cfg.max_iter {
+                break;
+            }
+
+            // PCG for the correction dx (zero initial guess).
+            let mut dx = DenseVec::zeros(la.nrows());
+            let res = ConjugateGradient::<T>::default()
+                .solve(
+                    la,
+                    Some(&self.ads),
+                    &DenseVec::from_vec(r),
+                    &mut dx,
+                    &self.inner_cfg.to_linlvo(),
+                )
+                .map_err(SolverError::from)?;
+            total_iters += res.iterations;
+            let xs = lx.as_mut_slice();
+            let dxs = dx.as_slice();
+            for i in 0..la.nrows() {
+                xs[i] = xs[i] + dxs[i];
+            }
+        }
+
+        if final_residual <= self.inner_cfg.rtol {
+            converged = true;
+        }
+        x.copy_from_slice(&lx);
+        Ok(SolveResult {
+            converged,
+            iterations: total_iters,
+            final_residual,
+        })
+    }
+}
+
+/// One-shot H(div) solve with PCG + the hypre-ADS preconditioner (builds the
+/// preconditioner for this call only — prefer [`AdsHypreSolver`] when the
+/// operator is reused across many right-hand sides).
+///
+/// # Arguments
+/// * `a`   — H(div) stiffness matrix (face DOFs)
+/// * `c`   — Discrete curl matrix (edges -> faces)
+/// * `g`   — Discrete gradient matrix (vertices -> edges)
+/// * `b`   — right-hand side
+/// * `x`   — initial guess on entry, solution on exit
+/// * `cfg` — solver configuration (interpolation blocks + hypre parameters)
+pub fn solve_pcg_ads_hypre<T: linlvoScalar>(
+    a: &FemCsr<T>,
+    c: &linlvoCsr<T>,
+    g: &linlvoCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    cfg: &AdsHypreSolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let solver = AdsHypreSolver::<T>::new(a, c, g, cfg)?;
+    solver.solve(b, x)
 }
 
 /// Block-diagonal preconditioner for complex (2x2 block) systems.

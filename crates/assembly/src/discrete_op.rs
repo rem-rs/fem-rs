@@ -977,6 +977,224 @@ impl DiscreteLinearOperator {
         Ok(vec![c0.into_csr(), c1.into_csr(), c2.into_csr()])
     }
 
+    /// Build the ADS face (`RT`) interpolation blocks `Pi_rt = [Pi_x, Pi_y, Pi_z]`
+    /// for the **P2 → RT1** pair — the `id_RT` input of the hypre-ADS input
+    /// layer at the *quadratic* auxiliary order.
+    ///
+    /// MFEM `HypreADS::MakeDiscreteMatrices` builds the auxiliary complex at
+    /// `p = face_fec->GetOrder()`.  For `RT_FECollection(1, 3)` that is
+    /// `GetOrder() = 2` (probe-verified: `RT(1).GetOrder = 2`, `RT(0) = 1`), so
+    /// the `p > 1` branch runs and the blocks come from `IdentityInterpolator`
+    /// on the vector vertex space `[H¹(P2)]³` (`id_RT`), split into the three
+    /// component blocks handed to `HYPRE_ADSSetInterpolations`
+    /// (`RT_Pix/RT_Piy/RT_Piz`).  This is the quadratic counterpart of
+    /// [`DiscreteLinearOperator::ads_pi_rt_blocks`] — that one is the `p = 1`
+    /// geometric/coordinate path (`RT_FECollection(0, 3)`,
+    /// `hypre_ADSComputePixyz`), this one the `p > 1` explicit-block path.
+    ///
+    /// Element block — MFEM `VectorFiniteElement::Project_RT`
+    /// (`fem/fe/fe_base.cpp:1244`, scalar-trial branch, which is what
+    /// `IdentityInterpolator::AssembleElementMatrix2` calls for its
+    /// `vdim`-replicated blocks):
+    ///
+    /// ```text
+    ///   I(s, a + 27·d) = φ_a^{Q2}(ξ_s) · vk_s[d],     vk_s = adj(J_s)ᵀ·n_s
+    /// ```
+    ///
+    /// where `ξ_s` is the RT face DOF's node (the tensor product of the
+    /// 2-point Gauss-Legendre nodes `gl_nodes_01(2)` on the face, in the
+    /// element-local slot order — fem-rs `HexRTk::dof_coords`, same positions
+    /// in both open-mode flavours), `n_s` the reference outward face normal
+    /// (±ê_axis) and `φ_a^{Q2}` the P2 Lagrange basis.  On the straight hexes
+    /// the ADS needs (`adj(J)ᵀ = I` on the reference element; the per-element
+    /// orientation is carried by `element_signs` + the `QuadDofOrd` slot
+    /// permutation, exactly as in [`Self::ams_pi_blocks`]) this is
+    /// `vk_s[d] = ±δ_{d, axis(s)}` scaled by the physical face area.  The
+    /// `|φ| < 1e-12 → 0` truncation reproduces MFEM's `Project_RT` guard
+    /// (rr151 `ams_pi_blocks` convention).
+    ///
+    /// # Verification (round 153)
+    ///
+    /// Cross-checked against a MFEM 4.10 serial `IdentityInterpolator` dump of
+    /// the same operator (`D:/fem-pro-targets/rr153-lane4/rtprobe/dump_rt_pi.cpp`,
+    /// refined cylinder-hex, MFEM `50016 × 53391`):
+    ///
+    /// * unit cube: all 234 entries identical to ≤1.1e-16;
+    /// * refined cylinder-hex (50016 rows): 583281 compared entries with a
+    ///   worst absolute difference of **2.78e-17** (machine level; every sign
+    ///   correct).  Restricted to entries of magnitude ≥1e-13 (362880
+    ///   entries) the worst relative difference is **2.7e-14** (~13 digits) —
+    ///   the residue of evaluating `adj(J)ᵀ·n̂` through this closed-form
+    ///   trilinear Jacobian versus MFEM's `AdjugateJacobian`, amplified by the
+    ///   `φ·vk` products.
+    ///
+    /// The element-interior (bubble) slots of `RT_HexahedronElement(1)` are
+    /// **not** built (their rows are empty; MFEM's dump carries 24192 such
+    /// rows) — MFEM's closed-axis `nk`/`d2n` convention for them is still open.
+    ///
+    /// # Errors
+    /// Returns [`DiscreteOpError`] for non-hex meshes or slot-count mismatch.
+    pub fn ads_pi_rt_blocks_p2<M: MeshTopology>(
+        h1_space: &H1Space<M>,
+        hdiv_space: &HDivSpace<M>,
+    ) -> Result<Vec<CsrMatrix<f64>>, DiscreteOpError> {
+        let mesh = h1_space.mesh();
+        const N_P2_LOCAL: usize = 27;
+        const N_RT1_LOCAL: usize = 24;
+
+        match mesh.element_type(0) {
+            ElementType::Hex8 | ElementType::Hex20 => {}
+            other => {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "ads_pi_rt_blocks_p2 (P2→RT1)",
+                    cell: element_type_name(other),
+                })
+            }
+        }
+
+        // RT1 face DOF nodes in the element-local slot order
+        // (`RT_HexahedronElement(1, GaussLobatto, GaussLegendre)`; the local
+        // list is the 24 face slots followed by the 12 element-interior
+        // bubbles — only the face slots are used, see the assembly loop).
+        let rt = HexRTk::new_gauss_legendre(1);
+        let nodes = rt.dof_coords();
+        if nodes.len() < N_RT1_LOCAL {
+            return Err(DiscreteOpError::UnsupportedCellType {
+                op: "ads_pi_rt_blocks_p2 (P2→RT1)",
+                cell: "HexRTk(1) has fewer than 24 face DOFs",
+            });
+        }
+
+        // Reference shape values and per-slot face identity.  The face normal
+        // is the coordinate the node pins to 0 (outward −ê) or 1 (outward +ê);
+        // the two free coordinates are the open Gauss-Legendre nodes, never
+        // 0/1, so the axis is unambiguous.
+        let q2 = HexQ2;
+        // Per-slot face identity: the reference axis the node pins (0 → the
+        // −ê side, 1 → +ê), which also fixes the reference outward normal sign.
+        let mut slot_face = vec![(0usize, false); N_RT1_LOCAL];
+        let mut phi_ref = vec![vec![0.0_f64; N_P2_LOCAL]; N_RT1_LOCAL];
+        let mut node_ref = vec![[0.0_f64; 3]; N_RT1_LOCAL];
+        {
+            let mut shapes = vec![0.0_f64; N_P2_LOCAL];
+            for (s, x) in nodes.iter().take(N_RT1_LOCAL).enumerate() {
+                let mut axis = usize::MAX;
+                let mut at_max = false;
+                for (d, &c) in x.iter().enumerate() {
+                    if c == 0.0 {
+                        axis = d;
+                    } else if c == 1.0 {
+                        axis = d;
+                        at_max = true;
+                    }
+                }
+                if axis == usize::MAX {
+                    return Err(DiscreteOpError::UnsupportedCellType {
+                        op: "ads_pi_rt_blocks_p2 (P2→RT1)",
+                        cell: "RT1 DOF node is not on a reference face",
+                    });
+                }
+                slot_face[s] = (axis, at_max);
+                node_ref[s] = [x[0], x[1], x[2]];
+                q2.eval_basis(&[x[0], x[1], x[2]], &mut shapes);
+                for a in 0..N_P2_LOCAL {
+                    // MFEM `Project_RT`: `if (fabs(s) < 1e-12) s = 0`.
+                    phi_ref[s][a] = if shapes[a].abs() < 1e-12 { 0.0 } else { shapes[a] };
+                }
+            }
+        }
+        // Trilinear hex geometry (`RT` trial branch: `vk = adj(J)ᵀ·n̂` at the
+        // DOF's node, MFEM `Project_RT`, no `Weight` division).
+        let q1_nodes = HexQ1.dof_coords();
+
+        let n_rt = hdiv_space.n_dofs();
+        let n_p2 = h1_space.n_dofs();
+        let mut coos = [
+            CooMatrix::<f64>::new(n_rt, n_p2),
+            CooMatrix::<f64>::new(n_rt, n_p2),
+            CooMatrix::<f64>::new(n_rt, n_p2),
+        ];
+        let mut visited = HashSet::with_capacity(n_rt);
+
+        for e in mesh.elem_iter() {
+            let h1_dofs = h1_space.element_dofs(e);
+            let rt_dofs = hdiv_space.element_dofs(e);
+            let rt_signs = hdiv_space.element_signs(e);
+            let vnodes = mesh.element_nodes(e);
+            if rt_dofs.len() < N_RT1_LOCAL || h1_dofs.len() != N_P2_LOCAL || vnodes.len() < 8 {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "ads_pi_rt_blocks_p2 (P2→RT1)",
+                    cell: "element DOF count is not HexRT1(24 face + bubble) × HexQ2(27)",
+                });
+            }
+            let corner: Vec<[f64; 3]> = (0..8)
+                .map(|i| {
+                    let c = mesh.node_coords(vnodes[i]);
+                    [c[0], c[1], c[2]]
+                })
+                .collect();
+            for (s_local, &g_rt) in rt_dofs.iter().take(N_RT1_LOCAL).enumerate() {
+                if !visited.insert(g_rt as usize) {
+                    continue;
+                }
+                // `vk = sign·(j_(c+1) × j_(c+2))` — `adj(J)ᵀ·n̂` with the
+                // reference outward normal `n̂ = sign·ê_c`, at the DOF's node.
+                let (axis, at_max) = slot_face[s_local];
+                let xi = node_ref[s_local];
+                let mut jac = [[0.0_f64; 3]; 3];
+                for (i, c) in q1_nodes.iter().enumerate() {
+                    // phi_i = prod_d f_d(xi_d), f_d(u) = c_d*u + (1-c_d)*(1-u);
+                    // d phi_i / d xi_d = f'_d(xi_d) * prod_{o != d} f_o(xi_o).
+                    let mut f = [0.0_f64; 3];
+                    let mut df = [0.0_f64; 3];
+                    for d in 0..3 {
+                        if c[d] == 1.0 {
+                            f[d] = xi[d];
+                            df[d] = 1.0;
+                        } else {
+                            f[d] = 1.0 - xi[d];
+                            df[d] = -1.0;
+                        }
+                    }
+                    let grad = [
+                        df[0] * f[1] * f[2],
+                        f[0] * df[1] * f[2],
+                        f[0] * f[1] * df[2],
+                    ];
+                    for row in 0..3 {
+                        for col in 0..3 {
+                            jac[row][col] += corner[i][row] * grad[col];
+                        }
+                    }
+                }
+                let a1 = (axis + 1) % 3;
+                let a2 = (axis + 2) % 3;
+                let sgn = if at_max { 1.0 } else { -1.0 };
+                let vk = [
+                    sgn * (jac[1][a1] * jac[2][a2] - jac[2][a1] * jac[1][a2]),
+                    sgn * (jac[2][a1] * jac[0][a2] - jac[0][a1] * jac[2][a2]),
+                    sgn * (jac[0][a1] * jac[1][a2] - jac[1][a1] * jac[0][a2]),
+                ];
+                let sign = rt_signs[s_local];
+                for (a, &global_p2) in h1_dofs.iter().enumerate() {
+                    let phi = phi_ref[s_local][a];
+                    if phi == 0.0 {
+                        continue;
+                    }
+                    for (d, coo) in coos.iter_mut().enumerate() {
+                        let val = sign * phi * vk[d];
+                        if val != 0.0 {
+                            coo.add(g_rt as usize, global_p2 as usize, val);
+                        }
+                    }
+                }
+            }
+        }
+
+        let [c0, c1, c2] = coos;
+        Ok(vec![c0.into_csr(), c1.into_csr(), c2.into_csr()])
+    }
+
     /// Build the discrete curl matrix C: H(curl) -> L2 (2D).
     ///
     /// ## Order 1 — ND1 -> P0 (integral DOFs)

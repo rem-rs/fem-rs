@@ -35,9 +35,18 @@
 //! Solver mapping (tol 1e-9 relative, max 1000 iterations both sides):
 //! A0 PCG+AMG (`fem_solver::amg::solve_amg_cg`), A1 PCG+AMS
 //! (`solve_pcg_ams`, P1 discrete gradient — hypre's AMS convention), A2 /
-//! M3 PCG+diag (`solve_pcg_dsmoother`).  **Registered preconditioner gap**:
-//! C++ preconditions A2 with `HypreADS`; fem-rs has no ADS, so the converged
-//! solutions are the parity target, not the iteration paths.  Quadrature
+//! M3 PCG+diag (`solve_pcg_dsmoother`).  **A2 hypre-ADS (round 153)**: the
+//! C++ preconditions A2 with `HypreADS(*A2, prec_fespace)`
+//! (joule_solver.cpp:580-596); fem-rs ports that structure
+//! (`fem_solver::AdsHypreSolver` — five-level multiplicative subspace cycle
+//! `"013454310"`, inner AMS cycle 14 on `CᵀAC`, three scalar AMGs on
+//! `Pi_dᵀAPi_d`), fed with the **quadratic** auxiliary complex
+//! (`RT_FECollection(1,3).GetOrder() = 2`): C = curl(ND2→RT1), G = grad(P2→ND2),
+//! `Pi_nd` = the round-151 P2→ND2 blocks and `Pi_rt` = the round-153 P2→RT1
+//! blocks (`ads_pi_rt_blocks_p2`, verified against MFEM's `id_RT`).
+//! Selected by **`FEMRS_JOULE_A2_ADS=1`**; default OFF keeps the historical
+//! diag-smoother path, which is the byte-parity pin.
+//! Quadrature
 //! orders follow MFEM's per-integrator defaults (a0 `OrderGrad+GetOrder=5`,
 //! A1 mass `OrderW+2·GetOrder=6` via the D680 hook, curl-curl `2·GetOrder=4`,
 //! A2 mass 6 / div-div 4, M3 mass 2, weakCurl `2+2−1=3`, weakDiv 4).
@@ -1304,6 +1313,79 @@ fn main() {
             ..fem_solver::SolverConfig::default()
         };
 
+        // ── A2 preconditioner: the hypre-ADS gate (round 153) ──────────────
+        // joule_solver.cpp:580-596 preconditions A2 with `HypreADS(*A2,
+        // prec_fespace)`, created once (`if (ads_a2 == NULL)`) and reused for
+        // every step.  The **solver layer** of that structure is landed
+        // (`fem_solver::AdsHypreSolver` = `linlvo::precond::AdsHyprePrecond`:
+        // the five-level multiplicative subspace cycle `"013454310"`,
+        // inner AMS cycle 14 on `CᵀAC`, three scalar AMGs on `Pi_dᵀAPi_d`;
+        // unit-tested on a synthetic 3-D de Rham complex and on the
+        // cycle-string interpreter).
+        //
+        // The **joule wiring is not completable from the round-152 inputs**:
+        // `HypreADS::MakeDiscreteMatrices` takes
+        // `p = face_fec->GetOrder()`, and MFEM's `RT_FECollection(order-1=1, 3)`
+        // has `GetOrder() = 2` (probe-verified: `RT(1).GetOrder = 2`,
+        // `RT(0).GetOrder = 1`) — so joule's ADS runs the **quadratic**
+        // auxiliary complex, not the lowest-order one:
+        //
+        //   C      = curl(ND_2 → RT_1)   = joule's D120 `curl`   (50016×51684)
+        //   G      = grad(P2  → ND_2)    = joule's AMS `g_ams`   (51684×17797)
+        //   Pi_nd  = id(P2³ → ND_2)      = joule's `pi_linlvo`   (3× 51684×17797)
+        //   Pi_rt  = id(P2³ → RT_1)      = **not assembled in fem-rs** ← the gap
+        //
+        // (`RT_Pi`/`ND_Pi` are passed explicitly because `p = 2 > 1`; the round-152
+        // `ads_pi_rt_blocks`/`ads_pi_nd_blocks_p1` geometric blocks belong to the
+        // `RT_FECollection(0, 3)` lowest-order path — `p = 1`, as in the
+        // assembly d630 pins — not to this case.)
+        //
+        // All four inputs are now available: `curl` (D120 curl ND2→RT1),
+        // `g_ams` (round-151 P2 gradient), `pi_linlvo` (round-151 P2→ND2
+        // blocks) and `ads_pi_rt_blocks_p2` (round-153 P2→RT1 blocks, verified
+        // entry-for-entry against MFEM's `id_RT`).
+        //
+        // Default OFF: the registered-gap stand-in (diag-smoother PCG) is the
+        // byte-parity pin.  `FEMRS_JOULE_A2_ADS=1` selects PCG + the five-level
+        // hypre-ADS cycle.
+        let a2_ads = if std::env::var("FEMRS_JOULE_A2_ADS").as_deref() == Ok("1") {
+            let pi_rt = fem_assembly::discrete_op::DiscreteLinearOperator::ads_pi_rt_blocks_p2(
+                &h1_p2, rt_local,
+            )
+            .expect("ADS Pi_rt blocks (P2 -> RT1)");
+            if rank == 0 {
+                eprintln!(
+                    "A2 ADS inputs: C(ND2->RT1) {}x{} nnz {}, G(P2->ND2) {}x{} nnz {}, \
+                     Pi_nd 3x {}x{}, Pi_rt 3x {}x{}",
+                    curl.nrows,
+                    curl.ncols,
+                    curl.nnz(),
+                    g_ams.nrows,
+                    g_ams.ncols,
+                    g_ams.nnz(),
+                    pi_linlvo[0].nrows(),
+                    pi_linlvo[0].ncols(),
+                    pi_rt[0].nrows,
+                    pi_rt[0].ncols,
+                );
+            }
+            Some((
+                fem_linalg::fem_to_linlvo_csr(&curl),
+                g_linlvo.clone(),
+                fem_solver::AdsHypreSolverConfig {
+                    inner_cfg: cfg.clone(),
+                    pi_nd: pi_linlvo.clone(),
+                    pi_rt: pi_rt
+                        .iter()
+                        .map(fem_linalg::fem_to_linlvo_csr)
+                        .collect(),
+                    ..Default::default()
+                },
+            ))
+        } else {
+            None
+        };
+
         // joule.cpp:587-602 — the BE time loop (with the state-overwrite
         // semantics of `ImplicitSolve` unfolded, see the block header).
         let mut t: f64 = 0.0;
@@ -1316,6 +1398,10 @@ fn main() {
         let mut div_b_max = 0.0_f64;
         let mut ledger_rhs = 0.0_f64;
         let mut ledger_lhs = 0.0_f64;
+        // A2 hypre-ADS preconditioner, built once from the first step's
+        // eliminated operator and reused (joule_solver.cpp:580-590 — the A2
+        // matrix is dt-frozen, `MagneticDiffusionEOperator::buildA2`).
+        let mut a2_solver: Option<fem_solver::AdsHypreSolver<f64>> = None;
         while !last_step {
             ti += 1;
             if t + opts.dt >= opts.t_final - opts.dt / 2.0 {
@@ -1450,8 +1536,32 @@ fn main() {
             let mut a2e = a2.clone();
             form_linear_system_vdofs(&mut a2e, &mut v2, &mut x2, &ess_rt, false);
             let mut f_new = x2;
-            fem_solver::solve_pcg_dsmoother(&a2e, &v2, &mut f_new, &cfg)
-                .expect("A2 PCG+diag solve (ADS gap)");
+            if let Some((c_ads, g_ads, ads_cfg)) = &a2_ads {
+                // `if (ads_a2 == NULL) { ads_a2 = new HypreADS(*A2, ...); }`
+                // (joule_solver.cpp:580-587) — the preconditioner is created on
+                // the first step and reused; `a2` is dt-frozen.
+                if a2_solver.is_none() {
+                    a2_solver = Some(
+                        fem_solver::AdsHypreSolver::new(&a2e, c_ads, g_ads, ads_cfg)
+                            .expect("A2 hypre-ADS setup"),
+                    );
+                }
+                let a2_res = a2_solver
+                    .as_ref()
+                    .expect("A2 hypre-ADS solver")
+                    .solve(&v2, &mut f_new)
+                    .expect("A2 PCG+ADS solve");
+                // oracle diagnostic parity: the `-hl 2` oracle prints
+                // "PCG Iterations = 8 / Final PCG Relative Residual Norm"
+                // for the A2 solve on -rs 1 (hypre ADS).
+                eprintln!(
+                    "A2 PCG+ADS: {} iters, ||r||/||b|| = {:.5e}",
+                    a2_res.iterations, a2_res.final_residual
+                );
+            } else {
+                fem_solver::solve_pcg_dsmoother(&a2e, &v2, &mut f_new, &cfg)
+                    .expect("A2 PCG+diag solve (ADS gap)");
+            }
 
             // 9. M3 dT = <W,·> − weakDiv·F (638-662); no essential BCs.
             let mut lf = vec![0.0_f64; n_l2];
