@@ -1001,36 +1001,48 @@ impl DiscreteLinearOperator {
     ///   I(s, a + 27·d) = φ_a^{Q2}(ξ_s) · vk_s[d],     vk_s = adj(J_s)ᵀ·n_s
     /// ```
     ///
-    /// where `ξ_s` is the RT face DOF's node (the tensor product of the
-    /// 2-point Gauss-Legendre nodes `gl_nodes_01(2)` on the face, in the
-    /// element-local slot order — fem-rs `HexRTk::dof_coords`, same positions
-    /// in both open-mode flavours), `n_s` the reference outward face normal
-    /// (±ê_axis) and `φ_a^{Q2}` the P2 Lagrange basis.  On the straight hexes
-    /// the ADS needs (`adj(J)ᵀ = I` on the reference element; the per-element
-    /// orientation is carried by `element_signs` + the `QuadDofOrd` slot
-    /// permutation, exactly as in [`Self::ams_pi_blocks`]) this is
-    /// `vk_s[d] = ±δ_{d, axis(s)}` scaled by the physical face area.  The
-    /// `|φ| < 1e-12 → 0` truncation reproduces MFEM's `Project_RT` guard
-    /// (rr151 `ams_pi_blocks` convention).
+    /// where `ξ_s` is the RT DOF's node and `n_s = nk + d2n·3` its reference
+    /// normal (`fem/fe/fe_rt.cpp:323-324, 438-489`): on the 24 face slots the
+    /// outward face normal `±ê_c` (`nk`), on the 12 element-interior (bubble)
+    /// slots `±ê_c` of the slot's component block — the sign is MFEM's
+    /// closed-block orientation flip `i <= k/2` (`fe_rt.cpp:407-436`), which
+    /// at `k = 1` leaves every interior normal at `+ê_c`.  The per-slot
+    /// `(ξ_s, n_s)` pairs are taken from the canonical fem-rs table
+    /// `hex_rt1::mfem_hex_nodal_dofs(1)`, whose slot order (faces in
+    /// `HEX_RT_FACES` frames, then the interior x/y/z blocks with the closed
+    /// index innermost) is MFEM's local DOF numbering and `HDivSpace`'s
+    /// element-local order.  On the straight hexes the ADS needs
+    /// (`adj(J)ᵀ = I` on the reference element; the per-element orientation is
+    /// carried by `element_signs` + the `QuadDofOrd` slot permutation, exactly
+    /// as in [`Self::ams_pi_blocks`]) this is `vk_s[d] = ±δ_{d, axis(s)}`
+    /// scaled by the physical face area (face slots) or the physical element
+    /// cofactor column (bubble slots).  The `|φ| < 1e-12 → 0` truncation
+    /// reproduces MFEM's `Project_RT` guard (rr151 `ams_pi_blocks`
+    /// convention).
     ///
-    /// # Verification (round 153)
+    /// # Verification (round 154)
     ///
-    /// Cross-checked against a MFEM 4.10 serial `IdentityInterpolator` dump of
-    /// the same operator (`D:/fem-pro-targets/rr153-lane4/rtprobe/dump_rt_pi.cpp`,
-    /// refined cylinder-hex, MFEM `50016 × 53391`):
+    /// Cross-checked entry-for-entry against a MFEM 4.10 serial
+    /// `IdentityInterpolator` dump of the same operator
+    /// (`D:/fem-pro-targets/rr154-lane3/rtprobe2/dump_rt_pi2.cpp`, refined
+    /// cylinder-hex `50016 × 53391`, the `cmp_rt_pi2.py` comparison script):
     ///
-    /// * unit cube: all 234 entries identical to ≤1.1e-16;
-    /// * refined cylinder-hex (50016 rows): 583281 compared entries with a
-    ///   worst absolute difference of **2.78e-17** (machine level; every sign
-    ///   correct).  Restricted to entries of magnitude ≥1e-13 (362880
-    ///   entries) the worst relative difference is **2.7e-14** (~13 digits) —
-    ///   the residue of evaluating `adj(J)ᵀ·n̂` through this closed-form
-    ///   trilinear Jacobian versus MFEM's `AdjugateJacobian`, amplified by the
-    ///   `φ·vk` products.
-    ///
-    /// The element-interior (bubble) slots of `RT_HexahedronElement(1)` are
-    /// **not** built (their rows are empty; MFEM's dump carries 24192 such
-    /// rows) — MFEM's closed-axis `nk`/`d2n` convention for them is still open.
+    /// * unit cube (**all 36 slots**, 360 nnz): 0 entries only on either side,
+    ///   worst |diff| **1.11e-16**; 324 of 360 within 1 ulp, 36 at exactly
+    ///   2 ulp (all of them at the *high* Gauss node `u = fl(1−t)`, where
+    ///   fem-rs's closed-form Lobatto basis `4u(1−u)` differs from MFEM's
+    ///   barycentric `Poly_1D::Basis::Eval` — the same 2-ulp signature the 24
+    ///   face slots already had in round 153);
+    /// * refined cylinder-hex: **1196712 compared entries** (583281 on the
+    ///   face rows + 613431 on the 24192 element-interior bubble rows, up from
+    ///   583281 in round 153 when the bubble rows were empty), worst |diff|
+    ///   **2.78e-17** (face) / **2.36e-17** (bubble); restricted to
+    ///   `|v| ≥ 1e-13` the worst relative difference is 2.7e-14 / 1.5e-14;
+    /// * the **structural** symmetric difference is **0** for every
+    ///   `|v| ≥ 1e-16`; the remaining 11385 MFEM-only + 2952 fem-rs-only
+    ///   entries all carry `|v| ≤ 2.0e-17` (the roundoff-level "dust" both
+    ///   sides emit where the exact value is zero — MFEM keeps its own
+    ///   `adj(J)ᵀ` dust, this code its trilinear-Jacobian dust).
     ///
     /// # Errors
     /// Returns [`DiscreteOpError`] for non-hex meshes or slot-count mismatch.
@@ -1040,7 +1052,7 @@ impl DiscreteLinearOperator {
     ) -> Result<Vec<CsrMatrix<f64>>, DiscreteOpError> {
         let mesh = h1_space.mesh();
         const N_P2_LOCAL: usize = 27;
-        const N_RT1_LOCAL: usize = 24;
+        const N_RT1_LOCAL: usize = 36;
 
         match mesh.element_type(0) {
             ElementType::Hex8 | ElementType::Hex20 => {}
@@ -1052,51 +1064,29 @@ impl DiscreteLinearOperator {
             }
         }
 
-        // RT1 face DOF nodes in the element-local slot order
-        // (`RT_HexahedronElement(1, GaussLobatto, GaussLegendre)`; the local
-        // list is the 24 face slots followed by the 12 element-interior
-        // bubbles — only the face slots are used, see the assembly loop).
-        let rt = HexRTk::new_gauss_legendre(1);
-        let nodes = rt.dof_coords();
-        if nodes.len() < N_RT1_LOCAL {
-            return Err(DiscreteOpError::UnsupportedCellType {
-                op: "ads_pi_rt_blocks_p2 (P2→RT1)",
-                cell: "HexRTk(1) has fewer than 24 face DOFs",
-            });
-        }
+        // RT1 local DOF table — the 24 face slots followed by the 12
+        // element-interior (bubble) slots of `RT_HexahedronElement(1)`, in
+        // `HDivSpace`'s element-local slot order (the `HexRTk` layout:
+        // `HEX_RT_FACES` frames, then the interior x/y/z blocks with the
+        // closed index innermost).  `mfem_hex_nodal_dofs(1)` is the canonical
+        // fem-rs table of MFEM's nodal pairs in exactly that order: each
+        // slot's sample point and its reference normal `nk + d2n·3` from
+        // `VectorFiniteElement::Project_RT`.  On a face slot the normal is
+        // the reference outward face normal `±ê_c`; on an interior slot it is
+        // `±ê_c` of the slot's component block, the sign being MFEM's
+        // closed-block orientation flip `i <= k/2` (`fe_rt.cpp:407-436`) — at
+        // k = 1 all twelve are `+ê_c`.
+        let (nodes, slot_nk) = fem_element::raviart_thomas::hex_rt1::mfem_hex_nodal_dofs(1);
+        debug_assert_eq!(nodes.len(), N_RT1_LOCAL);
+        debug_assert_eq!(slot_nk.len(), N_RT1_LOCAL);
 
-        // Reference shape values and per-slot face identity.  The face normal
-        // is the coordinate the node pins to 0 (outward −ê) or 1 (outward +ê);
-        // the two free coordinates are the open Gauss-Legendre nodes, never
-        // 0/1, so the axis is unambiguous.
+        // Reference shape values at each slot's node.
         let q2 = HexQ2;
-        // Per-slot face identity: the reference axis the node pins (0 → the
-        // −ê side, 1 → +ê), which also fixes the reference outward normal sign.
-        let mut slot_face = vec![(0usize, false); N_RT1_LOCAL];
         let mut phi_ref = vec![vec![0.0_f64; N_P2_LOCAL]; N_RT1_LOCAL];
-        let mut node_ref = vec![[0.0_f64; 3]; N_RT1_LOCAL];
         {
             let mut shapes = vec![0.0_f64; N_P2_LOCAL];
-            for (s, x) in nodes.iter().take(N_RT1_LOCAL).enumerate() {
-                let mut axis = usize::MAX;
-                let mut at_max = false;
-                for (d, &c) in x.iter().enumerate() {
-                    if c == 0.0 {
-                        axis = d;
-                    } else if c == 1.0 {
-                        axis = d;
-                        at_max = true;
-                    }
-                }
-                if axis == usize::MAX {
-                    return Err(DiscreteOpError::UnsupportedCellType {
-                        op: "ads_pi_rt_blocks_p2 (P2→RT1)",
-                        cell: "RT1 DOF node is not on a reference face",
-                    });
-                }
-                slot_face[s] = (axis, at_max);
-                node_ref[s] = [x[0], x[1], x[2]];
-                q2.eval_basis(&[x[0], x[1], x[2]], &mut shapes);
+            for (s, x) in nodes.iter().enumerate() {
+                q2.eval_basis(x, &mut shapes);
                 for a in 0..N_P2_LOCAL {
                     // MFEM `Project_RT`: `if (fabs(s) < 1e-12) s = 0`.
                     phi_ref[s][a] = if shapes[a].abs() < 1e-12 { 0.0 } else { shapes[a] };
@@ -1124,7 +1114,7 @@ impl DiscreteLinearOperator {
             if rt_dofs.len() < N_RT1_LOCAL || h1_dofs.len() != N_P2_LOCAL || vnodes.len() < 8 {
                 return Err(DiscreteOpError::UnsupportedCellType {
                     op: "ads_pi_rt_blocks_p2 (P2→RT1)",
-                    cell: "element DOF count is not HexRT1(24 face + bubble) × HexQ2(27)",
+                    cell: "element DOF count is not HexRT1(24 face + 12 bubble) × HexQ2(27)",
                 });
             }
             let corner: Vec<[f64; 3]> = (0..8)
@@ -1137,10 +1127,18 @@ impl DiscreteLinearOperator {
                 if !visited.insert(g_rt as usize) {
                     continue;
                 }
-                // `vk = sign·(j_(c+1) × j_(c+2))` — `adj(J)ᵀ·n̂` with the
-                // reference outward normal `n̂ = sign·ê_c`, at the DOF's node.
-                let (axis, at_max) = slot_face[s_local];
-                let xi = node_ref[s_local];
+                // `vk = sgn·(j_(c+1) × j_(c+2))` — `adj(J)ᵀ·n̂` with the slot's
+                // reference normal `n̂ = sgn·ê_c` from `Project_RT`
+                // (`nk + d2n·dim`), at the DOF's node.
+                let xi = nodes[s_local];
+                let nk = slot_nk[s_local];
+                let axis = if nk[0] != 0.0 {
+                    0
+                } else if nk[1] != 0.0 {
+                    1
+                } else {
+                    2
+                };
                 let mut jac = [[0.0_f64; 3]; 3];
                 for (i, c) in q1_nodes.iter().enumerate() {
                     // phi_i = prod_d f_d(xi_d), f_d(u) = c_d*u + (1-c_d)*(1-u);
@@ -1169,7 +1167,7 @@ impl DiscreteLinearOperator {
                 }
                 let a1 = (axis + 1) % 3;
                 let a2 = (axis + 2) % 3;
-                let sgn = if at_max { 1.0 } else { -1.0 };
+                let sgn = nk[axis];
                 let vk = [
                     sgn * (jac[1][a1] * jac[2][a2] - jac[2][a1] * jac[1][a2]),
                     sgn * (jac[2][a1] * jac[0][a2] - jac[0][a1] * jac[2][a2]),
