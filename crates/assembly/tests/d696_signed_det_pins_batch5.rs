@@ -148,6 +148,8 @@ fn d696_b5_compute_l2_error_retains_abs_on_inverted_quad() {
     let uh = ComplexGridFunction {
         u_re: vec![0.0; space.n_dofs()],
         u_im: vec![0.0; space.n_dofs()],
+        iterations: 0, // round-150 field, "not reported" (from_flat) semantics
+        residual: 0.0,
     };
     let (er, ei) = uh.compute_l2_error(&|_p| 1.0, &|_p| 0.0, 3, &space);
     assert_eq!(er.to_bits(), 2.0_f64.sqrt().to_bits(), "L2 error retention pin (er)");

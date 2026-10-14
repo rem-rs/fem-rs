@@ -556,6 +556,8 @@ fn bisect_element(
     let gf = ComplexGridFunction {
         u_re: x[..n_cpp].to_vec(),
         u_im: x[n_cpp..].to_vec(),
+        iterations: 0, // round-150 field, "not reported" (from_flat) semantics
+        residual: 0.0,
     };
     let (er, ei) = gf.compute_l2_error(
         &|x: &[f64]| u0(x).0,
@@ -772,6 +774,8 @@ fn d702_two_hex_q2_full_pipeline() {
     let gf = ComplexGridFunction {
         u_re: x[..45].to_vec(),
         u_im: x[45..].to_vec(),
+        iterations: 0, // round-150 field, "not reported" (from_flat) semantics
+        residual: 0.0,
     };
     let (er, ei) = gf.compute_l2_error(
         &|x: &[f64]| u0(x).0,
@@ -838,6 +842,8 @@ fn d702_inline_hex_o1_bc_gauge() {
         let gf = ComplexGridFunction {
             u_re: x[..n].to_vec(),
             u_im: x[n..].to_vec(),
+            iterations: 0, // round-150 field, "not reported" (from_flat) semantics
+            residual: 0.0,
         };
         gf.compute_l2_error(
             &|x: &[f64]| u0(x).0,

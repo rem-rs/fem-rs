@@ -22,6 +22,7 @@
 //! | `divergence` | H(div) RT1 | L2 (P2)   | 1     |
 //! | `divergence` | H(div) RT2 | L2 (P2)   | 2     |
 //! | `curl_3d`    | H(curl) ND1| H(div) RT0| 1     |
+//! | `curl_3d`    | H(curl) ND1| H(div) RT1| 1     |
 //! | `curl_3d`    | H(curl) ND2| H(div) RT1| 2     |
 //! | `curl_2d_hdiv` | H(curl) ND1/ND2 | H(div) RT0/RT2 | 2 (2D) |
 //!
@@ -42,8 +43,8 @@ use std::collections::HashSet;
 use fem_mesh::ElementType;
 use fem_core::types::DofId;
 use fem_element::{
-    quadrature::gauss_legendre_01, HexNDk, HexQ2, HexQ3, HexRTk, ReferenceElement, TetRT1, TriNDk,
-    TriND2, TriRT1, TriRT2, VectorReferenceElement,
+    quadrature::gauss_legendre_01, HexNDk, HexQ1, HexQ2, HexQ3, HexRTk, ReferenceElement, TetRT1,
+    TriNDk, TriND2, TriRT1, TriRT2, VectorReferenceElement,
 };
 use fem_element::lagrange::factory::TriPk;
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -84,6 +85,10 @@ pub enum DiscreteOpError {
     /// The mesh dimension is supported but its cell type is not.
     #[error("{op}: unsupported cell type {cell}")]
     UnsupportedCellType { op: &'static str, cell: &'static str },
+
+    /// Two operator inputs have mismatched dimensions.
+    #[error("{op}: {detail}")]
+    InputDimMismatch { op: &'static str, detail: String },
 }
 
 /// Short name of a cell type, for [`DiscreteOpError::UnsupportedCellType`].
@@ -725,6 +730,249 @@ impl DiscreteLinearOperator {
             }
         }
 
+        let [c0, c1, c2] = coos;
+        Ok(vec![c0.into_csr(), c1.into_csr(), c2.into_csr()])
+    }
+
+    /// Build the ADS nodal interpolation blocks `Pi_nd = [Pix, Piy, Piz]` for
+    /// the **P1 → ND1** pair — the ND_Pi input of the hypre-ADS input layer
+    /// (round 152).
+    ///
+    /// For the lowest-order ADS path (face space RT1, straight mesh) MFEM's
+    /// `HypreADS::MakeDiscreteMatrices` passes *no* interpolation matrices and
+    /// hypre reconstructs `Pi_nd` internally from the vertex coordinates
+    /// (`hypre_ADSSetup`, `ads.c:1110-1121` → the AMS `SetCoordinateVectors`
+    /// path).  On a straight mesh that geometric construction is
+    /// entry-for-entry identical to the FEM `IdentityInterpolator(P1³ → ND1)`
+    /// split into domain-vdim components (same formula family as
+    /// [`DiscreteLinearOperator::ams_pi_blocks`], with `φ_j^{P1}(ξ_k) = 1/2`
+    /// at the 8 hex vertices): the round-152 probe matched the MFEM
+    /// `IdentityInterpolator` dump **and** hypre 2.28's internal
+    /// `ams_data->Pix/Piy/Piz` bit-for-bit (72 entries, 0 ulp) on the unit
+    /// hex.
+    ///
+    /// Element block: `pix[d][s, j] = φ_j^{P1}(ξ_s) · τ_s[d]` with the
+    /// sub-1e-12 shape truncation MFEM's `NodalFiniteElement::Project` applies
+    /// (rr151 `ams_pi_blocks` convention).
+    ///
+    /// # Errors
+    /// Returns [`DiscreteOpError`] for non-hex meshes or slot-count mismatch.
+    pub fn ads_pi_nd_blocks_p1<M: MeshTopology>(
+        h1_space: &H1Space<M>,
+        hcurl_space: &HCurlSpace<M>,
+    ) -> Result<Vec<CsrMatrix<f64>>, DiscreteOpError> {
+        let mesh = h1_space.mesh();
+        const N_P1_LOCAL: usize = 8;
+
+        match mesh.element_type(0) {
+            ElementType::Hex8 | ElementType::Hex20 => {}
+            other => {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "ads_pi_nd_blocks_p1 (P1→ND1)",
+                    cell: element_type_name(other),
+                })
+            }
+        }
+
+        let nd = HexNDk::new(1);
+        let coords = nd.dof_coords();
+        let tangents = nd.dof_tangents();
+        let n_slots = coords.len();
+        if n_slots != nd.n_dofs() {
+            return Err(DiscreteOpError::UnsupportedCellType {
+                op: "ads_pi_nd_blocks_p1 (P1→ND1)",
+                cell: "HexNDk::dof_coords length mismatch",
+            });
+        }
+
+        let p1 = HexQ1;
+        let mut pix_ref = vec![vec![0.0_f64; n_slots * N_P1_LOCAL]; 3];
+        {
+            let mut shapes = vec![0.0_f64; N_P1_LOCAL];
+            for (s, (xi, tau)) in coords.iter().zip(tangents.iter()).enumerate() {
+                p1.eval_basis(&[xi[0], xi[1], xi[2]], &mut shapes);
+                for j in 0..N_P1_LOCAL {
+                    let v = if shapes[j].abs() < 1e-12 { 0.0 } else { shapes[j] };
+                    for d in 0..3 {
+                        pix_ref[d][s * N_P1_LOCAL + j] = v * tau[d];
+                    }
+                }
+            }
+        }
+
+        let n_nd = hcurl_space.n_dofs();
+        let n_p1 = h1_space.n_dofs();
+        let mut coos = [
+            CooMatrix::<f64>::new(n_nd, n_p1),
+            CooMatrix::<f64>::new(n_nd, n_p1),
+            CooMatrix::<f64>::new(n_nd, n_p1),
+        ];
+        let mut visited = HashSet::with_capacity(n_nd);
+
+        for e in mesh.elem_iter() {
+            let h1_dofs = h1_space.element_dofs(e);
+            let nd_dofs = hcurl_space.element_dofs(e);
+            let nd_signs = hcurl_space.element_signs(e);
+            if nd_dofs.len() != n_slots || h1_dofs.len() != N_P1_LOCAL {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "ads_pi_nd_blocks_p1 (P1→ND1)",
+                    cell: "element DOF count is not HexND1(12) × HexQ1(8)",
+                });
+            }
+            for (s_local, &g_nd) in nd_dofs.iter().enumerate() {
+                if !visited.insert(g_nd as usize) {
+                    continue;
+                }
+                let sign = nd_signs[s_local];
+                for (j_local, &global_p1) in h1_dofs.iter().enumerate() {
+                    for (d, coo) in coos.iter_mut().enumerate() {
+                        let val = sign * pix_ref[d][s_local * N_P1_LOCAL + j_local];
+                        if val != 0.0 {
+                            coo.add(g_nd as usize, global_p1 as usize, val);
+                        }
+                    }
+                }
+            }
+        }
+
+        let [c0, c1, c2] = coos;
+        Ok(vec![c0.into_csr(), c1.into_csr(), c2.into_csr()])
+    }
+
+    /// Build the ADS geometric face interpolation blocks `Pi = [Pix, Piy,
+    /// Piz]` — the Raviart-Thomas-level auxiliary-space maps of the hypre-ADS
+    /// input layer (round 152).
+    ///
+    /// hypre builds these internally in `hypre_ADSComputePixyz` (`ads.c:759`)
+    /// when the interpolation matrices are not supplied (the lowest-order
+    /// straight-mesh path MFEM's `HypreADS` takes for joule's RT1 A2 system):
+    ///
+    /// ```text
+    ///   RT100 = C · (Pi_nd[1] · z),   RT010 = C · (Pi_nd[2] · x),
+    ///   RT001 = C · (Pi_nd[0] · y)        // ads.c:786-794 — the RT coordinates
+    ///                                     // of (1,0,0) = -curl(0,z,0), etc.
+    ///   Pix[i, v] = RT100[i]  on the sparsity pattern of C·G  (face → vertex)
+    ///   Piy/Piz likewise with RT010/RT001                    // ads.c:807
+    /// ```
+    ///
+    /// where `x/y/z` are the vertex coordinate vectors indexed by the P1 H1
+    /// dofs of `G`.  The round-152 probe reproduced hypre 2.28's internal
+    /// `ads_data->Pix/Piy/Piz` from the FEM `Pi_nd` blocks **bit-for-bit**
+    /// (192 entries per component, 0 ulp, sparsity symmetric difference 0) on
+    /// the unit hex; the Galerkin products `CᵀAC`/`Pixᵀ·A·Pix` hypre builds
+    /// from these matched the MFEM triple product to ≤ 2 ulp.
+    ///
+    /// # Arguments
+    /// * `h1_space` — the P1 vertex space (its dofs index `G`'s columns and
+    ///   provide the coordinate gathering; only used for `mesh` + dof→node
+    ///   mapping, no re-assembly).
+    /// * `c` — the discrete curl `ND1 → RT1` ([`DiscreteLinearOperator::curl_3d`]).
+    /// * `g` — the discrete gradient `P1 → ND1` ([`DiscreteLinearOperator::gradient`]).
+    /// * `pi_nd` — the three nodal interpolation blocks
+    ///   ([`DiscreteLinearOperator::ads_pi_nd_blocks_p1`]).
+    ///
+    /// # Errors
+    /// Returns [`DiscreteOpError`] on dimension mismatches between the three
+    /// inputs.
+    pub fn ads_pi_rt_blocks<M: MeshTopology>(
+        h1_space: &H1Space<M>,
+        c: &CsrMatrix<f64>,
+        g: &CsrMatrix<f64>,
+        pi_nd: &[CsrMatrix<f64>; 3],
+    ) -> Result<Vec<CsrMatrix<f64>>, DiscreteOpError> {
+        let mesh = h1_space.mesh();
+        let n_faces = c.nrows;
+        let n_edges = c.ncols;
+        let n_verts = g.ncols;
+
+        if g.nrows != n_edges {
+            return Err(DiscreteOpError::InputDimMismatch {
+                op: "ads_pi_rt_blocks",
+                detail: format!("G has {} rows, C has {} columns", g.nrows, n_edges),
+            });
+        }
+        for (d, p) in pi_nd.iter().enumerate() {
+            if p.nrows != n_edges || p.ncols != n_verts {
+                return Err(DiscreteOpError::InputDimMismatch {
+                    op: "ads_pi_rt_blocks",
+                    detail: format!(
+                        "Pi_nd[{d}] is {}×{}, expected {}×{}",
+                        p.nrows,
+                        p.ncols,
+                        n_edges,
+                        n_verts
+                    ),
+                });
+            }
+        }
+
+        // Vertex coordinate vectors indexed by the P1 H1 dof ids of G's
+        // columns (first touch over the elements; P1 dofs are vertex dofs, so
+        // every dof is covered).
+        let mut dof_node = vec![u32::MAX; n_verts];
+        for e in mesh.elem_iter() {
+            let verts = mesh.element_nodes(e);
+            let h1_dofs = h1_space.element_dofs(e);
+            for (&dof, &node) in h1_dofs.iter().zip(verts.iter()) {
+                let d = dof as usize;
+                if d < n_verts && dof_node[d] == u32::MAX {
+                    dof_node[d] = node;
+                }
+            }
+        }
+        let mut cx = vec![0.0_f64; n_verts];
+        let mut cy = vec![0.0_f64; n_verts];
+        let mut cz = vec![0.0_f64; n_verts];
+        for (d, &node) in dof_node.iter().enumerate() {
+            if node == u32::MAX {
+                return Err(DiscreteOpError::InputDimMismatch {
+                    op: "ads_pi_rt_blocks",
+                    detail: format!("G column {d} is not a mesh vertex dof"),
+                });
+            }
+            let p = mesh.node_coords(node);
+            cx[d] = p[0];
+            cy[d] = p[1];
+            cz[d] = p[2];
+        }
+
+        // RT100 = C·(Pi_nd[1]·z), RT010 = C·(Pi_nd[2]·x), RT001 = C·(Pi_nd[0]·y).
+        let mut comp: [Vec<f64>; 3] = std::array::from_fn(|_| vec![0.0_f64; n_faces]);
+        {
+            let axis = [cz, cx, cy]; // component 1 with z, 2 with x, 0 with y
+            let pi_of_comp = [1usize, 2, 0];
+            for (k, &p_idx) in pi_of_comp.iter().enumerate() {
+                let mut t = vec![0.0_f64; n_edges];
+                pi_nd[p_idx].spmv(&axis[k], &mut t);
+                c.spmv(&t, &mut comp[k]);
+            }
+        }
+
+        // Pix/Piy/Piz: rows of RT100/RT010/RT001 placed on the sparsity
+        // pattern of C·G — the *deduplicated* face-to-vertex topology
+        // (hypre_ParMatmul's F2V adjacency: a vertex belongs to two edges of
+        // each quad face, so the raw edge walk visits every (face, vertex)
+        // pair twice and must contribute the row value only once).
+        let mut coos = [
+            CooMatrix::<f64>::new(n_faces, n_verts),
+            CooMatrix::<f64>::new(n_faces, n_verts),
+            CooMatrix::<f64>::new(n_faces, n_verts),
+        ];
+        let mut seen = vec![u32::MAX; n_verts]; // epoch stamp per vertex
+        for i in 0..n_faces {
+            for &e in &c.col_idx[c.row_ptr[i]..c.row_ptr[i + 1]] {
+                for &v in &g.col_idx[g.row_ptr[e as usize]..g.row_ptr[e as usize + 1]] {
+                    let v = v as usize;
+                    if seen[v] == i as u32 {
+                        continue;
+                    }
+                    seen[v] = i as u32;
+                    for (d, coo) in coos.iter_mut().enumerate() {
+                        coo.add(i, v, comp[d][i]);
+                    }
+                }
+            }
+        }
         let [c0, c1, c2] = coos;
         Ok(vec![c0.into_csr(), c1.into_csr(), c2.into_csr()])
     }
@@ -1795,7 +2043,7 @@ impl DiscreteLinearOperator {
     /// On **hexahedra** (D120) the same `DᵀZ = Yᵀ` pattern runs once on the
     /// reference element with the `HexNDk(2)` nodal functionals and the
     /// `hex_rt1::mfem_hex_nodal_dofs(1)` RT1 rows — see
-    /// [`hex_nd2_rt1_reference_tables`].  Because `curl` maps the order-2 hex
+    /// [`hex_nd_rt1_reference_tables`].  Because `curl` maps the order-2 hex
     /// Nédélec space into the order-1 Raviart-Thomas space, the result is
     /// MFEM's `DiscreteLinearOperator` + `CurlInterpolator` matrix
     /// entry-for-entry (parity test `d120_curl_3d_nd2_rt1_hex3d`).
@@ -1836,12 +2084,104 @@ impl DiscreteLinearOperator {
 
         match (hcurl_space.order(), hdiv_space.order()) {
             (1, 0) => Self::curl_3d_nd1_rt0(hcurl_space, hdiv_space),
+            (1, 1) => Self::curl_3d_nd1_rt1(hcurl_space, hdiv_space),
             (2, 1) => Self::curl_3d_nd2_rt1(hcurl_space, hdiv_space),
             _ => Err(DiscreteOpError::IncompatibleOrders {
                 op: "curl_3d",
                 h1_order: hcurl_space.order(),
                 hcurl_order: hdiv_space.order(),
             }),
+        }
+    }
+
+    /// Discrete curl `ND1 → RT1` — the curl arm of the hypre-ADS input layer
+    /// (round 152).  hypre's `HypreADS::MakeDiscreteMatrices` builds exactly
+    /// this pair for an order-1 face space: `edge_fec = ND(p)`,
+    /// `face_fec = RT(p)` with `p = face order`, i.e. `CurlInterpolator` from
+    /// ND1 into RT1 (`hypre.cpp:6195-6216`), consumed as
+    /// `HYPRE_ADSSetDiscreteCurl`.
+    ///
+    /// The hex arm shares the D120 reference-element machinery with the ND2 →
+    /// RT1 arm: the local matrix is geometry-independent (`A = W⁻¹·M·D⁻¹`,
+    /// see [`hex_nd_rt1_reference_tables`]) and is scattered with the two
+    /// spaces' `element_signs`.  Tetrahedral/prismatic cells are not wired for
+    /// this pair yet (round-152 scope: the joule ADS benchmark is hex); they
+    /// error explicitly.
+    ///
+    /// # Errors
+    /// Returns [`DiscreteOpError`] for unsupported cell types (tet/prism on
+    /// this pair).
+    fn curl_3d_nd1_rt1<M: MeshTopology>(
+        hcurl_space: &HCurlSpace<M>,
+        hdiv_space: &HDivSpace<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = hcurl_space.mesh();
+        let n_hdiv = hdiv_space.n_dofs();
+        let n_hcurl = hcurl_space.n_dofs();
+        let mut coo = CooMatrix::<f64>::new(n_hdiv, n_hcurl);
+        let mut visited = HashSet::with_capacity(n_hdiv);
+
+        // The hex local matrix is a reference-element matrix (built lazily on
+        // the first hex, shared by every element).
+        let mut hex_tables: Option<HexNdRt1Tables> = None;
+
+        for e in mesh.elem_iter() {
+            let hcurl_dofs = hcurl_space.element_dofs(e);
+            let hdiv_dofs = hdiv_space.element_dofs(e);
+            match mesh.element_type(e) {
+                ElementType::Hex8 | ElementType::Hex20 => {
+                    let tables =
+                        hex_tables.get_or_insert_with(|| hex_nd_rt1_reference_tables(1));
+                    debug_assert_eq!(hcurl_dofs.len(), 12, "HexND1 local dof count");
+                    debug_assert_eq!(hdiv_dofs.len(), 36, "HexRT1 local dof count");
+                    Self::scatter_hex_nd_rt1_arm(
+                        &tables.a,
+                        tables.n_nd,
+                        hcurl_dofs,
+                        hdiv_dofs,
+                        hcurl_space.element_signs(e),
+                        hdiv_space.element_signs(e),
+                        &mut visited,
+                        &mut coo,
+                    );
+                }
+                other => {
+                    return Err(DiscreteOpError::UnsupportedCellType {
+                        op: "curl_3d (ND1→RT1)",
+                        cell: element_type_name(other),
+                    });
+                }
+            }
+        }
+
+        Ok(coo.into_csr())
+    }
+
+    /// Shared hex scatter for the `ND → RT1` reference-element curl arms:
+    /// writes `rt_signs[p] · nd_signs[i] · a[p·n_nd + i]` for every RT1 row
+    /// (first touch only) against its ND columns.
+    fn scatter_hex_nd_rt1_arm(
+        a: &[f64],
+        n_nd: usize,
+        hcurl_dofs: &[DofId],
+        hdiv_dofs: &[DofId],
+        nd_signs: &[f64],
+        rt_signs: &[f64],
+        visited: &mut HashSet<usize>,
+        coo: &mut CooMatrix<f64>,
+    ) {
+        for (p_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
+            let g_rt1 = global_rt1 as usize;
+            if !visited.insert(g_rt1) {
+                continue;
+            }
+            for (i_local, &global_nd) in hcurl_dofs.iter().enumerate() {
+                let val =
+                    rt_signs[p_local] * nd_signs[i_local] * a[p_local * n_nd + i_local];
+                if val.abs() > 1e-15 {
+                    coo.add(g_rt1, global_nd as usize, val);
+                }
+            }
         }
     }
 
@@ -2008,9 +2348,9 @@ impl DiscreteLinearOperator {
         let mut visited_rt1 = HashSet::with_capacity(n_hdiv);
 
         // D120: the hexahedral local matrix is shared by every element (it is
-        // a reference-element matrix — see `hex_nd2_rt1_reference_tables`), so
+        // a reference-element matrix — see `hex_nd_rt1_reference_tables`), so
         // it is built lazily on the first hex.
-        let mut hex_tables: Option<HexNd2Rt1Tables> = None;
+        let mut hex_tables: Option<HexNdRt1Tables> = None;
 
         for e in mesh.elem_iter() {
             let hcurl_dofs = hcurl_space.element_dofs(e);
@@ -2032,25 +2372,19 @@ impl DiscreteLinearOperator {
                     // the spaces' own conventions (the same dual the
                     // `HDivSpace::interpolate_vector` engine inverts).
                     let tables =
-                        hex_tables.get_or_insert_with(hex_nd2_rt1_reference_tables);
-                    let nd_signs = hcurl_space.element_signs(e);
-                    let rt_signs = hdiv_space.element_signs(e);
+                        hex_tables.get_or_insert_with(|| hex_nd_rt1_reference_tables(2));
                     debug_assert_eq!(hcurl_dofs.len(), 54, "HexND2 local dof count");
                     debug_assert_eq!(hdiv_dofs.len(), 36, "HexRT1 local dof count");
-                    for (p_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
-                        let g_rt1 = global_rt1 as usize;
-                        if !visited_rt1.insert(g_rt1) {
-                            continue;
-                        }
-                        for (i_local, &global_nd2) in hcurl_dofs.iter().enumerate() {
-                            let val = rt_signs[p_local]
-                                * nd_signs[i_local]
-                                * tables.a[p_local * 54 + i_local];
-                            if val.abs() > 1e-15 {
-                                coo.add(g_rt1, global_nd2 as usize, val);
-                            }
-                        }
-                    }
+                    Self::scatter_hex_nd_rt1_arm(
+                        &tables.a,
+                        tables.n_nd,
+                        hcurl_dofs,
+                        hdiv_dofs,
+                        hcurl_space.element_signs(e),
+                        hdiv_space.element_signs(e),
+                        &mut visited_rt1,
+                        &mut coo,
+                    );
                 }
                 ElementType::Tet4 | ElementType::Tet10 => {
                     Self::curl_3d_nd2_rt1_tet_element(
@@ -2300,16 +2634,20 @@ impl DiscreteLinearOperator {
     }
 }
 
-/// D120: element-independent reference tables for the hexahedral
-/// `curl_3d(ND2 → RT1)` arm.
-struct HexNd2Rt1Tables {
-    /// Local matrix `A[p*54 + k]` mapping ND2 element dof values to RT1 element
-    /// dof values, both in the slot conventions of `HexNDk(2)` /
+/// D120/D630: element-independent reference tables for the hexahedral
+/// `curl_3d(NDk → RT1)` arms (`k = 1` round-152 ADS input layer, `k = 2` D120).
+struct HexNdRt1Tables {
+    /// Number of local ND dofs (12 for ND1, 54 for ND2).
+    n_nd: usize,
+    /// Local matrix `A[p*n_nd + k]` mapping ND element dof values to RT1
+    /// element dof values, both in the slot conventions of `HexNDk(k)` /
     /// `mfem_hex_nodal_dofs(1)`.
     a: Vec<f64>,
 }
 
-/// Reference-element tables for the hex `ND2 → RT1` discrete curl (D120).
+/// Reference-element tables for the hex `NDk → RT1` discrete curl (D120;
+/// order-1 arm round 152).  Built for `nd_order = 1` (12 slots) or
+/// `nd_order = 2` (54 slots).
 ///
 /// The hexahedral local curl matrix is a **reference-element** matrix: with
 /// `Φ_k = J⁻ᵀ φ̂_k` (covariant pullback) the ND functional is
@@ -2332,25 +2670,25 @@ struct HexNd2Rt1Tables {
 ///   A = W⁻¹ · M · D⁻¹ ,   D[i,k] = φ̂_k(ξ_i)·τ̂_i ,   M[p,k] = (curl_ξ φ̂_k)(ξ_p)·n̂_p ,
 /// ```
 ///
-/// with `D` the (diagonal, ±1) ND2 nodal Vandermonde.  Both solves run
+/// with `D` the (diagonal, ±1) ND nodal Vandermonde.  Both solves run
 /// through [`solve_small`], so no assumption about the diagonal structure of
 /// `D`/`W` is baked in.
-fn hex_nd2_rt1_reference_tables() -> HexNd2Rt1Tables {
-    const N_ND: usize = 54; // HexNDk(2): 12 edges × 2 + 6 faces × 4 + 6 interior
+fn hex_nd_rt1_reference_tables(nd_order: usize) -> HexNdRt1Tables {
     const N_RT: usize = 36; // HexRT1: 6 faces × 4 + 12 interior
 
-    let nd = HexNDk::new(2);
-    debug_assert_eq!(nd.n_dofs(), N_ND);
+    let nd = HexNDk::new(nd_order);
+    let n_nd = nd.n_dofs();
     let coords = nd.dof_coords();
     let tks = nd.dof_tangents();
+    debug_assert_eq!(coords.len(), n_nd);
 
     // D[i,k] = φ̂_k(ξ_i)·τ̂_i.
-    let mut dmat = vec![0.0_f64; N_ND * N_ND];
+    let mut dmat = vec![0.0_f64; n_nd * n_nd];
     for (i, (xi, tau)) in coords.iter().zip(tks.iter()).enumerate() {
-        let mut phi = vec![0.0_f64; N_ND * 3];
+        let mut phi = vec![0.0_f64; n_nd * 3];
         nd.eval_basis_vec(xi, &mut phi);
         for (k, phi_k) in phi.chunks_exact(3).enumerate() {
-            dmat[i * N_ND + k] =
+            dmat[i * n_nd + k] =
                 phi_k[0] * tau[0] + phi_k[1] * tau[1] + phi_k[2] * tau[2];
         }
     }
@@ -2360,29 +2698,29 @@ fn hex_nd2_rt1_reference_tables() -> HexNd2Rt1Tables {
     // rows `HDivSpace::interpolate_vector` pairs with the `HexRTk` dual).
     let (pts, nks) = fem_element::raviart_thomas::hex_rt1::mfem_hex_nodal_dofs(1);
     debug_assert_eq!(pts.len(), N_RT);
-    let mut m = vec![0.0_f64; N_RT * N_ND];
+    let mut m = vec![0.0_f64; N_RT * n_nd];
     for (p, (xi, nk)) in pts.iter().zip(nks.iter()).enumerate() {
-        let mut curl = vec![0.0_f64; N_ND * 3];
+        let mut curl = vec![0.0_f64; n_nd * 3];
         nd.eval_curl(xi, &mut curl);
         for (k, c_k) in curl.chunks_exact(3).enumerate() {
-            m[p * N_ND + k] = c_k[0] * nk[0] + c_k[1] * nk[1] + c_k[2] * nk[2];
+            m[p * n_nd + k] = c_k[0] * nk[0] + c_k[1] * nk[1] + c_k[2] * nk[2];
         }
     }
 
-    // Z = D⁻ᵀ Mᵀ (54×36): solve Dᵀ Z = Mᵀ.
-    let mut dt = vec![0.0_f64; N_ND * N_ND];
-    for (i, row) in dmat.chunks_exact(N_ND).enumerate() {
+    // Z = D⁻ᵀ Mᵀ (n_nd×36): solve Dᵀ Z = Mᵀ.
+    let mut dt = vec![0.0_f64; n_nd * n_nd];
+    for (i, row) in dmat.chunks_exact(n_nd).enumerate() {
         for (j, &v) in row.iter().enumerate() {
-            dt[j * N_ND + i] = v;
+            dt[j * n_nd + i] = v;
         }
     }
-    let mut mt = vec![0.0_f64; N_ND * N_RT];
-    for (p, row) in m.chunks_exact(N_ND).enumerate() {
+    let mut mt = vec![0.0_f64; n_nd * N_RT];
+    for (p, row) in m.chunks_exact(n_nd).enumerate() {
         for (k, &v) in row.iter().enumerate() {
             mt[k * N_RT + p] = v;
         }
     }
-    let z = solve_small(N_ND, N_RT, &dt, &mt); // z[k*N_RT + p] = A_raw[p,k]
+    let z = solve_small(n_nd, N_RT, &dt, &mt); // z[k*N_RT + p] = A_raw[p,k]
 
     // W[p,j] = ψ̂_j(ξ_p)·n̂_p — the reference dual of the nodal-GL RT1 basis
     // (`HexRTk::new_gauss_legendre(1)`, the basis the assembly/get-values
@@ -2398,15 +2736,15 @@ fn hex_nd2_rt1_reference_tables() -> HexNd2Rt1Tables {
         }
     }
 
-    // A = W⁻¹ Zᵀ (36×54): solve W A = Zᵀ.
-    let mut zt = vec![0.0_f64; N_RT * N_ND];
+    // A = W⁻¹ Zᵀ (36×n_nd): solve W A = Zᵀ.
+    let mut zt = vec![0.0_f64; N_RT * n_nd];
     for (k, zrow) in z.chunks_exact(N_RT).enumerate() {
         for (p, &v) in zrow.iter().enumerate() {
-            zt[p * N_ND + k] = v;
+            zt[p * n_nd + k] = v;
         }
     }
-    let a = solve_small(N_RT, N_ND, &w, &zt);
-    HexNd2Rt1Tables { a }
+    let a = solve_small(N_RT, n_nd, &w, &zt);
+    HexNdRt1Tables { n_nd, a }
 }
 
 /// Solve the small dense linear system `A * X = B` where `A` is `n × n` and
