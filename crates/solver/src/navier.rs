@@ -57,6 +57,14 @@
 //!   repairs its measured instability with the projection-adjoint Poisson
 //!   left end `−D·Mv⁻¹·G` (nested Krylov).  The default `Classical` is
 //!   byte-identical to the C++ path.
+//! * [`NavierSolver::reassemble_operators`] is a fem-rs-only extension
+//!   (round-153): a mid-run refresh of the `Setup`-time operator block
+//!   (`mv`/`sp`/`mv_diag`/`h_diag`/`sp_amg`) for discretizations whose
+//!   coefficients move with a transported field (two-phase `M_ρ`/`L_{1/ρ}`),
+//!   without the BDF-history reset a mid-run `Setup` re-entry would cause.
+//!   The C++ class has no such hook (its forms are assumed frozen after
+//!   `Setup`); the default constant-coefficient path is byte-identical
+//!   whether or not the hook is called.
 //!
 //! # The `D`/`G` pairing and its boundary term
 //!
@@ -663,18 +671,23 @@ pub struct NavierSolver<D: NavierDiscretization> {
     /// Kinematic viscosity (dimensionless).
     kin_vis: f64,
 
-    // `OperatorHandle`s assembled once by `Setup`.
+    // `OperatorHandle`s assembled by `Setup` (and refreshed by
+    // [`NavierSolver::reassemble_operators`] for variable-coefficient discs).
     mv: CsrMatrix<f64>,
     sp: CsrMatrix<f64>,
     d: CsrMatrix<f64>,
     g: CsrMatrix<f64>,
     /// `MvInvPC` / `HInvPC` (`DSmoother`-equivalent Jacobi diagonals),
-    /// snapshotted in `Setup` exactly like the C++ full-assembly path.
+    /// snapshotted in `Setup` exactly like the C++ full-assembly path
+    /// (refreshed together with `mv`/`sp` by
+    /// [`NavierSolver::reassemble_operators`]).
     mv_diag: Vec<f64>,
     h_diag: Vec<f64>,
     /// `SpInvPC` — the [`crate::amg::AmgSolver`] analogue of MFEM's
     /// `HypreBoomerAMG` pressure preconditioner (navier_solver.cpp:270/278),
-    /// built in `Setup` when [`NavierConfig::pressure_amg`] is set.
+    /// built in `Setup` when [`NavierConfig::pressure_amg`] is set and
+    /// rebuilt by [`NavierSolver::reassemble_operators`] (the `SpInvPC->SetOperator`
+    /// analogue).
     sp_amg: Option<crate::amg::AmgSolver<f64>>,
 
     vel: VelState,
@@ -794,10 +807,33 @@ impl<D: NavierDiscretization> NavierSolver<D> {
             println!("Using Full Assembly");
         }
 
-        self.mv = self.disc.assemble_mass_velocity();
-        self.sp = self.disc.assemble_pressure_laplace();
         self.d = self.disc.assemble_divergence();
         self.g = self.disc.assemble_gradient();
+        self.assemble_operators(dt);
+
+        // "If the initial condition was set, it has to be aligned with
+        // dependent Vectors and GridFunctions": un_next = un.
+        self.vel.un_next.copy_from_slice(&self.vel.un);
+
+        // Set initial time step in the history array.
+        self.dthist = [dt, 0.0, 0.0];
+
+        self.rt_setup = t_start.elapsed().as_secs_f64();
+    }
+
+    /// The `Setup`-time operator block — the matrices and preconditioner
+    /// diagonals a mid-run refresh shares with the initial assembly
+    /// ([`Self::setup`] and [`Self::reassemble_operators`] both ride this):
+    /// `mv`/`sp`, the `SpInvPC` analogue when [`NavierConfig::pressure_amg`]
+    /// is set, and the `MvInvPC`/`HInvPC` Jacobi diagonals with the
+    /// full-assembly `H_bdfcoeff = 1/dt` snapshot convention (the C++
+    /// full-assembly path builds `HInvPC` once in `Setup` and reuses it
+    /// stale — reproduced here on purpose, see the module docs).  The
+    /// `d`/`g` mixed matrices stay in [`Self::setup`]: the constraint
+    /// `∇·u = 0` is ρ-independent.
+    fn assemble_operators(&mut self, dt: f64) {
+        self.mv = self.disc.assemble_mass_velocity();
+        self.sp = self.disc.assemble_pressure_laplace();
 
         // `SpInvPC`: the BoomerAMG analogue, built once for the constant `Sp`
         // (MFEM builds `HypreBoomerAMG` on the LOR/assembled matrix in Setup).
@@ -813,15 +849,42 @@ impl<D: NavierDiscretization> NavierSolver<D> {
         self.mv_diag = diagonal(&self.mv);
         let h = self.disc.assemble_helmholtz(1.0 / dt, self.kin_vis);
         self.h_diag = diagonal(&h);
+    }
 
-        // "If the initial condition was set, it has to be aligned with
-        // dependent Vectors and GridFunctions": un_next = un.
-        self.vel.un_next.copy_from_slice(&self.vel.un);
-
-        // Set initial time step in the history array.
-        self.dthist = [dt, 0.0, 0.0];
-
-        self.rt_setup = t_start.elapsed().as_secs_f64();
+    /// Mid-run refresh of the `Setup`-time operator block WITHOUT touching
+    /// the time-integration history (round-153 extension; the C++
+    /// `NavierSolver` has no such hook).
+    ///
+    /// Reassembles exactly the matrices and preconditioner diagonals of
+    /// [`Self::assemble_operators`]: `mv` (the momentum mass matrix — e.g.
+    /// the two-phase `M_ρ = ∫ρ(φ)u·v`), `sp` (the pressure laplacian — e.g.
+    /// `L_{1/ρ} = ∫(1/ρ(φ))∇p·∇q`), `mv_diag`, `h_diag` (with the `1/dt`
+    /// snapshots convention of `Setup`) and `sp_amg` when
+    /// [`NavierConfig::pressure_amg`] is set.  Everything else is left
+    /// bit-untouched: `dthist` and the velocity history
+    /// (`un`/`un_next`/`unm1`/`unm2`), the pressure state (`pn`, `pnm1`,
+    /// `pnm2`), the `d`/`g` mixed matrices (ρ-independent — the constraint
+    /// `∇·u = 0` knows no density), the iteration counters and the current
+    /// vorticity.
+    ///
+    /// Calling [`Self::setup`] mid-run instead would reset the BDF history
+    /// (`dthist = [dt, 0, 0]`, dropped to BDF1) and overwrite `un_next` —
+    /// this hook is the supported refresh for discretizations whose
+    /// mass/pressure coefficients move with a transported field (the
+    /// pro-fluid `TwoPhaseFlowDisc` level-set wrapper).  With
+    /// constant-coefficient discretizations and a constant `dt` the
+    /// reassembly reproduces exactly the matrices `Setup` produced, so a run
+    /// that calls the hook every step is bit-identical to one that never
+    /// calls it (with a VARYING `dt` the refreshed `h_diag` legitimately
+    /// tracks the new step size while a never-hooked run keeps the `Setup`
+    /// snapshot — a preconditioner difference at the `H`-solve tolerance,
+    /// no history state is affected either way).
+    ///
+    /// `dt` enters `h_diag` through the same `1/dt` convention `Setup`
+    /// uses; the per-step Helmholtz MATRIX is reassembled inside
+    /// [`Self::step`] with the current `bd0/dt` regardless.
+    pub fn reassemble_operators(&mut self, dt: f64) {
+        self.assemble_operators(dt);
     }
 
     /// MFEM `NavierSolver::UpdateTimestepHistory(dt)`.
