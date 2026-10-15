@@ -200,27 +200,30 @@ impl MixedHyperelasticityForm {
                 for k in 0..n_dp { pres += pe[k] * phi_p[k]; }
 
                 // Momentum integrand, MFEM IncompressibleNeoHookeanIntegrator::
-                // AssembleElementVector (nonlininteg.cpp:608-616):
-                // P = dJ·(μ·F − p·F⁻ᵀ), then × w. The dJ belongs to the form —
-                // dropping it agrees with C++ only at u=0 (dJ=1) and diverges on
-                // every loaded Newton step (rr148: ex19 residual/Jacobian pair
-                // was internally consistent but solved a different equation).
+                // AssembleElementVector (nonlininteg.cpp:608-613):
+                //   P = μ·dJ·F + (−p·dJ)·F⁻ᵀ;  P *= ip.weight*Tr.Weight();
+                //   AddMultABt(DS_u, P, PMatO_u)
+                // The `w` scaling happens **before** the mat-vec (the old form
+                // applied it to the already-summed row), and AddMultABt adds one
+                // `+=` per column `l` straight into the element vector — both
+                // matter for the rounding sequence (rr157 lane2, source (3)).
                 let mut P = DMatrix::<f64>::zeros(self.dim, self.dim);
                 for i in 0..self.dim {
                     for j in 0..self.dim {
-                        P[(i, j)] = self.mu * dJ * F[(i, j)] - pres * dJ * FT[(i, j)];
+                        P[(i, j)] =
+                            (self.mu * dJ * F[(i, j)] - pres * dJ * FT[(i, j)]) * w;
                     }
                 }
 
-                // R_u: P : ∇v
-                for a in 0..n_du {
+                // R_u: MFEM `AddMultABt(DS_u, P, PMatO_u)` — accumulate
+                // `DS_u(a,l)·P(i,l)` per column `l` (ascending), exactly as the
+                // reference kernel does.
+                for l in 0..self.dim {
                     for i in 0..self.dim {
-                        let row = a * self.dim + i;
-                        let mut s = 0.0;
-                        for j in 0..self.dim {
-                            s += P[(i, j)] * gp_u[a * self.dim + j];
+                        let p_il = P[(i, l)];
+                        for a in 0..n_du {
+                            fu_e[a * self.dim + i] += gp_u[a * self.dim + l] * p_il;
                         }
-                        fu_e[row] += w * s;
                     }
                 }
 
@@ -284,10 +287,10 @@ impl MixedHyperelasticityForm {
 
                 let (det_j, ji) = geometry_jacobian(&*self.mesh, e as u32, xi, self.dim);
                 xform_grads(&ji, &gr_u, &mut gp_u, n_du, self.dim);
-                // D696 batch 4: SIGNED — `ip.weight * Ttr.Weight()`
-                // (nonlininteg.cpp:420/461/498 class); bitwise |det| on
-                // valid meshes.
-                let w = q.weights[qi] * det_j;
+                // Quadrature weight and the geometric factor stay **separate**
+                // below: MFEM's Jacobian closes every term with the tail chain
+                // `* ip.weight * Tr.Weight()` (two roundings), not with a
+                // pre-multiplied `w` (rr157 lane2, source (3)).
 
                 let mut F = DMatrix::<f64>::identity(self.dim, self.dim);
                 for k in 0..n_du {
@@ -304,60 +307,70 @@ impl MixedHyperelasticityForm {
                 for k in 0..n_dp { pres += pe[k] * phi_p[k]; }
 
                 // K_uu: MFEM IncompressibleNeoHookeanIntegrator::AssembleElementGrad
-                // (nonlininteg.cpp:646-704) — three terms per qp, all ×dJ·w,
-                // nested n-outer/l-inner exactly as C++ for fp-order parity:
-                //   T1  dJ·(μF − pF⁻ᵀ)(i,l)·F⁻ᵀ(j,n)·DS_a(l)·DS_b(n)·w
-                //   T2  dJ·μ·DS_a(l)·DS_b(n)·w                  (i==j && n==l)
-                //   T3  dJ·p·F⁻ᵀ(i,n)·F⁻ᵀ(j,l)·DS_a(l)·DS_b(n)·w
+                // (nonlininteg.cpp:673-712) — three terms per qp, each closed by
+                // the **tail chain** `* ip.weight * Tr.Weight()` (two separate
+                // roundings, not a pre-multiplied `w`), accumulated with one
+                // `+=` per (n,l) straight into the element matrix (n-outer /
+                // l-inner exactly as C++):
+                //   T1  dJ·(μF − pF⁻ᵀ)(i,l)·F⁻ᵀ(j,n)·DS_a(l)·DS_b(n)·ip.weight·Tr.Weight()
+                //   T2  dJ·μ·DS_a(l)·DS_b(n)·ip.weight·Tr.Weight()   (i==j && n==l)
+                //   T3  dJ·p·F⁻ᵀ(i,n)·F⁻ᵀ(j,l)·DS_a(l)·DS_b(n)·ip.weight·Tr.Weight()
                 // (T1 was missing entirely and T2/T3 lacked dJ — the rr127
                 // "solver structure debt" root cause, adjudicated rr148.)
+                let wq = q.weights[qi];
                 for a in 0..n_du {
                     for i in 0..self.dim {
                         let row = a * self.dim + i;
                         for b in 0..n_du {
                             for j in 0..self.dim {
                                 let col = b * self.dim + j;
-                                let mut v = 0.0;
                                 for n in 0..self.dim {
                                     for l in 0..self.dim {
-                                        v += dJ
+                                        kuu[row * n_vd + col] += dJ
                                             * (self.mu * F[(i, l)] - pres * FT[(i, l)])
                                             * FT[(j, n)]
                                             * gp_u[a * self.dim + l]
                                             * gp_u[b * self.dim + n]
-                                            * w;
+                                            * wq
+                                            * det_j;
                                         if i == j && n == l {
-                                            v += dJ
+                                            kuu[row * n_vd + col] += dJ
                                                 * self.mu
                                                 * gp_u[a * self.dim + l]
                                                 * gp_u[b * self.dim + n]
-                                                * w;
+                                                * wq
+                                                * det_j;
                                         }
-                                        v += dJ
+                                        kuu[row * n_vd + col] += dJ
                                             * pres
                                             * FT[(i, n)]
                                             * FT[(j, l)]
                                             * gp_u[a * self.dim + l]
                                             * gp_u[b * self.dim + n]
-                                            * w;
+                                            * wq
+                                            * det_j;
                                     }
                                 }
-                                kuu[row * n_vd + col] += v;
                             }
                         }
                     }
                 }
 
-                // K_up / K_pu: MFEM coupling blocks (nonlininteg.cpp:708-722) —
-                // one per-l accumulated quantity X = dJ·F⁻ᵀ(j,l)·DS_b(l)·φ_m·w,
-                // added to (1,0) and subtracted into (0,1). (The old K_up dropped
-                // the dJ factor while K_pu had it.)
+                // K_up / K_pu: MFEM coupling blocks (nonlininteg.cpp:715-731) —
+                // one per-l accumulated quantity
+                // X = dJ·F⁻ᵀ(j,l)·DS_b(l)·φ_m·ip.weight·Tr.Weight(), added to
+                // (1,0) and subtracted into (0,1).
                 for m in 0..n_dp {
                     for b in 0..n_du {
                         for j in 0..self.dim {
                             let col = b * self.dim + j;
                             for l in 0..self.dim {
-                                let x = dJ * FT[(j, l)] * gp_u[b * self.dim + l] * phi_p[m] * w;
+                                let x = dJ
+                                    * FT[(j, l)]
+                                    * gp_u[b * self.dim + l]
+                                    * phi_p[m]
+                                    * wq
+                                    * det_j;
                                 kpu[m * n_vd + col] += x;
                                 kup[col * n_dp + m] -= x;
                             }

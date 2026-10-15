@@ -20,7 +20,7 @@
 
 use fem_assembly::physics::mixed_hyperelasticity::MixedHyperelasticityForm;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
-use fem_linalg::{CooMatrix, CsrMatrix, SolverConfig};
+use fem_linalg::{BlockMatrix, CooMatrix, CsrMatrix, SolverConfig};
 use fem_solver::block_operator::{
     mfem_gmres, mfem_gmres_monitored, IterativeSolverMonitor, MfemBlockOperator, MfemGmresConfig,
 };
@@ -28,6 +28,66 @@ use fem_solver::smoother::{GsSmoother, GsType};
 use fem_solver::{fmt_g, solve_pcg_gssmoother};
 use fem_mesh::{geometry_jacobian, refine_uniform, MeshTopology};
 use fem_space::{constraints::boundary_dofs, fe_space::FESpace, H1Space, VectorH1Space};
+
+/// MFEM ex19 numbers the displacement space with `Ordering::byVDIM`
+/// (`ex19.cpp`: `FiniteElementSpace R_space(mesh, &quad_coll, dim,
+/// Ordering::byVDIM)`), whose true-DOF index is `dim·s + c` for scalar DOF `s`
+/// and component `c`.  `VectorH1Space` numbers its DOFs component-major
+/// (`c·ns + s`), so the two differ by this fixed permutation.
+///
+/// Re-ordering the assembled system into MFEM's indexing puts every Krylov dot
+/// product, Gauss-Seidel sweep and residual norm in the reference summation
+/// order.  Measured on the Newton-0 anchor: `‖z_u‖` moves from `2.3164065128747025`
+/// (blocked, 5e-11 off MFEM) to `2.3164065129917222` (byVDIM, ~1 ulp off MFEM's
+/// `2.3164065129917213`).  (Library follow-up: `VectorH1Space` should expose the
+/// ordering directly — see the rr157 lane2 report.)
+fn byvdim_perm(ns: usize, dim: usize) -> Vec<usize> {
+    let mut p = vec![0usize; ns * dim];
+    for s in 0..ns {
+        for c in 0..dim {
+            p[c * ns + s] = dim * s + c;
+        }
+    }
+    p
+}
+
+/// `A'[pr[i]][pc[j]] = A[i][j]` for a CSR matrix.
+fn permute_csr(
+    a: &CsrMatrix<f64>,
+    pr: &[usize],
+    pc: &[usize],
+    nrow: usize,
+    ncol: usize,
+) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::<f64>::new(nrow, ncol);
+    for i in 0..a.nrows {
+        for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+            coo.add(pr[i], pc[a.col_idx[k] as usize], a.values[k]);
+        }
+    }
+    coo.into_csr()
+}
+
+/// Re-index the `[K_uu K_up; K_pu K_pp]` block matrix into MFEM's byVDIM
+/// ordering (the pressure block is scalar and keeps its own ordering).
+fn permute_block_matrix(jac: &BlockMatrix, perm: &[usize], nu: usize, np: usize) -> BlockMatrix {
+    let ident: Vec<usize> = (0..np).collect();
+    let mut bm = BlockMatrix::new_square(vec![nu, np]);
+    if let Some(k) = jac.get(0, 0) {
+        bm.set(0, 0, permute_csr(k, perm, perm, nu, nu));
+    }
+    if let Some(k) = jac.get(0, 1) {
+        bm.set(0, 1, permute_csr(k, perm, &ident, nu, np));
+    }
+    if let Some(k) = jac.get(1, 0) {
+        bm.set(1, 0, permute_csr(k, &ident, perm, np, nu));
+    }
+    if let Some(k) = jac.get(1, 1) {
+        bm.set(1, 1, permute_csr(k, &ident, &ident, np, np));
+    }
+    bm
+}
+
 
 /// Euclidean norm of a slice.
 fn nr(v: &[f64]) -> f64 {
@@ -246,6 +306,17 @@ fn main() {
     let nu = u_space.n_dofs();
     let np = p_space.n_dofs();
     let ns = u_space.n_scalar_dofs(); // scalar DOFs per component
+    // MFEM's byVDIM displacement indexing (see `byvdim_perm`): every assembled
+    // vector/matrix and every norm below is expressed in this order.
+    let perm = byvdim_perm(ns, dim);
+    let residual_byvdim = |ru: &[f64], rp: &[f64]| -> Vec<f64> {
+        let mut v = vec![0.0_f64; nu + np];
+        for i in 0..nu {
+            v[perm[i]] = ru[i];
+        }
+        v[nu..].copy_from_slice(rp);
+        v
+    };
     println!("***********************************************************");
     println!("dim(u) = {nu}");
     println!("dim(p) = {np}");
@@ -356,7 +427,7 @@ fn main() {
     let mut newton_monitor = GeneralResidualMonitor::new("Newton", 1);
     let mut j_monitor = GeneralResidualMonitor::new("  GMRES", 3);
 
-    let mut norm = nr(&[ru.as_slice(), rp.as_slice()].concat());
+    let mut norm = nr(&residual_byvdim(&ru, &rp));
     let norm_goal = (args.rel_tol * norm).max(args.abs_tol);
 
     let mut converged = false;
@@ -378,6 +449,9 @@ fn main() {
 
         // grad = &oper->GetGradient(x); prec->SetOperator(*grad).
         let (_sizes, jac) = form.jacobian_blocks(&u, &p);
+        // Re-order into MFEM's byVDIM indexing (same matrix, reference
+        // summation order for the preconditioner and Krylov sweeps).
+        let jac = permute_block_matrix(&jac, &perm, nu, np);
         let bop = MfemBlockOperator::new(&jac);
         let kuu = jac.get(0, 0).expect("Jacobian block (0,0)");
         let kup = jac.get(0, 1).expect("Jacobian block (0,1)");
@@ -392,9 +466,7 @@ fn main() {
 
         // c = J⁻¹ r — left-preconditioned GMRES, `iterative_mode = false`
         // (c starts from zero and b = r, not −r).
-        let mut b = vec![0.0_f64; nu + np];
-        b[..nu].copy_from_slice(&ru);
-        b[nu..].copy_from_slice(&rp);
+        let b = residual_byvdim(&ru, &rp);
         let mut c = vec![0.0_f64; nu + np];
         let _ = mfem_gmres_monitored(
             &bop,
@@ -411,14 +483,14 @@ fn main() {
         // every Krylov vector vanishes there — hence the essential values
         // survive without re-application, exactly as in C++.
         for i in 0..nu {
-            u[i] -= c[i];
+            u[i] -= c[perm[i]];
         }
         for i in 0..np {
             p[i] -= c[nu + i];
         }
 
         form.residual(&u, &p, &mut ru, &mut rp);
-        norm = nr(&[ru.as_slice(), rp.as_slice()].concat());
+        norm = nr(&residual_byvdim(&ru, &rp));
         it += 1;
     }
     // MFEM end-of-`Mult`: `Monitor(final_iter, final_norm, r, x, true)` —
@@ -829,6 +901,36 @@ mod tests {
                 "2.31641",
                 "Newton-0 ||M r|| anchor with MFEM-faithful K_uu"
             );
+
+            // ── (4) dof-layout pin (rr157 lane2) ─────────────────────────────
+            // MFEM ex19 numbers the displacement space `Ordering::byVDIM`.
+            // Re-ordering the assembled system into that indexing puts every
+            // Gauss-Seidel sweep / Krylov dot product in MFEM's summation order
+            // and closes the `‖z_u‖` gap from 5e-11 (blocked) to ~1 ulp: the
+            // oracle's full-precision value is `2.3164065129917213`.
+            {
+                let perm = byvdim_perm(ns, dim);
+                let ident: Vec<usize> = (0..np).collect();
+                let kuu_p = permute_csr(kuu, &perm, &perm, nu, nu);
+                let kup_p = permute_csr(kup, &perm, &ident, nu, np);
+                let mut b_p = vec![0.0_f64; nu + np];
+                for i in 0..nu {
+                    b_p[perm[i]] = b[i];
+                }
+                b_p[nu..].copy_from_slice(&b[nu..]);
+                let stiff_p = GsSmoother::new(&kuu_p, GsType::Symmetric, 1);
+                let mut z_p = vec![0.0_f64; nu + np];
+                apply_jacobian_preconditioner(
+                    &b_p, &mut z_p, &kuu_p, &kup_p, &p_mass, &stiff_p, 1e-5, nu, np, &s_cfg,
+                    stiff_cfg,
+                );
+                let zu = nr(&z_p[..nu]);
+                println!("[byvdim] ||z_u||    = {zu:?}  (MFEM 2.3164065129917213)");
+                assert!(
+                    (zu - 2.3164065129917213).abs() < 1e-13,
+                    "byVDIM Newton-0 ||z_u|| = {zu:?}, MFEM = 2.3164065129917213"
+                );
+            }
         }
     }
 }

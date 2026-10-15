@@ -18,7 +18,7 @@
 //!
 //! DOF count: `(p+1) × (p+1)(p+2)/2`.
 
-use crate::lagrange::factory::{dlag1d_on, lag1d_on, H1TriPk};
+use crate::lagrange::factory::H1TriPk;
 use crate::quadrature::prism_rule;
 use crate::reference::{QuadratureRule, ReferenceElement};
 
@@ -314,6 +314,11 @@ pub struct PrismPk {
     /// Closed Gauss-Lobatto points on [0,1], ascending (`cp[0] = 0`,
     /// `cp[p] = 1`) — MFEM `Poly_1D::ClosedPoints(p)`.
     cp: Vec<f64>,
+    /// Barycentric weights of `cp` in MFEM `Poly_1D::Basis::Basis`'s
+    /// accumulation order ([`crate::gll_basis::bary_weights`]) — the segment
+    /// factor is evaluated through MFEM's `Poly_1D::Basis::Eval` (rr157; see
+    /// [`PrismPk::seg_vals`]).
+    sw: Vec<f64>,
 }
 
 impl PrismPk {
@@ -323,7 +328,41 @@ impl PrismPk {
         let n_tri = tri.n_dofs();
         let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
         let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
-        Self { order: p, tri, n_tri, cp }
+        let sw = crate::gll_basis::bary_weights(&cp);
+        Self { order: p, tri, n_tri, cp, sw }
+    }
+
+    /// Values of the segment factor `σ_k(ξ)` — MFEM `H1_WedgeElement::CalcShape`
+    /// calls `SegmentFE.CalcShape` (`H1_SegmentElement::CalcShape`), which is
+    /// `Poly_1D::Basis::Eval(y, u)`: the **value-only** barycentric overload
+    /// with the stable-centre split (`crate::gll_basis::bary_val_into`).
+    ///
+    /// rr157: this replaced the naive product `Π_{m≠k}(ξ−cp_m)/(cp_k−cp_m)`.
+    /// The two are the same polynomial but round differently — measured against
+    /// MFEM 4.10 `H1_SegmentElement(p)` on 8 points (probe
+    /// `D:/fem-pro-targets/rr157-lane3/probe/qp_probe.cpp`): p=2 22/24 → 24/24
+    /// bit-exact (worst 1 ulp → 0), p=3 15/32 → 32/32 (worst 2 ulp → 0); the
+    /// gradient is worse (p=2 15/24 → 24/24, worst 2 ulp → 0; p=3 11/32 → 32/32,
+    /// worst 4 ulp → 0).
+    ///
+    /// Slot note: `cp` is ascending and `PrismPk`'s segment slots follow it, so
+    /// factor `k` is `cp[k]` — no permutation.  (MFEM's `H1_SegmentElement`
+    /// *slot* order is `[cp0, cp_p, cp1..]`; the layer↔H1-slot permutation is
+    /// applied one level up by [`h1_prism_slots`]/`seg_node_layer`.)
+    fn seg_vals(&self, x: f64, out: &mut [f64]) {
+        crate::gll_basis::bary_val_into(&self.cp, &self.sw, x, out);
+    }
+
+    /// Values **and** derivatives of the segment factor — MFEM's
+    /// `H1_WedgeElement::CalcDShape` calls both `SegmentFE.CalcShape`
+    /// (value-only, feeding the `∂x`/`∂y` components) *and*
+    /// `SegmentFE.CalcDShape` (value+derivative overload, feeding `∂z`).  The
+    /// two overloads' values differ by 1 ulp, so the derivative must come from
+    /// [`crate::gll_basis::bary_val_der_into`] and the values from
+    /// [`PrismPk::seg_vals`]; `scratch` absorbs the derivative overload's
+    /// (discarded) values.
+    fn seg_vals_der(&self, x: f64, scratch: &mut [f64], d: &mut [f64]) {
+        crate::gll_basis::bary_val_der_into(&self.cp, &self.sw, x, scratch, d);
     }
 
     fn dof_index(&self, k: usize, tri_dof: usize) -> usize {
@@ -332,14 +371,14 @@ impl PrismPk {
 
     /// The dof sitting exactly at `xi` (bit-identical coordinates), if any.
     ///
-    /// A nodal basis is δ at its own nodes; the 1-D factor (`lag1d_on`)
-    /// returns that exactly, but the triangle factor's Vandermonde-inverse
-    /// evaluation carries `O(1e-14)` noise *at the nodes themselves* (`p = 4`
-    /// monomial Vandermonde), which fem-io's prism `nodes` writer — whose
-    /// interpolation matrix is the identity once the geometry lattice matches
-    /// (D164) — would multiply through into every written value.  Callers that
-    /// evaluate at a dof's own reference point (the writer, and any consumer
-    /// passing stored `dof_coords()` back in) get the exact δ instead.
+    /// A nodal basis is δ at its own nodes; the 1-D factor (the barycentric
+    /// `Poly_1D::Basis::Eval`) returns that exactly, but the triangle factor's
+    /// Vandermonde-inverse evaluation carries `O(1e-14)` noise *at the nodes
+    /// themselves* (`p = 4` monomial Vandermonde), which fem-io's prism `nodes`
+    /// writer — whose interpolation matrix is the identity once the geometry
+    /// lattice matches (D164) — would multiply through into every written value.
+    /// Callers that evaluate at a dof's own reference point (the writer, and any
+    /// consumer passing stored `dof_coords()` back in) get the exact δ instead.
     fn node_at(&self, xi: &[f64]) -> Option<usize> {
         let k = self.cp.iter().position(|&c| c == xi[0])?;
         let tri = self.tri.dof_coords();
@@ -374,7 +413,7 @@ impl ReferenceElement for PrismPk {
         let mut t_vals = vec![0.0_f64; self.n_tri];
         self.tri.eval_basis(&xi[1..3], &mut t_vals);
         let mut s_vals = vec![0.0_f64; self.order + 1];
-        lag1d_on(&self.cp, xi[0], &mut s_vals);
+        self.seg_vals(xi[0], &mut s_vals);
         for k in 0..=self.order {
             let sv = s_vals[k];
             for t in 0..self.n_tri {
@@ -389,9 +428,13 @@ impl ReferenceElement for PrismPk {
         self.tri.eval_basis(&xi[1..3], &mut t_vals);
         self.tri.eval_grad_basis(&xi[1..3], &mut t_grads);
         let mut s_vals = vec![0.0_f64; self.order + 1];
+        let mut s_scratch = vec![0.0_f64; self.order + 1];
         let mut ds_vals = vec![0.0_f64; self.order + 1];
-        lag1d_on(&self.cp, xi[0], &mut s_vals);
-        dlag1d_on(&self.cp, xi[0], &mut ds_vals);
+        // `s_vals` from the value-only overload (MFEM's `SegmentFE.CalcShape`
+        // inside `CalcDShape`), `ds_vals` from the value+derivative overload
+        // (`SegmentFE.CalcDShape`).
+        self.seg_vals(xi[0], &mut s_vals);
+        self.seg_vals_der(xi[0], &mut s_scratch, &mut ds_vals);
         // `∂ξ` hits only the segment factor; `∂η, ∂ζ` only the triangle factor.
         for k in 0..=self.order {
             for t in 0..self.n_tri {
@@ -494,6 +537,281 @@ mod tests {
             let perm = fe.layer_perm();
             for (m, &src) in perm.iter().enumerate() {
                 assert!((vals[m] - layer_vals[src]).abs() < 1e-13);
+            }
+        }
+    }
+
+    /// The 8 fixed 1-D evaluation points of the rr157 oracle probe
+    /// (`D:/fem-pro-targets/rr157-lane3/probe/qp_probe.cpp`), in ascending
+    /// `cp` order of the 1-D segment factor.
+    const P1_PIN: [f64; 8] = [
+        0.0,
+        1.0,
+        0.5,
+        0.2763932022500210,
+        0.7236067977499790,
+        0.2113248654051871,
+        0.7886751345948129,
+        0.3333333333333333,
+    ];
+
+    /// rr157: the segment factor `σ_k(ξ)` must be MFEM's `Poly_1D::Basis::Eval`
+    /// barycentric values — bit-for-bit what `H1_WedgeElement::CalcShape`
+    /// consumes through `SegmentFE.CalcShape` (`H1_SegmentElement::CalcShape`,
+    /// the **value-only** overload) and what `CalcDShape` consumes through
+    /// `SegmentFE.CalcDShape` (the **value+derivative** overload).
+    ///
+    /// The values below are MFEM 4.10 `H1_SegmentElement(2)/(3)`'s
+    /// `CalcShape`/`CalcDShape` at [`P1_PIN`], permuted from MFEM's slot order
+    /// `[cp0, cp_p, cp1..cp_{p-1}]` into `PrismPk`'s ascending `cp` order.
+    /// Before the fix (`lag1d_on`, the naive product) the p=2 shape was 22/24
+    /// and the gradient 15/24 bit-exact (worst 2 ulp); p=3 was 15/32 / 11/32
+    /// (worst 2 / 4 ulp).
+    #[test]
+    fn prism_pk_segment_factor_is_mfems_barycentric() {
+        // ── p = 2 ──
+        let fe = PrismPk::new(2);
+        let mut s = vec![0.0_f64; 3];
+        let mut ds = vec![0.0_f64; 3];
+        let mut scratch = vec![0.0_f64; 3];
+        // ξ = point 0
+        fe.seg_vals(P1_PIN[0], &mut s);
+        fe.seg_vals_der(P1_PIN[0], &mut scratch, &mut ds);
+        assert_eq!(s, [1.0, 0.0, -0.0], "p=2 q=0 shape");
+        assert_eq!(ds, [-3.0, 4.0, -1.0], "p=2 q=0 dshape");
+        // ξ = point 1
+        fe.seg_vals(P1_PIN[1], &mut s);
+        fe.seg_vals_der(P1_PIN[1], &mut scratch, &mut ds);
+        assert_eq!(s, [0.0, -0.0, 1.0], "p=2 q=1 shape");
+        assert_eq!(ds, [1.0, -4.0, 3.0], "p=2 q=1 dshape");
+        // ξ = point 2
+        fe.seg_vals(P1_PIN[2], &mut s);
+        fe.seg_vals_der(P1_PIN[2], &mut scratch, &mut ds);
+        assert_eq!(s, [-0.0, 1.0, 0.0], "p=2 q=2 shape");
+        assert_eq!(ds, [-1.0, 0.0, 1.0], "p=2 q=2 dshape");
+        // ξ = point 3
+        fe.seg_vals(P1_PIN[3], &mut s);
+        fe.seg_vals_der(P1_PIN[3], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [0.32360679774997897, 0.7999999999999999, -0.12360679774997897],
+            "p=2 q=3 shape"
+        );
+        assert_eq!(
+            ds,
+            [-1.894427190999916, 1.7888543819998317, 0.10557280900008405],
+            "p=2 q=3 dshape"
+        );
+        // ξ = point 4
+        fe.seg_vals(P1_PIN[4], &mut s);
+        fe.seg_vals_der(P1_PIN[4], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [-0.12360679774997897, 0.7999999999999998, 0.32360679774997914],
+            "p=2 q=4 shape"
+        );
+        assert_eq!(
+            ds,
+            [-0.1055728090000838, -1.7888543819998322, 1.894427190999916],
+            "p=2 q=4 dshape"
+        );
+        // ξ = point 5 (2-pt Gauss, low)
+        fe.seg_vals(P1_PIN[5], &mut s);
+        fe.seg_vals_der(P1_PIN[5], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [0.4553418012614795, 0.6666666666666666, -0.12200846792814621],
+            "p=2 q=5 shape"
+        );
+        assert_eq!(
+            ds,
+            [-2.1547005383792515, 2.3094010767585025, -0.15470053837925146],
+            "p=2 q=5 dshape"
+        );
+        // ξ = point 6 (2-pt Gauss, high)
+        fe.seg_vals(P1_PIN[6], &mut s);
+        fe.seg_vals_der(P1_PIN[6], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [-0.12200846792814621, 0.6666666666666666, 0.4553418012614795],
+            "p=2 q=6 shape"
+        );
+        assert_eq!(
+            ds,
+            [0.15470053837925146, -2.3094010767585025, 2.1547005383792515],
+            "p=2 q=6 dshape"
+        );
+        // ξ = point 7
+        fe.seg_vals(P1_PIN[7], &mut s);
+        fe.seg_vals_der(P1_PIN[7], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [0.22222222222222227, 0.888888888888889, -0.11111111111111112],
+            "p=2 q=7 shape"
+        );
+        assert_eq!(
+            ds,
+            [-1.6666666666666667, 1.3333333333333337, 0.33333333333333326],
+            "p=2 q=7 dshape"
+        );
+        // ── p = 3 ──
+        let fe = PrismPk::new(3);
+        let mut s = vec![0.0_f64; 4];
+        let mut ds = vec![0.0_f64; 4];
+        let mut scratch = vec![0.0_f64; 4];
+        // ξ = point 0
+        fe.seg_vals(P1_PIN[0], &mut s);
+        fe.seg_vals_der(P1_PIN[0], &mut scratch, &mut ds);
+        assert_eq!(s, [1.0, 0.0, -0.0, 0.0], "p=3 q=0 shape");
+        assert_eq!(ds, [-6.0, 8.090169943749475, -3.0901699437494745, 1.0], "p=3 q=0 dshape");
+        // ξ = point 1
+        fe.seg_vals(P1_PIN[1], &mut s);
+        fe.seg_vals_der(P1_PIN[1], &mut scratch, &mut ds);
+        assert_eq!(s, [-0.0, 0.0, -0.0, 1.0], "p=3 q=1 shape");
+        assert_eq!(ds, [-1.0, 3.0901699437494745, -8.090169943749475, 6.0], "p=3 q=1 dshape");
+        // ξ = point 2
+        fe.seg_vals(P1_PIN[2], &mut s);
+        fe.seg_vals_der(P1_PIN[2], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [-0.12499999999999996, 0.6249999999999999, 0.6249999999999999, -0.12499999999999996],
+            "p=3 q=2 shape"
+        );
+        assert_eq!(
+            ds,
+            [0.24999999999999992, -2.7950849718747373, 2.7950849718747373, -0.24999999999999992],
+            "p=3 q=2 dshape"
+        );
+        // ξ = point 3 (GLL-4 interior, low)
+        fe.seg_vals(P1_PIN[3], &mut s);
+        fe.seg_vals_der(P1_PIN[3], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [
+                8.981892944681073e-17,
+                0.9999999999999999,
+                -1.2412670766236363e-16,
+                3.430777821555291e-17
+            ],
+            "p=3 q=3 shape"
+        );
+        assert_eq!(
+            ds,
+            [-1.6180339887498951, 2.2204460492503128e-16, 2.2360679774997894, -0.6180339887498947],
+            "p=3 q=3 dshape"
+        );
+        // ξ = point 4 (GLL-4 interior, high)
+        fe.seg_vals(P1_PIN[4], &mut s);
+        fe.seg_vals_der(P1_PIN[4], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [
+                6.86155564311058e-17,
+                -2.4825341532472726e-16,
+                0.9999999999999999,
+                1.796378588936215e-16
+            ],
+            "p=3 q=4 shape"
+        );
+        assert_eq!(
+            ds,
+            [0.6180339887498946, -2.236067977499789, -1.3322676295501877e-15, 1.6180339887498956],
+            "p=3 q=4 dshape"
+        );
+        // ξ = point 5 (2-pt Gauss, low)
+        fe.seg_vals(P1_PIN[5], &mut s);
+        fe.seg_vals_der(P1_PIN[5], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [
+                0.1314458557658022,
+                0.9545810203065855,
+                -0.12124768697325242,
+                0.035220810900864534
+            ],
+            "p=3 q=5 shape"
+        );
+        assert_eq!(
+            ds,
+            [-2.4433756729740645, 1.4433756729740639, 1.443375672974064, -0.44337567297406427],
+            "p=3 q=5 dshape"
+        );
+        // ξ = point 6 (2-pt Gauss, high)
+        fe.seg_vals(P1_PIN[6], &mut s);
+        fe.seg_vals_der(P1_PIN[6], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [
+                0.03522081090086453,
+                -0.12124768697325239,
+                0.9545810203065856,
+                0.13144585576580217
+            ],
+            "p=3 q=6 shape"
+        );
+        assert_eq!(
+            ds,
+            [0.44337567297406444, -1.4433756729740645, -1.4433756729740637, 2.443375672974064],
+            "p=3 q=6 dshape"
+        );
+        // ξ = point 7
+        fe.seg_vals(P1_PIN[7], &mut s);
+        fe.seg_vals_der(P1_PIN[7], &mut scratch, &mut ds);
+        assert_eq!(
+            s,
+            [
+                -0.07407407407407401,
+                0.9696422180555168,
+                0.1414688930555944,
+                -0.037037037037037
+            ],
+            "p=3 q=7 shape"
+        );
+        assert_eq!(
+            ds,
+            [-1.0000000000000004, -1.0300566479164914, 2.6967233145831586, -0.6666666666666665],
+            "p=3 q=7 dshape"
+        );
+    }
+
+    /// rr157 end-to-end: `PrismPk::eval_basis`/`eval_grad_basis` at the
+    /// triangle vertex `(η, ζ) = (0, 0)` — where `H1TriPk(2)` is *exactly* the
+    /// unit vector `e_0` — so the returned values are the segment factor alone.
+    /// Pinned against the same MFEM `H1_SegmentElement(2)` oracle values as
+    /// [`prism_pk_segment_factor_is_mfems_barycentric`]; this is the public-path
+    /// guard (it fails if `eval_basis`/`eval_grad_basis` stop routing through
+    /// `seg_vals`/`seg_vals_der`).
+    #[test]
+    fn prism_pk_p2_public_path_at_triangle_vertex_is_mfems() {
+        let fe = PrismPk::new(2);
+        let n_tri = fe.n_tri;
+        let mut v = vec![0.0_f64; fe.n_dofs()];
+        let mut g = vec![0.0_f64; fe.n_dofs() * 3];
+        // (η, ζ) = (0, 0) is H1TriPk(2) dof 0's node, so t_vals = e_0 exactly.
+        let want_shape = [
+            [0.4553418012614795, 0.6666666666666666, -0.12200846792814621], // q=5
+            [-0.12200846792814621, 0.6666666666666666, 0.4553418012614795], // q=6
+            [0.22222222222222227, 0.888888888888889, -0.11111111111111112], // q=7
+        ];
+        let want_der = [
+            [-2.1547005383792515, 2.3094010767585025, -0.15470053837925146],
+            [0.15470053837925146, -2.3094010767585025, 2.1547005383792515],
+            [-1.6666666666666667, 1.3333333333333337, 0.33333333333333326],
+        ];
+        for (i, &q) in [5usize, 6, 7].iter().enumerate() {
+            let xi = [P1_PIN[q], 0.0, 0.0];
+            fe.eval_basis(&xi, &mut v);
+            fe.eval_grad_basis(&xi, &mut g);
+            for k in 0..=2 {
+                assert_eq!(
+                    v[k * n_tri], want_shape[i][k],
+                    "public shape, ξ-slot {k} at q={q}"
+                );
+                // ∂ξ of φ_{k,0} = σ'_k · 1 (the segment derivative alone).
+                assert_eq!(
+                    g[(k * n_tri) * 3], want_der[i][k],
+                    "public ∂ξ, ξ-slot {k} at q={q}"
+                );
             }
         }
     }

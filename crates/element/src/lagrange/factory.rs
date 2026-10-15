@@ -434,41 +434,6 @@ pub struct H1TriPk {
     ti: Vec<f64>, // dof×dof row-major: φ_k = Σ_o ti[k·dof+o]·s_o
 }
 
-/// Evaluate the 1-D Lagrange basis on `nodes` at `x`.
-pub(crate) fn lag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
-    let n = nodes.len();
-    for i in 0..n {
-        let mut v = 1.0;
-        for m in 0..n {
-            if m != i {
-                v *= (x - nodes[m]) / (nodes[i] - nodes[m]);
-            }
-        }
-        out[i] = v;
-    }
-}
-
-/// Evaluate the 1-D Lagrange basis derivatives on `nodes` at `x`.
-pub(crate) fn dlag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
-    let n = nodes.len();
-    for i in 0..n {
-        let mut s = 0.0;
-        for j in 0..n {
-            if j == i {
-                continue;
-            }
-            let mut v = 1.0 / (nodes[i] - nodes[j]);
-            for m in 0..n {
-                if m != i && m != j {
-                    v *= (x - nodes[m]) / (nodes[i] - nodes[m]);
-                }
-            }
-            s += v;
-        }
-        out[i] = s;
-    }
-}
-
 impl H1TriPk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "order must be >= 1");
@@ -743,9 +708,11 @@ pub struct H1TetPk {
 struct H1TetPkInner {
     order: usize,
     nodes: Vec<[f64; 3]>,
-    lex: Vec<(usize, usize, usize)>,
-    /// Row-major DOF × DOF: `φ_m = Σ_o ti[m·dof+o]·s_o`.
-    ti: Vec<f64>,
+    /// MFEM `H1_TetrahedronElement`'s Chebyshev-tensor + LU-Vandermonde kernel
+    /// (`lagrange::tet::TetVdm`). The kernel *solves* `T φ = u` through MFEM's
+    /// `LUFactors` rather than multiplying by an explicit inverse, which is what
+    /// makes `CalcShape`/`CalcDShape` bit-identical to MFEM (rr157 lane2).
+    vdm: std::sync::Arc<crate::lagrange::tet::TetVdm>,
 }
 
 /// Chebyshev polynomials `T_0..T_p` evaluated at `2x−1` (MFEM
@@ -820,37 +787,8 @@ fn h1_tet_pk_build_with_points(p: usize, cp: &[f64]) -> H1TetPkInner {
     nodes[2] = [cp[0], cp[p], cp[0]];
     nodes[3] = [cp[0], cp[0], cp[p]];
 
-    // MFEM's basis enumeration: k outer, j middle, i inner.
-    let mut lex = Vec::with_capacity(nodes.len());
-    for k in 0..=p {
-        for j in 0..=(p - k) {
-            for i in 0..=(p - j - k) {
-                lex.push((i, j, k));
-            }
-        }
-    }
-    debug_assert_eq!(lex.len(), nodes.len());
-
-    let n = nodes.len();
-    let mut t = DMatrix::<f64>::zeros(n, n);
-    for (m, node) in nodes.iter().enumerate() {
-        let l = 1.0 - node[0] - node[1] - node[2];
-        let sx = cheb_1d(p, node[0]);
-        let sy = cheb_1d(p, node[1]);
-        let sz = cheb_1d(p, node[2]);
-        let sl = cheb_1d(p, l);
-        for (o, &(i, j, k)) in lex.iter().enumerate() {
-            t[(o, m)] = sx[i] * sy[j] * sz[k] * sl[p - i - j - k];
-        }
-    }
-    let ti_m = t.try_inverse().expect("H1TetPk: singular Vandermonde matrix");
-    let mut ti = vec![0.0; n * n];
-    for m in 0..n {
-        for o in 0..n {
-            ti[m * n + o] = ti_m[(m, o)];
-        }
-    }
-    H1TetPkInner { order: p, nodes, lex, ti }
+    let vdm = crate::lagrange::tet::tet_vdm(p, &nodes);
+    H1TetPkInner { order: p, nodes, vdm }
 }
 
 impl H1TetPk {
@@ -907,55 +845,11 @@ impl ReferenceElement for H1TetPk {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let p = self.inner.order;
-        let n = self.inner.nodes.len();
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let sx = cheb_1d(p, x);
-        let sy = cheb_1d(p, y);
-        let sz = cheb_1d(p, z);
-        let sl = cheb_1d(p, 1.0 - x - y - z);
-        let mut u = vec![0.0; n];
-        for (o, &(i, j, k)) in self.inner.lex.iter().enumerate() {
-            u[o] = sx[i] * sy[j] * sz[k] * sl[p - i - j - k];
-        }
-        for m in 0..n {
-            let mut acc = 0.0;
-            for o in 0..n {
-                acc += self.inner.ti[m * n + o] * u[o];
-            }
-            values[m] = acc;
-        }
+        self.inner.vdm.shape(xi, values);
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let p = self.inner.order;
-        let n = self.inner.nodes.len();
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let (sx, dx) = cheb_1d_d(p, x);
-        let (sy, dy) = cheb_1d_d(p, y);
-        let (sz, dz) = cheb_1d_d(p, z);
-        let (sl, dl) = cheb_1d_d(p, 1.0 - x - y - z);
-        // MFEM `H1_TetrahedronElement::CalcDShape`: the `1-x-y-z` coordinate
-        // contributes `-dshape_l` to every partial derivative.
-        let mut du = vec![0.0_f64; n * 3];
-        for (o, &(i, j, k)) in self.inner.lex.iter().enumerate() {
-            let l = p - i - j - k;
-            du[o * 3] = (dx[i] * sl[l] - sx[i] * dl[l]) * sy[j] * sz[k];
-            du[o * 3 + 1] = (dy[j] * sl[l] - sy[j] * dl[l]) * sx[i] * sz[k];
-            du[o * 3 + 2] = (dz[k] * sl[l] - sz[k] * dl[l]) * sx[i] * sy[j];
-        }
-        for m in 0..n {
-            let (mut gx, mut gy, mut gz) = (0.0, 0.0, 0.0);
-            for o in 0..n {
-                let c = self.inner.ti[m * n + o];
-                gx += c * du[o * 3];
-                gy += c * du[o * 3 + 1];
-                gz += c * du[o * 3 + 2];
-            }
-            grads[m * 3] = gx;
-            grads[m * 3 + 1] = gy;
-            grads[m * 3 + 2] = gz;
-        }
+        self.inner.vdm.grad(xi, grads);
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
@@ -974,14 +868,25 @@ impl ReferenceElement for H1TetPk {
 // ─── TetPk ───────────────────────────────────────────────────────────────────
 
 /// Arbitrary-order Lagrange element on the reference tetrahedron —
-/// `(p+1)(p+2)(p+3)/6` DOFs.
+/// `(p+1)(p+2)(p+3)/6` DOFs, at the **equispaced** integer barycentric nodes
+/// (`i/p` along every edge).
 ///
-/// Uses the direct barycentric Lagrange formula (stable for any order) instead
-/// of a Vandermonde-based coefficient approach.
+/// Shape/gradient evaluation goes through MFEM `H1_TetrahedronElement`'s
+/// Chebyshev-tensor + LU-Vandermonde kernel (`lagrange::tet::TetVdm`) **for
+/// `p ≤ 2`**, where the equispaced nodes *are* MFEM's closed Gauss-Lobatto
+/// points, so the element is then bit-identical to MFEM.
+///
+/// From `p = 3` on this element is a *legacy* equispaced element (MFEM's nodes
+/// are `0.276393…`, and its face/interior slot order differs), so MFEM parity is
+/// not attainable regardless; there the stable barycentric (rising-factorial)
+/// form is kept, because the Chebyshev Vandermonde at equispaced nodes is
+/// ill-conditioned (measured: the order-6 gradient partition-of-unity residual
+/// degrades from ~1e-16 to ~2e-10).
 pub struct TetPk {
     order: usize,
     nodes: Vec<[f64; 3]>,
     ijkl: Vec<(usize, usize, usize, usize)>,
+    vdm: Option<std::sync::Arc<crate::lagrange::tet::TetVdm>>,
 }
 
 impl TetPk {
@@ -997,10 +902,12 @@ impl TetPk {
                 (i, j, k, p - i - j - k)
             })
             .collect();
+        let vdm = (p <= 2).then(|| crate::lagrange::tet::tet_vdm(p, &nodes));
         Self {
             order: p,
             nodes,
             ijkl,
+            vdm,
         }
     }
 }
@@ -1016,6 +923,10 @@ impl ReferenceElement for TetPk {
         (self.order + 1) * (self.order + 2) * (self.order + 3) / 6
     }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        if let Some(vdm) = &self.vdm {
+            vdm.shape(xi, values);
+            return;
+        }
         let p = self.order;
         let pf = p as f64;
         let t0 = pf * xi[0];
@@ -1028,6 +939,10 @@ impl ReferenceElement for TetPk {
         }
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        if let Some(vdm) = &self.vdm {
+            vdm.grad(xi, grads);
+            return;
+        }
         let p = self.order;
         let pf = p as f64;
         let t0 = pf * xi[0];

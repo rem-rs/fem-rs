@@ -5,11 +5,265 @@
 use crate::quadrature::tet_rule;
 use crate::reference::{QuadratureRule, ReferenceElement};
 
+// ─── MFEM H1 tetrahedron evaluation kernel ────────────────────────────────────
+//
+// MFEM's `H1_TetrahedronElement` does **not** evaluate a closed-form nodal
+// basis. It evaluates the hierarchical Chebyshev tensor basis
+//
+//     u_o(ξ) = T_i(x)·T_j(y)·T_k(z)·T_l(1−x−y−z),
+//
+// `o` enumerated with `k` outer, `j` middle, `i` inner and `l = p−i−j−k`
+// (`fe_h1.cpp:768-778`; `Poly_1D::CalcBasis ≡ CalcChebyshev`, `fe_base.hpp:1220`),
+// and maps it to the nodal basis with the inverse of the change-of-basis
+// (Vandermonde) matrix `T(o,m) = u_o(node_m)` — built once and *solved* through
+// `DenseMatrixInverse` (`fe_h1.cpp:754` `Ti.Factor(T)`; `Ti.Mult(u, shape)`).
+//
+// The LU factorisation and forward/back substitution are reproduced verbatim
+// (`linalg/densemat.cpp` `LUFactors::Factor` / `LSolve` / `USolve` and
+// `linalg/kernels.hpp`) because the *rounding sequence*, not just the
+// mathematical result, is what makes `CalcShape`/`CalcDShape` bit-identical to
+// MFEM: an explicit inverse followed by a dense mat-vec lands 1–3 ulp away
+// (measured on the order-7 tetrahedron rule points — see rr157 lane2 report).
+//
+// Both paths compute the unique nodal Lagrange basis at the same nodes, so the
+// functions are mathematically identical to the former closed forms; only the
+// summation order differs.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Chebyshev polynomials `T_0..T_p` evaluated at `2x−1` — MFEM
+/// `Poly_1D::CalcChebyshev` (fe_base.cpp:2376).
+fn cheb(p: usize, x: f64) -> Vec<f64> {
+    let mut u = vec![0.0_f64; p + 1];
+    u[0] = 1.0;
+    if p == 0 {
+        return u;
+    }
+    let z = 2.0 * x - 1.0;
+    u[1] = z;
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+    }
+    u
+}
+
+/// Values and first derivatives of `T_0..T_p` at `2x−1` — MFEM
+/// `Poly_1D::CalcChebyshev(p, x, u, d)`.
+fn cheb_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut u = vec![0.0_f64; p + 1];
+    let mut d = vec![0.0_f64; p + 1];
+    u[0] = 1.0;
+    if p == 0 {
+        return (u, d);
+    }
+    let z = 2.0 * x - 1.0;
+    u[1] = z;
+    d[1] = 2.0;
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+        d[n + 1] = (n as f64 + 1.0) * (z * d[n] / n as f64 + 2.0 * u[n]);
+    }
+    (u, d)
+}
+
+/// `H1_TetrahedronElement`'s Chebyshev-tensor + LU-Vandermonde evaluation kernel
+/// for the nodal set `nodes`, given in the element's own DOF order.
+pub(crate) struct TetVdm {
+    p: usize,
+    n: usize,
+    /// Column-major LU factors of `T`, `lu[col*n + row]` (MFEM `DenseMatrix`
+    /// storage), with `T(o, m) = u_o(nodes[m])`.
+    lu: Vec<f64>,
+    ipiv: Vec<usize>,
+}
+
+impl TetVdm {
+    fn new(p: usize, nodes: &[[f64; 3]]) -> Self {
+        let n = nodes.len();
+        // T(o, m) — MFEM `H1_TetrahedronElement` ctor (fe_h1.cpp:736-752).
+        let mut t = vec![0.0_f64; n * n];
+        for (m, node) in nodes.iter().enumerate() {
+            let l = 1.0 - node[0] - node[1] - node[2];
+            let sx = cheb(p, node[0]);
+            let sy = cheb(p, node[1]);
+            let sz = cheb(p, node[2]);
+            let sl = cheb(p, l);
+            let mut o = 0;
+            for k in 0..=p {
+                for j in 0..=(p - k) {
+                    for i in 0..=(p - j - k) {
+                        t[m * n + o] = sx[i] * sy[j] * sz[k] * sl[p - i - j - k];
+                        o += 1;
+                    }
+                }
+            }
+        }
+        let mut ipiv = vec![0usize; n];
+        Self::lu_factor(&mut t, n, &mut ipiv);
+        Self { p, n, lu: t, ipiv }
+    }
+
+    /// MFEM `LUFactors::Factor` (densemat.cpp:3415) — partial pivoting,
+    /// column-major storage.
+    fn lu_factor(a: &mut [f64], m: usize, ipiv: &mut [usize]) {
+        for i in 0..m {
+            let mut piv = i;
+            let mut amax = a[piv + i * m].abs();
+            for j in (i + 1)..m {
+                let b = a[j + i * m].abs();
+                if b > amax {
+                    amax = b;
+                    piv = j;
+                }
+            }
+            ipiv[i] = piv;
+            if piv != i {
+                for j in 0..m {
+                    a.swap(i + j * m, piv + j * m);
+                }
+            }
+            assert!(
+                a[i + i * m] != 0.0,
+                "TetVdm: singular Chebyshev Vandermonde matrix"
+            );
+            let inv = 1.0 / a[i + i * m];
+            for j in (i + 1)..m {
+                a[j + i * m] *= inv;
+            }
+            for k in (i + 1)..m {
+                let a_ik = a[i + k * m];
+                for j in (i + 1)..m {
+                    a[j + k * m] -= a_ik * a[j + i * m];
+                }
+            }
+        }
+    }
+
+    /// MFEM `LUFactors::Solve` = `kernels::LSolve` then `kernels::USolve`
+    /// (kernels.hpp:1760/1785).
+    fn lu_solve(&self, x: &mut [f64]) {
+        let (m, a, ipiv) = (self.n, self.lu.as_slice(), self.ipiv.as_slice());
+        for i in 0..m {
+            x.swap(i, ipiv[i]);
+        }
+        for j in 0..m {
+            let xj = x[j];
+            for i in (j + 1)..m {
+                x[i] -= a[i + j * m] * xj;
+            }
+        }
+        for j in (0..m).rev() {
+            x[j] /= a[j + j * m];
+            let xj = x[j];
+            for i in 0..j {
+                x[i] -= a[i + j * m] * xj;
+            }
+        }
+    }
+
+    /// The Chebyshev tensor values `u_o` at `xi` (MFEM CalcShape's `u` loop).
+    fn modal(&self, xi: &[f64]) -> Vec<f64> {
+        let p = self.p;
+        let sx = cheb(p, xi[0]);
+        let sy = cheb(p, xi[1]);
+        let sz = cheb(p, xi[2]);
+        let sl = cheb(p, 1.0 - xi[0] - xi[1] - xi[2]);
+        let mut u = vec![0.0_f64; self.n];
+        let mut o = 0;
+        for k in 0..=p {
+            for j in 0..=(p - k) {
+                for i in 0..=(p - j - k) {
+                    u[o] = sx[i] * sy[j] * sz[k] * sl[p - i - j - k];
+                    o += 1;
+                }
+            }
+        }
+        u
+    }
+
+    /// MFEM `H1_TetrahedronElement::CalcShape` (fe_h1.cpp:758).
+    pub(crate) fn shape(&self, xi: &[f64], out: &mut [f64]) {
+        let mut u = self.modal(xi);
+        self.lu_solve(&mut u);
+        out.copy_from_slice(&u);
+    }
+
+    /// MFEM `H1_TetrahedronElement::CalcDShape` (fe_h1.cpp:783).
+    pub(crate) fn grad(&self, xi: &[f64], out: &mut [f64]) {
+        let p = self.p;
+        let (sx, dx) = cheb_d(p, xi[0]);
+        let (sy, dy) = cheb_d(p, xi[1]);
+        let (sz, dz) = cheb_d(p, xi[2]);
+        let (sl, dl) = cheb_d(p, 1.0 - xi[0] - xi[1] - xi[2]);
+        let n = self.n;
+        let mut du = vec![0.0_f64; n * 3];
+        let mut o = 0;
+        for k in 0..=p {
+            for j in 0..=(p - k) {
+                for i in 0..=(p - j - k) {
+                    let l = p - i - j - k;
+                    du[o * 3] = (dx[i] * sl[l] - sx[i] * dl[l]) * sy[j] * sz[k];
+                    du[o * 3 + 1] = (dy[j] * sl[l] - sy[j] * dl[l]) * sx[i] * sz[k];
+                    du[o * 3 + 2] = (dz[k] * sl[l] - sz[k] * dl[l]) * sx[i] * sy[j];
+                    o += 1;
+                }
+            }
+        }
+        // MFEM `Ti.Mult(du, dshape)` solves one column at a time.
+        for d in 0..3 {
+            let mut col = vec![0.0_f64; n];
+            for i in 0..n {
+                col[i] = du[i * 3 + d];
+            }
+            self.lu_solve(&mut col);
+            for i in 0..n {
+                out[i * 3 + d] = col[i];
+            }
+        }
+    }
+}
+
+/// Content-keyed cache of [`TetVdm`] kernels — the LU factorisation is `O(n³)`.
+pub(crate) fn tet_vdm(p: usize, nodes: &[[f64; 3]]) -> Arc<TetVdm> {
+    static CACHE: OnceLock<Mutex<HashMap<Vec<u64>, Arc<TetVdm>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut key = Vec::with_capacity(1 + 3 * nodes.len());
+    key.push(p as u64);
+    for n in nodes {
+        key.push(n[0].to_bits());
+        key.push(n[1].to_bits());
+        key.push(n[2].to_bits());
+    }
+    let mut m = cache.lock().expect("TetVdm cache poisoned");
+    m.entry(key)
+        .or_insert_with(|| Arc::new(TetVdm::new(p, nodes)))
+        .clone()
+}
+
+/// Fetch (once) the kernel for a fixed, compile-time node set.
+macro_rules! tet_vdm_static {
+    ($p:expr, $nodes:expr) => {{
+        static VDM: OnceLock<Arc<TetVdm>> = OnceLock::new();
+        VDM.get_or_init(|| tet_vdm($p, $nodes)).clone()
+    }};
+}
+
 // ─── P1 ───────────────────────────────────────────────────────────────────────
+
+/// Vertex coordinates of the reference tetrahedron, in [`TetP1`] DOF order.
+const TET_P1_NODES: [[f64; 3]; 4] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+];
 
 /// Linear Lagrange element on the reference tetrahedron — 4 DOFs at vertices.
 ///
-/// Basis:
+/// Basis (evaluated through MFEM's Chebyshev-tensor + Vandermonde-LU path, see
+/// the kernel note above; the closed form `1−ξ−η−ζ, ξ, η, ζ` is the same
+/// function):
 /// - φ₀ = 1−ξ−η−ζ  (vertex (0,0,0))
 /// - φ₁ = ξ          (vertex (1,0,0))
 /// - φ₂ = η          (vertex (0,1,0))
@@ -28,31 +282,11 @@ impl ReferenceElement for TetP1 {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        values[0] = 1.0 - x - y - z;
-        values[1] = x;
-        values[2] = y;
-        values[3] = z;
+        tet_vdm_static!(1, &TET_P1_NODES).shape(xi, values);
     }
 
-    fn eval_grad_basis(&self, _xi: &[f64], grads: &mut [f64]) {
-        // row-major [4×3]: grads[i*3 + j]
-        // ∇φ₀ = (-1,-1,-1)
-        grads[0] = -1.0;
-        grads[1] = -1.0;
-        grads[2] = -1.0;
-        // ∇φ₁ = (1,0,0)
-        grads[3] = 1.0;
-        grads[4] = 0.0;
-        grads[5] = 0.0;
-        // ∇φ₂ = (0,1,0)
-        grads[6] = 0.0;
-        grads[7] = 1.0;
-        grads[8] = 0.0;
-        // ∇φ₃ = (0,0,1)
-        grads[9] = 0.0;
-        grads[10] = 0.0;
-        grads[11] = 1.0;
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        tet_vdm_static!(1, &TET_P1_NODES).grad(xi, grads);
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
@@ -88,6 +322,22 @@ impl ReferenceElement for TetP1 {
 /// - 9: edge midpoint (0,1/2,1/2) — φ₉ = 4λ₃λ₄
 pub struct TetP2;
 
+/// [`TetP2`] node coordinates in DOF order (closed Gauss-Lobatto points of
+/// order 2 on `[0,1]` are the vertices and edge midpoints, so these coincide
+/// bit-for-bit with MFEM's `H1_TetrahedronElement(2)` nodes).
+const TET_P2_NODES: [[f64; 3]; 10] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.5, 0.0, 0.0],
+    [0.0, 0.5, 0.0],
+    [0.0, 0.0, 0.5],
+    [0.5, 0.5, 0.0],
+    [0.5, 0.0, 0.5],
+    [0.0, 0.5, 0.5],
+];
+
 impl ReferenceElement for TetP2 {
     fn dim(&self) -> u8 {
         3
@@ -100,80 +350,11 @@ impl ReferenceElement for TetP2 {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let l1 = 1.0 - x - y - z;
-        let l2 = x;
-        let l3 = y;
-        let l4 = z;
-        // Vertex DOFs
-        values[0] = l1 * (2.0 * l1 - 1.0);
-        values[1] = l2 * (2.0 * l2 - 1.0);
-        values[2] = l3 * (2.0 * l3 - 1.0);
-        values[3] = l4 * (2.0 * l4 - 1.0);
-        // Edge DOFs
-        values[4] = 4.0 * l1 * l2;
-        values[5] = 4.0 * l1 * l3;
-        values[6] = 4.0 * l1 * l4;
-        values[7] = 4.0 * l2 * l3;
-        values[8] = 4.0 * l2 * l4;
-        values[9] = 4.0 * l3 * l4;
+        tet_vdm_static!(2, &TET_P2_NODES).shape(xi, values);
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        // grads layout: row-major [10×3], grads[i*3 + j]
-        // ∂λ₁/∂ξ=-1, ∂λ₁/∂η=-1, ∂λ₁/∂ζ=-1
-        // ∂λ₂/∂ξ= 1, ∂λ₂/∂η= 0, ∂λ₂/∂ζ= 0
-        // ∂λ₃/∂ξ= 0, ∂λ₃/∂η= 1, ∂λ₃/∂ζ= 0
-        // ∂λ₄/∂ξ= 0, ∂λ₄/∂η= 0, ∂λ₄/∂ζ= 1
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let l1 = 1.0 - x - y - z;
-        let l2 = x;
-        let l3 = y;
-        let l4 = z;
-        // φ₀ = l1(2l1-1): ∂/∂λ₁ = 4l1-1; all partials = (4l1-1)*(-1)
-        let d0 = 4.0 * l1 - 1.0;
-        grads[0] = -d0;
-        grads[1] = -d0;
-        grads[2] = -d0;
-        // φ₁ = l2(2l2-1): ∂/∂λ₂ = 4l2-1; ξ only
-        let d1 = 4.0 * l2 - 1.0;
-        grads[3] = d1;
-        grads[4] = 0.0;
-        grads[5] = 0.0;
-        // φ₂ = l3(2l3-1): η only
-        let d2 = 4.0 * l3 - 1.0;
-        grads[6] = 0.0;
-        grads[7] = d2;
-        grads[8] = 0.0;
-        // φ₃ = l4(2l4-1): ζ only
-        let d3 = 4.0 * l4 - 1.0;
-        grads[9] = 0.0;
-        grads[10] = 0.0;
-        grads[11] = d3;
-        // φ₄ = 4l1l2: ∂/∂ξ=4(l1-l2), ∂/∂η=-4l2, ∂/∂ζ=-4l2
-        grads[12] = 4.0 * (l1 - l2);
-        grads[13] = -4.0 * l2;
-        grads[14] = -4.0 * l2;
-        // φ₅ = 4l1l3: ∂/∂ξ=-4l3, ∂/∂η=4(l1-l3), ∂/∂ζ=-4l3
-        grads[15] = -4.0 * l3;
-        grads[16] = 4.0 * (l1 - l3);
-        grads[17] = -4.0 * l3;
-        // φ₆ = 4l1l4: ∂/∂ξ=-4l4, ∂/∂η=-4l4, ∂/∂ζ=4(l1-l4)
-        grads[18] = -4.0 * l4;
-        grads[19] = -4.0 * l4;
-        grads[20] = 4.0 * (l1 - l4);
-        // φ₇ = 4l2l3: ∂/∂ξ=4l3, ∂/∂η=4l2, ∂/∂ζ=0
-        grads[21] = 4.0 * l3;
-        grads[22] = 4.0 * l2;
-        grads[23] = 0.0;
-        // φ₈ = 4l2l4: ∂/∂ξ=4l4, ∂/∂η=0, ∂/∂ζ=4l2
-        grads[24] = 4.0 * l4;
-        grads[25] = 0.0;
-        grads[26] = 4.0 * l2;
-        // φ₉ = 4l3l4: ∂/∂ξ=0, ∂/∂η=4l4, ∂/∂ζ=4l3
-        grads[27] = 0.0;
-        grads[28] = 4.0 * l4;
-        grads[29] = 4.0 * l3;
+        tet_vdm_static!(2, &TET_P2_NODES).grad(xi, grads);
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
@@ -181,36 +362,11 @@ impl ReferenceElement for TetP2 {
     }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        let t = 1.0 / 3.0;
-        let t2 = 2.0 / 3.0;
-        vec![
-            vec![0.0, 0.0, 0.0],
-            vec![1.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 1.0],
-            vec![t, 0.0, 0.0],
-            vec![t2, 0.0, 0.0],
-            vec![0.0, t, 0.0],
-            vec![0.0, t2, 0.0],
-            vec![0.0, 0.0, t],
-            vec![0.0, 0.0, t2],
-            vec![t2, t, 0.0],
-            vec![t, t2, 0.0],
-            vec![t2, 0.0, t],
-            vec![t, 0.0, t2],
-            vec![0.0, t2, t],
-            vec![0.0, t, t2],
-            vec![t, t, 0.0],
-            vec![t, 0.0, t],
-            vec![0.0, t, t],
-            vec![t, t, t],
-        ]
+        TET_P2_NODES.iter().map(|c| c.to_vec()).collect()
     }
 }
 
-// ─── Pk (fixed-order) — using rising-factorial basis ─────────────────────────
-
-use std::sync::OnceLock;
+// ─── Pk (fixed-order) ────────────────────────────────────────────────────────
 
 /// Generate IJKL indices for tet order p, in the same order as TetPk factory.
 fn tet_ijkl(p: usize) -> Vec<(usize, usize, usize, usize)> {
