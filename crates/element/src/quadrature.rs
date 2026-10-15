@@ -1713,13 +1713,19 @@ fn build_wv_tet(
         weights.push(w);
     }
 
-    // S31: 4 points per entry — (a,a,a), (b,a,a), (a,b,a), (a,a,b) where b=1-3a
+    // S31: 4 points per entry — MFEM `AddTetPoints4(off, a, w)`
+    // (intrules.hpp:163): `(a,a,a)` then `AddTetPoints3(off+1, a, 1-3a, w)`
+    // = `(a,a,b), (a,b,a), (b,a,a)`.  The emission ORDER matters: it fixes the
+    // quadrature summation order in every tetrahedral assembly, so it must be
+    // bit-identical to MFEM's (rr156 lane4: the previous `(b,a,a), (a,b,a),
+    // (a,a,b)` order was a transcription slip — same point multiset, 3 swapped
+    // pairs against `IntRules.Get(TETRAHEDRON, 7)`).
     for &(a, w) in s31 {
         let b = 1.0 - 3.0 * a;
         points.push(vec![a, a, a]);
-        points.push(vec![b, a, a]);
-        points.push(vec![a, b, a]);
         points.push(vec![a, a, b]);
+        points.push(vec![a, b, a]);
+        points.push(vec![b, a, a]);
         weights.push(w);
         weights.push(w);
         weights.push(w);
@@ -1747,21 +1753,21 @@ fn build_wv_tet(
     // S211: 12 points per entry — permutations of (a,a,bc,cb) where cb=1-2a-bc
     for &(a, bc, w) in s211 {
         let cb = 1.0 - 2.0 * a - bc;
-        // 12 permutations: (a,a,bc,cb) and permutations
-        // The 12 permutations come from:
-        // 3 choices for which coordinate gets 'a' (the other two get bc, cb)
-        // × 2 ways to assign bc/cb to those two
-        // × 2 from the two 'a' positions... actually let me just use the MFEM formula
-        // AddTetPoints12(off, a, bc, w):
+        // MFEM `AddTetPoints12(off, a, bc, w)` (intrules.hpp:171):
         //   AddTetPoints3(off,     a, bc, w):   (a,a,bc), (a,bc,a), (bc,a,a)
         //   AddTetPoints3(off + 3, a, cb, w):   (a,a,cb), (a,cb,a), (cb,a,a)
-        //   AddTetPoints6(off + 6, a, bc, cb, w): all 6 perms of (a,bc,cb)
-        // In Cartesian (x,y,z) where the 4th barycentric coord is 1-x-y-z:
+        //   AddTetPoints6(off + 6, a, bc, cb):  (a,bc,cb), (a,cb,bc),
+        //                                       (bc,cb,a), (bc,a,cb),
+        //                                       (cb,a,bc), (cb,bc,a)
+        // (`AddTetPoints6` emits `(a,b,c),(a,c,b),(b,c,a),(b,a,c),(c,a,b),
+        //  (c,b,a)` — the two `bc`-leading permutations are `(bc,cb,a)` then
+        //  `(bc,a,cb)`.)  Kept in MFEM's exact emission order for the same
+        //  summation-order reason as S31 above.
         for p in [
             [a, a, bc], [a, bc, a], [bc, a, a],
             [a, a, cb], [a, cb, a], [cb, a, a],
-            [a, bc, cb], [a, cb, bc], [bc, a, cb],
-            [bc, cb, a], [cb, a, bc], [cb, bc, a],
+            [a, bc, cb], [a, cb, bc], [bc, cb, a],
+            [bc, a, cb], [cb, a, bc], [cb, bc, a],
         ] {
             points.push(vec![p[0], p[1], p[2]]);
             weights.push(w);
