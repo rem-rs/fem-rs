@@ -184,21 +184,34 @@ const Q2_NODES_HEX: [(f64, f64, f64); 27] = {
     n
 };
 
-/// 1-D quadratic Lagrange basis on the `[0,1]` frame at the nodes
-/// `{0, 1/2, 1}` — the historical `[-1,1]` form `[½x(x−1), 1−x², ½x(x+1)]`
-/// re-expressed directly on `[0,1]` (D721; derivative factor 2 folded in).
-fn hex_q2_1d(u: f64) -> ([f64; 3], [f64; 3]) {
-    let vals = [
-        (2.0 * u - 1.0) * (u - 1.0), // ℓ at 0
-        4.0 * u * (1.0 - u),         // ℓ at 1/2
-        u * (2.0 * u - 1.0),         // ℓ at 1
-    ];
-    let ders = [
-        4.0 * u - 3.0,
-        4.0 - 8.0 * u,
-        4.0 * u - 1.0,
-    ];
-    (vals, ders)
+/// Values of the 1-D Q2 factor — MFEM `Poly_1D::Basis::Eval(y, u)`, the
+/// **value-only** barycentric overload `H1_HexahedronElement::CalcShape`
+/// calls (`fem/fe/fe_h1.cpp:293` → `fe_base.cpp:1875`); nodes and weights are
+/// the shared `[0,1]` GLL-2 tables ([`crate::gll_basis::gll2_vals_01`]).
+///
+/// D-rr155: the previous closed form (`4u(1−u)` for the centre mode, `(2u−1)(u−1)`
+/// / `u(2u−1)` for the endpoints) is the same polynomial but not the same
+/// floating-point expression.  At the 2-point Gauss-Legendre points the ADS
+/// `Pi_rt` blocks sample (`u = fl(1 − (1−1/√3)/2) = 0.7886751345948129`) it
+/// evaluates the centre mode to `0.6666666666666667` where MFEM's barycentric
+/// evaluation gives `0.6666666666666666` — one ulp low, which the tensor
+/// products (`ℓ_{1/2}²`, `ℓ_0·ℓ_{1/2}`, `ℓ_0²`) amplify to 2-ulp matrix
+/// entries (rr154 lane3 root cause; the rr155 `ads_pi_rt_blocks_p2` cube dump
+/// went 36-entries-at-2-ulp → 0 at this change).
+#[inline]
+fn hex_q2_1d_vals(u: f64) -> [f64; 3] {
+    crate::gll_basis::gll2_vals_01(u)
+}
+
+/// Values **and** derivatives of the 1-D Q2 factor — MFEM
+/// `Poly_1D::Basis::Eval(y, u, d)`, the value+derivative barycentric overload
+/// `H1_HexahedronElement::CalcDShape` calls (`fem/fe/fe_base.cpp:1936`).
+/// Its values come from the reciprocal-multiplication form and so differ from
+/// [`hex_q2_1d_vals`] by 1 ulp — `CalcDShape` consumes exactly these, so the
+/// gradient path must take both from here.
+#[inline]
+fn hex_q2_1d_vals_der(u: f64) -> ([f64; 3], [f64; 3]) {
+    crate::gll_basis::gll2_vals_der_01(u)
 }
 
 fn coord_to_q2_idx(c: f64) -> usize {
@@ -224,9 +237,9 @@ impl ReferenceElement for HexQ2 {
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let (lx, _) = hex_q2_1d(x);
-        let (ly, _) = hex_q2_1d(y);
-        let (lz, _) = hex_q2_1d(z);
+        let lx = hex_q2_1d_vals(x);
+        let ly = hex_q2_1d_vals(y);
+        let lz = hex_q2_1d_vals(z);
         for (i, &(xi_i, eta_i, zeta_i)) in Q2_NODES_HEX.iter().enumerate() {
             let ix = coord_to_q2_idx(xi_i);
             let iy = coord_to_q2_idx(eta_i);
@@ -237,9 +250,9 @@ impl ReferenceElement for HexQ2 {
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let (lx, dlx) = hex_q2_1d(x);
-        let (ly, dly) = hex_q2_1d(y);
-        let (lz, dlz) = hex_q2_1d(z);
+        let (lx, dlx) = hex_q2_1d_vals_der(x);
+        let (ly, dly) = hex_q2_1d_vals_der(y);
+        let (lz, dlz) = hex_q2_1d_vals_der(z);
         for (i, &(xi_i, eta_i, zeta_i)) in Q2_NODES_HEX.iter().enumerate() {
             let ix = coord_to_q2_idx(xi_i);
             let iy = coord_to_q2_idx(eta_i);
@@ -358,34 +371,41 @@ const Q3_SLOT_TENSOR: [[u8; 3]; 64] = [
     [1, 1, 2], [2, 1, 2], [1, 2, 2], [2, 2, 2],
 ];
 
-fn hex_q3_lagrange_1d(x: f64, nodes: &[f64; 4]) -> ([f64; 4], [f64; 4]) {
-    let mut vals = [1.0_f64; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            if j != i {
-                vals[i] *= (x - nodes[j]) / (nodes[i] - nodes[j]);
-            }
-        }
-    }
+/// Barycentric weights of [`q3_nodes_1d`] in MFEM `Poly_1D::Basis::Basis`'s
+/// accumulation order ([`crate::gll_basis::bary_weights`]) — computed once
+/// (the inner nodes involve `√(1/5)`, so these are not exact powers of two).
+fn q3_1d_weights() -> &'static [f64; 4] {
+    use std::sync::OnceLock;
+    static W: OnceLock<[f64; 4]> = OnceLock::new();
+    W.get_or_init(|| {
+        let w = crate::gll_basis::bary_weights(&q3_nodes_1d());
+        [w[0], w[1], w[2], w[3]]
+    })
+}
 
-    let mut ders = [0.0_f64; 4];
-    for i in 0..4 {
-        let mut sum = 0.0;
-        for m in 0..4 {
-            if m == i {
-                continue;
-            }
-            let mut term = 1.0 / (nodes[i] - nodes[m]);
-            for j in 0..4 {
-                if j != i && j != m {
-                    term *= (x - nodes[j]) / (nodes[i] - nodes[j]);
-                }
-            }
-            sum += term;
-        }
-        ders[i] = sum;
-    }
-    (vals, ders)
+/// Values of the 1-D Q3 factor — MFEM `Poly_1D::Basis::Eval(y, u)`
+/// (`H1_HexahedronElement::CalcShape`), the value-only barycentric overload.
+///
+/// D-rr155 (same change as [`hex_q2_1d_vals`]): the previous naive product
+/// `Π_{j≠i}(x−x_j)/(x_i−x_j)` is the same polynomial but rounds differently —
+/// up to 2 ulp away from MFEM's barycentric value at the Gauss points (probe
+/// `tmp/rr155/lane2/ulp_siblings.py`: 30 of 60 evaluations off, 8 of them by
+/// 2 ulp), which the tensor products amplify into matrix-entry dust.
+#[inline]
+fn hex_q3_1d_vals(x: f64) -> [f64; 4] {
+    let mut v = [0.0_f64; 4];
+    crate::gll_basis::bary_val_into(&q3_nodes_1d(), q3_1d_weights(), x, &mut v);
+    v
+}
+
+/// Values **and** derivatives of the 1-D Q3 factor — MFEM
+/// `Poly_1D::Basis::Eval(y, u, d)` (`H1_HexahedronElement::CalcDShape`).
+#[inline]
+fn hex_q3_1d_vals_der(x: f64) -> ([f64; 4], [f64; 4]) {
+    let mut v = [0.0_f64; 4];
+    let mut d = [0.0_f64; 4];
+    crate::gll_basis::bary_val_der_into(&q3_nodes_1d(), q3_1d_weights(), x, &mut v, &mut d);
+    (v, d)
 }
 
 impl ReferenceElement for HexQ3 {
@@ -400,10 +420,9 @@ impl ReferenceElement for HexQ3 {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let n1d = q3_nodes_1d();
-        let (lx, _) = hex_q3_lagrange_1d(xi[0], &n1d);
-        let (ly, _) = hex_q3_lagrange_1d(xi[1], &n1d);
-        let (lz, _) = hex_q3_lagrange_1d(xi[2], &n1d);
+        let lx = hex_q3_1d_vals(xi[0]);
+        let ly = hex_q3_1d_vals(xi[1]);
+        let lz = hex_q3_1d_vals(xi[2]);
         for (slot, t) in Q3_SLOT_TENSOR.iter().enumerate() {
             let (ix, iy, iz) = (t[0] as usize, t[1] as usize, t[2] as usize);
             values[slot] = lx[ix] * ly[iy] * lz[iz];
@@ -411,10 +430,9 @@ impl ReferenceElement for HexQ3 {
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let n1d = q3_nodes_1d();
-        let (lx, dlx) = hex_q3_lagrange_1d(xi[0], &n1d);
-        let (ly, dly) = hex_q3_lagrange_1d(xi[1], &n1d);
-        let (lz, dlz) = hex_q3_lagrange_1d(xi[2], &n1d);
+        let (lx, dlx) = hex_q3_1d_vals_der(xi[0]);
+        let (ly, dly) = hex_q3_1d_vals_der(xi[1]);
+        let (lz, dlz) = hex_q3_1d_vals_der(xi[2]);
         for (slot, t) in Q3_SLOT_TENSOR.iter().enumerate() {
             let (ix, iy, iz) = (t[0] as usize, t[1] as usize, t[2] as usize);
             grads[slot * 3] = dlx[ix] * ly[iy] * lz[iz];
@@ -523,6 +541,58 @@ mod tests {
     fn hex_q2_n_dofs_matches_hex_qk() {
         use crate::lagrange::factory::HexQk;
         assert_eq!(HexQ2.n_dofs(), HexQk::new(2).n_dofs());
+    }
+
+    /// rr155 lane2: the shared `[0,1]` GLL-2 weight table must be *exactly*
+    /// what MFEM's `Poly_1D::Basis` accumulation produces for these nodes
+    /// (`{2, −4, 2}` — all powers of two).
+    #[test]
+    fn hex_q2_1d_weights_are_exact() {
+        use crate::gll_basis::{GLL2_NODES_01, GLL2_W_01};
+        assert_eq!(
+            crate::gll_basis::bary_weights(&GLL2_NODES_01),
+            GLL2_W_01.to_vec()
+        );
+        assert_eq!(GLL2_NODES_01, [0.0, 0.5, 1.0]);
+    }
+
+    /// rr155 lane2 pin: at the 2-point Gauss-Legendre points the ADS `Pi_rt`
+    /// blocks sample, the Q2 1-D factor must take **MFEM's barycentric**
+    /// values (`H1_HexahedronElement::CalcShape` → `Poly_1D::Basis::Eval`,
+    /// `fe_base.cpp:1875`), not the older closed form.  The two agree at the
+    /// low node and differ by 1 ulp at the high node (`fl(1−t)`), which the
+    /// tensor products amplify to the 2-ulp entries the rr154 lane3 cube dump
+    /// carried (`rs 0.44444444444444453` vs MFEM `0.4444444444444444`).
+    /// Oracle values below are that dump's (MFEM 4.10 serial,
+    /// `D:/fem-pro-targets/rr154-lane3/rtprobe2/out/hex1_rtpij`).
+    #[test]
+    fn hex_q2_1d_matches_mfem_barycentric_at_gauss_points() {
+        let (gl, _) = crate::quadrature::gauss_legendre_01(2);
+        assert_eq!(gl[0], 0.21132486540518710671);
+        assert_eq!(gl[1], 0.78867513459481286553);
+        assert_eq!(gl[1], 1.0 - gl[0], "the two nodes are complementary");
+        assert_eq!(
+            hex_q2_1d_vals(gl[0]),
+            [0.4553418012614795, 0.6666666666666666, -0.12200846792814621]
+        );
+        let hi = hex_q2_1d_vals(gl[1]);
+        assert_eq!(
+            hi,
+            [-0.12200846792814621, 0.6666666666666666, 0.4553418012614795]
+        );
+        // The three products the cube dump's 2-ulp rows carry, at MFEM's
+        // values (the closed form gave ...53 / ...616 / ...6486).
+        assert_eq!(hi[1] * hi[1], 0.4444444444444444);
+        assert_eq!(hi[0] * hi[1], -0.08133897861876413);
+        assert_eq!(hi[0] * hi[0], 0.014886066246173483);
+        // Element wiring: at (gl_hi, gl_lo, gl_lo) the centre slot 26 is the
+        // product of the three centre modes and slot 0 the three endpoint-0
+        // modes — the products the dump's 2-ulp rows are built from.
+        let lo = hex_q2_1d_vals(gl[0]);
+        let mut phi = vec![0.0; 27];
+        HexQ2.eval_basis(&[gl[1], gl[0], gl[0]], &mut phi);
+        assert_eq!(phi[26], hi[1] * lo[1] * lo[1]);
+        assert_eq!(phi[0], hi[0] * lo[0] * lo[0]);
     }
 
     // ── HexQ3 ─────────────────────────────────────────────────────────────

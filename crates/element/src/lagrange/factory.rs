@@ -1262,68 +1262,14 @@ impl Lagrange1D {
 
 // ─── MFEM barycentric 1-D basis on [0,1] (shared by QuadQk and HexQk) ───────
 
-/// Barycentric weights of the nodes `x` in MFEM's `Poly_1D::Basis::Basis`
-/// accumulation order (`for i { for j < i { xij = x(i)−x(j); w(i) *= xij;
-/// w(j) *= −xij } }` then one reciprocal) — matching that order keeps the
-/// weights bit-identical (a `j != i` full loop permutes the accumulation and
-/// differs by ~1 ulp).
-fn mfem_bary_weights(x: &[f64]) -> Vec<f64> {
-    let n = x.len();
-    let mut w = vec![1.0; n];
-    for i in 0..n {
-        for j in 0..i {
-            let xij = x[i] - x[j];
-            w[i] *= xij;
-            w[j] *= -xij;
-        }
-    }
-    for v in w.iter_mut() {
-        *v = 1.0 / *v;
-    }
-    w
-}
-
-/// MFEM's stable-centre split of `∏(y−x_i)`: advance the "centre" `k` while
-/// `y` lies right of the midpoint of the current node interval, then take the
-/// remaining product on the other side.  Returns `(k, lk, l)` with
-/// `lk = ∏_{i<k}(y−x_i)·∏_{i>k}(y−x_i)` and `l = lk·(y−x_k)`.
-fn mfem_bary_centre(x: &[f64], y: f64) -> (usize, f64, f64) {
-    let p = x.len() - 1;
-    let mut k = 0usize;
-    let mut lk = 1.0;
-    while k < p {
-        if y >= (x[k] + x[k + 1]) / 2.0 {
-            lk *= y - x[k];
-            k += 1;
-        } else {
-            for i in k + 1..=p {
-                lk *= y - x[i];
-            }
-            break;
-        }
-    }
-    let l = lk * (y - x[k]);
-    (k, lk, l)
-}
-
 /// MFEM `Poly_1D::Basis::Eval(y, u)` (the **value-only** overload, used by
 /// `CalcShape`): barycentric Lagrange values with the **division** form
-/// `u(i) = l·w(i)/(y − x(i))`.
+/// `u(i) = l·w(i)/(y − x(i))`.  Thin `Vec` wrapper over
+/// [`crate::gll_basis::bary_val_into`], which carries the algorithm and the
+/// MFEM call-site map.
 pub(crate) fn mfem_bary_val_01(x: &[f64], y: f64) -> Vec<f64> {
-    let p = x.len() - 1;
-    if p == 0 {
-        return vec![1.0];
-    }
-    let w = mfem_bary_weights(x);
-    let (k, lk, l) = mfem_bary_centre(x, y);
-    let mut u = vec![0.0; p + 1];
-    for i in 0..k {
-        u[i] = l * w[i] / (y - x[i]);
-    }
-    u[k] = lk * w[k];
-    for i in k + 1..=p {
-        u[i] = l * w[i] / (y - x[i]);
-    }
+    let mut u = vec![0.0; x.len()];
+    crate::gll_basis::bary_val_into(x, &crate::gll_basis::bary_weights(x), y, &mut u);
     u
 }
 
@@ -1333,34 +1279,9 @@ pub(crate) fn mfem_bary_val_01(x: &[f64], y: f64) -> Vec<f64> {
 /// [`mfem_bary_val_01`], and picking the wrong one breaks bit-identical
 /// assembly.
 pub(crate) fn mfem_bary_1d_01(x: &[f64], y: f64) -> (Vec<f64>, Vec<f64>) {
-    let p = x.len() - 1;
-    if p == 0 {
-        return (vec![1.0], vec![0.0]);
-    }
-    let w = mfem_bary_weights(x);
-    let (k, lk, l) = mfem_bary_centre(x, y);
-    let mut u = vec![0.0; p + 1];
-    let mut sk = 0.0;
-    for i in 0..k {
-        let si = 1.0 / (y - x[i]);
-        sk += si;
-        u[i] = l * si * w[i];
-    }
-    u[k] = lk * w[k];
-    for i in k + 1..=p {
-        let si = 1.0 / (y - x[i]);
-        sk += si;
-        u[i] = l * si * w[i];
-    }
-    let lp = l * sk + lk;
-    let mut d = vec![0.0; p + 1];
-    for i in 0..k {
-        d[i] = (lp * w[i] - u[i]) / (y - x[i]);
-    }
-    d[k] = sk * u[k];
-    for i in k + 1..=p {
-        d[i] = (lp * w[i] - u[i]) / (y - x[i]);
-    }
+    let mut u = vec![0.0; x.len()];
+    let mut d = vec![0.0; x.len()];
+    crate::gll_basis::bary_val_der_into(x, &crate::gll_basis::bary_weights(x), y, &mut u, &mut d);
     (u, d)
 }
 
@@ -1808,59 +1729,9 @@ impl ReferenceElement for QuadQk {
     }
 }
 
-/// Arbitrary-order L² Lagrange element on `[0,1]²` with **Gauss-Legendre**
-/// nodes — `(p+1)²` DOFs, matching MFEM's `L2_FECollection` default
-/// `BasisType::GaussLegendre` (used by e.g. `CoefficientRefiner` and L2
-/// projection error estimation).  Unlike [`QuadQk`] (Gauss-Lobatto nodes
-/// including the boundary), GL nodes are interior-only.
-///
-/// The 1D basis uses the direct Lagrange formula `Π_{j≠i}(x−x_j)/(x_i−x_j)`
-/// on `[0,1]` (no reference-domain mapping).
-///
-/// Barycentric weights `w(i) = 1/Π_{j≠i}(x_i − x_j)`, accumulated exactly like
-/// MFEM `Poly_1D::Basis` (Barycentric branch, `fe_base.cpp`): start from
-/// `w = 1`, then for every pair `j < i` do `xij = x_i − x_j; w(i) *= xij;
-/// w(j) *= −xij`, and finally `w(i) = 1/w(i)`.
-fn barycentric_weights(nodes: &[f64]) -> Vec<f64> {
-    let n = nodes.len();
-    let mut w = vec![1.0; n];
-    for i in 0..n {
-        for j in 0..i {
-            let xij = nodes[i] - nodes[j];
-            w[i] *= xij;
-            w[j] *= -xij;
-        }
-    }
-    for v in w.iter_mut() {
-        *v = 1.0 / *v;
-    }
-    w
-}
-
-/// MFEM's prefix/suffix product: `lk = Π_{j≠k}(y − x_j)` accumulated exactly as
-/// `Poly_1D::Basis::Eval` does — the prefix `Π_{j<k}(y − x_j)` grows until `y`
-/// falls below the midpoint of `[x_k, x_{k+1}]`, then the suffix
-/// `Π_{j>k}(y − x_j)` is folded in.  When the midpoint test never fails,
-/// `k = p` and `lk = Π_{j<p}(y − x_j)` (MFEM's loop runs to completion).
-fn bary_product(nodes: &[f64], y: f64) -> (f64, usize) {
-    let p = nodes.len() - 1;
-    let mut lk = 1.0;
-    for k in 0..p {
-        if y >= (nodes[k] + nodes[k + 1]) / 2.0 {
-            lk *= y - nodes[k];
-        } else {
-            for i in (k + 1)..=p {
-                lk *= y - nodes[i];
-            }
-            return (lk, k);
-        }
-    }
-    (lk, p)
-}
-
 /// MFEM `Poly_1D::Basis::Eval(y, u)` (Barycentric branch) — basis **values**
-/// only, i.e. the exact floating-point sequence MFEM's `CalcShape` runs:
-/// `l = lk·(y − x_k)` then `u(i) = l·w(i)/(y − x_i)` (multiply **then**
+/// only, i.e. the exact floating-point sequence MFEM's `CalcShape` runs
+/// (`l = lk·(y − x_k)` then `u(i) = l·w(i)/(y − x_i)`, multiply **then**
 /// divide).  The derivative variant below deliberately forms
 /// `u(i) = l·(1/(y − x_i))·w(i)` instead; the two differ in the last ulp, so
 /// value-only and gradient paths must each use their own variant.
@@ -1870,22 +1741,11 @@ fn bary_product(nodes: &[f64], y: f64) -> (f64, usize) {
 /// this barycentric form (D864 — the previous direct
 /// `Π_{j≠i}(x−x_j)/(x_i−x_j)` grouping disagreed with MFEM by 1–2 ulp, which
 /// the `κ ≈ 10³` DPG element blocks amplified into a visible trajectory fork).
+/// Thin `Vec` wrapper over [`crate::gll_basis::bary_val_into`], which carries
+/// the algorithm.
 fn lagrange_1d_val(nodes: &[f64], w: &[f64], y: f64) -> Vec<f64> {
-    let p = nodes.len() - 1;
-    let mut u = vec![0.0; p + 1];
-    if p == 0 {
-        u[0] = 1.0;
-        return u;
-    }
-    let (lk, k) = bary_product(nodes, y);
-    let l = lk * (y - nodes[k]);
-    for i in 0..k {
-        u[i] = l * w[i] / (y - nodes[i]);
-    }
-    u[k] = lk * w[k];
-    for i in (k + 1)..=p {
-        u[i] = l * w[i] / (y - nodes[i]);
-    }
+    let mut u = vec![0.0; nodes.len()];
+    crate::gll_basis::bary_val_into(nodes, w, y, &mut u);
     u
 }
 
@@ -1894,40 +1754,20 @@ fn lagrange_1d_val(nodes: &[f64], w: &[f64], y: f64) -> Vec<f64> {
 /// `si = 1/(y − x_i)` (and `sk = Σ si`), and MFEM's `CalcDShape` consumes
 /// exactly these values for the cross terms; the derivatives are
 /// `d(i) = (lp·w(i) − u(i))/(y − x_i)` with `lp = l·sk + lk`, and
-/// `d(k) = sk·u(k)`.
+/// `d(k) = sk·u(k)`.  Thin `Vec` wrapper over
+/// [`crate::gll_basis::bary_val_der_into`].
 fn lagrange_1d_val_der(nodes: &[f64], w: &[f64], y: f64) -> (Vec<f64>, Vec<f64>) {
-    let p = nodes.len() - 1;
-    let mut u = vec![0.0; p + 1];
-    let mut d = vec![0.0; p + 1];
-    if p == 0 {
-        u[0] = 1.0;
-        return (u, d);
-    }
-    let (lk, k) = bary_product(nodes, y);
-    let l = lk * (y - nodes[k]);
-    let mut sk = 0.0;
-    for i in 0..k {
-        let si = 1.0 / (y - nodes[i]);
-        sk += si;
-        u[i] = l * si * w[i];
-    }
-    u[k] = lk * w[k];
-    for i in (k + 1)..=p {
-        let si = 1.0 / (y - nodes[i]);
-        sk += si;
-        u[i] = l * si * w[i];
-    }
-    let lp = l * sk + lk;
-    for i in 0..k {
-        d[i] = (lp * w[i] - u[i]) / (y - nodes[i]);
-    }
-    d[k] = sk * u[k];
-    for i in (k + 1)..=p {
-        d[i] = (lp * w[i] - u[i]) / (y - nodes[i]);
-    }
+    let mut u = vec![0.0; nodes.len()];
+    let mut d = vec![0.0; nodes.len()];
+    crate::gll_basis::bary_val_der_into(nodes, w, y, &mut u, &mut d);
     (u, d)
 }
 
+/// Arbitrary-order L² Lagrange element on `[0,1]²` with **Gauss-Legendre**
+/// nodes — `(p+1)²` DOFs, matching MFEM's `L2_FECollection` default
+/// `BasisType::GaussLegendre` (used by e.g. `CoefficientRefiner` and L2
+/// projection error estimation).  Unlike [`QuadQk`] (Gauss-Lobatto nodes
+/// including the boundary), GL nodes are interior-only.
 pub struct QuadL2GL {
     order: usize,
     nodes: Vec<f64>, // Gauss-Legendre nodes on [0,1]
@@ -1946,7 +1786,7 @@ impl QuadL2GL {
         // with the nodes for order 1) and perturbs the element stiffness by
         // 1–2 ulp (D864).  `HexL2GL` already took this route.
         let (nodes, _w) = crate::quadrature::gauss_legendre_01(p + 1);
-        let w = barycentric_weights(&nodes);
+        let w = crate::gll_basis::bary_weights(&nodes);
         Self { order: p, nodes, w }
     }
 
@@ -2072,7 +1912,7 @@ impl HexL2GL {
         if nodes.len() > 1 && nodes[0] > nodes[nodes.len() - 1] {
             nodes.reverse();
         }
-        let w = barycentric_weights(&nodes);
+        let w = crate::gll_basis::bary_weights(&nodes);
         Self { order: p, nodes, w }
     }
 

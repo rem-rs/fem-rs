@@ -19,8 +19,17 @@ use fem_mesh::topology::MeshTopology;
 
 // ─── 1D Q2 Lagrange basis on [0, 0.5, 1] (D721 frame) ──────────────────────
 //
-// Bit-identical to `HexQ2::hex_q2_1d` / `HexQk(2)`'s GLL(3) nodes: Gauss-Lobatto
-// for 3 nodes is the closed equispaced set {0, 1/2, 1} on MFEM's `[0,1]`.
+// The **closed form** of the Q2 1-D factor on the closed Gauss-Lobatto set
+// `{0, 1/2, 1}` — the polynomial `HexQ2`/`SegP2` evaluate.  Since D-rr155 the
+// element layer evaluates it through MFEM's `Poly_1D::Basis::Eval` barycentric
+// sequence, which rounds differently: this closed form is up to 2 ulp away
+// from it at the Gauss points (the 2-ulp ADS `Pi_rt` signature rr154 lane3
+// located — `tmp/rr155/lane2/ulp_siblings.py`), so this kernel's values differ
+// from `HexQ2::eval_basis`'s in the last bits.  It is kept as-is deliberately:
+// the kernel has no MFEM-bit-parity consumer (its tests compare against the
+// assembled matrix at 1e-12, and `pa::hex_qk`'s cross-checks at the same
+// tolerance); if bit-parity with the element layer is ever required, evaluate
+// the factor with `fem_element::gll_basis`'s `gll2_vals_der_01` instead.
 #[inline] fn l0(t: f64) -> f64 { (2.0 * t - 1.0) * (t - 1.0) } // ℓ at 0
 #[inline] fn l1(t: f64) -> f64 { 4.0 * t * (1.0 - t) }          // ℓ at 1/2
 #[inline] fn l2(t: f64) -> f64 { t * (2.0 * t - 1.0) }          // ℓ at 1

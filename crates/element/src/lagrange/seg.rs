@@ -48,10 +48,12 @@ impl ReferenceElement for SegP1 {
 ///
 /// DOF order: 0 (ξ=0), 1 (ξ=1), 2 (ξ=½)
 ///
-/// Basis:
-/// - φ₀ = (1−ξ)(1−2ξ)
-/// - φ₁ = ξ(2ξ−1)
-/// - φ₂ = 4ξ(1−ξ)
+/// Basis: the three quadratic Lagrange polynomials through the Gauss-Lobatto
+/// points `{0, ½, 1}` — MFEM's `H1_SegmentElement(2)` (`H1_FECollection(2, 1)`
+/// default `BasisType::GaussLobatto`), evaluated with MFEM's
+/// `Poly_1D::Basis::Eval` barycentric sequence (D-rr155; the historical closed
+/// form `(1−ξ)(1−2ξ) / ξ(2ξ−1) / 4ξ(1−ξ)` is the same polynomial but rounds up
+/// to 1 ulp away from MFEM at the Gauss points).
 pub struct SegP2;
 
 impl ReferenceElement for SegP2 {
@@ -66,17 +68,23 @@ impl ReferenceElement for SegP2 {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let x = xi[0];
-        values[0] = (1.0 - x) * (1.0 - 2.0 * x);
-        values[1] = x * (2.0 * x - 1.0);
-        values[2] = 4.0 * x * (1.0 - x);
+        // MFEM `H1_SegmentElement::CalcShape` (`fe_h1.cpp`) evaluates this basis
+        // through the **value-only** `Poly_1D::Basis::Eval` overload — the
+        // GLL-2 factor the hex Q2 element shares (`gll2_vals_01`).  The helper
+        // returns the *node* order `{0, ½, 1}`; this element's slots are
+        // `{ξ = 0, ξ = 1, ξ = ½}` (`dof_coords`), hence the 1↔2 swap.
+        let v = crate::gll_basis::gll2_vals_01(xi[0]);
+        values[0] = v[0];
+        values[1] = v[2];
+        values[2] = v[1];
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let x = xi[0];
-        grads[0] = -3.0 + 4.0 * x;
-        grads[1] = 4.0 * x - 1.0;
-        grads[2] = 4.0 - 8.0 * x;
+        // MFEM `H1_SegmentElement::CalcDShape` — the value+derivative overload.
+        let d = crate::gll_basis::gll2_vals_der_01(xi[0]).1;
+        grads[0] = d[0];
+        grads[1] = d[2];
+        grads[2] = d[1];
     }
 
     fn quadrature(&self, order: u8) -> QuadratureRule {
@@ -197,6 +205,36 @@ mod tests {
         assert!((phi[0]).abs() < 1e-14);
         assert!((phi[1]).abs() < 1e-14);
         assert!((phi[2] - 1.0).abs() < 1e-14);
+    }
+
+    /// D-rr155: the P2 values are MFEM's `H1_SegmentElement(2)` barycentric
+    /// ones (`Poly_1D::Basis::Eval`), not the historical closed form — the two
+    /// differ by 1 ulp at the high 2-point Gauss node (`fl(1−t)`) and agree at
+    /// the low one.  Oracle values: the rr155 sibling probe
+    /// (`tmp/rr155/lane2/ulp_siblings.py`) whose barycentric arm follows
+    /// `fe_base.cpp:1875` verbatim.
+    #[test]
+    fn seg_p2_matches_mfem_barycentric_at_gauss_points() {
+        let (gl, _) = crate::quadrature::gauss_legendre_01(2);
+        let mut v = vec![0.0; 3];
+        // Slot order is {ξ = 0, ξ = 1, ξ = ½} — node order permuted 1↔2.
+        SegP2.eval_basis(&[gl[0]], &mut v);
+        assert_eq!(
+            v,
+            [0.4553418012614795, -0.12200846792814621, 0.6666666666666666]
+        );
+        SegP2.eval_basis(&[gl[1]], &mut v);
+        assert_eq!(
+            v,
+            [-0.12200846792814621, 0.4553418012614795, 0.6666666666666666]
+        );
+        // Nodal deltas, bit-exact.
+        for (slot, x) in [(0, 0.0), (1, 1.0), (2, 0.5)] {
+            SegP2.eval_basis(&[x], &mut v);
+            for j in 0..3 {
+                assert_eq!(v[j], if j == slot { 1.0 } else { 0.0 }, "slot {slot} at {x}");
+            }
+        }
     }
 
     #[test]

@@ -86,6 +86,169 @@ pub(crate) fn gl_nodes_01(p: usize) -> Vec<f64> {
     crate::quadrature::gauss_legendre_01(p).0
 }
 
+// ─── MFEM `Poly_1D::Basis::Eval` (Barycentric branch) ────────────────────────
+//
+// The single implementation of MFEM's barycentric nodal-basis evaluation on a
+// node set, shared by every element that must reproduce a `Poly_1D::Basis::Eval`
+// caller bit for bit: [`ClosedBasis`] (this module) and `lagrange`'s
+// `factory` (`QuadL2GL`/`HexL2GL`/`QuadQk`/`HexQk`) and `hex` (`HexQ2`/`HexQ3`)
+// 1-D factors.  The exact statement order matters: MFEM's value-only and
+// value+derivative overloads evaluate the *same* polynomial with different
+// roundings (1 ulp apart), and consumers pin against the overload their
+// counterpart — `CalcShape`/`CalcVShape` vs `CalcDShape`/`CalcDivShape` —
+// actually calls.
+
+/// Barycentric weights `w_i = 1/Π_{j≠i}(x_i − x_j)` in MFEM
+/// `Poly_1D::Basis::Basis(..., Barycentric)`'s accumulation order
+/// (`fem/fe/fe_base.cpp:1829`): start from `w = 1`, then for every pair
+/// `j < i` do `xij = x_i − x_j; w_i *= xij; w_j *= −xij`, then one reciprocal
+/// pass.  Matching that order (rather than a per-node full product) keeps the
+/// weights — and hence every value below — bit-identical; see D680.
+pub(crate) fn bary_weights(nodes: &[f64]) -> Vec<f64> {
+    let n = nodes.len();
+    let mut w = vec![1.0_f64; n];
+    for i in 0..n {
+        for j in 0..i {
+            let xij = nodes[i] - nodes[j];
+            w[i] *= xij;
+            w[j] *= -xij;
+        }
+    }
+    for v in w.iter_mut() {
+        *v = 1.0 / *v;
+    }
+    w
+}
+
+/// MFEM's stable-centre split of `∏(y − x_i)` (`fem/fe/fe_base.cpp:1896`): the
+/// prefix `Π_{i<k}(y − x_i)` grows while `y` lies at or right of the midpoint
+/// of the current node interval, then the suffix `Π_{i>k}(y − x_i)` is folded
+/// in; when the midpoint test never fails the loop runs to `k = p` and no
+/// suffix is taken.  Returns `(k, lk, l)` with `lk = Π_{i≠k}(y − x_i)` and
+/// `l = lk·(y − x_k)`.
+#[inline]
+pub(crate) fn bary_centre(nodes: &[f64], y: f64) -> (usize, f64, f64) {
+    let p = nodes.len() - 1;
+    let mut k = 0usize;
+    let mut lk = 1.0;
+    while k < p {
+        if y >= (nodes[k] + nodes[k + 1]) / 2.0 {
+            lk *= y - nodes[k];
+            k += 1;
+        } else {
+            for i in k + 1..=p {
+                lk *= y - nodes[i];
+            }
+            break;
+        }
+    }
+    let l = lk * (y - nodes[k]);
+    (k, lk, l)
+}
+
+/// MFEM `Poly_1D::Basis::Eval(y, u)` — the **value-only** overload
+/// (`fem/fe/fe_base.cpp:1875`), the form `CalcShape`/`CalcVShape` call:
+/// the division form `u(i) = l·w(i)/(y − x(i))` with the centre entry
+/// `u(k) = lk·w(k)`.  Values are written into `u` (`u.len() == nodes.len()`);
+/// `w` must be `bary_weights(nodes)`.
+#[inline]
+pub(crate) fn bary_val_into(nodes: &[f64], w: &[f64], y: f64, u: &mut [f64]) {
+    let p = nodes.len() - 1;
+    debug_assert_eq!(u.len(), nodes.len());
+    debug_assert_eq!(w.len(), nodes.len());
+    if p == 0 {
+        u[0] = 1.0;
+        return;
+    }
+    let (k, lk, l) = bary_centre(nodes, y);
+    for i in 0..k {
+        u[i] = l * w[i] / (y - nodes[i]);
+    }
+    u[k] = lk * w[k];
+    for i in k + 1..=p {
+        u[i] = l * w[i] / (y - nodes[i]);
+    }
+}
+
+/// MFEM `Poly_1D::Basis::Eval(y, u, d)` — the **value+derivative** overload
+/// (`fem/fe/fe_base.cpp:1936`), the form `CalcDShape`/`CalcDivShape`/
+/// `CalcCurlShape` call: values through the reciprocal-multiplication form
+/// `u(i) = l·si·w(i)` with `si = 1/(y − x(i))` and `sk = Σ si`, derivatives
+/// `d(i) = (lp·w(i) − u(i))/(y − x(i))` with `lp = l·sk + lk`, and
+/// `d(k) = sk·u(k)`.  Its values are 1 ulp apart from [`bary_val_into`]'s by
+/// construction, so a value-only consumer must not take them from here.
+/// Values into `u`, derivatives into `d` (both `nodes.len()` long).
+#[inline]
+pub(crate) fn bary_val_der_into(nodes: &[f64], w: &[f64], y: f64, u: &mut [f64], d: &mut [f64]) {
+    let p = nodes.len() - 1;
+    debug_assert_eq!(u.len(), nodes.len());
+    debug_assert_eq!(d.len(), nodes.len());
+    debug_assert_eq!(w.len(), nodes.len());
+    if p == 0 {
+        u[0] = 1.0;
+        d[0] = 0.0;
+        return;
+    }
+    let (k, lk, l) = bary_centre(nodes, y);
+    let mut sk = 0.0;
+    for i in 0..k {
+        let si = 1.0 / (y - nodes[i]);
+        sk += si;
+        u[i] = l * si * w[i];
+    }
+    u[k] = lk * w[k];
+    for i in k + 1..=p {
+        let si = 1.0 / (y - nodes[i]);
+        sk += si;
+        u[i] = l * si * w[i];
+    }
+    let lp = l * sk + lk;
+    for i in 0..k {
+        d[i] = (lp * w[i] - u[i]) / (y - nodes[i]);
+    }
+    d[k] = sk * u[k];
+    for i in k + 1..=p {
+        d[i] = (lp * w[i] - u[i]) / (y - nodes[i]);
+    }
+}
+
+/// The `p = 2` Gauss-Lobatto points on `[0,1]` — MFEM
+/// `Poly_1D::ClosedPoints(2, GaussLobatto)` (`QuadratureFunctions1D::
+/// GaussLobatto(3)` stores exactly `{0, 0.5, 1}`).  The 1-D node set of the
+/// quadratic tensor elements (`HexQ2`, `SegP2`, `QuadQ2`) and of the RT1
+/// interior slots.
+pub(crate) const GLL2_NODES_01: [f64; 3] = [0.0, 0.5, 1.0];
+
+/// Barycentric weights of [`GLL2_NODES_01`] in MFEM `Poly_1D::Basis::Basis`'s
+/// accumulation order ([`bary_weights`]): every factor is a power of two, so
+/// the weights are exact.  Pinned against `bary_weights` by
+/// `lagrange::hex::tests::hex_q2_1d_weights_are_exact`.
+pub(crate) const GLL2_W_01: [f64; 3] = [2.0, -4.0, 2.0];
+
+/// Values of the [`GLL2_NODES_01`] nodal basis at `u` — MFEM
+/// `Poly_1D::Basis::Eval(y, u)`, the **value-only** barycentric overload
+/// `CalcShape`/`CalcVShape` call (`fem/fe/fe_base.cpp:1875`; the wrappers in
+/// `lagrange::hex`/`lagrange::seg` name the consumers).
+#[inline]
+pub(crate) fn gll2_vals_01(u: f64) -> [f64; 3] {
+    let mut v = [0.0_f64; 3];
+    bary_val_into(&GLL2_NODES_01, &GLL2_W_01, u, &mut v);
+    v
+}
+
+/// Values **and** derivatives of the [`GLL2_NODES_01`] nodal basis at `u` —
+/// MFEM `Poly_1D::Basis::Eval(y, u, d)`, the value+derivative overload
+/// `CalcDShape` calls (`fem/fe/fe_base.cpp:1936`).  Its values come from the
+/// reciprocal-multiplication form and differ from [`gll2_vals_01`] by 1 ulp,
+/// so the gradient path must take both from here.
+#[inline]
+pub(crate) fn gll2_vals_der_01(u: f64) -> ([f64; 3], [f64; 3]) {
+    let mut v = [0.0_f64; 3];
+    let mut d = [0.0_f64; 3];
+    bary_val_der_into(&GLL2_NODES_01, &GLL2_W_01, u, &mut v, &mut d);
+    (v, d)
+}
+
 /// Values of the closed GLL nodal basis of degree `p` at one point.
 pub(crate) struct ClosedVals {
     /// Nodal values `c_j(x)`.
@@ -121,25 +284,9 @@ impl ClosedBasis {
     }
 
     fn from_nodes(nodes: Vec<f64>) -> Self {
-        let n = nodes.len();
-        // Barycentric weights in MFEM's `Poly_1D::Basis::Basis` accumulation
-        // order (`for i { for j < i { xij = x(i)-x(j); w(i) *= xij;
-        // w(j) *= -xij } }` then one reciprocal) — matching it keeps the
-        // weights (and hence every value below) bit-identical; the historical
-        // `w[j] /= Π(nodes[j]-nodes[k])` full loop differs by ~1 ulp for
-        // `n ≥ 3` and is why the D680 RT1 gate needed this fix.
-        let mut w = vec![1.0_f64; n];
-        for i in 0..n {
-            for j in 0..i {
-                let xij = nodes[i] - nodes[j];
-                w[i] *= xij;
-                w[j] *= -xij;
-            }
-        }
-        for v in w.iter_mut() {
-            *v = 1.0 / *v;
-        }
-        ClosedBasis { nodes, w }
+        // MFEM `Poly_1D::Basis::Basis(..., Barycentric)` weight accumulation
+        // order — see [`bary_weights`].
+        ClosedBasis { w: bary_weights(&nodes), nodes }
     }
 
     /// MFEM `Poly_1D::Basis::Eval(y, u)` **value-only** overload — the form
@@ -147,7 +294,8 @@ impl ClosedBasis {
     /// form `u(i) = l·w(i)/(y − x(i))`.  Bit-for-bit MFEM, and ~1 ulp away
     /// from the value returned by the derivative overload
     /// ([`ClosedBasis::eval_mfem`]), which `CalcDivShape`/`CalcCurlShape`
-    /// consume.
+    /// consume.  Exact node hits short-circuit to the unit vector (the
+    /// barycentric quotient is singular at a node).
     pub fn val_mfem(&self, y: f64) -> Vec<f64> {
         let n = self.nodes.len();
         if n == 1 {
@@ -158,38 +306,9 @@ impl ClosedBasis {
             u[m] = 1.0;
             return u;
         }
-        let (k, lk, l) = self.centre(y);
         let mut u = vec![0.0_f64; n];
-        for i in 0..k {
-            u[i] = l * self.w[i] / (y - self.nodes[i]);
-        }
-        u[k] = lk * self.w[k];
-        for i in k + 1..n {
-            u[i] = l * self.w[i] / (y - self.nodes[i]);
-        }
+        bary_val_into(&self.nodes, &self.w, y, &mut u);
         u
-    }
-
-    /// MFEM's stable-centre split of `∏(y − x_i)`: `(k, lk, l)` with
-    /// `lk = ∏_{i≠k}(y−x_i)` and `l = lk·(y−x_k)` (`fem/fe/fe_base.cpp:1896`).
-    fn centre(&self, y: f64) -> (usize, f64, f64) {
-        let x = &self.nodes;
-        let p = x.len() - 1;
-        let mut k = 0usize;
-        let mut lk = 1.0;
-        while k < p {
-            if y >= (x[k] + x[k + 1]) / 2.0 {
-                lk *= y - x[k];
-                k += 1;
-            } else {
-                for i in k + 1..=p {
-                    lk *= y - x[i];
-                }
-                break;
-            }
-        }
-        let l = lk * (y - x[k]);
-        (k, lk, l)
     }
 
     /// MFEM `Poly_1D::Basis::Eval(y, u, d, d2)` — the derivative overload
@@ -235,7 +354,7 @@ impl ClosedBasis {
             }
             return ClosedVals { c, dc, d2c };
         }
-        let (k, lk, l) = self.centre(y);
+        let (k, lk, l) = bary_centre(x, y);
         let (mut sk, mut sk2) = (0.0_f64, 0.0_f64);
         for i in 0..k {
             let si = 1.0 / (y - x[i]);
