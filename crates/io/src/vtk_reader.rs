@@ -118,7 +118,19 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
         face_type: n_face_type,
         elem_types: if uniform_type.is_some() { None } else { Some(elem_types) },
         vertex_parents: vec![], nc_leaf_states: None, nc_face_ids: None,
-        elem_offsets: None,
+        // 混合网格必须随 elem_types 一起给出 offsets：n_elems()/elem_nodes()
+        // 在 None 时按 elem_type（uniform 回落 Tet4）的统一 npe 整除推
+        // 进——节点数不一的混合表会算错单元数并越界 elem_types（显示端
+        // 高阶降阶混合网格实测触发）。VTK offsets 是端点式（无前导 0），
+        // Mesh 约定 offsets[e]..offsets[e+1]，补前导 0。
+        elem_offsets: if uniform_type.is_some() {
+            None
+        } else {
+            let mut mesh_offsets = Vec::with_capacity(offsets.len() + 1);
+            mesh_offsets.push(0usize);
+            mesh_offsets.extend_from_slice(&offsets);
+            Some(mesh_offsets)
+        },
         face_types: None,
         face_offsets: None,
         face_to_elem: None,
