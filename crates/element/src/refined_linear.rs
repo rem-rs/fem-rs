@@ -159,7 +159,8 @@ impl ReferenceElement for RefinedLinear2D {
 
         if l0 >= 1.0 {
             // T0: d0 = DL0, d3 = DL1, d5 = DL2
-            grads[0 * 2..0 * 2 + 2].copy_from_slice(&DL[0]);
+            // dof 0 行：i*2 布局取 i=0（写 0*2 会触发 clippy erasing_op deny）。
+            grads[0..2].copy_from_slice(&DL[0]);
             grads[3 * 2..3 * 2 + 2].copy_from_slice(&DL[1]);
             grads[5 * 2..5 * 2 + 2].copy_from_slice(&DL[2]);
         } else if l1 >= 1.0 {
@@ -492,9 +493,9 @@ impl ReferenceElement for RefinedBiLinear2D {
         }
 
         if x <= 0.5 && y <= 0.5 {
-            // T0
-            grads[0 * 2] = 2.0 * (1.0 - ly);
-            grads[0 * 2 + 1] = 2.0 * (1.0 - lx);
+            // T0 —— dof 0 行：i*2+j 布局取 i=0（写 0*2 会触发 clippy erasing_op deny）。
+            grads[0] = 2.0 * (1.0 - ly);
+            grads[1] = 2.0 * (1.0 - lx);
 
             grads[4 * 2] = 2.0 * (ly - 1.0);
             grads[4 * 2 + 1] = -2.0 * (2.0 - lx);

@@ -146,7 +146,7 @@ impl InvariantsEvaluator2D {
     fn compute_dzt(z: &[f64], nd: usize, d: &[f64]) -> Vec<f64> {
         let mut dzt = vec![0.0; 2 * nd];
         for i in 0..nd {
-            let i0 = i + nd * 0;
+            let i0 = i; // 列 0 基址 i+nd*0 直写（clippy erasing_op deny）
             let i1 = i + nd * 1;
             dzt[i0] = d[i0] * z[0] + d[i1] * z[2];
             dzt[i1] = d[i0] * z[1] + d[i1] * z[3];
@@ -224,14 +224,14 @@ impl InvariantsEvaluator2D {
         let a2 = 2.0 * w;
         if let Some(d) = &self.d {
             for i in 0..nd {
-                let i0 = i + nd * 0;
+                let i0 = i; // 列 0 基址 i+nd*0 直写（clippy erasing_op deny）
                 let i1 = i + nd * 1;
                 let a_di = [a2 * d[i0], a2 * d[i1]];
                 let a_ddt_ii = a_di[0] * d[i0] + a_di[1] * d[i1];
                 a[i0 + ah * i0] += a_ddt_ii;
                 a[i1 + ah * i1] += a_ddt_ii;
                 for k in 0..i {
-                    let k0 = k + nd * 0;
+                    let k0 = k; // 列 0 基址 k+nd*0 直写（clippy erasing_op deny）
                     let k1 = k + nd * 1;
                     let a_ddt_ik = a_di[0] * d[k0] + a_di[1] * d[k1];
                     a[i0 + ah * k0] += a_ddt_ik;
@@ -258,7 +258,7 @@ impl InvariantsEvaluator2D {
         let coeff_c = -2.0 * w / i2;
         if let Some(d) = &self.d {
             for i in 0..nd {
-                let i0 = i + nd * 0;
+                let i0 = i; // 列 0 基址 i+nd*0 直写（clippy erasing_op deny）
                 let i1 = i + nd * 1;
                 let a_daj_i = [coeff_a * daj[i0], coeff_a * daj[i1]];
                 let b_d_i = [coeff_b * d[i0], coeff_b * d[i1]];
@@ -273,7 +273,7 @@ impl InvariantsEvaluator2D {
                     a[i1 + ah * i1] += 2.0 * (a_daj_i[1] + c_djt_i[1]) * daj[i1] + a2_ii;
                 }
                 for k in 0..i {
-                    let k0 = k + nd * 0;
+                    let k0 = k; // 列 0 基址 k+nd*0 直写（clippy erasing_op deny）
                     let k1 = k + nd * 1;
                     let a1_ik_01 = a_daj_i[0] * daj[k1] + a_daj_i[1] * daj[k0];
                     let a2_ik = b_d_i[0] * d[k0] + b_d_i[1] * d[k1];
@@ -642,7 +642,7 @@ impl InvariantsEvaluator3D {
     fn compute_dzt(z: &[f64], nd: usize, d: &[f64]) -> Vec<f64> {
         let mut dzt = vec![0.0; 3 * nd];
         for i in 0..nd {
-            let i0 = i + nd * 0;
+            let i0 = i; // 列 0 基址 i+nd*0 直写（clippy erasing_op deny）
             let i1 = i + nd * 1;
             let i2 = i + nd * 2;
             dzt[i0] = d[i0] * z[0] + d[i1] * z[3] + d[i2] * z[6];

@@ -2789,7 +2789,7 @@ fn flatten_2d(ds: &[[f64; 2]]) -> Vec<f64> {
     let ndof = ds.len();
     let mut result = vec![0.0; ndof * 2];
     for i in 0..ndof {
-        result[i + ndof * 0] = ds[i][0];
+        result[i] = ds[i][0]; // 列 0 基址 i+ndof*0 直写（clippy erasing_op deny）
         result[i + ndof * 1] = ds[i][1];
     }
     result
@@ -2800,7 +2800,7 @@ fn flatten_3d(ds: &[[f64; 3]]) -> Vec<f64> {
     let ndof = ds.len();
     let mut result = vec![0.0; ndof * 3];
     for i in 0..ndof {
-        result[i + ndof * 0] = ds[i][0];
+        result[i] = ds[i][0]; // 列 0 基址 i+ndof*0 直写（clippy erasing_op deny）
         result[i + ndof * 1] = ds[i][1];
         result[i + ndof * 2] = ds[i][2];
     }

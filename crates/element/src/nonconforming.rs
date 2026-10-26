@@ -324,9 +324,10 @@ impl ReferenceElement for RotTriLinearHex {
         let yt = A * (1.0 - 2.0 * xi[1]);
         let zt = A * (1.0 - 2.0 * xi[2]);
 
-        grads[0 * 3] = xt;
-        grads[0 * 3 + 1] = yt;
-        grads[0 * 3 + 2] = -1.0 - 2.0 * zt;
+        // dof 0 行：i*3+j 布局取 i=0（写 0*3 会触发 clippy erasing_op deny）。
+        grads[0] = xt;
+        grads[1] = yt;
+        grads[2] = -1.0 - 2.0 * zt;
 
         grads[1 * 3] = xt;
         grads[1 * 3 + 1] = -1.0 - 2.0 * yt;
@@ -412,7 +413,8 @@ impl ReferenceElement for P1TetNonConf {
 
     fn eval_grad_basis(&self, _xi: &[f64], grads: &mut [f64]) {
         // Constant dshape table, MFEM rows verbatim.
-        grads[0 * 3..0 * 3 + 3].copy_from_slice(&[3.0, 3.0, 3.0]);
+        // dof 0 行：i*3 布局取 i=0（写 0*3 会触发 clippy erasing_op deny）。
+        grads[0..3].copy_from_slice(&[3.0, 3.0, 3.0]);
         grads[1 * 3..1 * 3 + 3].copy_from_slice(&[-3.0, 0.0, 0.0]);
         grads[2 * 3..2 * 3 + 3].copy_from_slice(&[0.0, -3.0, 0.0]);
         grads[3 * 3..3 * 3 + 3].copy_from_slice(&[0.0, 0.0, -3.0]);

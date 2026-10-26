@@ -202,8 +202,8 @@ fn build_dof_map(p: usize) -> Vec<i32> {
     let mut o = 0i32;
     // edges
     for i in 0..=p {
-        // (0,1) bottom, y = 0
-        dm[dof2 + i + 0 * (p + 1)] = o;
+        // (0,1) bottom, y = 0 —— x 分量块基址 0*(p+1) 取 0（clippy erasing_op deny）
+        dm[dof2 + i] = o;
         o += 1;
     }
     for i in 0..=p {
