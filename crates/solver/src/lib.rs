@@ -53,6 +53,7 @@
 pub use linlvo::core::preconditioner::Preconditioner;
 pub use linlvo::precond::{
     AdsConfig, AmsConfig, AmsCycle, AmsEdgeSmoother, AmsPrecond, AuxSpaceSolver,
+    Icc0Precond,
 };
 pub use linlvo::DenseVec;
 /// Re-export of linlvo's [`Preconditioner`] trait.
